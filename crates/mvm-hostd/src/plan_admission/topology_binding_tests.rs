@@ -469,9 +469,17 @@ fn refused_entries(host: &Host, tenant: &str) -> usize {
 /// Boot through the shared admitted-boot entrypoint with a chain emitter, the
 /// path whose caller also records admission failures.
 fn admit_and_start_on_mock(host: &Host) -> Result<StartedMachine> {
+    on_boot_path(host, admit_and_start)
+}
+
+/// Run `admit` over the boot path's parameters for the fixture workload.
+fn on_boot_path<T>(
+    host: &Host,
+    admit: impl FnOnce(&mvm_runtime::AnyBackend, AdmitAndStartParams<'_>) -> Result<T>,
+) -> Result<T> {
     let keys = host.keys();
     let emitter = emitter(host.home.path(), &keys);
-    admit_and_start(
+    admit(
         &mvm_runtime::AnyBackend::from_hypervisor("mock"),
         AdmitAndStartParams {
             synthesis: &fixture_input(UNIT),
@@ -497,7 +505,8 @@ fn admit_and_start_on_mock(host: &Host) -> Result<StartedMachine> {
 #[test]
 fn a_refusal_on_the_boot_path_is_recorded_once() {
     let host = Host::new();
-    let topology = topology_for(&plan(), 1);
+    let mut topology = topology_for(&plan(), 1);
+    topology.units[0].workload = WorkloadId("vm-other".to_string());
     host.admit_topology(&topology);
     let tenant = topology.tenant.0.clone();
 
@@ -578,4 +587,139 @@ fn a_plan_that_cannot_be_confined_is_refused_while_cores_are_held_and_keeps_its_
     )
     .unwrap();
     host.admit(&plan).expect("the nonce was never spent");
+}
+
+/// The two places hostd synthesizes a plan and then signs it.
+#[derive(Debug, Clone, Copy)]
+enum SynthesisSite {
+    AdmitForRun,
+    BootPath,
+}
+
+const SITES: [SynthesisSite; 2] = [SynthesisSite::AdmitForRun, SynthesisSite::BootPath];
+
+impl Host {
+    /// Synthesize the fixture workload's plan at `site` and admit it.
+    fn synthesize_and_admit(&self, site: SynthesisSite) -> Result<AdmittedPlan> {
+        match site {
+            SynthesisSite::AdmitForRun => admit_for_run(
+                &fixture_input(UNIT),
+                &SystemClock,
+                &self.ledger,
+                Some(&self.keys()),
+                None,
+                RunPosture::without_backend(Variant::Dev),
+            ),
+            SynthesisSite::BootPath => on_boot_path(self, |backend, params| {
+                admit_synthesized_with_verified_release(backend, &params, None)
+            }),
+        }
+    }
+}
+
+#[test]
+fn with_no_admitted_topology_a_synthesized_plan_keeps_its_exact_bytes() {
+    let host = Host::new();
+    let synthesized = plan();
+    let mut bound = synthesized.clone();
+    super::topology_binding::bind_synthesized_plan_at(
+        host.home.path(),
+        &mut bound,
+        Some(&host.keys()),
+    );
+    let bytes = serde_json::to_vec(&bound).unwrap();
+    assert_eq!(bytes, serde_json::to_vec(&synthesized).unwrap());
+    assert!(
+        !String::from_utf8(bytes).unwrap().contains("\"topology\""),
+        "an unbound plan omits the field"
+    );
+    // Each host holds the process-wide environment lock.
+    drop(host);
+
+    for site in SITES {
+        let host = Host::new();
+        let admitted = host.synthesize_and_admit(site).expect("admitted as before");
+        assert_eq!(admitted.plan().topology, None, "{site:?}");
+    }
+}
+
+#[test]
+fn a_synthesized_plan_is_bound_to_the_admitted_topology_and_admitted() {
+    for site in SITES {
+        let host = Host::new();
+        let topology = topology_for(&plan(), 1);
+        host.admit_topology(&topology);
+        let admitted = host.synthesize_and_admit(site).expect("admitted");
+        assert_eq!(
+            admitted.plan().topology,
+            Some(TopologyBinding {
+                topology: topology.digest(),
+                unit: WorkloadId(UNIT.to_string()),
+            }),
+            "{site:?}"
+        );
+        assert_eq!(
+            admitted.plan().plan_id,
+            mvm_core::plan::compute_plan_id(admitted.plan()),
+            "{site:?}: the id addresses the bound plan"
+        );
+    }
+}
+
+#[test]
+fn a_synthesized_plan_the_topology_does_not_name_is_refused_as_an_unknown_unit_once() {
+    for site in SITES {
+        let host = Host::new();
+        let mut topology = topology_for(&plan(), 1);
+        topology.units[0].workload = WorkloadId("vm-other".to_string());
+        host.admit_topology(&topology);
+        let tenant = topology.tenant.0.clone();
+
+        assert_eq!(
+            refusal(host.synthesize_and_admit(site)),
+            TopologyBindingRefusal::UnknownUnit {
+                unit: WorkloadId(UNIT.to_string())
+            },
+            "{site:?}"
+        );
+        assert_eq!(refused_entries(&host, &tenant), 1, "{site:?}");
+        let entry = host.last_entry(&tenant);
+        assert_eq!(entry["event"], "plan.admission_refused", "{site:?}");
+        assert_eq!(entry["labels"]["stage"], TOPOLOGY_BINDING_STAGE, "{site:?}");
+    }
+}
+
+#[test]
+fn a_synthesized_plan_for_another_recipe_is_refused() {
+    for site in SITES {
+        let host = Host::new();
+        let mut topology = topology_for(&plan(), 1);
+        topology.units[0].recipe =
+            Sha256Digest::parse(format!("sha256:{}", "c".repeat(64))).unwrap();
+        host.admit_topology(&topology);
+        assert!(
+            matches!(
+                refusal(host.synthesize_and_admit(site)),
+                TopologyBindingRefusal::RecipeMismatch { .. }
+            ),
+            "{site:?}"
+        );
+    }
+}
+
+#[test]
+fn a_synthesized_plan_sized_differently_from_its_unit_is_refused() {
+    for site in SITES {
+        let host = Host::new();
+        let mut topology = topology_for(&plan(), 1);
+        topology.units[0].resources.mem_mib += 64;
+        host.admit_topology(&topology);
+        assert!(
+            matches!(
+                refusal(host.synthesize_and_admit(site)),
+                TopologyBindingRefusal::ResourcesMismatch { .. }
+            ),
+            "{site:?}"
+        );
+    }
 }

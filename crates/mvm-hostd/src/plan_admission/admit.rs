@@ -493,6 +493,7 @@ pub fn admit_for_run(
     if let Some(identity) = posture.release_identity()? {
         plan.runtime_identity = Some(identity);
     }
+    super::topology_binding::bind_synthesized_plan(&mut plan, host_signer_keys_dir);
     admit_plan_for_run(
         &plan,
         clock,

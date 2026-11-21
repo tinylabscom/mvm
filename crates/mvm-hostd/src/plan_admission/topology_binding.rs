@@ -10,13 +10,47 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use mvm_contract::plan::topology::{Unit, check_topology_binding};
+use mvm_contract::plan::topology::{TopologyBinding, Unit, check_topology_binding};
 use mvm_core::plan::ExecutionPlan;
 
 use crate::audit::emitter::AuditEmitter;
 
 /// The `stage` label a refusal carries.
 pub const TOPOLOGY_BINDING_STAGE: &str = "topology_binding";
+
+/// Bind a plan this host synthesized, and has not yet signed, to the topology
+/// admitted for its tenant, naming the plan's own workload as its unit.
+///
+/// With no topology admitted the plan is left exactly as synthesis built it.
+/// Whether the plan fits the unit it names is not decided here: the admission
+/// check after signing does that, and audits a refusal. Never call this on a
+/// plan that arrived signed.
+pub(super) fn bind_synthesized_plan(plan: &mut ExecutionPlan, host_signer_keys_dir: Option<&Path>) {
+    // An unresolvable home or an unreadable record leaves the plan unbound;
+    // the admission check reads the same state and refuses on the same error.
+    let Ok(home) = mvm_core::config::mvm_home_strict() else {
+        return;
+    };
+    bind_synthesized_plan_at(&home, plan, host_signer_keys_dir);
+}
+
+/// [`bind_synthesized_plan`] under an explicit `home`.
+pub(crate) fn bind_synthesized_plan_at(
+    home: &Path,
+    plan: &mut ExecutionPlan,
+    host_signer_keys_dir: Option<&Path>,
+) {
+    let Ok(Some(admitted)) =
+        crate::topology_admission::last_admitted_topology(home, &plan.tenant, host_signer_keys_dir)
+    else {
+        return;
+    };
+    plan.topology = Some(TopologyBinding {
+        topology: admitted.digest(),
+        unit: plan.workload.clone(),
+    });
+    plan.plan_id = mvm_core::plan::compute_plan_id(plan);
+}
 
 /// Check `plan` against the topology admitted for its tenant under the
 /// resolved mvm home, and return the unit it boots, if it is bound.

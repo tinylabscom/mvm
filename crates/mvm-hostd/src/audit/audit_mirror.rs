@@ -175,6 +175,7 @@ mod tests {
             (std::fs::read_to_string(path).unwrap(), seen)
         }
 
+        let (_environment, _home) = crate::test_fixtures::isolated_mvm_home();
         let (without, none_seen) = chain_bytes(false).await;
         let (with, some_seen) = chain_bytes(true).await;
 
@@ -201,6 +202,7 @@ mod tests {
         use crate::audit::audit_file::FileAuditSigner;
         use crate::audit::signer::AuditSigner;
 
+        let (_environment, _home) = crate::test_fixtures::isolated_mvm_home();
         let dir = tempfile::tempdir().unwrap();
         let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
         let signer = FileAuditSigner::open(key, dir.path()).unwrap();

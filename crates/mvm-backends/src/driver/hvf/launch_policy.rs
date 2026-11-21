@@ -45,7 +45,21 @@ impl SupervisorLaunchPolicy {
     }
 }
 
-pub(super) fn claim_hvf_launch(state_dir: &Path) -> Result<std::fs::File> {
+/// The exclusive per-instance launch lock. A `flock` belongs to the open file
+/// description, which a concurrently forking thread's child shares until it
+/// execs, so closing the descriptor alone can leave the lock held. Dropping
+/// unlocks explicitly, releasing it for every copy.
+pub(super) struct HvfLaunchLock(std::fs::File);
+
+impl Drop for HvfLaunchLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the owned file is open; unlocking cannot invalidate it.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+pub(super) fn claim_hvf_launch(state_dir: &Path) -> Result<HvfLaunchLock> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
     let launch_lock = std::fs::OpenOptions::new()
@@ -58,6 +72,7 @@ pub(super) fn claim_hvf_launch(state_dir: &Path) -> Result<std::fs::File> {
     if unsafe { libc::flock(launch_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         bail!("another HVF launch owns this instance name");
     }
+    let launch_lock = HvfLaunchLock(launch_lock);
     if any_path_exists(hvf_runtime_evidence(state_dir))? {
         bail!("existing HVF runtime evidence requires confirmed cleanup before reuse");
     }
@@ -133,17 +148,31 @@ mod tests {
 
     #[test]
     fn same_name_launch_is_exclusive_and_prior_outcome_is_not_absence_proof() {
+        mvm_core::util::test_env::isolated_lock_probe(|| {
+            let _env = mvm_core::util::test_env::TestEnv::new();
+            let directory = tempfile::tempdir().unwrap();
+            let first = claim_hvf_launch(directory.path()).unwrap();
+            assert!(claim_hvf_launch(directory.path()).is_err());
+            drop(first);
+            drop(claim_hvf_launch(directory.path()).unwrap());
+            std::fs::write(directory.path().join("workload.exit"), "124").unwrap();
+            assert!(claim_hvf_launch(directory.path()).is_err());
+            assert_eq!(
+                std::fs::read_to_string(directory.path().join("workload.exit")).unwrap(),
+                "124"
+            );
+        });
+    }
+
+    /// A forked child shares the lock's open file description until it execs.
+    /// A clone stands in for it: dropping the lock must still release it.
+    #[test]
+    fn dropping_the_launch_lock_releases_it_while_another_descriptor_shares_it() {
         let directory = tempfile::tempdir().unwrap();
         let first = claim_hvf_launch(directory.path()).unwrap();
-        assert!(claim_hvf_launch(directory.path()).is_err());
+        let _forked_copy = first.0.try_clone().unwrap();
         drop(first);
         drop(claim_hvf_launch(directory.path()).unwrap());
-        std::fs::write(directory.path().join("workload.exit"), "124").unwrap();
-        assert!(claim_hvf_launch(directory.path()).is_err());
-        assert_eq!(
-            std::fs::read_to_string(directory.path().join("workload.exit")).unwrap(),
-            "124"
-        );
     }
 
     #[test]

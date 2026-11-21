@@ -29,6 +29,7 @@ use std::io::{Error, ErrorKind, Result, Write as _};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::time::Duration;
 
@@ -48,8 +49,8 @@ use crate::mailbox_custody::RetainedMailboxKeys;
 use crate::mailbox_launch::{
     DerivedMailboxKeys, LAUNCH_LIMITS, derive_launch_keys, mint_epoch_secret, shred_epoch_secret,
 };
-use crate::mailbox_service::MailboxService;
 use crate::mailbox_service::durable::DurableMailboxService;
+use crate::mailbox_service::{MailboxService, UnitGate};
 use crate::plan_admission::{MailboxLaunchPosture, MailboxPostureHandoff};
 use crate::vm_lifetime::{endpoint_needed, launcher_is_alive};
 
@@ -82,6 +83,9 @@ pub struct MailboxProcessConfig {
     pub actor: Option<crate::mailbox_launch::actor_template::ActorEndpointMaterial>,
     /// Absolute host key directory from the launcher; helper environment is empty.
     pub keys_dir: PathBuf,
+    /// The launcher's mvm home, where the workload ledger the service reads
+    /// its unit's current epoch from lives.
+    pub home: PathBuf,
     pub socket: PathBuf,
     /// How the backend says the guest's mailbox port is dialed.
     pub route: HostDialRoute,
@@ -152,6 +156,7 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
         keys,
         actor,
         keys_dir,
+        home,
         socket,
         route,
         posture,
@@ -198,6 +203,7 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
                 keys,
                 actor: None,
                 keys_dir,
+                home,
                 socket,
                 route,
                 posture: Some(posture),
@@ -223,6 +229,7 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
                 keys,
                 actor: None,
                 keys_dir,
+                home,
                 socket,
                 route,
                 posture: Some(posture),
@@ -238,9 +245,14 @@ fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
             "invalid mailbox posture",
         ));
     }
-    let (policy, sealer) = keys.trust();
+    let gate = UnitGate::bind(&home, &plan.workload.0)?;
+    let (policy, sealer) = keys.trust(gate.epoch());
     let sealer = sealer.with_grant(&grant)?;
-    let service = MailboxService::bind_live(&socket, LAUNCH_LIMITS, policy.with_grant(&grant)?)?;
+    let service = MailboxService::bind_live(
+        &socket,
+        LAUNCH_LIMITS,
+        policy.with_grant(&grant)?.gated(gate),
+    )?;
     std::io::stdout().write_all(READY_MARKER)?;
     let mut sealer = sealer;
     while keep_serving(launcher, &vm_state_dir) {
@@ -268,6 +280,8 @@ fn serve_actor(
     use mvm_core::mailbox::conversation_wire::ConversationBinding;
 
     material.verify_plan(plan)?;
+    let gate = UnitGate::bind(&config.home, &plan.workload.0)?;
+    let current_epoch = gate.epoch();
     let posture = config
         .posture
         .as_ref()
@@ -316,6 +330,7 @@ fn serve_actor(
             directory: directory.clone(),
             max_storage_bytes,
             now_unix_ms: crate::mailbox_launch::actor_template::current_time_ms()?,
+            current_epoch,
         },
         material,
     )
@@ -346,11 +361,11 @@ fn serve_actor(
         None
     };
     let (journal, anchor) = owner.control_journal().map_err(Error::other)?;
-    let (policy, mut sealer) = config.keys.trust();
+    let (policy, mut sealer) = config.keys.trust(current_epoch);
     let service = DurableMailboxService::bind_local(
         &config.socket,
         LAUNCH_LIMITS,
-        policy.with_grant(&config.grant)?,
+        policy.with_grant(&config.grant)?.gated(gate),
         signer,
         journal,
         anchor,
@@ -411,6 +426,7 @@ fn serve_local(
         keys,
         actor: _,
         keys_dir,
+        home,
         socket,
         route,
         posture,
@@ -446,12 +462,11 @@ fn serve_local(
             "production mailbox has no signed retention",
         )
     })?;
-    let (initial_policy, _) = keys.trust();
+    let gate = UnitGate::bind(&home, &plan.workload.0)?;
+    let current_epoch = gate.epoch();
     let address = mvm_contract::protocol::mailbox::MailboxAddress {
-        tenant: initial_policy.context.expected_tenant,
-        authorization_domain: initial_policy.context.expected_authorization_domain,
         mailbox: grant.mailbox,
-        recipient: initial_policy.context.expected_recipient,
+        ..keys.address()
     };
     let retained = RetainedMailboxKeys::open_existing(
         &keys_dir,
@@ -471,7 +486,7 @@ fn serve_local(
     let paths = retained.storage_paths(&keys_dir).map_err(Error::other)?;
     let derived = keys.with_retained(&retained)?;
     let (signer, _, _) = derived.durable_material();
-    let (policy, sealer) = derived.trust();
+    let (policy, sealer) = derived.trust(current_epoch);
     let mut sealer = sealer.with_grant(&grant)?;
     mvm_core::private_fs::ensure_private_dir(&paths.source_intents).map_err(Error::other)?;
     sealer.intent_dir = Some(paths.source_intents);
@@ -490,6 +505,7 @@ fn serve_local(
         anchor,
         refused,
         unknown,
+        retention: retention_flag,
         enrolled,
     } = coordinate(
         FileJournalAnchor::open(&paths.anchor, address, retained.anchor_key())
@@ -524,7 +540,7 @@ fn serve_local(
     let service = DurableMailboxService::bind_local(
         &socket,
         LAUNCH_LIMITS,
-        policy.with_grant(&grant)?,
+        policy.with_grant(&grant)?.gated(gate),
         signer,
         journal,
         anchor,
@@ -532,7 +548,11 @@ fn serve_local(
     service.install_guest_reader(reader)?;
     std::io::stdout().write_all(READY_MARKER)?;
     let still_ordered = || stop_if_unordered(&refused, &unknown).is_ok();
+    let unit = plan.workload.0.as_str();
     while keep_serving(launcher, &vm_state_dir) && still_ordered() {
+        if workload_is_quarantined(&home, unit, current_epoch) {
+            return Err(run_retention_pass(&service, &retention_flag));
+        }
         if service
             .serve_guest_while(&route, &mut sealer, || {
                 keep_serving(launcher, &vm_state_dir) && still_ordered()
@@ -542,12 +562,52 @@ fn serve_local(
             std::thread::sleep(POLL_INTERVAL);
         }
         stop_if_unordered(&refused, &unknown)?;
+        // Read again: the wait on the guest can outlast a quarantine, and an
+        // unmarked expiry commit after one is refused and poisons the journal.
+        if workload_is_quarantined(&home, unit, current_epoch) {
+            return Err(run_retention_pass(&service, &retention_flag));
+        }
         match service.maintain_local() {
             Ok(()) | Err(JournalError::MaintenancePending) => {}
             Err(error) => return Err(Error::other(error)),
         }
     }
     stop_if_unordered(&refused, &unknown)
+}
+
+/// Does the ledger name this helper's workload quarantined? Any other gate
+/// outcome, including an unreadable ledger, is not a quarantine.
+fn workload_is_quarantined(home: &Path, unit: &str, epoch: ExecutionEpoch) -> bool {
+    mvm_core::host_interface::epoch_gate::CommandGate::load_at(home).is_ok_and(|gate| {
+        matches!(
+            gate.admit(unit, epoch),
+            Err(mvm_core::host_interface::error::Denial::WorkloadQuarantined(_))
+        )
+    })
+}
+
+/// Rounds of maintenance the final pass runs before giving up.
+const RETENTION_ROUNDS: usize = 64;
+
+/// The one pass a helper makes once its workload is quarantined: expire and
+/// compact under commits the ledger accepts as retention-only, then report the
+/// quarantine as the reason to exit.
+fn run_retention_pass(service: &DurableMailboxService, retention: &AtomicBool) -> Error {
+    retention.store(true, Ordering::SeqCst);
+    for _ in 0..RETENTION_ROUNDS {
+        match service.maintain_local() {
+            Err(JournalError::MaintenancePending) => {}
+            Ok(()) => break,
+            Err(error) => {
+                tracing::warn!(%error, "the retention pass after a quarantine stopped early");
+                break;
+            }
+        }
+    }
+    Error::new(
+        ErrorKind::PermissionDenied,
+        "the workload is quarantined; the mailbox helper stopped after its retention pass",
+    )
 }
 
 fn vm_is_alive(state_dir: &Path) -> bool {
@@ -560,9 +620,11 @@ fn keep_serving(launcher: libc::pid_t, state_dir: &Path) -> bool {
 
 /// The process config for `grant` on the VM at `state_dir`, with keys derived
 /// from the host key directory `keys_dir` and a fresh per-epoch secret minted
-/// into `state_dir`. A failure after the mint shreds the secret again.
+/// into `state_dir`. A failure after the mint shreds the secret again. `home`
+/// is where the service reads its unit's current epoch when it binds.
 pub fn build_config(
     keys_dir: &Path,
+    home: &Path,
     grant: &MailboxGrant,
     state_dir: &Path,
     route: HostDialRoute,
@@ -576,6 +638,7 @@ pub fn build_config(
         keys,
         actor: None,
         keys_dir: keys_dir.to_path_buf(),
+        home: home.to_path_buf(),
         socket: mvm_core::config::vm_mailbox_socket_at(state_dir),
         route,
         posture: None,
@@ -826,7 +889,14 @@ pub fn spawn_for_launch_owned(
                 ),
             )
         })?;
-    let mut config = build_config(&mvm_core::config::mvm_keys_dir(), grant, &state_dir, route)?;
+    let home = PathBuf::from(mvm_core::config::mvm_home());
+    let mut config = build_config(
+        &mvm_core::config::mvm_keys_dir(),
+        &home,
+        grant,
+        &state_dir,
+        route,
+    )?;
     let started = (|| {
         if plan.workflow.is_some() {
             config.actor =
@@ -846,12 +916,9 @@ pub fn spawn_for_launch_owned(
                     "production mailbox requires guest boot binding",
                 )
             })?;
-            let (policy, _) = config.keys.trust();
             let address = mvm_contract::protocol::mailbox::MailboxAddress {
-                tenant: policy.context.expected_tenant,
-                authorization_domain: policy.context.expected_authorization_domain,
                 mailbox: grant.mailbox,
-                recipient: policy.context.expected_recipient,
+                ..config.keys.address()
             };
             RetainedMailboxKeys::provision_or_open(
                 &config.keys_dir,
@@ -864,7 +931,6 @@ pub fn spawn_for_launch_owned(
             .map_err(Error::other)?;
         }
         if posture.variant() == Variant::Prod {
-            let home = PathBuf::from(mvm_core::config::mvm_home());
             config.coordinator =
                 Some(crate::policy_generation::coordinator::ensure(&home).map_err(Error::other)?);
         }
@@ -918,6 +984,9 @@ fn spawn_serving(
 }
 
 #[cfg(test)]
+mod retention_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use mvm_contract::protocol::mailbox::{ExecutionEpoch, MailboxId};
@@ -957,8 +1026,14 @@ mod tests {
         let dir = keys_dir();
         let state = tempfile::tempdir().unwrap();
         for route in [test_route(), HostDialRoute::Mux(PathBuf::from("/m"))] {
-            let config =
-                build_config(dir.path(), &grant(dir.path()), state.path(), route.clone()).unwrap();
+            let config = build_config(
+                dir.path(),
+                dir.path(),
+                &grant(dir.path()),
+                state.path(),
+                route.clone(),
+            )
+            .unwrap();
             let back = parse(&serde_json::to_vec(&config).unwrap()).unwrap();
             assert_eq!(back.route, route);
         }
@@ -1063,8 +1138,14 @@ mod tests {
         let dir = keys_dir();
         let state = tempfile::tempdir().unwrap();
         let path = mvm_core::config::vm_mailbox_secret_at(state.path());
-        let config =
-            build_config(dir.path(), &grant(dir.path()), state.path(), test_route()).unwrap();
+        let config = build_config(
+            dir.path(),
+            dir.path(),
+            &grant(dir.path()),
+            state.path(),
+            test_route(),
+        )
+        .unwrap();
         let secret = std::fs::read(&path).unwrap();
         assert_eq!(secret.len(), 32);
         let json = serde_json::to_string(&config).unwrap();
@@ -1079,7 +1160,9 @@ mod tests {
         // A launch that fails after the mint leaves no secret behind.
         let mut foreign = grant(dir.path());
         foreign.authority_key = [1; 32];
-        assert!(build_config(dir.path(), &foreign, state.path(), test_route()).is_err());
+        assert!(
+            build_config(dir.path(), dir.path(), &foreign, state.path(), test_route()).is_err()
+        );
         assert!(!path.exists());
     }
 
@@ -1087,8 +1170,14 @@ mod tests {
     fn the_config_refuses_unknown_fields() {
         let dir = keys_dir();
         let state = tempfile::tempdir().unwrap();
-        let config =
-            build_config(dir.path(), &grant(dir.path()), state.path(), test_route()).unwrap();
+        let config = build_config(
+            dir.path(),
+            dir.path(),
+            &grant(dir.path()),
+            state.path(),
+            test_route(),
+        )
+        .unwrap();
         let mut value = serde_json::to_value(&config).unwrap();
         assert!(parse(value.to_string().as_bytes()).is_ok());
         value["seed"] = serde_json::json!("00");
@@ -1103,7 +1192,8 @@ mod tests {
         for (backend, expected_mux) in [("hvf", false), ("firecracker", true)] {
             let backend = backend_named(backend);
             let route = backend.host_dial_route(state.path(), MAILBOX_PORT).unwrap();
-            let config = build_config(dir.path(), &grant, state.path(), route.clone()).unwrap();
+            let config =
+                build_config(dir.path(), dir.path(), &grant, state.path(), route.clone()).unwrap();
             assert_eq!(matches!(config.route, HostDialRoute::Mux(_)), expected_mux);
             assert_eq!(config.route, route);
         }
@@ -1177,8 +1267,14 @@ mod tests {
         let dir = keys_dir();
         let seed = std::fs::read(dir.path().join("host-signer.ed25519")).unwrap();
         let state = tempfile::tempdir().unwrap();
-        let config =
-            build_config(dir.path(), &grant(dir.path()), state.path(), test_route()).unwrap();
+        let config = build_config(
+            dir.path(),
+            dir.path(),
+            &grant(dir.path()),
+            state.path(),
+            test_route(),
+        )
+        .unwrap();
         let json = serde_json::to_string(&config).unwrap();
         assert!(!json.contains(&hex::encode(&seed)));
         assert!(
@@ -1402,6 +1498,7 @@ mod tests {
         let config = MailboxProcessConfig {
             keys: derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap(),
             keys_dir: dir.path().to_path_buf(),
+            home: dir.path().to_path_buf(),
             grant,
             socket: dir.path().join("mailbox.sock"),
             route: HostDialRoute::PortSocket(dir.path().join("absent-port")),
@@ -1465,6 +1562,7 @@ mod tests {
         let config = MailboxProcessConfig {
             keys: derive_launch_keys(keys.path(), &grant, &test_secret()).unwrap(),
             keys_dir: keys.path().to_path_buf(),
+            home: keys.path().to_path_buf(),
             grant,
             socket: socket.clone(),
             route: HostDialRoute::PortSocket(guest_port),
@@ -1573,12 +1671,9 @@ mod tests {
         let posture = MailboxLaunchPosture::for_test(&plan, Variant::Prod);
         let keys =
             derive_launch_keys(&keys_dir, &grant, &test_secret()).expect("derived mailbox keys");
-        let (policy, _) = keys.trust();
         let address = mvm_contract::protocol::mailbox::MailboxAddress {
-            tenant: policy.context.expected_tenant,
-            authorization_domain: policy.context.expected_authorization_domain,
             mailbox: grant.mailbox,
-            recipient: policy.context.expected_recipient,
+            ..keys.address()
         };
         let retained = RetainedMailboxKeys::provision_or_open(
             &keys_dir,
@@ -1606,6 +1701,7 @@ mod tests {
             actor: None,
             keys: keys.clone(),
             keys_dir: home.path().join("missing-keys"),
+            home: home.path().to_path_buf(),
             grant,
             socket: socket.clone(),
             route: HostDialRoute::PortSocket(guest_port.clone()),
@@ -1623,6 +1719,7 @@ mod tests {
             actor: None,
             keys,
             keys_dir: keys_dir.clone(),
+            home: home.path().to_path_buf(),
             grant,
             socket: socket.clone(),
             route: HostDialRoute::PortSocket(guest_port.clone()),
@@ -1816,6 +1913,7 @@ mod tests {
             actor: None,
             keys: restart_keys,
             keys_dir: keys_dir.clone(),
+            home: home.path().to_path_buf(),
             grant,
             socket,
             route: HostDialRoute::PortSocket(guest_port),
@@ -1884,6 +1982,215 @@ mod tests {
         assert!(
             paths.journal.is_dir(),
             "VM teardown cannot erase accepted history"
+        );
+    }
+
+    /// What the helper's whole loop did when its workload was quarantined while
+    /// it was parked waiting on the guest.
+    struct QuarantinedLoop {
+        outcome: Error,
+        before: u64,
+        after: u64,
+    }
+
+    /// The guest's one message is sealed under a template that expires it
+    /// `expires_in_ms` after the keys are derived. With `overdue` the
+    /// quarantine lands once the message is past expiry, otherwise before. The
+    /// helper is parked on its next guest connection; closing that connection
+    /// wakes the loop after the quarantine.
+    fn run_loop_through_a_quarantine(overdue: bool) -> QuarantinedLoop {
+        use ed25519_dalek::SigningKey;
+        use mvm_contract::protocol::mailbox::PrincipalId;
+        use mvm_core::mailbox::frame::{OWN_MAILBOX_RECIPIENT, OutboxMessage};
+
+        let expires_in_ms: i64 = if overdue { 3_000 } else { 60_000 };
+        let home = tempfile::tempdir_in("/tmp").expect("isolated host home");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        crate::audit::host_keypair::load_or_init_at(&keys_dir).expect("host signer");
+        let state = tempfile::tempdir_in("/tmp").expect("VM state");
+        let mut grant = grant(&keys_dir);
+        grant.retention = Some(
+            mvm_contract::protocol::mailbox::MailboxRetentionPolicy::new(10_000)
+                .expect("signed retention"),
+        );
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.mailbox = Some(grant);
+        plan.image.name = state
+            .path()
+            .file_name()
+            .expect("VM name")
+            .to_string_lossy()
+            .into_owned();
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        std::fs::write(
+            state.path().join("plan.json"),
+            serde_json::to_vec(&plan).expect("plan"),
+        )
+        .expect("admitted plan");
+        let binding = MailboxReaderBootBinding::mint(
+            &plan,
+            SigningKey::from_bytes(&[45; 32]).verifying_key(),
+            SigningKey::from_bytes(&[44; 32]).verifying_key().to_bytes(),
+        )
+        .expect("cold boot identity");
+        binding.persist(state.path()).expect("persist guest boot");
+        {
+            use base64::Engine as _;
+            mvm_vmm::host::flowmux_identity::InheritableIdentity {
+                session_id: "production-guest".into(),
+                guest_verifying_key_base64: base64::engine::general_purpose::STANDARD
+                    .encode(SigningKey::from_bytes(&[45; 32]).verifying_key().as_bytes()),
+            }
+            .persist(state.path())
+            .expect("persist pinned guest identity");
+        }
+        // An operator template that expires the guest's messages in seconds.
+        let default_keys =
+            derive_launch_keys(&keys_dir, &grant, &test_secret()).expect("default keys");
+        let (_, sealer) = default_keys.trust(grant.epoch);
+        let expires = crate::mailbox_launch::actor_template::current_time_ms().expect("clock")
+            + expires_in_ms;
+        let mut template = crate::mailbox_launch::MailboxTemplate {
+            capability: sealer.capability,
+            header: sealer.header,
+            routing: sealer.routing,
+        };
+        template.capability.expires_at_unix_ms = expires;
+        template.header.expires_at_unix_ms = expires;
+        template.routing.expires_at_unix_ms = expires;
+        std::fs::write(
+            keys_dir.join("mailbox-template.json"),
+            serde_json::to_vec(&template).expect("template"),
+        )
+        .expect("operator template");
+        let posture = MailboxLaunchPosture::for_test(&plan, Variant::Prod);
+        let keys =
+            derive_launch_keys(&keys_dir, &grant, &test_secret()).expect("derived mailbox keys");
+        let address = mvm_contract::protocol::mailbox::MailboxAddress {
+            mailbox: grant.mailbox,
+            ..keys.address()
+        };
+        let retained = RetainedMailboxKeys::provision_or_open(
+            &keys_dir,
+            &plan,
+            &plan.image.name,
+            &posture,
+            Some(binding.boot),
+            address,
+        )
+        .expect("signed custody");
+        let paths = retained.storage_paths(&keys_dir).expect("persistent paths");
+        let guest_port = home.path().join("guest-port.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&guest_port).expect("guest port");
+        listener
+            .set_nonblocking(true)
+            .expect("bounded guest accept");
+        let coordinator = crate::policy_generation::coordinator::serve_in_process(home.path())
+            .expect("coordinator for the destination");
+        let config = MailboxProcessConfig {
+            actor: None,
+            keys,
+            keys_dir: keys_dir.clone(),
+            home: home.path().to_path_buf(),
+            grant,
+            socket: home.path().join("mailbox.sock"),
+            route: HostDialRoute::PortSocket(guest_port),
+            posture: Some(posture.handoff(Some(binding.boot))),
+            reader_boot: Some(binding),
+            vm_state_dir: state.path().to_path_buf(),
+            coordinator: Some(coordinator.clone()),
+        };
+        let (stopped_tx, stopped_rx) = sync_channel(1);
+        let helper = std::thread::spawn(move || {
+            let outcome = serve_verified(config);
+            let _ = stopped_tx.send(());
+            outcome
+        });
+        let outbox = home.path().join("outbox");
+        let message = OutboxMessage::new(
+            PrincipalId::from_bytes(OWN_MAILBOX_RECIPIENT),
+            b"expires soon".to_vec(),
+        );
+        mvm_agentd::mailbox_outbox::write_outbox(&outbox, &message).expect("outbox");
+        let mut stream = accept_guest(&listener);
+        mvm_agentd::mailbox_outbox::forward_local_outbox(
+            &mut stream,
+            &outbox,
+            &ed25519_dalek::VerifyingKey::from_bytes(&grant.authority_key).expect("authority"),
+            grant.mailbox,
+            grant.epoch,
+        )
+        .expect("accepted before it expires");
+        drop(stream);
+        let ledger_cursor = || {
+            let bytes = mvm_core::host_interface::workload::read_ledger_bytes_at(home.path())
+                .expect("ledger readable")
+                .expect("ledger exists");
+            serde_json::from_slice::<mvm_core::host_interface::workload::CanonicalLedger>(&bytes)
+                .expect("ledger parses")
+                .destinations[paths.destination.as_str()]
+            .tip
+            .cursor
+        };
+        // Past expiry, with the helper parked on its next guest connection.
+        if overdue {
+            let now = crate::mailbox_launch::actor_template::current_time_ms().expect("clock");
+            std::thread::sleep(Duration::from_millis(
+                u64::try_from(expires - now).unwrap_or(0) + 500,
+            ));
+        }
+        let before = ledger_cursor();
+        let workload = plan.workload.0.clone();
+        crate::policy_generation::coordinator::commit_workload(
+            &coordinator,
+            &mvm_core::host_interface::workload::WorkloadChange::Quarantine { workload },
+        )
+        .expect("quarantine");
+        assert!(
+            !helper.is_finished(),
+            "the helper does not stop on a ledger change alone"
+        );
+        drop(accept_guest(&listener));
+        let stopped = stopped_rx.recv_timeout(Duration::from_secs(20));
+        let outcome = if stopped.is_ok() {
+            helper.join().expect("helper task")
+        } else {
+            panic!("the helper did not stop within the bound after the quarantine")
+        };
+        QuarantinedLoop {
+            outcome: outcome.expect_err("a quarantined helper never ends cleanly"),
+            before,
+            after: ledger_cursor(),
+        }
+    }
+
+    #[test]
+    fn a_quarantine_while_the_helper_serves_ends_it_with_the_retention_pass() {
+        let run = run_loop_through_a_quarantine(false);
+        assert_eq!(
+            run.outcome.kind(),
+            ErrorKind::PermissionDenied,
+            "{:?}",
+            run.outcome
+        );
+    }
+
+    #[test]
+    fn an_overdue_message_at_quarantine_is_expired_by_the_retention_pass() {
+        let run = run_loop_through_a_quarantine(true);
+        assert_eq!(
+            run.outcome.kind(),
+            ErrorKind::PermissionDenied,
+            "{:?}",
+            run.outcome
+        );
+        assert!(
+            run.after > run.before,
+            "the expiry reached the ledger after the quarantine: {} -> {}",
+            run.before,
+            run.after
         );
     }
 
@@ -1987,6 +2294,7 @@ mod tests {
         let config = MailboxProcessConfig {
             keys: derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap(),
             keys_dir: dir.path().to_path_buf(),
+            home: dir.path().to_path_buf(),
             grant,
             socket: dir.path().join("mailbox.sock"),
             route: HostDialRoute::PortSocket(dir.path().join("absent-port")),
@@ -2023,6 +2331,7 @@ mod tests {
             grant,
             keys: derive_launch_keys(keys.path(), &grant, &test_secret()).expect("mailbox keys"),
             keys_dir: keys.path().to_path_buf(),
+            home: keys.path().to_path_buf(),
             socket: socket.clone(),
             route: HostDialRoute::PortSocket(state.path().join("guest-port.sock")),
             posture: Some(MailboxLaunchPosture::for_test(&plan, Variant::Prod).handoff(None)),

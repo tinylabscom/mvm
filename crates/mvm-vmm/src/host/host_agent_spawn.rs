@@ -269,6 +269,9 @@ pub struct HostAgentServicesParams<'a> {
     pub capability_bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
     /// Host-only controller-backed typed services prepared by admission.
     pub service_proxies: &'a [mvm_contract::protocol::broker_control::ServiceProxyBinding],
+    /// The admitted plan's workload and execution epoch. Set, the daemon admits
+    /// every call through the epoch gate; unset, it serves the VM ungated.
+    pub epoch: Option<&'a mvm_core::protocol::handler::CallEpoch>,
 }
 
 impl<'a> HostAgentServicesParams<'a> {
@@ -292,6 +295,7 @@ pub struct HostAgentServicesParamsBuilder<'a> {
     services: Option<&'a [mvm_core::protocol::broker::ServiceId]>,
     capability_bindings: Option<&'a [mvm_contract::protocol::agent_capability::CapabilityBinding]>,
     service_proxies: Option<&'a [mvm_contract::protocol::broker_control::ServiceProxyBinding]>,
+    epoch: Option<&'a mvm_core::protocol::handler::CallEpoch>,
 }
 
 impl<'a> HostAgentServicesParamsBuilder<'a> {
@@ -307,7 +311,15 @@ impl<'a> HostAgentServicesParamsBuilder<'a> {
             services: None,
             capability_bindings: None,
             service_proxies: Some(&[]),
+            epoch: None,
         }
+    }
+
+    /// Set the admitted plan's workload and execution epoch.
+    #[must_use]
+    pub fn epoch(mut self, epoch: &'a mvm_core::protocol::handler::CallEpoch) -> Self {
+        self.epoch = Some(epoch);
+        self
     }
 
     /// Set `workload_id`.
@@ -401,6 +413,7 @@ impl<'a> HostAgentServicesParamsBuilder<'a> {
                 "HostAgentServicesParams",
                 "service_proxies",
             ))?,
+            epoch: self.epoch,
         })
     }
 }
@@ -430,6 +443,7 @@ pub fn register_host_agent_services_if_admitted(
         services,
         capability_bindings,
         service_proxies,
+        epoch,
     } = params;
     let Some(tenant) = tenant_id else {
         return Ok(HostAgentServicesGuard::defused());
@@ -467,6 +481,8 @@ pub fn register_host_agent_services_if_admitted(
             capability_bindings: capability_bindings.to_vec(),
             service_proxies: service_proxies.to_vec(),
             assurance: None,
+            workload: epoch.map(|epoch| epoch.unit.clone()),
+            execution_epoch: epoch.map(|epoch| epoch.epoch),
         },
     )?;
     warm_claim_debug("register_vm_done");
@@ -810,6 +826,8 @@ mod tests {
             capability_bindings: vec![],
             assurance: None,
             service_proxies: vec![],
+            workload: None,
+            execution_epoch: None,
         }
     }
 
@@ -990,6 +1008,7 @@ mod tests {
             services: &[],
             capability_bindings: &[],
             service_proxies: &[],
+            epoch: None,
         })
         .expect("unadmitted VM registers nothing");
         drop(guard); // defused Drop reaps nothing

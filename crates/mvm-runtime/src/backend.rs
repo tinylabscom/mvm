@@ -1369,29 +1369,32 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn non_native_cold_backends_refuse_writable_image_custody() {
-        let dir = tempfile::tempdir().expect("test directory");
-        let path = dir.path().join("writer.img");
-        let lock = dir.path().join("writer.lock");
-        std::fs::write(&path, b"test image").expect("test image");
-        for selector in ["wasm", "web-linux"] {
-            let image = mvm_core::util::writable_image::LockedWritableImage::open(&path, &lock)
-                .expect("writer lock");
-            let error = AnyBackend::from_hypervisor(selector)
-                .start_custodied_verified_release(
-                    &VmStartConfig::default(),
-                    vec![(path.clone(), image)],
-                    None,
-                )
-                .expect_err("a backend without native writer handoff must refuse");
-            assert!(
-                format!("{error:#}").contains("does not support writable descriptor handoff"),
-                "{selector}: {error:#}"
-            );
-        }
-        let error = AnyBackend::from_hypervisor("web-linux")
-            .start_custodied_verified_release(&VmStartConfig::default(), Vec::new(), None)
-            .expect_err("native web-linux stub cannot start");
-        assert!(error.to_string().contains("browser-only"), "{error:#}");
+        mvm_core::util::test_env::isolated_lock_probe(|| {
+            let _env = mvm_core::util::test_env::TestEnv::new();
+            let dir = tempfile::tempdir().expect("test directory");
+            let path = dir.path().join("writer.img");
+            let lock = dir.path().join("writer.lock");
+            std::fs::write(&path, b"test image").expect("test image");
+            for selector in ["wasm", "web-linux"] {
+                let image = mvm_core::util::writable_image::LockedWritableImage::open(&path, &lock)
+                    .unwrap_or_else(|error| panic!("{selector} writer lock: {error}"));
+                let error = AnyBackend::from_hypervisor(selector)
+                    .start_custodied_verified_release(
+                        &VmStartConfig::default(),
+                        vec![(path.clone(), image)],
+                        None,
+                    )
+                    .expect_err("a backend without native writer handoff must refuse");
+                assert!(
+                    format!("{error:#}").contains("does not support writable descriptor handoff"),
+                    "{selector}: {error:#}"
+                );
+            }
+            let error = AnyBackend::from_hypervisor("web-linux")
+                .start_custodied_verified_release(&VmStartConfig::default(), Vec::new(), None)
+                .expect_err("native web-linux stub cannot start");
+            assert!(error.to_string().contains("browser-only"), "{error:#}");
+        });
     }
 
     fn vm_named(name: &str, cpus: u32) -> VmInfo {

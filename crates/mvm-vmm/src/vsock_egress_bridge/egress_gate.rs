@@ -147,6 +147,10 @@ pub enum DenyReason {
         /// Why the address is restricted.
         class: RestrictedClass,
     },
+    /// The process that owns the gate no longer admits the workload at all —
+    /// its execution epoch was superseded or its unit quarantined — so no
+    /// destination is decided.
+    ExecutionNotAdmitted,
 }
 
 impl DenyReason {
@@ -244,6 +248,9 @@ impl std::fmt::Display for DenyReason {
                 "{ip}:{port} is {} and is never reachable from a workload",
                 class.describe()
             ),
+            Self::ExecutionNotAdmitted => {
+                write!(f, "this workload's execution epoch is no longer admitted")
+            }
         }
     }
 }
@@ -256,6 +263,25 @@ pub enum DnsVerdict {
     Resolved(Vec<IpAddr>),
     /// Policy refused the name, or its admitted upstream lookup failed.
     Refused,
+}
+
+/// A check the owning process runs before every egress decision, answering
+/// whether the workload may still act at all. The gate stays pure: it never
+/// reads state itself, it only asks this.
+#[derive(Clone)]
+pub struct AdmissionCheck(std::sync::Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl AdmissionCheck {
+    /// `admitted` returns `false` to refuse every decision while it does.
+    pub fn new(admitted: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(admitted))
+    }
+}
+
+impl std::fmt::Debug for AdmissionCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AdmissionCheck")
+    }
 }
 
 /// The host-side egress decision for one VM, wrapping its resolved
@@ -276,6 +302,8 @@ pub struct EgressGate {
     /// may do, by method and path. Decided only where the endpoint reads the
     /// request; see [`Self::decide_route`].
     routes: RouteSet,
+    /// Asked before every decision; `None` decides on policy alone.
+    admission: Option<AdmissionCheck>,
 }
 
 impl EgressGate {
@@ -287,6 +315,7 @@ impl EgressGate {
             pins: DnsPinRegistry::new(),
             peers: Vec::new(),
             routes: RouteSet::default(),
+            admission: None,
         }
     }
 
@@ -297,6 +326,7 @@ impl EgressGate {
             pins: DnsPinRegistry::new(),
             peers: Vec::new(),
             routes: RouteSet::default(),
+            admission: None,
         }
     }
 
@@ -323,6 +353,7 @@ impl EgressGate {
                 pins: pins.clone(),
                 peers: Vec::new(),
                 routes,
+                admission: None,
             },
             Err(_) => Self::default_deny(),
         }
@@ -335,6 +366,22 @@ impl EgressGate {
     pub fn with_peers(mut self, peers: Vec<PeerBinding>) -> Self {
         self.peers = peers;
         self
+    }
+
+    /// Ask `check` before every decision and refuse all of them while it says
+    /// the workload is not admitted.
+    #[must_use]
+    pub fn with_admission(mut self, check: AdmissionCheck) -> Self {
+        self.admission = Some(check);
+        self
+    }
+
+    /// Whether the owning process refuses the workload outright. Every public
+    /// decision reaches this exactly once: `decide_peer`,
+    /// `decide_request_with_proto`, `decide_icmp_request` and `dns_verdict`
+    /// call it, and every other entry point decides through one of them.
+    fn not_admitted(&self) -> bool {
+        self.admission.as_ref().is_some_and(|check| !(check.0)())
     }
 
     /// Attach endpoint routes. The set is already validated.
@@ -422,6 +469,9 @@ impl EgressGate {
     ///
     /// Deny is the default: a gate with no peer bindings admits no peer.
     pub fn decide_peer(&self, host: &str, port: u16) -> EgressVerdict {
+        if self.not_admitted() {
+            return EgressVerdict::Deny(DenyReason::ExecutionNotAdmitted);
+        }
         let Ok(name) = PeerName::parse(host) else {
             return EgressVerdict::Malformed;
         };
@@ -533,6 +583,9 @@ impl EgressGate {
     /// Returns the pinned addresses to echo, IPv4 first, matching the ordering
     /// every other verdict uses.
     pub fn decide_icmp_request(&self, host: &str) -> EgressVerdict {
+        if self.not_admitted() {
+            return EgressVerdict::Deny(DenyReason::ExecutionNotAdmitted);
+        }
         let Some(pin) = self.pins.lookup(host) else {
             return EgressVerdict::Deny(if self.admitted_hosts().is_empty() {
                 DenyReason::NoEgressAdmitted
@@ -615,6 +668,9 @@ impl EgressGate {
     where
         F: Fn(&str) -> std::io::Result<Vec<IpAddr>>,
     {
+        if self.not_admitted() {
+            return EgressVerdict::Deny(DenyReason::ExecutionNotAdmitted);
+        }
         let target = target.trim();
         // Numeric ip:port — decide directly.
         if let Ok(addr) = target.parse::<SocketAddr>() {
@@ -705,6 +761,9 @@ impl EgressGate {
     where
         F: Fn(&str) -> std::io::Result<Vec<IpAddr>>,
     {
+        if self.not_admitted() {
+            return DnsVerdict::Refused;
+        }
         let (candidates, explicitly_pinned) = if let Some(pin) = self.pins.lookup(name) {
             (pin.ips.clone(), true)
         } else if matches!(self.egress, CanonicalEgress::Unrestricted) {
@@ -1940,5 +1999,144 @@ mod peer_tests {
             TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500)).is_err(),
             "a dial to a stopped peer fails at the connect, with nothing listening"
         );
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    fn open_gate() -> EgressGate {
+        EgressGate::new(CanonicalEgress::Unrestricted).with_peers(vec![PeerBinding {
+            name: PeerName::parse("db.mvm.peer").unwrap(),
+            port: 5432,
+            host_addr: "127.0.0.1".into(),
+            host_port: 15432,
+        }])
+    }
+
+    fn resolve(_: &str) -> std::io::Result<Vec<IpAddr>> {
+        Ok(vec!["93.184.216.34".parse().unwrap()])
+    }
+
+    /// Every public decision the gate offers, each with an input it would
+    /// admit on policy alone. Returns whether each one refused.
+    fn every_decision(gate: &EgressGate) -> Vec<(&'static str, bool)> {
+        let refused = |verdict: EgressVerdict| verdict.is_deny();
+        vec![
+            (
+                "decide_target",
+                refused(gate.decide_target("93.184.216.34", 443).verdict),
+            ),
+            (
+                "decide_target_with",
+                refused(gate.decide_target_with("example.com", 443, resolve).verdict),
+            ),
+            (
+                "decide_peer",
+                refused(gate.decide_peer("db.mvm.peer", 5432)),
+            ),
+            (
+                "decide_request",
+                refused(gate.decide_request("93.184.216.34:443")),
+            ),
+            (
+                "decide_request_with",
+                refused(gate.decide_request_with("example.com:443", resolve)),
+            ),
+            (
+                "decide_udp_request",
+                refused(gate.decide_udp_request("93.184.216.34:53")),
+            ),
+            (
+                "decide_udp_request_with",
+                refused(gate.decide_udp_request_with("example.com:53", resolve)),
+            ),
+            // ICMP is decided against pins only, and this gate pins nothing,
+            // so it refuses on policy too; its admission arm is pinned by
+            // reason in the refusal test.
+            (
+                "decide_icmp_request",
+                refused(gate.decide_icmp_request("example.com")),
+            ),
+            (
+                "dns_verdict",
+                gate.dns_verdict("example.com", DnsRecordType::A, resolve) == DnsVerdict::Refused,
+            ),
+        ]
+    }
+
+    #[test]
+    fn an_admitted_workload_is_decided_on_policy_alone() {
+        let gate = open_gate().with_admission(AdmissionCheck::new(|| true));
+        for (name, refused) in every_decision(&gate) {
+            if name != "decide_icmp_request" {
+                assert!(!refused, "{name} refused an admitted workload");
+            }
+        }
+    }
+
+    #[test]
+    fn a_workload_no_longer_admitted_is_refused_by_every_decision() {
+        let gate = open_gate().with_admission(AdmissionCheck::new(|| false));
+        for (name, refused) in every_decision(&gate) {
+            assert!(
+                refused,
+                "{name} decided for a workload that is not admitted"
+            );
+        }
+        assert_eq!(
+            gate.decide_request("93.184.216.34:443"),
+            EgressVerdict::Deny(DenyReason::ExecutionNotAdmitted)
+        );
+        assert_eq!(
+            gate.decide_icmp_request("example.com"),
+            EgressVerdict::Deny(DenyReason::ExecutionNotAdmitted)
+        );
+    }
+
+    #[test]
+    fn the_check_is_asked_on_every_decision_and_once_per_decision() {
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let admitted = std::sync::Arc::new(AtomicBool::new(true));
+        let gate = open_gate().with_admission(AdmissionCheck::new({
+            let calls = std::sync::Arc::clone(&calls);
+            let admitted = std::sync::Arc::clone(&admitted);
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                admitted.load(Ordering::SeqCst)
+            }
+        }));
+        assert!(!gate.decide_target("93.184.216.34", 443).verdict.is_deny());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        admitted.store(false, Ordering::SeqCst);
+        assert!(gate.decide_target("93.184.216.34", 443).verdict.is_deny());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// The public decisions this module offers. A new one fails this test
+    /// until it is listed here and in `every_decision`, which proves it
+    /// refuses when the workload is not admitted.
+    #[test]
+    fn no_decision_entry_point_is_added_without_the_admission_check() {
+        let source = include_str!("egress_gate.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let mut decisions: Vec<&str> = production
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("pub fn "))
+            .filter_map(|rest| rest.split(['(', '<']).next())
+            .filter(|name| name.starts_with("decide_") || name.starts_with("dns_"))
+            // Route rules refine a destination already decided by one of the
+            // entry points below; they never admit one by themselves.
+            .filter(|name| *name != "decide_route")
+            .collect();
+        decisions.sort_unstable();
+        let mut listed: Vec<&str> = every_decision(&EgressGate::default_deny())
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        listed.sort_unstable();
+        assert_eq!(decisions, listed);
     }
 }

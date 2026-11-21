@@ -33,6 +33,7 @@ use secrecy::ExposeSecret as _;
 use tracing::{info, warn};
 
 use mvm_hostd::keyholder::secret_placeholder_env;
+use mvm_hostd::supervisor::endpoint::epoch_admission::EndpointEpochGate;
 use mvm_hostd::supervisor::endpoint::flowmux::{
     FlowMuxIngressHandle, FlowMuxSession, FlowMuxVmResources, registry::RegistryLimits,
 };
@@ -85,6 +86,13 @@ fn main() -> Result<()> {
     let cfg = parse(&raw).context("mvm-network-endpoint config parse failed")?;
     validate_flowmux_limits(&cfg)?;
     mvm_hostd::supervisor::endpoint::audit_start::validate(&cfg)?;
+    // Refuse to serve a plan whose execution epoch the workload ledger does
+    // not admit; each egress decision asks again while serving.
+    if let Some(epoch) = EndpointEpochGate::for_config(&cfg)? {
+        epoch
+            .admit()
+            .context("the workload ledger does not admit this plan's execution epoch")?;
+    }
     info!(
         tenant_id = %cfg.tenant_id,
         secrets = cfg.secrets.len(),
@@ -649,6 +657,11 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<ConfinedEndpoint> {
         })
         .transpose()?;
     let audit_dir = mvm_core::config::mvm_audit_dir();
+    // The epoch gate re-reads the workload ledger on every egress decision.
+    let ledger = EndpointEpochGate::for_config(cfg)?
+        .map(|epoch| epoch.readable_ledger_paths())
+        .transpose()?
+        .unwrap_or_default();
     let spec = ConfinementSpec::network_endpoint(
         secret_dir,
         binding_dir,
@@ -657,6 +670,7 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<ConfinedEndpoint> {
         resolver_uds_path(cfg),
     )
     .with_session_marker_parent(session_marker_parent)
+    .with_workload_ledger(ledger)
     .with_telemetry_state(cfg.telemetry.as_ref().map(|t| t.state_dir.as_path()))
     .with_approval_socket_parent(
         cfg.approval_socket

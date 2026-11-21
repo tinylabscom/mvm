@@ -13,10 +13,12 @@ from scripts.density_idle import (
     cpu_ticks,
     render,
     render_per_standby,
+    render_threads,
     sample,
     sample_macos,
     wakeups_from_rusage,
     summarize,
+    summarize_threads,
 )
 
 
@@ -28,6 +30,7 @@ def write_process(
     switches: list[int],
     descriptors: int,
     command: str = "name",
+    thread_names: list[str] | None = None,
 ) -> None:
     directory = root / str(pid)
     (directory / "fd").mkdir(parents=True, exist_ok=True)
@@ -43,6 +46,8 @@ def write_process(
         (task / "status").write_text(
             f"Name:\tx\nvoluntary_ctxt_switches:\t{count}\nnonvoluntary_ctxt_switches:\t9\n"
         )
+        name = thread_names[index] if thread_names else f"t{index}"
+        (task / "comm").write_text(f"{name}\n")
 
 
 class DensityIdleTests(unittest.TestCase):
@@ -72,7 +77,13 @@ class DensityIdleTests(unittest.TestCase):
             (root / "self").mkdir()
             taken = sample(root)
         self.assertEqual(
-            taken, {100: ProcessSample("mvm-mailbox", 3, 4, 2, 23)}
+            taken,
+            {
+                100: ProcessSample(
+                    "mvm-mailbox", 3, 4, 2, 23,
+                    ((100, "t0", 5), (101, "t1", 7), (102, "t2", 11)),
+                )
+            },
         )
 
     def test_a_skipped_pid_and_an_unreadable_process_are_left_out(self) -> None:
@@ -120,6 +131,44 @@ class DensityIdleTests(unittest.TestCase):
             "wave_100_idle_mvm-mailbox_cpu_millicores\t6.2\n"
             "wave_100_idle_mvm-mailbox_wakeups_per_second\t150.0\n",
         )
+
+
+class DensityIdleThreadTests(unittest.TestCase):
+    def test_wakeups_are_attributed_per_thread_name_across_processes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = ["firecracker", "fc_api", "fc_vcpu 0"]
+            write_process(root, 100, "/x/firecracker", (0, 0), [1, 1, 1], 0, thread_names=names)
+            write_process(root, 200, "/x/firecracker", (0, 0), [1, 1, 1], 0, thread_names=names)
+            before = sample(root)
+            write_process(root, 100, "/x/firecracker", (0, 0), [11, 1, 501], 0, thread_names=names)
+            write_process(root, 200, "/x/firecracker", (0, 0), [21, 1, 301], 0, thread_names=names)
+            rows = summarize_threads(before, sample(root), 10.0)
+        self.assertEqual(
+            rows,
+            [
+                ("firecracker", "fc_api", 2, 0.0),
+                ("firecracker", "fc_vcpu 0", 2, 80.0),
+                ("firecracker", "firecracker", 2, 3.0),
+            ],
+        )
+        table, summary = render_threads(rows, 5)
+        self.assertEqual(table.splitlines()[2], "firecracker\tfc_vcpu 0\t2\t80.0")
+        self.assertIn("wave_5_thread_firecracker_fc_vcpu_0_threads\t2\n", summary)
+        self.assertIn("wave_5_thread_firecracker_fc_vcpu_0_wakeups_per_second\t80.0\n", summary)
+
+    def test_a_thread_that_started_or_was_renamed_inside_the_window_is_left_out(self) -> None:
+        before = {1: ProcessSample("mvmctl", 2, 1, 0, 0, ((1, "main", 5), (2, "old", 5)))}
+        after = {
+            1: ProcessSample(
+                "mvmctl", 3, 1, 0, 0, ((1, "main", 15), (2, "new", 50), (3, "late", 90))
+            )
+        }
+        self.assertEqual(summarize_threads(before, after, 1.0), [("mvmctl", "main", 1, 10.0)])
+
+    def test_a_host_without_per_thread_counters_emits_no_thread_rows(self) -> None:
+        taken = {1: ProcessSample("mvm-hvf-supervisor", 4, 10, 0, 0)}
+        self.assertEqual(summarize_threads(taken, taken, 1.0), [])
 
 
 class FakeLibproc:

@@ -160,6 +160,7 @@ fn a_commit_the_owner_took_before_the_local_write_is_replayed_not_refused() {
         epoch: ExecutionEpoch::new(1).unwrap(),
         expected: wire(JournalTip::genesis()),
         next: wire(tip(1)),
+        retention: false,
     }
     .sign(&destination().key)
     .unwrap();
@@ -259,6 +260,32 @@ fn a_late_success_after_an_unknown_answer_commits_the_anchor() {
     let coordinated = coordinate(fixture.anchor(), scripted, destination()).unwrap();
     coordinated.anchor.advance(tip(1)).unwrap();
     assert_eq!(coordinated.anchor.tip(), tip(1));
+}
+
+#[test]
+fn the_retention_flag_is_copied_into_the_head_the_owner_receives() {
+    let fixture = Fixture::new();
+    let scripted = Arc::new(Scripted {
+        replies: std::sync::Mutex::new(vec![
+            DestinationOutcome::Committed(DestinationCommit {
+                sequence: 2,
+                tip: wire(tip(1)),
+            }),
+            DestinationOutcome::Committed(DestinationCommit {
+                sequence: 3,
+                tip: wire(tip(2)),
+            }),
+        ]),
+        commits: Default::default(),
+        recovers: Default::default(),
+    });
+    let coordinated = coordinate(fixture.anchor(), scripted.clone(), destination()).unwrap();
+    coordinated.anchor.advance(tip(1)).unwrap();
+    coordinated.retention.store(true, Ordering::SeqCst);
+    coordinated.anchor.advance(tip(2)).unwrap();
+    let commits = scripted.commits.lock().unwrap();
+    assert!(!commits[0].head.retention);
+    assert!(commits[1].head.retention);
 }
 
 /// Remove the destination from the ledger, as retirement does.

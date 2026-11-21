@@ -48,6 +48,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 
 use crate::host::codesign::{self, RequiredEntitlement, SignTarget};
+use crate::host::file_memo::{FileStamp, file_stamp, now_ns, stamp_is_settled};
 use crate::host::helper_contract;
 use source_build::{Built, SourceBuild};
 
@@ -233,48 +234,6 @@ struct ProbeMemo {
     recorded_ns: i64,
 }
 
-/// A cheap rejection filter, not proof that a file's bytes are unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct FileStamp {
-    len: u64,
-    /// Nanoseconds since the Unix epoch; epoch-ns fits an `i64` until 2262.
-    mtime_ns: i64,
-    ctime_ns: i64,
-    inode: Option<u64>,
-}
-
-fn file_stamp(path: &Path) -> Option<FileStamp> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let ns_since_epoch = |time: std::io::Result<std::time::SystemTime>| {
-        time.ok()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
-    };
-    let mtime_ns = ns_since_epoch(metadata.modified())?;
-    #[cfg(unix)]
-    let (ctime_ns, inode) =
-        unix_stamp_ext(&metadata).map(|(ctime_ns, inode)| (ctime_ns, Some(inode)))?;
-    #[cfg(not(unix))]
-    let (ctime_ns, inode) = (mtime_ns, None);
-    Some(FileStamp {
-        len: metadata.len(),
-        mtime_ns,
-        ctime_ns,
-        inode,
-    })
-}
-
-#[cfg(unix)]
-fn unix_stamp_ext(metadata: &std::fs::Metadata) -> Option<(i64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    let ctime_ns = metadata
-        .ctime()
-        .checked_mul(1_000_000_000)?
-        .checked_add(metadata.ctime_nsec())?;
-    Some((ctime_ns, metadata.ino()))
-}
-
 fn probe_memo_path(memo_dir: &Path, bin: &str) -> PathBuf {
     memo_dir.join(format!("{bin}.json"))
 }
@@ -323,37 +282,6 @@ fn probe_memo_accepts_at(
     // renewing the memo lets the next launch skip the hash once it has aged.
     write_probe_memo(env, spec, resolved, stamp, digest, observed_ns);
     true
-}
-
-/// Whether a file's timestamps are old enough, relative to when its memo was
-/// written, to prove no rewrite has happened since. A rewrite made after the
-/// memo carries a later mtime and ctime, so it cannot match the stamp, unless
-/// it lands in the same timestamp tick as the write the memo describes; a
-/// stamp within [`RACY_MARGIN_NS`] of the memo (or after it) cannot rule that
-/// out. This is the "racily clean" rule: such a file is hashed instead.
-///
-/// A memo written after `observed_ns` came from a clock that has since moved
-/// backwards, so its age proves nothing and the file is hashed too.
-///
-/// File timestamps and the clock read here must come from the same clock. A
-/// filesystem served by a host whose clock runs more than the margin behind
-/// this one can stamp a rewrite as older than the memo.
-fn stamp_is_settled(stamp: &FileStamp, recorded_ns: i64, observed_ns: i64) -> bool {
-    let newest = stamp.mtime_ns.max(stamp.ctime_ns);
-    recorded_ns <= observed_ns && recorded_ns.saturating_sub(newest) >= RACY_MARGIN_NS
-}
-
-/// Wider than the coarsest timestamp granularity a supported filesystem
-/// offers (two seconds on FAT), so a settled stamp cannot share a tick with
-/// the write that preceded the memo.
-const RACY_MARGIN_NS: i64 = 2_000_000_000;
-
-fn now_ns() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
-        .unwrap_or(0)
 }
 
 /// Remember a probe that just succeeded, best effort: the memo is a cache,
@@ -1095,6 +1023,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
+    use crate::host::file_memo::RACY_MARGIN_NS;
 
     fn hvf_spec() -> AuxBin<'static> {
         AuxBin::new("mvm-hvf-supervisor", "MVM_HVF_SUPERVISOR_PATH", "mvm-hostd")

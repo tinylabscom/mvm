@@ -140,10 +140,10 @@ fn a_liveness_period_is_refused_with_its_unit_on_every_backend() {
 }
 
 #[test]
-fn a_state_cell_is_refused_with_its_name() {
+fn a_state_cell_is_refused_with_its_name_where_no_host_store_exists() {
     let mut topology = stating_nothing();
     topology.cells = full().cells;
-    for &kind in BackendKind::ALL {
+    for kind in [BackendKind::Wasm, BackendKind::WebLinux] {
         assert_eq!(
             check_requirements(&topology, ResourceControls::for_backend(kind), None),
             Err(UnmetRequirement::StateCell {
@@ -152,6 +152,49 @@ fn a_state_cell_is_refused_with_its_name() {
             "{kind:?}"
         );
     }
+}
+
+#[test]
+fn a_plain_state_cell_is_admitted_on_the_host_store() {
+    let mut topology = stating_nothing();
+    topology.cells = full().cells;
+    topology.cells[0].update = CellUpdate::AtPromotion;
+    topology.cells[0].per_write_audit = false;
+    for &kind in BackendKind::ALL {
+        let controls = ResourceControls::for_backend(kind);
+        let expected = match controls.state_cells {
+            StateCellControl::HostStore => Ok(()),
+            StateCellControl::None => Err(UnmetRequirement::StateCell {
+                cell: "brake".into(),
+            }),
+        };
+        assert_eq!(
+            check_requirements(&topology, controls, None),
+            expected,
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn a_cell_asking_for_follow_or_per_write_audit_is_refused_on_the_host_store() {
+    let mut topology = stating_nothing();
+    topology.cells = full().cells;
+    topology.cells[0].per_write_audit = false;
+    assert_eq!(
+        check_requirements(&topology, vm_backend(), None),
+        Err(UnmetRequirement::CellFollow {
+            cell: "brake".into()
+        })
+    );
+    topology.cells[0].update = CellUpdate::AtPromotion;
+    topology.cells[0].per_write_audit = true;
+    assert_eq!(
+        check_requirements(&topology, vm_backend(), None),
+        Err(UnmetRequirement::CellPerWriteAudit {
+            cell: "brake".into()
+        })
+    );
 }
 
 #[test]

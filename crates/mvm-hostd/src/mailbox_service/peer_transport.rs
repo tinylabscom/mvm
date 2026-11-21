@@ -304,9 +304,14 @@ mod tests {
                 .to_bytes(),
                 service_blind: None,
             };
-            crate::mailbox_launch::host_trust(keys.path(), &grant, &Key::from_bytes([41; 32]))
-                .unwrap()
-                .1
+            crate::mailbox_launch::host_trust(
+                keys.path(),
+                &grant,
+                &Key::from_bytes([41; 32]),
+                grant.epoch,
+            )
+            .unwrap()
+            .1
         };
         let parent = endpoint(1);
         let mut child = endpoint(2);

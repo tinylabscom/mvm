@@ -276,7 +276,10 @@ pub fn reap_unowned_state_dir(state_dir: &Path, instance_dir: &Path) -> Result<b
     // Nothing to remove, and no reason to create a lock file for a machine
     // that has no state.
     if !state_dir.exists() {
-        return Ok(true);
+        // Without the lock a socket dir is a leftover only once it has sat
+        // untouched; a launch that just created it has not made its state dir
+        // visible yet.
+        return remove_idle_fallback_socket_dir(state_dir, FALLBACK_SOCKET_DIR_IDLE).map(|()| true);
     }
     let lock = crate::vm::instance_snapshot::try_lock_resume_in(instance_dir)
         .map_err(|e| format!("{e:#}"))?;
@@ -317,6 +320,28 @@ pub fn remove_runtime_dirs(state_dir: &Path) -> Result<(), String> {
         )
     })?;
     remove_state_dir(state_dir)
+}
+
+/// How long a fallback socket dir must be untouched before an unlocked reap
+/// treats it as a leftover rather than a launch in progress.
+const FALLBACK_SOCKET_DIR_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// [`remove_fallback_socket_dir`], but only when the directory was last
+/// modified at least `idle` ago.
+fn remove_idle_fallback_socket_dir(
+    state_dir: &Path,
+    idle: std::time::Duration,
+) -> Result<(), String> {
+    let socket_dir = mvm_core::config::vm_socket_dir_at(state_dir);
+    let age = std::fs::symlink_metadata(&socket_dir)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok());
+    if age.is_some_and(|age| age >= idle) {
+        remove_fallback_socket_dir(state_dir)
+            .map_err(|e| format!("{}: {e}", socket_dir.display()))?;
+    }
+    Ok(())
 }
 
 /// Remove the short `/tmp` socket directory a deep `state_dir` falls back to.
@@ -1438,6 +1463,24 @@ mod tests {
         std::fs::write(socket_dir.join("fc.socket"), b"").unwrap();
 
         assert_eq!(reap_unowned_state_dir_locked(&dir), Ok(true));
+        assert!(!socket_dir.exists());
+    }
+
+    #[test]
+    fn an_unlocked_reap_removes_only_an_idle_leftover_socket_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("d".repeat(120)).join("vms").join("gone");
+        let socket_dir = mvm_core::config::vm_socket_dir_at(&dir);
+        assert_ne!(socket_dir, dir, "the fixture must keep its sockets apart");
+        mvm_core::config::secure_fallback_socket_dir_at(&dir).unwrap();
+        std::fs::write(socket_dir.join("fc.socket"), b"").unwrap();
+        let instance_dir = tmp.path().join("instances").join("gone");
+
+        // Just created, as a launch in progress would have it.
+        assert_eq!(reap_unowned_state_dir(&dir, &instance_dir), Ok(true));
+        assert!(socket_dir.exists());
+
+        remove_idle_fallback_socket_dir(&dir, std::time::Duration::ZERO).unwrap();
         assert!(!socket_dir.exists());
     }
 

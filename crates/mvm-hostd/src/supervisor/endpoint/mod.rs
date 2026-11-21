@@ -2,6 +2,7 @@
 
 pub mod accept_loop;
 pub mod audit_start;
+pub mod epoch_admission;
 pub mod flowmux;
 /// Host substitution endpoint request preparation (placeholder -> real
 /// credential, binding-checked). The forward leg + the guest-facing

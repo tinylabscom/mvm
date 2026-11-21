@@ -11,7 +11,7 @@ use super::rollback::{
     FailureAuditPolicy, UndoLaunch, UndoLaunchFailure, apply_admitted_grants_or_undo_launch,
     apply_admitted_grants_with_rollback, apply_entrypoint_grants_or_undo_launch,
     record_charge_or_undo_launch, record_charge_with_owned_rollback,
-    record_entrypoint_charge_or_undo_launch, undo_cli_launch, undo_launch, undo_launch_with,
+    record_entrypoint_charge_or_undo_launch, stop_actor, undo_cli_launch, undo_start,
 };
 use super::{AdmitAndStartParams, AdmittedPlan, RunPosture, final_gates, registry_pack};
 use anyhow::{Context, Result};
@@ -757,7 +757,12 @@ pub fn claim_cli_transient(
     // Spend it before the runner can fork or resume the child.
     admitted.dispatched = true;
     match backend.claim_standby_owned_via_runner(ctx, handle, &claim) {
-        Ok(owned) => Ok(WarmClaimDispatch::Claimed(owned)),
+        Ok(owned) => match super::containment_recheck::still_admitted(admitted.plan()) {
+            Ok(()) => Ok(WarmClaimDispatch::Claimed(owned)),
+            Err(error) => Err(super::containment_recheck::stop_claimed(
+                backend, owned, error,
+            )),
+        },
         Err(StandbyError::ReservationLost) => {
             admitted.dispatched = false;
             Ok(WarmClaimDispatch::ReservationLost(Box::new(admitted)))
@@ -1054,6 +1059,18 @@ fn start_admitted_with_finalization(
     };
     match start {
         Ok(vm_id) => {
+            if let Err(err) = super::containment_recheck::still_admitted(admitted.plan()) {
+                let emitter = params.emitter.filter(|_| !(cli_transient || fork));
+                let undo =
+                    super::containment_recheck::undo(backend, &vm_id, &admitted, emitter, err);
+                return Err(if cli_transient || fork {
+                    cli_rollback_error(undo_cli_launch(undo))
+                } else if entrypoint {
+                    entrypoint_rollback_error(undo_cli_launch(undo))
+                } else {
+                    undo_start(undo, &mut actor_owner)
+                });
+            }
             // A VM whose grants could not be applied is running without the
             // bounds it was admitted under; the helper stops it rather than
             // leaving a run whose only record says it was bounded.
@@ -1385,32 +1402,6 @@ fn start_owned_admitted_impl(
     })
 }
 
-fn stop_actor(
-    slot: &mut Option<&mut Option<mvm_runtime::actor_teardown::ActorOwner>>,
-) -> Result<()> {
-    let owner = slot
-        .as_mut()
-        .and_then(|slot| slot.as_mut())
-        .ok_or_else(|| anyhow::anyhow!("original actor owner missing"))?;
-    let _proof = owner.stop_and_reap()?;
-    Ok(())
-}
-
-fn undo_start(
-    undo: UndoLaunch<'_>,
-    slot: &mut Option<&mut Option<mvm_runtime::actor_teardown::ActorOwner>>,
-) -> anyhow::Error {
-    if slot.is_some() {
-        undo_launch_with(
-            undo,
-            || stop_actor(slot),
-            FailureAuditPolicy::OwnedAfterConfirmedRollback,
-        )
-    } else {
-        undo_launch(undo)
-    }
-}
-
 /// The single admitted-boot entrypoint every driver shares — the CLI's
 /// `mvmctl run` / `mvmctl machine run` and the `mvm-client` local backend both reach it, so a
 /// workload can never boot on a path that skipped admission.
@@ -1472,6 +1463,7 @@ pub(crate) fn admit_synthesized_with_verified_release(
     if let Some(runtime) = verified_runtime {
         plan.runtime_identity = Some(runtime.identity().clone());
     }
+    super::topology_binding::bind_synthesized_plan(&mut plan, params.host_signer_keys_dir);
 
     let admitted_result = admit_plan_for_run(
         &plan,

@@ -68,6 +68,8 @@ pub(crate) struct Coordinated {
     /// Set when a commit's outcome stayed unknown after every attempt; the
     /// helper must stop, and the next start reconciles from the journal.
     pub(crate) unknown: Arc<AtomicBool>,
+    /// Read by the final-commit hook: set, every head is marked retention-only.
+    pub(crate) retention: Arc<AtomicBool>,
     /// The tip the owner holds for this destination at enrollment.
     pub(crate) enrolled: DestinationTip,
 }
@@ -176,6 +178,7 @@ pub(crate) fn coordinate(
 pub(crate) struct OrderingFlags {
     pub(crate) refused: Arc<AtomicBool>,
     pub(crate) unknown: Arc<AtomicBool>,
+    pub(crate) retention: Arc<AtomicBool>,
 }
 
 /// [`coordinate`] with stop flags the caller supplies, so several journals can
@@ -202,7 +205,11 @@ pub(crate) fn coordinate_with(
         ..template.clone()
     };
     let enrollment = enroll_at(anchor.tip());
-    let OrderingFlags { refused, unknown } = flags;
+    let OrderingFlags {
+        refused,
+        unknown,
+        retention,
+    } = flags;
     let enrolled =
         resolve(authority.as_ref(), || authority.enroll(&enrollment)).map_err(|failure| {
             failure.raise(&refused, &unknown);
@@ -214,6 +221,7 @@ pub(crate) fn coordinate_with(
         return Err(JournalError::Rollback);
     }
     let (refused_flag, unknown_flag) = (Arc::clone(&refused), Arc::clone(&unknown));
+    let retention_flag = Arc::clone(&retention);
     let anchor = anchor.with_final_commit(Box::new(move |current, next| {
         let prepared = PreparedHead {
             destination: destination.id.clone(),
@@ -221,6 +229,7 @@ pub(crate) fn coordinate_with(
             epoch: destination.epoch,
             expected: wire(current),
             next: wire(next),
+            retention: retention_flag.load(Ordering::SeqCst),
         }
         .sign(&destination.key)
         .map_err(|_| JournalError::Corrupt)?;
@@ -250,6 +259,7 @@ pub(crate) fn coordinate_with(
         anchor,
         refused,
         unknown,
+        retention,
         enrolled: enrolled.tip,
     })
 }

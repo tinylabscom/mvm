@@ -31,6 +31,7 @@ impl BrokerRegistrar for RealBrokerRegistrar {
                     services: req.services,
                     capability_bindings: req.capability_bindings,
                     service_proxies: req.service_proxies,
+                    epoch: req.epoch,
                 },
             )
             .map(mvm_vmm::host::host_agent_spawn::ServicesGuard::Agent)?
@@ -47,6 +48,7 @@ impl BrokerRegistrar for RealBrokerRegistrar {
                     broker_listen_socket,
                     services: req.services,
                     capability_bindings: req.capability_bindings,
+                    epoch: req.epoch,
                 },
             )
             .map(mvm_vmm::host::host_agent_spawn::ServicesGuard::Fork)?
@@ -75,6 +77,10 @@ pub struct BrokerRegisterRequest<'a> {
     pub capability_bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
     /// Controller-backed typed services prepared by the admitting process.
     pub service_proxies: &'a [mvm_contract::protocol::broker_control::ServiceProxyBinding],
+    /// The admitted plan's workload and execution epoch. Every launch with an
+    /// admitted plan sets it, so the broker admits each call through the
+    /// epoch gate; `None` registers the VM ungated.
+    pub epoch: Option<&'a mvm_core::protocol::handler::CallEpoch>,
 }
 
 /// Register/spawn the per-VM host-services broker for an admitted workload,
@@ -126,16 +132,30 @@ pub(crate) fn admitted_broker_bindings(
 ) -> Result<(
     Vec<ServiceId>,
     Vec<mvm_contract::protocol::agent_capability::CapabilityBinding>,
+    Option<mvm_core::protocol::handler::CallEpoch>,
 )> {
     let plan = plan_json
         .map(mvm_core::plan::plan_from_admitted_json)
         .transpose()
         .context("parse admitted plan host services")?;
     let Some(plan) = plan else {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), None));
     };
     let capabilities = capabilities_for_plan(&plan)?;
-    Ok((plan.services, capabilities))
+    let epoch = plan_call_epoch(&plan)?;
+    Ok((plan.services, capabilities, Some(epoch)))
+}
+
+/// The plan's workload and execution epoch, which the broker gates each call
+/// on. The gate is keyed by the plan's workload, never the VM's name.
+pub(crate) fn plan_call_epoch(
+    plan: &mvm_core::plan::ExecutionPlan,
+) -> Result<mvm_core::protocol::handler::CallEpoch> {
+    Ok(mvm_core::protocol::handler::CallEpoch {
+        unit: plan.workload.0.clone(),
+        epoch: mvm_contract::protocol::mailbox::ExecutionEpoch::new(plan.execution_epoch)
+            .context("the admitted plan carries a zero execution epoch")?,
+    })
 }
 
 fn capabilities_for_plan(

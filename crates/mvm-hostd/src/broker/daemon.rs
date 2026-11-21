@@ -42,6 +42,7 @@ use tracing::warn;
 use crate::audit_signer::helper_client::SignerHelperClient;
 
 use super::audit_client::AuditClient;
+use super::epoch::BrokerEpochGate;
 use super::handlers::host_audit_v1::HostAuditV1Handler;
 use super::handlers::register_bound_handlers;
 use super::registry::Registry;
@@ -458,6 +459,12 @@ impl HostAgentDaemon {
             }
         }
 
+        let epoch_gate = BrokerEpochGate::from_registration(
+            r.workload.as_deref(),
+            r.execution_epoch,
+            mvm_core::config::mvm_home_strict,
+        )?;
+
         // Re-register replaces: drop the prior handle first so its socket is
         // unbound before we rebind (idempotent rebind, fail-closed).
         self.vms.remove(&r.vm_id);
@@ -486,6 +493,7 @@ impl HostAgentDaemon {
         // at the resident helper with this server-derived `vm_id`; legacy
         // per-VM broker mode still points at a per-VM audit-signer UDS.
         let mut registry = Registry::new();
+        registry.bind_epoch_gate(epoch_gate);
         registry
             .admit_capabilities(r.capability_bindings.clone())
             .context("load host-signed capability bindings")?;
@@ -958,6 +966,8 @@ mod tests {
             capability_bindings: vec![],
             assurance: None,
             service_proxies: vec![],
+            workload: None,
+            execution_epoch: None,
         }
     }
 

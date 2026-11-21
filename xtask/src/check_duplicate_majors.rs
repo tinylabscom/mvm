@@ -84,9 +84,11 @@ const ALLOWLIST: &[&str] = &[
     "spki",
 ];
 
+type DuplicateMajors<'a> = BTreeMap<&'a str, Vec<(u64, u64)>>;
+
 pub(crate) fn run(workspace: &Path) -> Result<()> {
     let packages = resolved_packages(workspace)?;
-    let found = duplicate_major_names(&packages);
+    let found = duplicate_majors(&packages);
 
     let regressions = regressions(&found, ALLOWLIST);
     if !regressions.is_empty() {
@@ -94,8 +96,7 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
             "check-duplicate-majors: {} crate(s) newly resolve at two incompatible majors: {}.\n\
              A duplicate major compiles both versions into the build. Unify on one major \
              (align the dependents' version requirements), or, if it is genuinely unavoidable, \
-             add the crate name to ALLOWLIST in xtask/src/check_duplicate_majors.rs with a \
-             one-line justification in the PR.",
+             obtain explicit approval for a narrowly justified dependency-policy change.",
             regressions.len(),
             regressions.join(", ")
         );
@@ -161,9 +162,9 @@ fn compat_key(version: &str) -> (u64, u64) {
     if major > 0 { (major, 0) } else { (0, minor) }
 }
 
-/// Names that resolve at two or more incompatible compatibility keys, sorted.
-fn duplicate_major_names(packages: &[(String, String)]) -> Vec<String> {
-    let mut by_name: BTreeMap<&str, Vec<(u64, u64)>> = BTreeMap::new();
+/// Crates resolving at two or more compatibility keys, with sorted unique keys.
+fn duplicate_majors(packages: &[(String, String)]) -> DuplicateMajors<'_> {
+    let mut by_name = DuplicateMajors::new();
     for (name, version) in packages {
         by_name.entry(name).or_default().push(compat_key(version));
     }
@@ -172,27 +173,25 @@ fn duplicate_major_names(packages: &[(String, String)]) -> Vec<String> {
         .filter_map(|(name, mut keys)| {
             keys.sort_unstable();
             keys.dedup();
-            (keys.len() > 1).then(|| name.to_string())
+            (keys.len() > 1).then_some((name, keys))
         })
         .collect()
 }
 
-/// Found duplicate-major crates not covered by the allowlist (regressions).
-fn regressions<'a>(found: &'a [String], allow: &[&str]) -> Vec<&'a str> {
+/// Duplicate-major crates outside the baseline.
+fn regressions<'a>(found: &DuplicateMajors<'a>, allow: &[&str]) -> Vec<&'a str> {
     found
         .iter()
-        .map(String::as_str)
-        .filter(|name| !allow.contains(name))
+        .filter_map(|(&name, _)| (!allow.contains(&name)).then_some(name))
         .collect()
 }
 
 /// Allowlist entries that no longer have a duplicate major (ratchet-down hint).
-fn stale_allowlist<'a>(found: &[String], allow: &'a [&str]) -> Vec<&'a str> {
-    let found_set: std::collections::HashSet<&str> = found.iter().map(String::as_str).collect();
+fn stale_allowlist<'a>(found: &DuplicateMajors<'_>, allow: &'a [&str]) -> Vec<&'a str> {
     allow
         .iter()
         .copied()
-        .filter(|name| !found_set.contains(name))
+        .filter(|name| !found.contains_key(name))
         .collect()
 }
 
@@ -228,7 +227,13 @@ mod tests {
             ("http".to_string(), "0.2.12".to_string()),
             ("http".to_string(), "1.4.0".to_string()),
         ];
-        assert_eq!(duplicate_major_names(&pkgs), vec!["base64", "http"]);
+        assert_eq!(
+            duplicate_majors(&pkgs),
+            BTreeMap::from([
+                ("base64", vec![(0, 21), (0, 22)]),
+                ("http", vec![(0, 2), (1, 0)]),
+            ])
+        );
     }
 
     #[test]
@@ -237,7 +242,7 @@ mod tests {
             ("serde".to_string(), "1.0.0".to_string()),
             ("serde".to_string(), "1.0.99".to_string()),
         ];
-        assert!(duplicate_major_names(&pkgs).is_empty());
+        assert!(duplicate_majors(&pkgs).is_empty());
     }
 
     #[test]
@@ -246,18 +251,140 @@ mod tests {
             ("aho-corasick".to_string(), "1.1.4".to_string()),
             ("aho-corasick".to_string(), "1.1.4".to_string()),
         ];
-        assert!(duplicate_major_names(&pkgs).is_empty());
+        assert!(duplicate_majors(&pkgs).is_empty());
     }
 
     #[test]
     fn regressions_are_found_minus_allowlist() {
-        let found = vec!["base64".to_string(), "newdup".to_string()];
+        let found = BTreeMap::from([
+            ("base64", vec![(0, 21), (0, 22)]),
+            ("newdup", vec![(1, 0), (2, 0)]),
+        ]);
         assert_eq!(regressions(&found, &["base64"]), vec!["newdup"]);
     }
 
     #[test]
     fn stale_allowlist_is_allow_minus_found() {
-        let found = vec!["base64".to_string()];
+        let found = BTreeMap::from([("base64", vec![(0, 21), (0, 22)])]);
         assert_eq!(stale_allowlist(&found, &["base64", "gone"]), vec!["gone"]);
+    }
+
+    fn package_regressions(packages: &[(&str, &[&str])]) -> Vec<String> {
+        let packages: Vec<_> = packages
+            .iter()
+            .flat_map(|(name, versions)| {
+                versions
+                    .iter()
+                    .map(move |version| (name.to_string(), version.to_string()))
+            })
+            .collect();
+        regressions(&duplicate_majors(&packages), ALLOWLIST)
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn former_coordinator_compatibility_pairs_are_rejected() {
+        assert_eq!(
+            package_regressions(&[
+                ("syn", &["2.0.100", "3.0.0"]),
+                ("winnow", &["0.7.13", "1.0.0"]),
+            ]),
+            ["syn", "winnow"]
+        );
+    }
+
+    #[test]
+    fn former_coordinator_pairs_reject_a_third_compatibility_key() {
+        for extra in ["0.9.0", "1.0.0", "4.0.0"] {
+            assert_eq!(
+                package_regressions(&[("syn", &["2.0.100", "3.0.0", extra])]),
+                ["syn"],
+                "unexpected syn {extra}"
+            );
+        }
+        for extra in ["0.6.0", "0.8.0", "2.0.0"] {
+            assert_eq!(
+                package_regressions(&[("winnow", &["0.7.13", "1.0.0", extra])]),
+                ["winnow"],
+                "unexpected winnow {extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_compatibility_pairs_are_rejected() {
+        for (name, versions) in [
+            ("syn", ["1.0.0", "2.0.0"]),
+            ("syn", ["1.0.0", "3.0.0"]),
+            ("syn", ["2.0.0", "4.0.0"]),
+            ("syn", ["3.0.0", "4.0.0"]),
+            ("winnow", ["0.6.0", "1.0.0"]),
+            ("winnow", ["0.8.0", "1.0.0"]),
+            ("winnow", ["0.7.0", "2.0.0"]),
+            ("winnow", ["1.0.0", "2.0.0"]),
+        ] {
+            assert_eq!(
+                package_regressions(&[(name, &versions)]),
+                [name],
+                "{name} {versions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_detection_uses_compatibility_keys_not_package_counts() {
+        assert_eq!(
+            package_regressions(&[
+                ("syn", &["3.1.1", "2.0.100", "3.0.0", "2.0.101", "3.0.0"]),
+                ("winnow", &["1.2.3", "0.7.13", "1.0.0", "0.7.14", "0.7.13"]),
+            ]),
+            ["syn", "winnow"]
+        );
+        assert!(
+            package_regressions(&[
+                ("syn", &["2.0.100", "2.0.101"]),
+                ("winnow", &["0.7.13", "0.7.14"]),
+            ])
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn all_unapproved_duplicates_are_reported() {
+        assert_eq!(
+            package_regressions(&[
+                ("syn", &["2.0.100", "3.0.0"]),
+                ("winnow", &["0.7.13", "1.0.0"]),
+                ("unrelated", &["1.0.0", "2.0.0"]),
+            ]),
+            ["syn", "unrelated", "winnow"]
+        );
+    }
+
+    #[test]
+    fn existing_baseline_remains_name_only() {
+        for name in ALLOWLIST {
+            assert!(
+                package_regressions(&[(name, &["0.1.0", "1.0.0", "2.0.0"])]).is_empty(),
+                "baseline exception {name}"
+            );
+        }
+        assert!(!ALLOWLIST.contains(&"syn"));
+        assert!(!ALLOWLIST.contains(&"winnow"));
+    }
+
+    #[test]
+    fn cargo_deny_has_no_coordinator_compatibility_exceptions() {
+        let config: toml::Value = include_str!("../../deny.toml").parse().unwrap();
+        let skips: Vec<_> = config["bans"]["skip"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .filter(|entry| entry.starts_with("syn") || entry.starts_with("winnow"))
+            .collect();
+        assert!(skips.is_empty(), "{skips:?}");
     }
 }

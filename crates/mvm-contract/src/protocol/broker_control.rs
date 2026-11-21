@@ -180,6 +180,16 @@ pub struct RegisterVm {
     /// omitted from their signed canonical bytes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub service_proxies: Vec<ServiceProxyBinding>,
+    /// The admitted plan's workload: the unit the epoch gate is keyed by.
+    /// Distinct from `workload_id`, which names the VM's registration.
+    /// Set together with `execution_epoch`; when both are present the daemon
+    /// admits every call through the epoch gate. Omitted from the signed
+    /// bytes when absent, for the same reason as `assurance`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<String>,
+    /// The admitted plan's execution epoch for `workload`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_epoch: Option<super::mailbox::ExecutionEpoch>,
 }
 
 /// Deregister a VM at teardown: the daemon unbinds + drops its listen socket
@@ -276,6 +286,8 @@ mod tests {
             capability_bindings: vec![],
             assurance: None,
             service_proxies: vec![],
+            workload: None,
+            execution_epoch: None,
         }))
     }
 

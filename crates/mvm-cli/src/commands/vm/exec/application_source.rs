@@ -422,6 +422,7 @@ mod tests {
 
     #[test]
     fn policy_and_plan_selections_precede_ambiguous_application_defaults() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let (dir, service) = secret_fixture(&["first", "second"]);
         let profile = dir.path().join("choose-first.toml");
         std::fs::write(

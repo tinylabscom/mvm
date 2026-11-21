@@ -6110,11 +6110,26 @@ fn audit_consistency_bypasses_telemetry_and_interactive_update_notices() {
             args.extend(["--proof", "proof.json"]);
         }
         let cli = Cli::try_parse_from(args).unwrap();
-        assert!(cli.command.is_offline_audit_command());
+        assert!(cli.command.skips_startup());
         assert!(cli.command.is_early_command());
     }
     let publish = Cli::try_parse_from(["mvmctl", "trust", "audit", "publish-root"]).unwrap();
-    assert!(!publish.command.is_offline_audit_command());
+    assert!(!publish.command.skips_startup());
+}
+
+#[test]
+fn coordinator_observation_bypasses_startup_but_activation_does_not() {
+    for arguments in [
+        &["mvmctl", "policy", "coordinator"][..],
+        &["mvmctl", "policy", "coordinator", "--json"],
+    ] {
+        let cli = Cli::try_parse_from(arguments).unwrap();
+        assert!(cli.command.skips_startup());
+        assert!(cli.command.is_early_command());
+    }
+    let activate = Cli::try_parse_from(["mvmctl", "policy", "activate", "/project"]).unwrap();
+    assert!(!activate.command.skips_startup());
+    assert!(!activate.command.is_early_command());
 }
 
 #[test]
@@ -6128,10 +6143,10 @@ fn verified_logs_bypass_startup_but_ordinary_logs_do_not() {
         "exact-plan",
     ])
     .unwrap();
-    assert!(verified.command.is_offline_audit_command());
+    assert!(verified.command.skips_startup());
     assert!(verified.command.is_early_command());
     let ordinary = Cli::try_parse_from(["mvmctl", "machine", "logs", "vm"]).unwrap();
-    assert!(!ordinary.command.is_offline_audit_command());
+    assert!(!ordinary.command.skips_startup());
     assert!(!ordinary.command.is_early_command());
     // There is no top-level logs alias in the shipped command tree.
     assert!(Cli::try_parse_from(["mvmctl", "logs", "vm"]).is_err());

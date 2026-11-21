@@ -229,7 +229,13 @@ async fn a_sealed_unit_can_still_be_stopped_and_quarantined() {
             .any(|m| m.id == id),
         "the sealed machine stopped"
     );
-    crate::containment::quarantine(&id.0, "contained").expect("quarantine is not gated");
+    crate::containment::quarantine_in_process(&id.0, "contained").expect("quarantine is not gated");
+    let ledger = mvm_core::host_interface::workload::WorkloadLedger::load_at(host._home.path())
+        .expect("read the quarantined workload ledger");
+    assert!(
+        ledger.authorize_local_start(&id.0).is_err(),
+        "the stopped sealed workload remains quarantined"
+    );
     assert_eq!(refusals(), 0);
 }
 

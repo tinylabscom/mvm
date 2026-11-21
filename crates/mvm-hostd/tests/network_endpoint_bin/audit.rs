@@ -37,6 +37,47 @@ fn refused_start(cfg: &EndpointConfig, home: &std::path::Path) -> std::process::
     child.wait_with_output().unwrap()
 }
 
+/// Record `workload` at `epoch` in the workload ledger under `home`, the way
+/// the policy coordinator would have after advancing it.
+fn ledger_at(home: &std::path::Path, workload: &str, epoch: u64) {
+    let dir = mvm_core::host_interface::workload::canonical_dir_at(home);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(mvm_core::host_interface::workload::LEDGER_FILE),
+        serde_json::json!({
+            "sequence": 1,
+            "workloads": { workload: { "epoch": epoch, "quarantined": false } },
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_plan_whose_epoch_the_ledger_does_not_admit_refuses_before_readiness() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    ledger_at(&home, "test", 2);
+    let socket = dir.path().join("network.sock");
+    let (mut cfg, _) = flow_config(&socket);
+    let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+    plan.tenant = mvm_core::plan::TenantId("local".into());
+    plan.workload = mvm_core::plan::WorkloadId("test".into());
+    plan.execution_epoch = 1;
+    cfg.audit = Some(AuditContext::Workload {
+        plan: Box::new(plan),
+    });
+    let output = refused_start(&cfg, &home);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "no readiness for a stale epoch");
+    assert!(UnixStream::connect(&socket).is_err());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("does not admit"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn a_missing_audit_binding_refuses_before_listener_or_readiness() {
     let dir = tempfile::tempdir().unwrap();
@@ -81,6 +122,8 @@ fn twenty_fresh_endpoint_sessions_record_each_plan_bound_denial_before_response(
     for epoch in 1..=20 {
         let dir = tempfile::tempdir().unwrap();
         let _environment = audit_environment(dir.path());
+        // Each session runs at the epoch the ledger names current for it.
+        ledger_at(&dir.path().join("mvm-home"), "test", epoch);
         let socket = dir.path().join("network.sock");
         let (mut cfg, guest_key) = flow_config(&socket);
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();

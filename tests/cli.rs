@@ -4,6 +4,37 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn policy_coordinator_observation_does_not_initialize_state() {
+    let directory = tempfile::tempdir().expect("isolated coordinator home");
+    for json in [false, true] {
+        let home = directory
+            .path()
+            .join(if json { "absent-json" } else { "absent-text" });
+        let output = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .env("MVM_HOME", &home)
+            .env("HOME", &home)
+            .env("PATH", directory.path())
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .env_remove("XDG_RUNTIME_DIR")
+            .args(["policy", "coordinator"])
+            .args(json.then_some("--json"))
+            .output()
+            .expect("observe an absent coordinator home");
+        assert!(!output.status.success(), "an absent home must refuse");
+        assert!(
+            output.stdout.is_empty(),
+            "refusal must not report an identity"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("canonicalizing MVM home"),
+            "observation must refuse the absent home without initializing it: {stderr}"
+        );
+        assert!(!home.exists(), "observation must not create runtime state");
+    }
+}
+
+#[test]
 fn audit_consistency_real_commands_generate_verify_and_refuse_rollback() {
     use mvm_client::audit::chain::{
         merkle::sign_root_in,

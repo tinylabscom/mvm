@@ -55,6 +55,13 @@ pub struct SubprocessConfig {
     /// Opaque actor routes; never contain keys or lifecycle authority.
     #[serde(default)]
     pub service_proxies: Vec<mvm_contract::protocol::broker_control::ServiceProxyBinding>,
+    /// The admitted plan's workload, the epoch gate's unit key. Set together
+    /// with `execution_epoch`, the broker admits every call through the gate.
+    #[serde(default)]
+    pub workload: Option<String>,
+    /// The admitted plan's execution epoch for `workload`.
+    #[serde(default)]
+    pub execution_epoch: Option<mvm_contract::protocol::mailbox::ExecutionEpoch>,
 }
 
 fn default_max_frame_bytes() -> usize {
@@ -112,6 +119,8 @@ mod tests {
             services_bindings: vec![],
             capability_bindings: vec![],
             service_proxies: vec![],
+            workload: Some("unit".into()),
+            execution_epoch: mvm_contract::protocol::mailbox::ExecutionEpoch::new(2).ok(),
         };
         let bytes = serde_json::to_vec(&cfg).unwrap();
         let parsed: SubprocessConfig = parse(&bytes).unwrap();

@@ -344,6 +344,9 @@ pub struct BrokerSpawnParams<'a> {
     pub services: &'a [mvm_core::protocol::broker::ServiceId],
     pub capability_bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
     pub service_proxies: &'a [mvm_contract::protocol::broker_control::ServiceProxyBinding],
+    /// The admitted plan's workload and execution epoch. Set, the broker
+    /// admits every call through the epoch gate; unset, it serves ungated.
+    pub epoch: Option<&'a mvm_core::protocol::handler::CallEpoch>,
 }
 
 impl<'a> BrokerSpawnParams<'a> {
@@ -367,6 +370,7 @@ pub struct BrokerSpawnParamsBuilder<'a> {
     services: Option<&'a [mvm_core::protocol::broker::ServiceId]>,
     capability_bindings: Option<&'a [mvm_contract::protocol::agent_capability::CapabilityBinding]>,
     service_proxies: &'a [mvm_contract::protocol::broker_control::ServiceProxyBinding],
+    epoch: Option<&'a mvm_core::protocol::handler::CallEpoch>,
 }
 
 impl<'a> BrokerSpawnParamsBuilder<'a> {
@@ -382,7 +386,15 @@ impl<'a> BrokerSpawnParamsBuilder<'a> {
             services: None,
             capability_bindings: None,
             service_proxies: &[],
+            epoch: None,
         }
+    }
+
+    /// Set the admitted plan's workload and execution epoch.
+    #[must_use]
+    pub fn epoch(mut self, epoch: &'a mvm_core::protocol::handler::CallEpoch) -> Self {
+        self.epoch = Some(epoch);
+        self
     }
 
     /// Set `workload_id`.
@@ -450,6 +462,7 @@ impl<'a> BrokerSpawnParamsBuilder<'a> {
     pub fn build(self) -> Result<BrokerSpawnParams<'a>, BuilderError> {
         Ok(BrokerSpawnParams {
             service_proxies: self.service_proxies,
+            epoch: self.epoch,
             workload_id: self
                 .workload_id
                 .ok_or(BuilderError::missing("BrokerSpawnParams", "workload_id"))?,
@@ -539,6 +552,7 @@ fn spawn_broker_with_routes(
         services,
         capability_bindings,
         service_proxies,
+        epoch,
     } = params;
     anyhow::ensure!(
         routes.is_empty() || service_proxies.is_empty() || routes == service_proxies,
@@ -574,6 +588,8 @@ fn spawn_broker_with_routes(
         "services_bindings": services,
         "capability_bindings": capability_bindings,
         "service_proxies": routes,
+        "workload": epoch.map(|epoch| &epoch.unit),
+        "execution_epoch": epoch.map(|epoch| epoch.epoch),
     });
 
     let child = spawn_detached_with_config(&bin, &cfg, "mvm-broker")?;
@@ -688,6 +704,8 @@ pub struct BrokerServicesSpawnParams<'a> {
     /// Exact host-service bindings from the admitted execution plan.
     pub services: &'a [mvm_core::protocol::broker::ServiceId],
     pub capability_bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
+    /// The admitted plan's workload and execution epoch, handed to the broker.
+    pub epoch: Option<&'a mvm_core::protocol::handler::CallEpoch>,
 }
 
 impl<'a> BrokerServicesSpawnParams<'a> {
@@ -710,6 +728,7 @@ pub struct BrokerServicesSpawnParamsBuilder<'a> {
     broker_listen_socket: Option<&'a Path>,
     services: Option<&'a [mvm_core::protocol::broker::ServiceId]>,
     capability_bindings: Option<&'a [mvm_contract::protocol::agent_capability::CapabilityBinding]>,
+    epoch: Option<&'a mvm_core::protocol::handler::CallEpoch>,
 }
 
 impl<'a> BrokerServicesSpawnParamsBuilder<'a> {
@@ -724,7 +743,15 @@ impl<'a> BrokerServicesSpawnParamsBuilder<'a> {
             broker_listen_socket: None,
             services: None,
             capability_bindings: None,
+            epoch: None,
         }
+    }
+
+    /// Set the admitted plan's workload and execution epoch.
+    #[must_use]
+    pub fn epoch(mut self, epoch: &'a mvm_core::protocol::handler::CallEpoch) -> Self {
+        self.epoch = Some(epoch);
+        self
     }
 
     /// Set `workload_id`.
@@ -806,6 +833,7 @@ impl<'a> BrokerServicesSpawnParamsBuilder<'a> {
                 "BrokerServicesSpawnParams",
                 "capability_bindings",
             ))?,
+            epoch: self.epoch,
         })
     }
 }
@@ -836,6 +864,7 @@ pub fn spawn_broker_services_if_admitted(
         broker_listen_socket,
         services,
         capability_bindings,
+        epoch,
     } = params;
     let Some(tenant_id) = tenant_id else {
         return Ok(BrokerServicesGuard::defused());
@@ -859,6 +888,7 @@ pub fn spawn_broker_services_if_admitted(
         services,
         capability_bindings,
         service_proxies: &[],
+        epoch,
     })?;
     Ok(guard)
 }
@@ -1119,6 +1149,10 @@ mod tests {
             services: &[],
             capability_bindings: &[],
             service_proxies: &[],
+            epoch: Some(&mvm_core::protocol::handler::CallEpoch {
+                unit: "unit-a".into(),
+                epoch: mvm_contract::protocol::mailbox::ExecutionEpoch::new(3).unwrap(),
+            }),
         });
 
         let handle = res.expect("spawn with stub broker should succeed");
@@ -1129,6 +1163,9 @@ mod tests {
                 .expect("config is JSON");
         assert_eq!(cfg["workload_id"], "wl-001");
         assert_eq!(cfg["tenant_id"], "tenant-x");
+        // The gate is keyed by the plan's workload, not the VM's registration id.
+        assert_eq!(cfg["workload"], "unit-a");
+        assert_eq!(cfg["execution_epoch"], 3);
         // The broker binds the per-VM BROKER_PORT socket so the VMM forwards the
         // guest's connect_host_vsock(BROKER_PORT) dial straight to it.
         assert_eq!(cfg["uds_path"], uds.to_string_lossy().as_ref());
@@ -1167,6 +1204,7 @@ mod tests {
             broker_listen_socket: &dir,
             services: &[],
             capability_bindings: &[],
+            epoch: None,
         })
         .expect("unadmitted VM yields a defused no-op guard");
         drop(guard); // a defused guard's Drop reaps nothing
@@ -1224,6 +1262,7 @@ mod tests {
             broker_listen_socket: &broker_uds,
             services: &[],
             capability_bindings: &[],
+            epoch: None,
         });
 
         let mut guard = res.expect("admitted VM spawns both broker services");
