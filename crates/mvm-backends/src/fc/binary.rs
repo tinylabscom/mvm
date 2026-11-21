@@ -199,9 +199,18 @@ fn memo_accepts(
     pin: &FirecrackerArchPin,
     observed_ns: i64,
 ) -> bool {
-    let Ok(bytes) = std::fs::read(memo_file) else {
+    // A symlinked memo is refused rather than followed.
+    let Ok(mut handle) = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(memo_file)
+    else {
         return false;
     };
+    let mut bytes = Vec::new();
+    if io::Read::read_to_end(&mut handle, &mut bytes).is_err() {
+        return false;
+    }
     let Ok(memo) = serde_json::from_slice::<BinaryMemo>(&bytes) else {
         return false;
     };
@@ -710,6 +719,79 @@ mod tests {
         edit_memo(&memo, |value| value["sha256"] = "00".into());
         assert!(verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
         std::fs::write(memo.path().join(BINARY_MEMO_FILE), b"{not json").unwrap();
+        assert!(verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
+    }
+
+    fn current_stamp(dir: &tempfile::TempDir) -> (FileStamp, i64) {
+        let meta = std::fs::metadata(dir.path().join("firecracker")).unwrap();
+        let ctime = meta.ctime() * SEC + meta.ctime_nsec();
+        let mtime = meta.mtime() * SEC + meta.mtime_nsec();
+        (file_stamp_of(&meta).unwrap(), ctime.max(mtime))
+    }
+
+    /// Writes a memo for the file as it stands, recorded at `recorded_ns`.
+    fn memo_recorded_at(dir: &tempfile::TempDir, memo: &tempfile::TempDir, recorded_ns: i64) {
+        let (stamp, _) = current_stamp(dir);
+        let path = dir.path().join("firecracker");
+        record_memo(memo.path(), &path, stamp, &pin_for(BINARY), recorded_ns);
+    }
+
+    #[test]
+    fn the_racy_margin_boundary_is_exact() {
+        use mvm_vmm::host::file_memo::RACY_MARGIN_NS;
+        let dir = shipped(BINARY, 0o755);
+        let memo = tempfile::tempdir().unwrap();
+        let (_, newest) = current_stamp(&dir);
+        memo_recorded_at(&dir, &memo, newest + RACY_MARGIN_NS - 1);
+        let observed = newest + RACY_MARGIN_NS + 10 * SEC;
+        assert!(verify_memoed(&dir, &memo, BINARY, observed).unwrap());
+        memo_recorded_at(&dir, &memo, newest + RACY_MARGIN_NS);
+        assert!(!verify_memoed(&dir, &memo, BINARY, observed).unwrap());
+    }
+
+    #[test]
+    fn a_memo_for_another_path_or_stamp_or_version_is_hashed() {
+        let dir = shipped(BINARY, 0o755);
+        let memo = tempfile::tempdir().unwrap();
+        let base = settled_memo(&dir, &memo);
+        let observed = base + 10 * SEC;
+        edit_memo(&memo, |value| {
+            value["path"] = "/elsewhere/firecracker".into()
+        });
+        assert!(verify_memoed(&dir, &memo, BINARY, observed).unwrap());
+        let base = settled_memo(&dir, &memo);
+        edit_memo(&memo, |value| value["memo_version"] = 99.into());
+        assert!(verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
+        // Same bytes, new timestamps: the stamp no longer matches.
+        let base = settled_memo(&dir, &memo);
+        let file = dir.path().join("firecracker");
+        std::fs::write(&file, BINARY).unwrap();
+        assert!(verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
+    }
+
+    #[test]
+    fn without_a_usable_memo_dir_verification_still_hashes_and_succeeds() {
+        let dir = shipped(BINARY, 0o755);
+        let file = dir.path().join("firecracker");
+        let hashed = |memo_dir: Option<&Path>| {
+            verify_at(&file, &pin_for(BINARY), my_uid(), memo_dir, now_ns()).unwrap()
+        };
+        assert!(hashed(None));
+        let blocker = tempfile::NamedTempFile::new().unwrap();
+        // A regular file where the directory should be: creating it fails.
+        assert!(hashed(Some(&blocker.path().join("sub"))));
+        assert!(hashed(Some(&dir.path().join("missing").join("deeper"))));
+    }
+
+    #[test]
+    fn a_symlinked_memo_is_refused_and_hashed() {
+        let dir = shipped(BINARY, 0o755);
+        let memo = tempfile::tempdir().unwrap();
+        let base = settled_memo(&dir, &memo);
+        let real = memo.path().join("real.json");
+        let link = memo.path().join(BINARY_MEMO_FILE);
+        std::fs::rename(&link, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
         assert!(verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
     }
 
