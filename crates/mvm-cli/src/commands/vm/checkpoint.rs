@@ -1046,6 +1046,7 @@ fn grant_predecessor_from_vm_name(vm_name: &str) -> Option<(String, mvm_core::pl
 /// override it was admitted with. Forks inherit the parent's explicit
 /// `--agent-verb` list so that a child of an unsealed image can still be
 /// grant-bearing when the parent was.
+#[cfg(test)]
 fn parent_agent_verb_override(
     parent_checkpoint: &CheckpointId,
     store: &CheckpointStore,
@@ -1063,32 +1064,6 @@ fn parent_agent_verb_override(
         .collect()
 }
 
-/// The transport a forked or restored child is admitted with.
-///
-/// Inherits the parent's, because a child that boots from a parent's memory
-/// and rootfs is continuing that workload rather than starting a new one: if
-/// the parent was admitted onto the raw-IP tunnel, its child is on it too.
-/// Falls back to what a fresh launch of the same shape would derive when the
-/// parent's plan cannot be read, which is the same shape `parent_plan_resources`
-/// already takes for cpus and memory.
-///
-/// Not `NetworkMode::None` on the fallback: that value means the guest has no
-/// broker at all, and claiming it for a child that is about to be given one is
-/// the defect this function exists to avoid rather than a safe default.
-fn parent_network_mode(
-    parent_checkpoint: &CheckpointId,
-    store: &CheckpointStore,
-) -> mvm_contract::plan::NetworkMode {
-    let fallback = crate::commands::machine::preflight_network();
-    let Ok(parent_meta) = store.read_meta(parent_checkpoint) else {
-        return fallback;
-    };
-    let Ok(plan) = mvm_client::audit::chain::plan_persist::read_plan(&parent_meta.vm_name) else {
-        return fallback;
-    };
-    plan.network_mode
-}
-
 /// The secret binding *names* the parent was admitted with, for diagnostics.
 ///
 /// A fork child is admitted with no secrets, so every binding the parent held
@@ -1101,6 +1076,7 @@ fn parent_network_mode(
 /// An unreadable parent plan yields an empty set, matching the sibling
 /// inheritance helpers. Absence of a plan file is not evidence the parent held
 /// no secrets, so silence here means "unknown", not "none".
+#[cfg(test)]
 fn parent_secret_names(parent_checkpoint: &CheckpointId, store: &CheckpointStore) -> Vec<String> {
     let Ok(parent_meta) = store.read_meta(parent_checkpoint) else {
         return Vec::new();
@@ -1111,6 +1087,7 @@ fn parent_secret_names(parent_checkpoint: &CheckpointId, store: &CheckpointStore
     plan.secrets.into_iter().map(|b| b.name).collect()
 }
 
+#[cfg(test)]
 fn dropped_parent_secret_names(
     parent_names: &[String],
     declared: &[mvm_core::plan::SecretBinding],
@@ -1126,6 +1103,7 @@ fn dropped_parent_secret_names(
         .collect()
 }
 
+#[cfg(test)]
 fn enforce_secret_attenuation(dropped: &[String], allow_secret_drop: bool) -> Result<()> {
     if dropped.is_empty() {
         return Ok(());
@@ -1134,35 +1112,6 @@ fn enforce_secret_attenuation(dropped: &[String], allow_secret_drop: bool) -> Re
         bail!(
             "fork child would drop parent secret bindings: {}. Redeclare each required binding with --secret NAME, or pass --allow-secret-drop to attenuate them intentionally",
             dropped.join(", ")
-        );
-    }
-    Ok(())
-}
-
-/// Validate a fork child's complete secret capability before any child boots.
-///
-/// Every declared keystore address must exist in the child's tenant. Parent
-/// bindings are never inherited; omitting one is an explicit attenuation and
-/// therefore requires `--allow-secret-drop`.
-pub(super) fn validate_fork_secret_policy(
-    parent_checkpoint: &CheckpointId,
-    store: &CheckpointStore,
-    tenant: &str,
-    declared: &[mvm_core::plan::SecretBinding],
-    allow_secret_drop: bool,
-) -> Result<()> {
-    let binding_store = mvm_client::checkpoint::FileBindingStore::default_location()
-        .context("opening the child tenant's secret-binding store")?;
-    resolve_fork_secret_audit(tenant, declared, &binding_store)?;
-
-    let dropped =
-        dropped_parent_secret_names(&parent_secret_names(parent_checkpoint, store), declared);
-    enforce_secret_attenuation(&dropped, allow_secret_drop)?;
-    if !dropped.is_empty() {
-        tracing::warn!(
-            secrets = %dropped.join(", "),
-            count = dropped.len(),
-            "fork child intentionally drops parent secret bindings"
         );
     }
     Ok(())
