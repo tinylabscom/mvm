@@ -64,6 +64,25 @@ mod tests {
         assert_eq!(claims, back);
     }
 
+    // Pinned on chrono and unchanged by the move to `UtcTimestamp`: the
+    // freshness block sits inside signed bytes.
+    #[test]
+    fn freshness_claims_serialize_to_pinned_json() {
+        let nonce = Nonce::from_bytes([7u8; 16]);
+        for (from, until) in [
+            ("2026-07-16T12:34:56Z", "2026-07-16T12:44:56Z"),
+            ("2026-07-16T12:34:56.500Z", "2026-07-16T12:44:56.123456Z"),
+            ("2026-07-16T12:34:56.000000001Z", "2026-07-16T12:44:56.250Z"),
+        ] {
+            let json = alloc::format!(
+                r#"{{"valid_from":"{from}","valid_until":"{until}","nonce":{}}}"#,
+                serde_json::to_string(&nonce).unwrap()
+            );
+            let claims: FreshnessClaims = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&claims).unwrap(), json);
+        }
+    }
+
     #[test]
     fn absent_fields_deserialize_to_none() {
         let claims: FreshnessClaims = serde_json::from_str("{}").unwrap();
