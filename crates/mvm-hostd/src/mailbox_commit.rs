@@ -314,6 +314,15 @@ pub(crate) fn actor_destination_id(
     Ok(hex::encode(hash.finalize()))
 }
 
+/// Whether the workload ledger orders an endpoint's journal commits. Every
+/// opener states it, so no journal is left unordered by omission.
+pub(crate) enum JournalOrder {
+    /// Each journal's commits go through the workload ledger.
+    Ledger(Arc<ActorOrdering>),
+    /// A development launch: nothing orders the journals.
+    Unordered,
+}
+
 /// What an actor endpoint orders its journals under: shared by every journal
 /// it opens.
 pub(crate) struct ActorOrdering {

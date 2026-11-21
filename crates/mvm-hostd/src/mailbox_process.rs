@@ -42,8 +42,8 @@ use mvm_vmm::host::aux_bin::AuxBin;
 use mvm_vmm::host::flowmux_identity::{MAILBOX_READER_BOOT_FILE, MailboxReaderBootBinding};
 
 use crate::mailbox_commit::{
-    ActorOrdering, Coordinated, CoordinatorSocket, Destination, OrderingFlags, coordinate,
-    require_reached, stop_if_unordered,
+    ActorOrdering, Coordinated, CoordinatorSocket, Destination, JournalOrder, OrderingFlags,
+    coordinate, require_reached, stop_if_unordered,
 };
 use crate::mailbox_custody::RetainedMailboxKeys;
 use crate::mailbox_launch::{
@@ -323,7 +323,18 @@ fn serve_actor(
     )?;
     let directory = material.registry_directory.with_extension("state");
     let max_storage_bytes = usize::try_from(material.max_storage_bytes).map_err(Error::other)?;
-    let mut owner = ActorConversationEndpoint::open(
+    let coordinator = if posture.variant() == Variant::Prod {
+        Some(config.coordinator.clone().ok_or_else(|| {
+            Error::new(
+                ErrorKind::PermissionDenied,
+                "production actor mailbox has no policy coordinator to order its commits",
+            )
+        })?)
+    } else {
+        None
+    };
+    let mut ordering = None;
+    let owner = ActorConversationEndpoint::open(
         ActorOperationConfig {
             plan: plan.clone(),
             binding: binding.clone(),
@@ -333,34 +344,30 @@ fn serve_actor(
             current_epoch,
         },
         material,
+        |directory| {
+            let Some(socket) = coordinator else {
+                return Ok(JournalOrder::Unordered);
+            };
+            // The key signs prepared heads and nothing else.
+            let (key, _) = mvm_core::crypto::ed25519_keypair::load_or_init(
+                &directory.join("commit.ed25519"),
+                &directory.join("commit.ed25519.pub"),
+            )
+            .map_err(|_| mvm_core::mailbox::frame::Refusal::Unavailable)?;
+            let ledger = std::sync::Arc::new(ActorOrdering {
+                authority: std::sync::Arc::new(CoordinatorSocket(socket)),
+                key,
+                workload: plan.workload.0.clone(),
+                epoch: ExecutionEpoch::new(plan.execution_epoch)
+                    .map_err(|_| mvm_core::mailbox::frame::Refusal::Unavailable)?,
+                flags: OrderingFlags::default(),
+            });
+            ordering = Some(std::sync::Arc::clone(&ledger));
+            Ok(JournalOrder::Ledger(ledger))
+        },
     )
     .map_err(Error::other)?
     .gated(gate.clone());
-    let ordering = if posture.variant() == Variant::Prod {
-        let socket = config.coordinator.clone().ok_or_else(|| {
-            Error::new(
-                ErrorKind::PermissionDenied,
-                "production actor mailbox has no policy coordinator to order its commits",
-            )
-        })?;
-        // The key signs prepared heads and nothing else.
-        let (key, _) = mvm_core::crypto::ed25519_keypair::load_or_init(
-            &directory.join("commit.ed25519"),
-            &directory.join("commit.ed25519.pub"),
-        )
-        .map_err(Error::other)?;
-        let ordering = std::sync::Arc::new(ActorOrdering {
-            authority: std::sync::Arc::new(CoordinatorSocket(socket)),
-            key,
-            workload: plan.workload.0.clone(),
-            epoch: ExecutionEpoch::new(plan.execution_epoch).map_err(Error::other)?,
-            flags: OrderingFlags::default(),
-        });
-        owner = owner.with_ordering(std::sync::Arc::clone(&ordering));
-        Some(ordering)
-    } else {
-        None
-    };
     let (journal, anchor) = owner.control_journal().map_err(Error::other)?;
     let (policy, mut sealer) = config.keys.trust(current_epoch);
     let service = DurableMailboxService::bind_local(
