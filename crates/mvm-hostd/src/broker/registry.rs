@@ -94,6 +94,7 @@ struct CapabilityRegistration {
 pub struct Registry {
     pub(super) actor_endpoint: Option<std::path::PathBuf>,
     pub(super) actor_connections: tokio::sync::Semaphore,
+    pub(super) epoch_gate: Option<super::epoch::BrokerEpochGate>,
     handlers: HashMap<ServiceId, Arc<dyn ServiceHandler>>,
     capability_only_services: HashSet<ServiceId>,
     capabilities: HashMap<CapabilityId, CapabilityRegistration>,
@@ -114,10 +115,16 @@ impl Registry {
         Ok(())
     }
 
+    /// Admit every call through the epoch gate for the registration's unit.
+    pub fn bind_epoch_gate(&mut self, gate: Option<super::epoch::BrokerEpochGate>) {
+        self.epoch_gate = gate;
+    }
+
     pub fn new() -> Self {
         Self {
             actor_endpoint: None,
             actor_connections: tokio::sync::Semaphore::new(4),
+            epoch_gate: None,
             handlers: HashMap::new(),
             capability_only_services: HashSet::new(),
             capabilities: HashMap::new(),
@@ -694,6 +701,7 @@ mod tests {
             profile: AgentProfile::Dev,
             composition_depth: 0,
             composition_width: 0,
+            epoch: None,
         }
     }
 

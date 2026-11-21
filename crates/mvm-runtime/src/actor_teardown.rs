@@ -359,7 +359,7 @@ pub fn require_actor_teardown(backend: &AnyBackend, config: &VmStartConfig) -> R
     ensure!(!config.gpu, "actor GPU helper ownership is unsupported");
     validate_actor_routes(&config.service_proxies)?;
     if !config.service_proxies.is_empty() {
-        let (services, capabilities) =
+        let (services, capabilities, _) =
             crate::workload_runner::runner::admitted_broker_bindings(config.plan_json.as_deref())?;
         for route in &config.service_proxies {
             ensure!(
@@ -584,6 +584,7 @@ impl BrokerRegistrar for ActorBroker {
                 services: req.services,
                 capability_bindings: req.capability_bindings,
                 service_proxies: req.service_proxies,
+                epoch: req.epoch,
             },
             req.service_proxies,
         )?;

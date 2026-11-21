@@ -25,6 +25,7 @@ pub use crate::audit::audit_client;
 pub mod config;
 pub mod controller_proxy;
 pub mod daemon;
+pub mod epoch;
 pub mod handlers;
 pub mod registry;
 pub mod server;

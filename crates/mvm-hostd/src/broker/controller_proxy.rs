@@ -166,6 +166,7 @@ async fn dispatch_request(
         profile: request.profile,
         composition_depth: request.composition_depth,
         composition_width: request.composition_width,
+        epoch: None,
     };
     match handler.dispatch(&ctx, &request.verb, request.payload).await {
         Ok(payload) => ServiceProxyResponse::Ok { payload },
@@ -281,6 +282,7 @@ mod tests {
             profile: AgentProfile::Dev,
             composition_depth: 0,
             composition_width: 0,
+            epoch: None,
         }
     }
 

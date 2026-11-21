@@ -48,6 +48,7 @@ fn ctx(workload_id: &str) -> ServiceCallCtx {
         profile: AgentProfile::Dev,
         composition_depth: 0,
         composition_width: 0,
+        epoch: None,
     }
 }
 
