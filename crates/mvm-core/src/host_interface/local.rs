@@ -93,13 +93,7 @@ impl HostInterface for LocalHostInterface {
                 if state != NodeState::Active {
                     return Err(Denial::NodeNotActive(state.label()));
                 }
-                if req.epoch != epoch {
-                    return Err(Denial::StaleEpoch {
-                        got: req.epoch.get(),
-                        current: epoch.get(),
-                    });
-                }
-                Ok(())
+                super::epoch_gate::admit_at(epoch, req.epoch).map(drop)
             })),
             Box::new(Fn1(CheckKind::Volumes, || {
                 p.volumes.iter().try_for_each(|v| v.validate())
