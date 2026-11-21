@@ -113,7 +113,7 @@ impl CommissioningBootstrapSession {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     fn new_for_test(
         peer: VerifiedMacPeer,
         intent_digest: [u8; 32],
