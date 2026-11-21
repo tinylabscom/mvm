@@ -306,13 +306,39 @@ fixed `/private/var/db/mvm/authority` path through read-only, directory-only,
 no-follow descriptors. It requires root-owned secure ancestry, an exact
 root-owned `0755` deployment directory, and an exact `0700`, no-extended-ACL
 authority directory owned by the intent's authority UID and GID. Its opaque
-result retains only the validated directory descriptor and exposes no
-descriptor, child-open or mutation API. Validation creates no lock and proves
-only that this namespace matched at observation time; it does not prove
-freshness, commissioning progress, authority or an atomic snapshot. Future
-mutation must obtain separately designed exclusion, then reload and revalidate
-the intent and root. The commissioning lock filename and lifecycle remain
-undecided.
+result retains only the validated directory descriptor and exposes no public
+descriptor, arbitrary-child or mutation API. A crate-internal seam opens only
+the fixed `owner-commissioning-state.jsonl` child for the state loader below.
+Validation creates no lock and proves only that this namespace matched at
+observation time; it does not prove freshness, commissioning progress,
+authority or an atomic snapshot. Future mutation must obtain separately
+designed exclusion, then reload and revalidate the intent and root.
+
+The source-only state loader observes a durable append-only v1 JSONL protocol at
+that fixed child. The nonempty log starts at sequence one and advances exactly
+once through `Prepared`, `KeyCreated`, `JournalInitialized`, `ReceiptPending`,
+`CompletionPublished` and terminal `Ready`. Every compact canonical object
+contains closed typed content plus its domain-separated SHA-256 digest. Content
+binds the prior record digest (all zero only at sequence one), the exact loaded
+intent digest, deployment ID and epoch, authority UID and GID, and a nonzero
+future lock device/inode pair that remains identical throughout the log. Each
+phase permits only its named optional 32-byte public evidence digest; those
+opaque digests make no key-custody, journal-validity, receipt-publication,
+completion-publication or readiness claim.
+
+The loader opens the child descriptor-relative with no-follow, nonblocking and
+close-on-exec flags, then requires a single-link regular file owned by the
+intent authority identity with exact `0600` mode and no extended ACL. Both each
+line (8 KiB) and the whole log (64 KiB) are bounded. Original bytes must have
+one canonical compact object and LF per record, with no CR, blank line,
+duplicate or unknown field, non-object, trailing form, missing final LF or
+partial record. Missing is `Absent` only when that exact child is absent and is
+not freshness or permission. Non-`Ready` retained logs are interrupted,
+readiness-refusing observations; `Ready` is only terminal log observation.
+The loader creates and changes nothing, validates or acquires no lock, performs
+no transition or recovery, and reads or reconciles no key, journal, receipt or
+completion artifact. The lock validator/acquisition and state writer remain
+unimplemented.
 The v1 preflight checks only these fixed sibling conflict names; it does not
 claim to discover arbitrary state beneath a future authority-owned
 subdirectory. Trusted installation and state mutation must be serialized across
@@ -345,13 +371,14 @@ deployment, key, intent, receipt, journal or VM action and is not a
 commissioning factory. Receipt of `Accepted` is not durable commissioning
 evidence; a future effectful consumer must revalidate again immediately before
 mutation.
-The future initializer still owns intent authentication and consumption, key
-creation, deployment-receipt and completion publication, and journal
-initialization. It must acquire installer-provisioned exclusion and then reload
-and revalidate the intent before mutation; a loader result is not an atomic
-fresh-namespace snapshot or a capability. This slice supplies none of those
-operations. Root-owned live deployment remains untested in this source-only
-slice; hermetic descriptor-root tests witness its filesystem and schema policy.
+The future initializer still owns intent authentication and consumption, lock
+validation and acquisition, state-log writing, key creation,
+deployment-receipt and completion publication, and journal initialization. It
+must acquire installer-provisioned exclusion and then reload and revalidate the
+intent before mutation; a loader result is not an atomic fresh-namespace
+snapshot or a capability. This slice supplies none of those operations.
+Root-owned live deployment remains untested in this source-only slice; hermetic
+descriptor-root tests witness its filesystem and schema policy.
 
 ## Recovery authorization
 
