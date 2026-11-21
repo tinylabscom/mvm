@@ -63,6 +63,13 @@ impl UtcTimestamp {
         self.secs * 1_000 + i64::from(self.nanos / 1_000_000)
     }
 
+    /// Whole seconds from `earlier` to `self`, truncated toward zero.
+    pub fn whole_secs_since(self, earlier: Self) -> i64 {
+        let nanos = |t: Self| i128::from(t.secs) * 1_000_000_000 + i128::from(t.nanos);
+        // Both lie within years 0000..=9999, so the quotient fits an i64.
+        ((nanos(self) - nanos(earlier)) / 1_000_000_000) as i64
+    }
+
     /// `None` when the result leaves years 0000..=9999.
     pub fn checked_add_secs(self, secs: i64) -> Option<Self> {
         Self::from_unix(self.secs.checked_add(secs)?, self.nanos)
