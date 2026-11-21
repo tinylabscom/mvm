@@ -220,3 +220,23 @@ fn the_schema_is_exactly_chromos() {
         DateTime::<Utc>::is_referenceable()
     );
 }
+
+#[test]
+fn whole_secs_since_truncates_toward_zero_like_chrono() {
+    use chrono::{DateTime, Utc};
+    for (a, an, b, bn) in [
+        (301, 100, 0, 900),
+        (0, 900, 301, 100),
+        (5, 0, 5, 0),
+        (-3, 5, 4, 0),
+    ] {
+        let chrono_secs = (DateTime::<Utc>::from_timestamp(a, an).unwrap()
+            - DateTime::<Utc>::from_timestamp(b, bn).unwrap())
+        .num_seconds();
+        assert_eq!(ours(a, an).whole_secs_since(ours(b, bn)), chrono_secs);
+    }
+    assert_eq!(
+        ours(MAX_SECS, 0).whole_secs_since(ours(MIN_SECS, 0)),
+        MAX_SECS - MIN_SECS
+    );
+}
