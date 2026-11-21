@@ -522,7 +522,9 @@ jobs:
             --build "daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu --bin mvm-host-agent --bin mvm-policy-coordinator --bin mvm-signer-helper --bin mvm-network-endpoint --bin mvm-broker --bin mvm-audit-signer --bin mvm-mailbox --bin mvm-actor-holder --bin mvm-actor-controller --bin mvm-gpu-endpoint" \
             --build "mvm-hostlib (release)=build --release --target ${hostlib_target} -p mvm-hostlib --features mvm-client/release-channel" \
             "${hvf_build[@]}" \
-            "${size_args[@]}" | tee -a "${GITHUB_STEP_SUMMARY}"
+            "${size_args[@]}" | tee -a "${GITHUB_STEP_SUMMARY}" \
+            || echo "::warning::Report compilation units failed; the compile-unit table is missing" \
+            | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Verify Linux release payloads are statically linked
         if: endsWith(matrix.build_target, '-unknown-linux-musl')
