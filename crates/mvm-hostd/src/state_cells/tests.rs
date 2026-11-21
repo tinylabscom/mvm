@@ -302,6 +302,8 @@ fn a_cell_the_topology_does_not_declare_is_refused() {
         }
     );
 
+    // The test environment lock is not reentrant: one host at a time.
+    drop(host);
     let none = Host::new();
     let err = none.cells().read(&as_unit(&t, &controller, 1)).unwrap_err();
     assert!(matches!(refusal(&err), CellRefusal::UnknownCell { .. }));
@@ -533,6 +535,7 @@ fn admission_refuses_a_cell_it_cannot_reserve_and_keeps_nothing() {
     );
 
     // A file where the tenant's directory belongs: nothing can be reserved.
+    drop(host);
     let host = Host::new();
     let root = mvm_core::config::state_cells_dir_at(host.home.path());
     std::fs::create_dir_all(&root).unwrap();
