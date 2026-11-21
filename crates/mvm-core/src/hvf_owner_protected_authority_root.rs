@@ -21,7 +21,20 @@ pub const PROTECTED_AUTHORITY_ROOT_PATH: &str = "/private/var/db/mvm/authority";
 /// exclusion, then reload and revalidate the commissioning intent and root.
 #[must_use]
 pub struct ProtectedAuthorityRoot {
-    _directory: File,
+    directory: File,
+}
+
+impl ProtectedAuthorityRoot {
+    /// Open only the fixed commissioning-state child for the read-only loader.
+    pub(crate) fn open_commissioning_state(&self) -> Result<File, rustix::io::Errno> {
+        rustix::fs::openat(
+            &self.directory,
+            "owner-commissioning-state.jsonl",
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+    }
 }
 
 /// Protected authority root validation failure.
@@ -88,7 +101,7 @@ pub fn validate_protected_authority_root(
 ///
 /// # Errors
 /// Refuses the same namespace and filesystem-policy failures as production.
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn validate_test_protected_authority_root(
     intent: &LoadedHvfOwnerCommissioningIntent,
@@ -148,7 +161,7 @@ fn validate_from_db_root(
         intent.authority_role().gid(),
     )?;
     Ok(ProtectedAuthorityRoot {
-        _directory: authority,
+        directory: authority,
     })
 }
 

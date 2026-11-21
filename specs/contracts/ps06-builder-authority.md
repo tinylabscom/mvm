@@ -187,11 +187,30 @@ Proposed trusted setup sequence:
    must be secure, `mvm` must be exact root-owned `0755` without an extended
    ACL, and `authority` must be exact `0700` without special bits or an extended
    ACL and owned by the intent's authority UID and GID. The opaque result offers
-   no descriptor, arbitrary-child or mutation surface. This creates no lock and
-   proves only the namespace policy at validation time, not freshness,
-   commissioning progress, authority or an atomic snapshot. Any future mutation
-   must obtain separately designed exclusion and then reload and revalidate.
-   The commissioning lock filename and lifecycle remain undecided.
+   no public descriptor, arbitrary-child or mutation surface. One crate-internal
+   open seam is restricted to the fixed
+   `owner-commissioning-state.jsonl` child.
+   A source-only read-only loader strictly observes that child's nonempty,
+   compact canonical v1 JSONL log. Records begin at sequence one, advance
+   exactly once through `Prepared`, `KeyCreated`, `JournalInitialized`,
+   `ReceiptPending`, `CompletionPublished` and terminal `Ready`, and form a
+   domain-separated SHA-256 predecessor chain. Every record binds the exact
+   loaded intent digest, deployment ID and epoch, authority UID and GID, and one
+   stable nonzero future-lock device/inode pair. A phase can carry only its
+   named optional 32-byte public evidence digest; no opaque payload is accepted.
+   The state file must be a single-link regular authority-owned `0600` object
+   without an extended ACL. Descriptor-relative no-follow opening, 8 KiB line
+   and 64 KiB log bounds, original-byte duplicate/unknown/missing rejection and
+   exact canonical re-encoding make aliases, nonobjects, CR, blanks, partial
+   lines and trailing forms refusals.
+   Exact-child absence is only `Absent`, never freshness or permission.
+   Non-`Ready` state is interrupted and readiness-refusing; `Ready` is terminal
+   log observation only. No key, journal, receipt, completion or lock is read or
+   reconciled. These validators and loaders create nothing and prove neither
+   authority nor an atomic snapshot. Lock validation/acquisition, transition
+   methods, the log writer and every commissioning effect remain unimplemented;
+   future mutation must acquire the separately designed exclusion and then
+   reload and revalidate.
 2. A fixed initialization entry point runs as the authority UID, exclusively
    locks the authority namespace under that future design and creates the issuer
    only for that intent.
