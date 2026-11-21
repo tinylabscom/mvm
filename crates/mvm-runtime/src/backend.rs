@@ -999,7 +999,7 @@ impl AnyBackend {
                 // The hermetic writer has no real descriptors to inherit, but
                 // it still exercises the same ownership and admission path.
                 anyhow::ensure!(
-                    release.is_none(),
+                    release.is_none() || backend.accepts_verified_release(),
                     "mock backend cannot consume a verified release runtime"
                 );
                 let images = images;

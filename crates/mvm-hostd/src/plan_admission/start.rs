@@ -762,12 +762,7 @@ pub fn claim_cli_transient(
             admitted.dispatched = false;
             Ok(WarmClaimDispatch::ReservationLost(Box::new(admitted)))
         }
-        Err(error) => Err(match error {
-            StandbyError::StopUnconfirmed(_) => {
-                CliStartFailure::UncertainStop(anyhow::Error::new(error)).into()
-            }
-            other => anyhow::Error::new(other).context("admitted warm claim"),
-        }),
+        Err(error) => Err(super::cli_cold::map_cli_warm_claim_error(error)),
     }
 }
 

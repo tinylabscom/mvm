@@ -337,6 +337,69 @@ cleanup, stale-parent quarantine and refill counting.
 These are source and hermetic-mock witnesses only: they do not qualify a live
 HVF or Firecracker parent, a child claim, cloud/GCP, or cold/warm performance.
 
+## Admitted warm-child claim ownership
+
+The admitted warm-child slice under
+[#5520](https://github.com/tinylabscom/mvm/issues/5520) keeps the CLI at the
+selection and Optional/Required policy boundary. The CLI computes the canonical
+`StandbyCompat`, selects one compatible parent and maps a miss, ineligible
+shape, unsupported backend or reservation loss to the existing cold reason or
+required refusal. Grant ceilings are not compatibility-key material. The CLI
+does not construct a claim context, take authority from its `RefCell`, invoke
+the host runner, or recover authority from signed-plan JSON.
+
+`CliAdmission` remains the client-owned one-shot slot. An eligible admitted CLI
+launch contains only hostd's private `PreparedCliCold`: the exact lowered
+config, launch-scoped runtime evidence, policy, durable admission obligation
+and `AdmittedPlan`. The client facade consumes that owner with the selected
+`StandbyHandle`, authenticates the parent checkpoint source, constructs the
+runner claim context and calls the hostd claim facade. Hostd rechecks backend,
+source/runtime/config/plan and policy binding, then spends admission before the
+runner can fork or resume. The runner remains the only owner of retained-parent
+runtime and digest validation, child policy/endpoint/broker construction,
+no-NIC-before-resume, fresh identity/genid/clock, seccomp/grant/late-volume
+handshakes, and claim commit.
+
+The exact states are **prepared**, **selected**, **dispatched**, and
+**claimed/refused/uncertain**. A pool miss or selection-time incompatibility
+never leaves `prepared`. `ReservationLost` is the sole dispatched attempt that
+restores the exact prepared allocation, plan identity and runtime evidence;
+Optional may cold-dispatch it, while Required refuses without doing so. Every
+final-gate or runner refusal leaves only the deferred audit continuation and
+cannot cold retry. A successful claim transfers the lifecycle lock with the
+child and removes the consumed pool entry. Healthy-parent reservation rollback
+and failed-parent quarantine remain runner-owned.
+
+`StopUnconfirmed` is nonterminal even though launch authority is spent. It
+retains parent reservation/cleanup custody, child lifecycle state, runtime and
+writable artifacts for reconciliation; the CLI neither cold-falls back nor
+seals a terminal completion. In particular, a failed identity/seccomp/grant
+handshake followed by a failed child stop returns the typed
+`StopUnconfirmed`/CLI `UncertainStop` path rather than an ordinary claim
+refusal. Required audit synchronization may still overlap selection and
+isolated initialization, but hostd waits before claim authority is released.
+The CLI's existing deferred `plan.launched`, posture, exit and seal sequence
+remains unchanged.
+
+Focused source gates prove that CLI production code cannot name hostd's
+prepared authority, `ClaimContext`, or direct backend/hostd claim functions.
+A selected record already marked `Claimed`, or confirmed absent because the
+winner consumed and removed it, is reservation loss and restores the exact
+capability. An unreadable or malformed record is not evidence of a winner and
+remains a terminal refusal. Production client-facade tests with test-support
+backends cover successful transfer and success-only pool removal, exact
+slot/plan/nonce/runtime-evidence and continuation restoration across both
+claimed-record and removed-record races, subsequent Optional cold dispatch,
+terminal preparation spending, deferred audit shape, and uncertain-stop
+retention/classification. CLI policy tests cover Optional cold versus Required
+refusal and prohibit uncertain cold fallback. Existing runner tests cover
+malformed-record refusal, pre-claim identity/runtime/config refusals,
+retained-parent mismatch, policy/grant/seccomp delivery, rollback/quarantine
+and uncertain-stop custody. These are compile, source and hermetic-mock
+witnesses only. They do not qualify a native HVF or Firecracker claim, Linux
+confinement, cloud/GCP behavior, formal cold/warm performance, operator trial,
+or same-identity restore.
+
 ## Signed application HVF startup diagnostics
 
 Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone

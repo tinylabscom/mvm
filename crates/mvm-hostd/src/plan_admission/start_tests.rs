@@ -1338,6 +1338,239 @@ fn cli_cold_preparation_orders_attach_and_admission_without_starting_backend() {
 }
 
 #[test]
+fn lost_warm_reservation_restores_the_exact_cli_capability_for_cold_dispatch() {
+    struct NoAnchor;
+    impl mvm_runtime::checkpoint::CheckpointChainAnchor for NoAnchor {
+        fn recorded_creation_digest(
+            &self,
+            _meta: &mvm_core::checkpoint::CheckpointMeta,
+        ) -> anyhow::Result<Option<mvm_core::checkpoint::CheckpointDigest>> {
+            Ok(None)
+        }
+
+        fn recorded_creation_tenant(
+            &self,
+            _meta: &mvm_core::checkpoint::CheckpointMeta,
+        ) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let keys = tempfile::tempdir().expect("keys");
+    let audit = tempfile::tempdir().expect("audit");
+    let backend = mvm_runtime::AnyBackend::Mock(
+        mvm_runtime::mock::MockBackend::new()
+            .with_standby()
+            .with_lost_standby_reservation(),
+    );
+    let name = "img";
+    let prepared = prepare_cli_cold(
+        PrepareCliColdParams {
+            backend: &backend,
+            config: VmStartConfig {
+                name: name.into(),
+                rootfs_path: "/store/rootfs.ext4".into(),
+                ..Default::default()
+            },
+        },
+        |_| Ok(None),
+        |_, runtime| {
+            assert!(runtime.is_none(), "fixture has no selected release runtime");
+            Ok(persistent_boundary_admission(
+                name,
+                &backend,
+                keys.path(),
+                audit.path(),
+            ))
+        },
+    )
+    .expect("prepare CLI cold");
+    let plan_id = prepared.plan().plan_id.clone();
+    let nonce = prepared.plan().nonce.clone();
+
+    let pool = mvm_runtime::standby_pool::SupervisorStandbyPool::at(_home.path().join("pool"));
+    let checkpoints =
+        mvm_runtime::checkpoint::CheckpointStore::at(_home.path().join("checkpoints"));
+    let snapshots = mvm_fs::snapshot_store::FsSnapshotStore::new(_home.path().join("snapshots"))
+        .expect("snapshot store");
+    let anchor = NoAnchor;
+    let parent_checkpoint = mvm_core::checkpoint::CheckpointId::new("parent");
+    let registry_path = _home.path().join("names.json");
+    let ctx = mvm_runtime::workload_runner::ClaimContext {
+        pool: &pool,
+        checkpoints: &checkpoints,
+        snapshots: &snapshots,
+        anchor: &anchor,
+        parent_checkpoint: &parent_checkpoint,
+        registry_path: &registry_path,
+        grant_issuer: None,
+    };
+    let handle = mvm_core::vm_backend::StandbyHandle {
+        id: "selected-parent".into(),
+        template_id: None,
+        control_socket: String::new(),
+        pid: 0,
+        kernel_sha256: String::new(),
+        vcpus: 1,
+        mem_mib: 128,
+        binding_nonce: String::new(),
+        spawned_unix_secs: 0,
+        state: mvm_core::vm_backend::StandbyState::Idle,
+        image_sha256: None,
+        root_strategy: Default::default(),
+        parent_checkpoint: Some(parent_checkpoint.to_string()),
+        preloaded_child_vm_name: None,
+        vsock_egress: false,
+    };
+
+    let prepared = match claim_prepared_cli_cold(prepared, &backend, &ctx, &handle) {
+        PreparedCliWarmClaim::ReservationLost(prepared) => *prepared,
+        PreparedCliWarmClaim::Claimed { .. } => panic!("reservation-loss fixture claimed"),
+        PreparedCliWarmClaim::Refused { error, .. } => {
+            panic!("reservation loss must remain retryable: {error:#}")
+        }
+    };
+    assert_eq!(prepared.plan().plan_id, plan_id);
+    assert_eq!(prepared.plan().nonce, nonce);
+
+    let (_dispatched, started) = start_prepared_cli_cold(prepared, &backend, Vec::new());
+    assert_eq!(
+        started.expect("restored capability cold-dispatches").0,
+        name
+    );
+    backend
+        .stop(&VmId(name.into()))
+        .expect("stop cold fallback fixture");
+}
+
+#[test]
+fn uncertain_warm_stop_maps_to_cli_uncertain_without_becoming_terminal_refusal() {
+    let error = super::cli_cold::map_cli_warm_claim_error(
+        mvm_core::vm_backend::StandbyError::StopUnconfirmed(
+            "child and parent remain retained".into(),
+        ),
+    );
+    let classified = error
+        .downcast_ref::<CliStartFailure>()
+        .expect("uncertain warm stop keeps the typed CLI failure");
+    assert!(matches!(classified, CliStartFailure::UncertainStop(_)));
+
+    let terminal = super::cli_cold::map_cli_warm_claim_error(
+        mvm_core::vm_backend::StandbyError::ClaimFailed("refused".into()),
+    );
+    assert!(
+        terminal.downcast_ref::<CliStartFailure>().is_none(),
+        "ordinary runner refusal remains terminal"
+    );
+}
+
+#[test]
+fn required_cli_warm_durability_refusal_spends_authority_before_runner_claim() {
+    struct NoAnchor;
+    impl mvm_runtime::checkpoint::CheckpointChainAnchor for NoAnchor {
+        fn recorded_creation_digest(
+            &self,
+            _meta: &mvm_core::checkpoint::CheckpointMeta,
+        ) -> anyhow::Result<Option<mvm_core::checkpoint::CheckpointDigest>> {
+            Ok(None)
+        }
+
+        fn recorded_creation_tenant(
+            &self,
+            _meta: &mvm_core::checkpoint::CheckpointMeta,
+        ) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    let (_env, home) = host_with_ceiling(Default::default());
+    let keys = tempfile::tempdir().expect("keys");
+    let audit = tempfile::tempdir().expect("audit");
+    let backend =
+        mvm_runtime::AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
+    let name = "img";
+    let prepared = prepare_cli_cold(
+        PrepareCliColdParams {
+            backend: &backend,
+            config: VmStartConfig {
+                name: name.into(),
+                rootfs_path: "/store/rootfs.ext4".into(),
+                admission_durability: Some(
+                    mvm_core::admission_durability::AdmissionDurability::settled(Err(
+                        anyhow::anyhow!("injected required audit sync failure"),
+                    )),
+                ),
+                ..Default::default()
+            },
+        },
+        |_| Ok(None),
+        |_, _| {
+            Ok(persistent_boundary_admission(
+                name,
+                &backend,
+                keys.path(),
+                audit.path(),
+            ))
+        },
+    )
+    .expect("prepare CLI cold");
+    let plan_id = prepared.plan().plan_id.clone();
+    let pool = mvm_runtime::standby_pool::SupervisorStandbyPool::at(home.path().join("pool"));
+    let checkpoints = mvm_runtime::checkpoint::CheckpointStore::at(home.path().join("checkpoints"));
+    let snapshots = mvm_fs::snapshot_store::FsSnapshotStore::new(home.path().join("snapshots"))
+        .expect("snapshots");
+    let anchor = NoAnchor;
+    let parent_checkpoint = mvm_core::checkpoint::CheckpointId::new("parent");
+    let registry_path = home.path().join("names.json");
+    let ctx = mvm_runtime::workload_runner::ClaimContext {
+        pool: &pool,
+        checkpoints: &checkpoints,
+        snapshots: &snapshots,
+        anchor: &anchor,
+        parent_checkpoint: &parent_checkpoint,
+        registry_path: &registry_path,
+        grant_issuer: None,
+    };
+    let handle = mvm_core::vm_backend::StandbyHandle {
+        id: "durability-parent".into(),
+        template_id: None,
+        control_socket: String::new(),
+        pid: 0,
+        kernel_sha256: String::new(),
+        vcpus: 1,
+        mem_mib: 128,
+        binding_nonce: String::new(),
+        spawned_unix_secs: 0,
+        state: mvm_core::vm_backend::StandbyState::Idle,
+        image_sha256: None,
+        root_strategy: Default::default(),
+        parent_checkpoint: Some(parent_checkpoint.to_string()),
+        preloaded_child_vm_name: None,
+        vsock_egress: false,
+    };
+
+    let (error, dispatched) = match claim_prepared_cli_cold(prepared, &backend, &ctx, &handle) {
+        PreparedCliWarmClaim::Refused { error, dispatched } => (error, dispatched),
+        PreparedCliWarmClaim::Claimed { .. } => panic!("durability failure cannot claim"),
+        PreparedCliWarmClaim::ReservationLost(_) => panic!("durability failure precedes reserve"),
+    };
+    assert!(
+        format!("{error:#}").contains("injected required audit sync failure"),
+        "{error:#}"
+    );
+    let (plan, _emitter, ()) = dispatched.into_parts();
+    assert_eq!(plan.plan_id, plan_id);
+    assert!(
+        !matches!(
+            backend.status(&VmId(handle.id)),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ),
+        "runner claim is not reached"
+    );
+}
+
+#[test]
 fn persistent_boundary_lock_mismatch_refuses_before_attachment_or_admission() {
     let (_env, _home) = host_with_ceiling(Default::default());
     let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
