@@ -23,19 +23,24 @@ impl Clock for SystemClock {
 /// Seconds outside the representable years 0000..=9999 clamp to the nearest
 /// bound, so no input can panic or emit a year the format has no width for.
 fn rfc3339_from_unix_secs(secs: i64) -> String {
-    let dt = ::time::OffsetDateTime::from_unix_timestamp(secs).unwrap_or(if secs < 0 {
-        ::time::PrimitiveDateTime::MIN.assume_utc()
-    } else {
-        ::time::PrimitiveDateTime::MAX.assume_utc()
-    });
+    // 0000-01-01T00:00:00Z and 9999-12-31T23:59:59Z.
+    let secs = secs.clamp(-62_167_219_200, 253_402_300_799);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Hinnant's civil-from-days, shifted to a March-based year.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
     format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        dt.year().clamp(0, 9999),
-        u8::from(dt.month()),
-        dt.day(),
-        dt.hour(),
-        dt.minute(),
-        dt.second()
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
     )
 }
 
@@ -166,6 +171,35 @@ mod tests {
             assert_eq!(rfc3339_from_system_time(at), chrono_secs_form(at), "{at:?}");
         }
         let _ = SystemTime::now();
+    }
+
+    #[test]
+    fn hand_written_rendering_matches_chrono_across_spread() {
+        use std::time::{Duration as D, UNIX_EPOCH};
+        let check = |secs: i64| {
+            let t = if secs >= 0 {
+                UNIX_EPOCH + D::from_secs(secs as u64)
+            } else {
+                UNIX_EPOCH - D::from_secs(secs.unsigned_abs())
+            };
+            assert_eq!(rfc3339_from_system_time(t), chrono_secs_form(t), "{secs}");
+        };
+        // Every day boundary +/- 1s from 1900 to 2200.
+        let mut day = -2_208_988_800_i64;
+        while day <= 7_258_118_400 {
+            for d in [-1, 0, 1] {
+                check(day + d);
+            }
+            day += 86_400;
+        }
+        // Deterministic xorshift spread over years 0001..=9999.
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..20_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            check((x % 253_402_300_800) as i64 - 62_135_596_800);
+        }
     }
 
     #[test]
