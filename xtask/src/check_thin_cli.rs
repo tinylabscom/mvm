@@ -125,7 +125,9 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
 ];
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {
-    let found = scan(&workspace.join("crates/mvm-cli/src"))?;
+    let cli_root = workspace.join("crates/mvm-cli/src");
+    reject_warm_parent_assembly(&cli_root)?;
+    let found = scan(&cli_root)?;
     let verdict = judge(&found, ALLOWLIST);
     if verdict.is_clean() {
         eprintln!(
@@ -136,6 +138,40 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
         return Ok(());
     }
     bail!("check-thin-cli:\n{}", verdict.report());
+}
+
+/// Warm-parent boot/capture belongs to the client facade, never a CLI command.
+fn reject_warm_parent_assembly(root: &Path) -> Result<()> {
+    let forbidden = [
+        "spawn_standby_via_runner_owned",
+        "admit_standby_parent_plan",
+    ];
+    let mut reaches = Vec::new();
+    for_each_file(root, Some("rs"), &mut |path, src| {
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_test_path(&rel) {
+            return;
+        }
+        let code = strip_cfg_test_items(&blank_comments_and_strings(src));
+        for (index, line) in code.lines().enumerate() {
+            for token in forbidden {
+                if names_token(line, token) {
+                    reaches.push(format!("{rel}:{}: {token}", index + 1));
+                }
+            }
+        }
+    })?;
+    if reaches.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "check-thin-cli: warm-parent preparation bypasses mvm-client:\n  {}",
+        reaches.join("\n  ")
+    )
 }
 
 /// Every reach in the production code under `root`, keyed by the file's path
@@ -419,6 +455,30 @@ mod tests {
         let files: Vec<&str> = found.keys().map(String::as_str).collect();
         assert_eq!(files, ["doctor/a.rs", "exec.rs", "exec/new_file.rs"]);
         assert_eq!(found["exec/new_file.rs"][0].below, Below::Hostd);
+    }
+
+    #[test]
+    fn warm_parent_assembly_is_client_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("pool.rs"),
+            "fn bypass() { backend.spawn_standby_via_runner_owned(&ctx, &spec); }\n",
+        )
+        .unwrap();
+        let error = reject_warm_parent_assembly(tmp.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("pool.rs:1: spawn_standby_via_runner_owned"),
+            "{error:#}"
+        );
+
+        std::fs::write(
+            tmp.path().join("pool.rs"),
+            "#[cfg(test)] fn fixture() { backend.spawn_standby_via_runner_owned(&ctx, &spec); }\n",
+        )
+        .unwrap();
+        reject_warm_parent_assembly(tmp.path()).unwrap();
     }
 
     #[test]

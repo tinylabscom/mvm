@@ -16,6 +16,7 @@
 //! disagreement is invisible: the pool fills and never drains. Multi-kernel keying and
 //! honouring an explicit `--name` are deferred follow-ups.
 
+#[cfg(test)]
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -24,30 +25,30 @@ use mvm_client::AnyBackend;
 use mvm_client::checkpoint::CheckpointStore;
 use mvm_client::claim::ClaimRefusal;
 use mvm_client::standby::{STANDBY_POOL_TTL, SupervisorStandbyPool};
-use mvm_client::{ChildGrantIssuer, ClaimContext, SpawnContext};
+use mvm_client::{ChildGrantIssuer, ClaimContext};
 use mvm_core::checkpoint::CheckpointId;
 use mvm_core::user_config::MvmConfig;
+#[cfg(test)]
+use mvm_core::vm_backend::{RuntimeSourceRootStrategy, StandbySpec};
 use mvm_core::vm_backend::{
-    RuntimeSourceRootStrategy, StandbyCompat, StandbyError, StandbyHandle, StandbySpec, VmId,
-    VmStartConfig, WarmClaimRefusal, WarmLaunchMode,
+    StandbyCompat, StandbyError, StandbyHandle, VmStartConfig, WarmClaimRefusal, WarmLaunchMode,
 };
 use mvm_fs::snapshot_store::FsSnapshotStore;
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 
 use super::Cli;
-use super::vm::checkpoint::{ClaimChainAnchor, SignedChainAnchor};
-use mvm_client::admission::{
-    AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run, stash_plan_and_mint_verb_grant,
-};
-use mvm_client::host_keypair;
+use super::vm::checkpoint::SignedChainAnchor;
+use mvm_client::admission::stash_plan_and_mint_verb_grant;
+#[cfg(test)]
 use mvm_contract::builder::BuilderError;
-use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
 
 mod cold_start;
 mod late_volumes;
 mod refill;
 mod select;
 mod status;
+#[cfg(test)]
 mod warm;
 mod warm_source;
 
@@ -56,11 +57,11 @@ use cold_start::{claim_gate, claim_required, outcome_for_refusal};
 use late_volumes::late_volumes_attachable;
 pub(crate) use refill::{StandbyRefill, schedule_standby_refill};
 use select::{recent_image_limit, warm_each, warm_sources};
-pub(crate) use warm::WarmResult;
 #[cfg(test)]
-use warm_source::manifest_template_source;
-use warm_source::warm_if_eligible;
+pub(crate) use warm::WarmResult;
 pub(in crate::commands) use warm_source::{WarmRequest, WarmSource};
+#[cfg(test)]
+use warm_source::{manifest_template_source, warm_if_eligible};
 
 struct HostChildGrantIssuer;
 
@@ -74,6 +75,7 @@ impl ChildGrantIssuer for HostChildGrantIssuer {
 }
 
 /// Lowercase-hex sha256 of a kernel image — part of the base-compat key.
+#[cfg(test)]
 pub(crate) fn kernel_sha256_hex(kernel: &Path) -> Result<String> {
     let bytes =
         std::fs::read(kernel).with_context(|| format!("read kernel {}", kernel.display()))?;
@@ -81,6 +83,7 @@ pub(crate) fn kernel_sha256_hex(kernel: &Path) -> Result<String> {
 }
 
 /// 32 random bytes as lowercase hex — the per-spawn binding nonce.
+#[cfg(test)]
 pub(crate) fn fresh_binding_nonce() -> String {
     use rand::Rng;
     let mut buf = [0u8; 32];
@@ -91,12 +94,14 @@ pub(crate) fn fresh_binding_nonce() -> String {
 /// The compat-key kernel identity, computed identically at claim **and** replenish time:
 /// the sha256 of the on-disk kernel the workload boots. Every workload backend boots an
 /// explicit kernel file, libkrun included.
+#[cfg(test)]
 pub(crate) fn kernel_identity(kernel_path: Option<&str>) -> Result<String> {
     let kernel = kernel_path.context("launch config has no kernel path for the compat key")?;
     kernel_sha256_hex(Path::new(kernel))
 }
 
 /// Inputs to [`build_standby_spec`] (grouped to avoid a long positional signature).
+#[cfg(test)]
 pub(crate) struct StandbySpecParams<'a> {
     /// `~/.mvm/pool/` root — holds the control UDS.
     pub pool_root: &'a Path,
@@ -129,6 +134,7 @@ pub(crate) struct StandbySpecParams<'a> {
     pub vsock_egress: bool,
 }
 
+#[cfg(test)]
 impl<'a> StandbySpecParams<'a> {
     /// Start building a [`StandbySpecParams`]. Every value is set by name, so a
     /// call site cannot transpose two fields that share a type.
@@ -141,6 +147,7 @@ impl<'a> StandbySpecParams<'a> {
 /// Builder for [`StandbySpecParams`]. Required fields are checked by
 /// [`StandbySpecParamsBuilder::build`] rather than defaulted, so an unset one is a
 /// reported error and never a silently empty value.
+#[cfg(test)]
 pub(crate) struct StandbySpecParamsBuilder<'a> {
     pool_root: Option<&'a Path>,
     template_id: Option<&'a str>,
@@ -157,6 +164,7 @@ pub(crate) struct StandbySpecParamsBuilder<'a> {
     vsock_egress: Option<bool>,
 }
 
+#[cfg(test)]
 impl<'a> StandbySpecParamsBuilder<'a> {
     /// An empty builder: nothing set yet.
     #[must_use]
@@ -310,6 +318,7 @@ impl<'a> StandbySpecParamsBuilder<'a> {
     }
 }
 
+#[cfg(test)]
 impl<'a> Default for StandbySpecParamsBuilder<'a> {
     fn default() -> Self {
         Self::new()
@@ -320,6 +329,7 @@ impl<'a> Default for StandbySpecParamsBuilder<'a> {
 /// `pool_root/<id>/control-<nonce>.sock` (nonce in the path — defense in depth); the VM's
 /// runtime state dir is the normal `vms_root/<id>/` so stop/status/console resolve it like
 /// any cold-booted VM.
+#[cfg(test)]
 pub(crate) fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
     let nonce = fresh_binding_nonce();
     // `standby-<16 hex>` — nonce-derived (defense-in-depth obfuscation within the 0700
@@ -351,205 +361,9 @@ pub(crate) fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpe
     })
 }
 
-/// Parameters for [`warm_to_target`] — grouped to keep the signature small.
-pub(crate) struct WarmParams<'a> {
-    pub backend: &'a AnyBackend,
-    pub signer_id: &'a str,
-    pub signing_key_path: &'a Path,
-    pub target: u32,
-    /// The resolved launch config the warm parents mirror, carrying everything
-    /// the run path resolves for a boot — the rootfs and its verity sidecar, the
-    /// runtime overlay that holds the guest agent, the universal initramfs, and
-    /// the cmdline-bearing policy fields.
-    ///
-    /// Every other input to the parent's shape is derived from this one value:
-    /// template, kernel, vCPUs, memory, image digest and egress enablement all
-    /// come out of [`compat_for_launch`]. Separate fields would let a caller record a compat key describing something other than what
-    /// booted — a pool that fills and never drains, with no error anywhere.
-    pub launch: &'a VmStartConfig,
-}
-
-/// Warm the pool toward `target` idle standbys for the given kernel+resources.
-/// Spawn failures are logged and counted; the caller decides whether to
-/// surface them as an error.  Returns a [`WarmResult`] with success and
-/// failure counts.
-/// Tenant a factory parent's plan is admitted under when the launch it mirrors
-/// carries none. A parent is host-side capacity, not a tenant's workload, so it
-/// gets its own identity rather than borrowing an arbitrary one.
-const STANDBY_PARENT_TENANT: &str = "standby";
-
-/// The captured parent's own rootfs digest — the bytes it actually booted, so
-/// the plan admitted for it describes what it is rather than what asked for it.
-fn captured_rootfs_digest(
-    checkpoints: &CheckpointStore,
-    meta: &mvm_core::checkpoint::CheckpointMeta,
-) -> Result<String> {
-    mvm_client::checkpoint::materialized_blob_sha256(
-        checkpoints,
-        meta,
-        mvm_core::checkpoint::ROOTFS_BLOB,
-    )
-    .context("reading the captured parent's materialized rootfs digest")
-}
-
-/// Admit a signed `ExecutionPlan` for a captured factory parent.
-///
-/// Mirrors the workload admission path (synthesize → sign → verify → window →
-/// nonce) with every workload authority left out: no secrets, no services, no
-/// bundle, no deps volume, no shares. The parent runs nothing on a tenant's
-/// behalf; the plan exists so its checkpoint has a signed creation entry to
-/// anchor against.
-fn admit_standby_parent_plan(
-    handle: &StandbyHandle,
-    backend_name: &str,
-    tenant: &str,
-    rootfs_sha256: &str,
-    vcpus: u8,
-    mem_mib: u32,
-) -> Result<AdmittedPlan> {
-    let input = SynthesisInput {
-        mailbox: None,
-        outputs: Vec::new(),
-        grants: None,
-        kernel_sha256: None,
-        vm_name: &handle.id,
-        tenant: Some(tenant),
-        backend_name,
-        image_name: &handle.id,
-        image_sha256: rootfs_sha256,
-        image_cosign_bundle: None,
-        intent: None,
-        seccomp_tier: PlanSeccompTier::Standard,
-        network_policy_ref: None,
-        fs_policy_ref: None,
-        egress_policy_ref: None,
-        secret_release: SecretReleasePolicy::default(),
-        secrets: Vec::new(),
-        audit_event_prefix: None,
-        cpus: u32::from(vcpus),
-        mem_mib: u64::from(mem_mib),
-        disk_mib: 0,
-        boot_timeout_secs: 60,
-        destroy_on_exit: true,
-        bundle_pin: None,
-        deps_volume: None,
-        shares: Vec::new(),
-        assets: Vec::new(),
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        caller_commitment: None,
-        audit_labels: Default::default(),
-        agent_verbs: None,
-        services: Vec::new(),
-        extensions: Vec::new(),
-        stream_edges: Vec::new(),
-        stream_retention: Default::default(),
-        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
-        // The parent reaches nothing, so it gets the closed transport and no
-        // L3 spec — the same "no workload authority" posture as the empty
-        // secrets, services, and shares above.
-        network_mode: mvm_contract::plan::NetworkMode::None,
-        ingress: Vec::new(),
-    };
-    let ledger = InMemoryNonceLedger::new();
-    admit_for_run(
-        &input,
-        &SystemClock,
-        &ledger,
-        None,
-        None,
-        mvm_client::admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
-    )
-    .context("admitting a plan for the captured standby parent")
-}
-
-/// Bind a freshly captured parent's checkpoint into the signed audit chain.
-///
-/// The claim path refuses to fork a parent whose checkpoint carries no
-/// `checkpoint.created` entry — the claim-8 lineage gate. A factory parent is
-/// never launched from a workload plan, so nothing else admits one for it, and
-/// without this every parent the pool captures is unclaimable by construction.
-fn audit_captured_parent(
-    checkpoints: &CheckpointStore,
-    handle: &StandbyHandle,
-    backend_name: &str,
-    tenant: &str,
-) -> Result<()> {
-    let checkpoint_id = handle.parent_checkpoint.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "standby '{}' was recorded without a parent checkpoint to anchor",
-            handle.id
-        )
-    })?;
-    let meta = checkpoints
-        .read_meta(&CheckpointId::new(checkpoint_id.to_string()))
-        .with_context(|| format!("reading captured checkpoint '{checkpoint_id}'"))?;
-    let rootfs_sha256 = captured_rootfs_digest(checkpoints, &meta)?;
-    let admitted = admit_standby_parent_plan(
-        handle,
-        backend_name,
-        tenant,
-        &rootfs_sha256,
-        handle.vcpus,
-        handle.mem_mib,
-    )?;
-    let signer = host_keypair::load_or_init()
-        .context("loading the host signer to sign the parent's creation entry")?;
-    let emitter = mvm_client::audit::chain::emitter::AuditEmitter::new(signer.signing)
-        .context("opening the audit chain to record the parent's creation")?
-        .with_receipts()
-        .with_decisions()
-        .context("enabling the decision store for the pool audit")?;
-    mvm_client::checkpoint::bind_checkpoint_created(&emitter, admitted.plan(), &meta)
-        .context("emitting checkpoint.created for the captured standby parent")
-}
-
-/// Drop a parent that could not be audited, checkpoint and all.
-///
-/// An unauditable parent is worse than no parent: every claim would refuse it,
-/// quarantine it, and replenish would spawn another — a wasted boot and capture
-/// per launch, forever. Its guest is already stopped by the capture, so this
-/// only has to reclaim the disk.
-fn discard_unauditable_parent(checkpoints: &CheckpointStore, handle: &StandbyHandle) {
-    let Some(id) = handle.parent_checkpoint.as_deref() else {
-        return;
-    };
-    if let Err(e) = checkpoints.remove(&CheckpointId::new(id.to_string())) {
-        tracing::warn!(
-            checkpoint = id,
-            error = %e,
-            "could not remove the unauditable parent's checkpoint; it will occupy disk until pruned"
-        );
-    }
-}
-
 /// Reap a paused child if the pool record cannot be published after preload.
 /// The child is not yet a user VM, so leaving it behind would leak a VMM that
 /// no persisted reaper can discover.
-fn discard_preloaded_child(backend: &AnyBackend, handle: &StandbyHandle) {
-    let Some(child_name) = handle.preloaded_child_vm_name.as_deref() else {
-        return;
-    };
-    if let Err(error) = backend.stop_transient(&VmId(child_name.to_string())) {
-        tracing::warn!(
-            child = child_name,
-            %error,
-            "could not stop unpublished preloaded standby child"
-        );
-    }
-    let child_dir = mvm_core::config::vm_state_dir(child_name);
-    if let Err(error) = std::fs::remove_dir_all(&child_dir)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(
-            child = child_name,
-            path = %child_dir.display(),
-            %error,
-            "could not remove unpublished preloaded child state"
-        );
-    }
-}
-
 /// Whether a standby pool this backend cannot serve should fail the launch.
 ///
 /// The warm target is not always something anyone asked for. On the HVF
@@ -574,10 +388,21 @@ fn residency_source() -> mvm_core::residency::ResidencySource {
     mvm_core::residency::resolve_residency().1
 }
 
+#[cfg(all(test, feature = "test-support"))]
+pub(crate) struct WarmParams<'a> {
+    pub backend: &'a AnyBackend,
+    pub signer_id: &'a str,
+    pub signing_key_path: &'a Path,
+    pub target: u32,
+    pub launch: &'a VmStartConfig,
+}
+
+#[cfg(all(test, feature = "test-support"))]
 pub(crate) fn warm_to_target(
     pool: &SupervisorStandbyPool,
     p: &WarmParams<'_>,
 ) -> Result<WarmResult> {
+    let _ = (p.signer_id, p.signing_key_path);
     if p.target == 0 {
         return Ok(WarmResult {
             spawned: 0,
@@ -598,158 +423,17 @@ pub(crate) fn warm_to_target(
         })
         .context("requested standby-pool recovery"));
     }
-    // Serialize concurrent warms on the pool directory. Without this lock two
-    // launches can both read an empty pool and each spawn up to `target`,
-    // overshooting it; the standbys then age out via TTL but waste a boot each.
-    // The lock spans the idle-count read through the spawn loop and releases on
-    // return.
-    let _warm_guard = mvm_core::atomic_io::FileLock::acquire(&pool.root().join("warm"))?;
-    // The key this spawn records is the key a claim will look for, because both
-    // are built by `compat_for_launch` from the same launch config. Building it
-    // twice from two field sets is how the pool came to fill with parents no
-    // claim could ever match.
-    let image = Path::new(p.launch.rootfs_path.as_str());
-    let kernel = Path::new(p.launch.kernel_path.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("the launch config names no kernel for its warm parents to boot")
-    })?);
-    let want = compat_for_launch(p.launch)?;
-    let have = pool.idle_count_compatible(&want)? as u32;
-    if have < p.target {
-        // Every parent is captured into an encrypted checkpoint, so a host
-        // with no snapshot key yet gets one before the first capture.
-        super::shared::ensure_snapshot_key()?;
-    }
-    let pool_root = mvm_core::config::mvm_pool_dir()?;
-    let vms_root = mvm_core::config::vms_dir();
-    let checkpoints = CheckpointStore::open();
-    let spawn_ctx = SpawnContext {
-        checkpoints: &checkpoints,
-        launch: Some(p.launch),
-    };
-    let mut spawned = 0u32;
-    let mut failed = 0u32;
-    let mut failures = Vec::new();
-    for _ in have..p.target {
-        // Every compat field comes from `want`, so the recorded handle's own
-        // `compat()` is `want` — the exact value the claim searches for.
-        let spec = build_standby_spec(
-            &StandbySpecParams::builder()
-                .pool_root(&pool_root)
-                .template_id(want.template_id.as_deref())
-                .vms_root(&vms_root)
-                .kernel(kernel)
-                .kernel_sha256(&want.kernel_sha256)
-                .vcpus(want.vcpus)
-                .mem_mib(want.mem_mib)
-                .signer_id(p.signer_id)
-                .signing_key_path(p.signing_key_path)
-                .image_path(image)
-                .image_sha256(want.image_sha256.as_deref())
-                .root_strategy(want.root_strategy)
-                .vsock_egress(want.vsock_egress)
-                .build()?,
-        )?;
-        match p.backend.spawn_standby_via_runner_owned(&spawn_ctx, &spec) {
-            Ok(handle) => {
-                // Audit before recording: the claim refuses a parent with no
-                // signed creation entry, so pooling an unauditable one only
-                // buys a refusal, a quarantine and another spawn next launch.
-                let tenant = p
-                    .launch
-                    .tenant_id
-                    .as_deref()
-                    .unwrap_or(STANDBY_PARENT_TENANT);
-                match audit_captured_parent(&checkpoints, &handle, p.backend.name(), tenant) {
-                    Ok(()) => {
-                        // An admission names its child only when a launch
-                        // arrives. A preloaded child has a different random
-                        // name and cannot take that signed identity, so CLI
-                        // parents stay saved-state until the claim.
-                        if let Err(error) = pool.record(&handle) {
-                            discard_preloaded_child(p.backend, &handle);
-                            return Err(error);
-                        }
-                        spawned += 1;
-                    }
-                    Err(e) => {
-                        failures.push(format!("auditing captured standby '{}': {e:#}", handle.id));
-                        tracing::warn!(
-                            standby = %handle.id,
-                            error = %e,
-                            "could not audit the captured standby parent; discarding it rather \
-                             than pooling one no claim could ever verify"
-                        );
-                        discard_unauditable_parent(&checkpoints, &handle);
-                        failed += 1;
-                    }
-                }
-            }
-            Err(e) => {
-                let e = match e.downcast::<mvm_backends::driver::hvf::ColdHvfBootFailure>() {
-                    Ok(native) => match native.into_released_error() {
-                        Ok(error) => error,
-                        Err(native) => {
-                            // Unconfirmed native ownership is not an ordinary
-                            // failed pool fill. Return it before generic
-                            // continuation, keeping this exact pool lock too.
-                            return Err(anyhow::Error::new(native.retain_support(_warm_guard))
-                                .context("native standby launch remains owned; retain error for stop retry"));
-                        }
-                    },
-                    Err(error) => error,
-                };
-                failures.push(format!("spawning standby: {e:#}"));
-                tracing::warn!(error = %e, "spawn standby failed; pool stays under target");
-                failed += 1;
-            }
-        }
-    }
-    // Bound the retained parent footprint for this launch shape. The target
-    // is also the intended number of parents, so its per-parent memory gives
-    // the shape's warm set a deterministic upper bound. Other shapes — other
-    // images included — are bounded by the host-wide standby budget instead.
-    let max_memory_mib = u64::from(p.target).saturating_mul(u64::from(want.mem_mib));
-    let evicted = pool.evict_compatible_to_memory_budget(&want, max_memory_mib)?;
-    if !evicted.is_empty() {
-        tracing::debug!(
-            template_id = ?want.template_id,
-            count = evicted.len(),
-            "evicted warm parents over memory budget"
-        );
-    }
+    // Historical warm-loop tests reuse a claim-shaped fixture. Production warm
+    // resolution has no admission, so project that fixture back to the same
+    // planless source before exercising the client boundary.
+    let mut launch = p.launch.clone();
+    launch.plan_json = None;
+    launch.tenant_id = None;
+    let result = mvm_client::standby::refill_borrowed_for_test(pool, p.backend, &launch, p.target)?;
     Ok(WarmResult {
-        spawned,
-        failed,
-        failures,
-    })
-}
-
-/// The compat-key image identity for a launch: the sha256 of its rootfs image.
-///
-/// A warm parent is a full-state capture of one particular rootfs, and every
-/// child is cloned from that captured content — so a parent captured from image
-/// A must never be handed to a launch of image B. This key is what keeps the
-/// two apart, and it is deliberately the **same digest** claim-8 admission puts
-/// on `plan.image.sha256` and that the runner's `bind_plan_to_parent_digest` checks against
-/// the captured parent's materialized rootfs digest. A standby that passes this
-/// pre-filter is therefore one the downstream binding will also accept, rather
-/// than one that gets reserved and then refused.
-///
-/// Both halves of the pool call this — the spawn records what it returns, the
-/// claim searches for it. They must not compute it separately: this function
-/// used to return `None` unconditionally, which read as "image-agnostic" but
-/// meant "never equal to anything the spawn recorded", so every claim silently
-/// cold-booted while the pool filled and never drained.
-///
-/// Hashing goes through the size+mtime-keyed sidecar cache that plan admission
-/// already populated for this rootfs, so the launch path re-reads a digest
-/// instead of re-hashing ~100 MB before it can decide.
-pub(crate) fn image_identity(rootfs_path: &Path) -> Result<String> {
-    mvm_core::crypto::image_verify::sha256_file_cached(rootfs_path).with_context(|| {
-        format!(
-            "hashing rootfs for the warm-pool compat key: {}",
-            rootfs_path.display()
-        )
+        spawned: result.spawned,
+        failed: result.failed,
+        failures: result.failures,
     })
 }
 
@@ -868,7 +552,10 @@ where
             resident_anchor = SignedChainAnchor::empty();
             &resident_anchor
         } else {
-            claim_anchor = ClaimChainAnchor::for_checkpoint(&parent_checkpoint)?;
+            claim_anchor = mvm_client::standby::PlanlessWarmParentAnchor::for_checkpoint(
+                &checkpoints,
+                &parent_checkpoint,
+            )?;
             &claim_anchor
         };
     let registry_path = mvm_client::name_registry::registry_path();
@@ -938,22 +625,7 @@ fn parent_checkpoint_for(handle: &StandbyHandle) -> Result<CheckpointId> {
 /// and `StandbyHandle::is_compatible` is exact equality — a disagreement is a
 /// pool that never drains, with no error anywhere.
 fn compat_for_launch(cfg: &VmStartConfig) -> Result<StandbyCompat> {
-    Ok(StandbyCompat {
-        template_id: cfg.template_id.clone(),
-        kernel_sha256: kernel_identity(cfg.kernel_path.as_deref())?,
-        vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
-        mem_mib: cfg.memory_mib,
-        image_sha256: Some(image_identity(Path::new(cfg.rootfs_path.as_str()))?),
-        // Every launch resolves a block root; the field stays on the recorded
-        // spec so a parent warmed before that was true still declares what it
-        // was warmed under, and the claim's compat check can refuse it.
-        root_strategy: RuntimeSourceRootStrategy::BlockExt4,
-        // Whether the guest boots an egress client, read off the launch's policy
-        // and its admitted plan through the same derivation the guest cmdline
-        // token comes from — never re-expressed here, because a second
-        // expression of it is free to drift from the token it must predict.
-        vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(cfg),
-    })
+    mvm_client::standby::standby_compat(cfg)
 }
 
 /// Whether a warm parent can serve this launch shape at all.
@@ -1240,7 +912,12 @@ mod tests {
 
         assert_ne!(index_address, expected);
         assert_eq!(
-            captured_rootfs_digest(&checkpoints, &meta).unwrap(),
+            mvm_client::checkpoint::materialized_blob_sha256(
+                &checkpoints,
+                &meta,
+                mvm_core::checkpoint::ROOTFS_BLOB,
+            )
+            .unwrap(),
             expected
         );
     }
@@ -1650,180 +1327,6 @@ mod tests {
                 "{why}"
             );
         }
-    }
-
-    // ── Auditing a captured factory parent ───────────────────────────────
-    //
-    // The claim refuses a parent whose checkpoint has no signed creation
-    // entry. Nothing admits a plan for a factory parent, so before this the
-    // pool filled with parents no claim could ever verify.
-
-    /// A captured parent's checkpoint carrying a chunked rootfs, the blob a
-    /// claim binds against. Captured as fs_quick: a parent's memory plays no
-    /// part in auditing it, and the rootfs is chunked the same way either way.
-    fn write_captured_parent(store: &CheckpointStore, id: &str) -> CheckpointId {
-        use mvm_runtime::checkpoint::{CaptureFsQuickParams, capture_fs_quick};
-        let source = tempfile::tempdir().unwrap();
-        let rootfs = source.path().join(mvm_core::checkpoint::ROOTFS_BLOB);
-        std::fs::write(&rootfs, id.as_bytes()).unwrap();
-        let params = CaptureFsQuickParams::builder()
-            .id(CheckpointId::new(id.to_string()))
-            .vm_name("standby-vm".into())
-            .rootfs(rootfs)
-            .supervisor_config_digest(String::new())
-            .created_unix(1)
-            .quiesced(true)
-            .build()
-            .unwrap();
-        capture_fs_quick(store, params).unwrap().id
-    }
-
-    fn captured_handle(id: &str, ckpt: &CheckpointId) -> StandbyHandle {
-        StandbyHandle {
-            id: id.to_string(),
-            template_id: None,
-            control_socket: String::new(),
-            // Zero is the released-after-capture sentinel a real captured
-            // parent carries: its state lives in the checkpoint, not a process.
-            pid: 0,
-            vcpus: 2,
-            mem_mib: 512,
-            binding_nonce: "nonce".into(),
-            spawned_unix_secs: 1,
-            state: StandbyState::Idle,
-            parent_checkpoint: Some(ckpt.as_str().to_string()),
-            kernel_sha256: "a".repeat(64),
-            image_sha256: Some("b".repeat(64)),
-            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
-            vsock_egress: false,
-            preloaded_child_vm_name: None,
-        }
-    }
-
-    /// The whole point: after auditing, the anchor the claim uses resolves the
-    /// parent's creation digest. This is the exact lookup that returned `None`
-    /// and produced `ParentUnaudited` on every live claim.
-    #[test]
-    fn auditing_a_captured_parent_makes_the_claim_anchor_resolve_it() {
-        use mvm_runtime::checkpoint::CheckpointChainAnchor;
-
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
-        env.isolate_mvm_home(tmp.path());
-        // The production store encrypts every capture under the host key.
-        env.set(
-            mvm_runtime::vm::instance_snapshot::SNAPSHOT_TENANT_KEY_ENV,
-            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
-        );
-
-        let store = CheckpointStore::open();
-        let ckpt = write_captured_parent(&store, "standby-standby-abc");
-        let handle = captured_handle("standby-abc", &ckpt);
-        let meta = store.read_meta(&ckpt).unwrap();
-
-        // Before: the claim's gate finds nothing and refuses.
-        assert_eq!(
-            SignedChainAnchor::load()
-                .unwrap()
-                .recorded_creation_digest(&meta)
-                .unwrap(),
-            None,
-            "an un-audited parent must not resolve — that is the fail-closed gate"
-        );
-
-        audit_captured_parent(&store, &handle, "firecracker", "tenant-a").unwrap();
-
-        assert_eq!(
-            SignedChainAnchor::load()
-                .unwrap()
-                .recorded_creation_digest(&meta)
-                .unwrap(),
-            Some(meta.meta_digest.clone()),
-            "after auditing, the claim's anchor must recover the parent's content-address"
-        );
-    }
-
-    /// The parent's plan is admitted for capacity, not for work: it must carry
-    /// none of the authority a workload plan does, or a claimed child could
-    /// inherit reach the parent was never entitled to.
-    #[test]
-    fn the_parent_plan_carries_no_workload_authority() {
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
-        env.isolate_mvm_home(tmp.path());
-
-        let ckpt = CheckpointId::new("standby-standby-xyz".to_string());
-        let handle = captured_handle("standby-xyz", &ckpt);
-        let admitted =
-            admit_standby_parent_plan(&handle, "firecracker", "tenant-a", &"cd".repeat(32), 2, 512)
-                .unwrap();
-
-        assert!(admitted.plan().secrets.is_empty(), "no secret bindings");
-        assert!(
-            admitted.plan().services.is_empty(),
-            "no host-service bindings"
-        );
-        assert_eq!(
-            admitted.plan().workload.0,
-            handle.id,
-            "named for the parent"
-        );
-        assert_eq!(
-            admitted.plan().image.sha256,
-            "cd".repeat(32),
-            "the plan describes the rootfs the parent actually booted"
-        );
-    }
-
-    /// An unauditable parent must be dropped, not pooled. Pooling one buys a
-    /// refusal and a quarantine on the next launch, then another spawn — a
-    /// wasted boot and capture per launch, forever.
-    #[test]
-    fn an_unauditable_parent_is_discarded_with_its_checkpoint() {
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
-        env.isolate_mvm_home(tmp.path());
-        // The production store encrypts every capture under the host key.
-        env.set(
-            mvm_runtime::vm::instance_snapshot::SNAPSHOT_TENANT_KEY_ENV,
-            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
-        );
-
-        let store = CheckpointStore::open();
-        let ckpt = write_captured_parent(&store, "standby-standby-doomed");
-        let handle = captured_handle("standby-doomed", &ckpt);
-        assert!(store.read_meta(&ckpt).is_ok());
-
-        discard_unauditable_parent(&store, &handle);
-
-        assert!(
-            store.read_meta(&ckpt).is_err(),
-            "the discarded parent's checkpoint must not survive to occupy disk"
-        );
-    }
-
-    /// A handle with no captured checkpoint has nothing to anchor; say so
-    /// rather than emitting an entry that points at nothing.
-    #[test]
-    fn auditing_refuses_a_handle_with_no_captured_checkpoint() {
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
-        env.isolate_mvm_home(tmp.path());
-        // The production store encrypts every capture under the host key.
-        env.set(
-            mvm_runtime::vm::instance_snapshot::SNAPSHOT_TENANT_KEY_ENV,
-            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
-        );
-
-        let store = CheckpointStore::open();
-        let mut handle = captured_handle("standby-nockpt", &CheckpointId::new("x".to_string()));
-        handle.parent_checkpoint = None;
-
-        let err = audit_captured_parent(&store, &handle, "firecracker", "tenant-a").unwrap_err();
-        assert!(
-            err.to_string().contains("without a parent checkpoint"),
-            "unexpected error: {err}"
-        );
     }
 
     /// A pool the operator named is still worth refusing over: silently
@@ -3023,7 +2526,7 @@ fn warm_network_policy(egress: bool) -> mvm_core::network_policy::NetworkPolicy 
 /// while giving a shared parent a workload's authority is exactly the posture
 /// the pool is built to avoid. The launch that later claims the parent supplies
 /// its own admitted plan.
-fn resolve_warm_launch(req: &WarmRequest) -> Result<crate::exec::ResolvedLaunch> {
+fn resolve_warm_launch(req: &WarmRequest) -> Result<mvm_client::standby::PreparedWarmParent> {
     let image = req
         .source
         .resolve()
@@ -3051,13 +2554,19 @@ fn resolve_warm_launch(req: &WarmRequest) -> Result<crate::exec::ResolvedLaunch>
         gpu: false,
         gpu_device: None,
     };
-    crate::exec::resolve_launch(
+    let resolved = crate::exec::resolve_launch(
         &shape,
         None,
         &mut crate::exec::LaunchResolveMarks::new(false),
         &mut crate::commands::vm::phase_timing::LaunchSubMarks::new(false),
     )
-    .context("resolving the launch shape the warm parents mirror")
+    .context("resolving the launch shape the warm parents mirror")?;
+    anyhow::ensure!(
+        warm_eligible_launch(&resolved.start_config, resolved.backend.late_volume_slots()),
+        "pool warm: this launch cannot claim a standby; bundles with pinned boot assets \
+         must use their verified cold launch path"
+    );
+    resolved.into_warm_parent()
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
@@ -3124,24 +2633,7 @@ pub(in crate::commands) fn warm_request(req: &WarmRequest) -> Result<()> {
 fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
     let target = req.target;
     let launch = resolve_warm_launch(req)?;
-    let result = warm_if_eligible(
-        &launch.start_config,
-        launch.backend.late_volume_slots(),
-        || {
-            // Ensure the host signer exists only for a parent a launch can claim.
-            let signer = host_keypair::load_or_init()?;
-            warm_to_target(
-                pool,
-                &WarmParams {
-                    backend: &launch.backend,
-                    signer_id: &host_keypair::host_signer_id(),
-                    signing_key_path: &signer.secret_path,
-                    target,
-                    launch: &launch.start_config,
-                },
-            )
-        },
-    )?;
+    let result = launch.refill_to(pool, target)?;
     // A state-changing verb emits one audit record per attempt.
     mvm_core::audit_emit!(
         PoolWarm,

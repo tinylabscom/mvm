@@ -1,6 +1,6 @@
 //! Which images a `pool warm` invocation warms, and warming each in turn.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::{WarmRequest, WarmSource};
 
@@ -93,8 +93,13 @@ pub(super) fn warm_each(
 ) -> Result<()> {
     let mut failed = Vec::new();
     for req in requests {
-        if let Err(e) = warm(req) {
-            failed.push(format!("{}: {e:#}", req.label()));
+        if let Err(error) = warm(req) {
+            if mvm_client::standby::is_warm_parent_ownership_uncertain(&error) {
+                return Err(error).with_context(|| {
+                    format!("warming {} left native ownership uncertain", req.label())
+                });
+            }
+            failed.push(format!("{}: {error:#}", req.label()));
         }
     }
     if failed.is_empty() {
@@ -205,6 +210,79 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "pool warm: 1 of 2 image(s) not warmed: alpine: spawn failed"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn warm_each_stops_and_retains_lock_on_uncertain_native_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("warm");
+        let requests: Vec<WarmRequest> = ["alpine", "nginx"]
+            .into_iter()
+            .map(|image| WarmRequest {
+                source: WarmSource::Image(Some(image.to_string())),
+                cpus: 2,
+                memory_mib: 512,
+                target: 1,
+                egress: false,
+            })
+            .collect();
+        let mut tried = Vec::new();
+
+        let error = warm_each(&requests, |request| {
+            tried.push(request.label().to_string());
+            Err(mvm_client::standby::warm_parent_cleanup_uncertain_for_test(
+                &lock_path,
+            )?)
+        })
+        .expect_err("uncertain cleanup must abort multi-image warming");
+
+        assert_eq!(tried, ["alpine"], "a second image must not be attempted");
+        assert!(
+            mvm_client::standby::is_warm_parent_ownership_uncertain(&error),
+            "{error:#}"
+        );
+        assert!(
+            mvm_core::atomic_io::FileLock::try_acquire(&lock_path)
+                .unwrap()
+                .is_none(),
+            "the returned error must retain the refill lock"
+        );
+        drop(error);
+        assert!(
+            mvm_core::atomic_io::FileLock::try_acquire(&lock_path)
+                .unwrap()
+                .is_some(),
+            "dropping the custody error releases the lock"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn warm_each_stops_on_native_boot_custody() {
+        let requests: Vec<WarmRequest> = ["alpine", "nginx"]
+            .into_iter()
+            .map(|image| WarmRequest {
+                source: WarmSource::Image(Some(image.to_string())),
+                cpus: 2,
+                memory_mib: 512,
+                target: 1,
+                egress: false,
+            })
+            .collect();
+        let mut tried = Vec::new();
+
+        let error = warm_each(&requests, |request| {
+            tried.push(request.label().to_string());
+            Err(mvm_client::standby::warm_parent_native_custody_for_test())
+        })
+        .expect_err("native launch custody must abort multi-image warming");
+
+        assert_eq!(tried, ["alpine"], "a second image must not be attempted");
+        assert!(
+            mvm_client::standby::is_warm_parent_ownership_uncertain(&error),
+            "{error:#}"
         );
     }
 }

@@ -832,9 +832,48 @@ mod tests {
         launch.plan_json = Some("{\"signed\":\"plan\"}".into());
         launch.bundle_json = Some("{\"pin\":\"bundle\"}".into());
         launch.tenant_id = Some("tenant-a".into());
+        launch.cpu_grant = Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 });
+        launch.allowed_cpus = Some(mvm_contract::protocol::cpu_set::CpuSet::parse("0").unwrap());
+        launch.ports = vec![mvm_core::vm_backend::VmPortMapping {
+            host: 8080,
+            guest: 80,
+        }];
+        launch.service_proxies = vec![
+            mvm_contract::protocol::broker_control::ServiceProxyBinding {
+                service: mvm_contract::protocol::broker::ServiceId::parse("host.test.v1").unwrap(),
+                endpoint: "/tmp/svc.sock".into(),
+                capabilities: Vec::new(),
+            },
+        ];
+        launch.mailbox_conversation = Some(
+            mvm_core::mailbox::conversation_wire::ConversationTarget {
+                address: mvm_contract::protocol::mailbox::MailboxAddress {
+                    tenant: mvm_contract::protocol::mailbox::TenantId::from_bytes([11; 32]),
+                    authorization_domain:
+                        mvm_contract::protocol::mailbox::AuthorizationDomainId::from_bytes([12; 32]),
+                    mailbox: mvm_contract::protocol::mailbox::MailboxId::from_bytes([13; 32]),
+                    recipient: mvm_contract::protocol::mailbox::PrincipalId::from_bytes([14; 32]),
+                },
+                policy_epoch: 1,
+            },
+        );
+        launch.config_files = vec![mvm_core::vm_backend::VmFile {
+            name: "config".into(),
+            content: "value".into(),
+            mode: 0o444,
+        }];
+        launch.secret_files = vec![mvm_core::vm_backend::VmFile {
+            name: "secret".into(),
+            content: "sensitive".into(),
+            mode: 0o400,
+        }];
         launch.warm_pool_size = 4;
         launch.dev_console = true;
-        launch.network_policy = NetworkPolicy::unrestricted();
+        launch.network_policy =
+            NetworkPolicy::allow_list(vec![mvm_core::network_policy::HostPort::new(
+                "api.example.com",
+                443,
+            )]);
         launch.volumes = vec![VmVolume {
             materialized_image: None,
             volume_label: None,
@@ -853,11 +892,18 @@ mod tests {
         assert_eq!(parent_cfg.plan_json, None);
         assert_eq!(parent_cfg.bundle_json, None);
         assert_eq!(parent_cfg.tenant_id, None);
+        assert_eq!(parent_cfg.cpu_grant, None);
+        assert_eq!(parent_cfg.allowed_cpus, None);
+        assert!(parent_cfg.ports.is_empty());
+        assert!(parent_cfg.service_proxies.is_empty());
+        assert_eq!(parent_cfg.mailbox_conversation, None);
         assert_eq!(parent_cfg.warm_pool_size, 0);
         assert!(!parent_cfg.dev_console);
         assert!(parent_cfg.volumes.is_empty());
         assert!(parent_cfg.secret_files.is_empty());
         assert!(parent_cfg.config_files.is_empty());
+        assert_ne!(parent_cfg.network_policy, launch.network_policy);
+        assert!(parent_cfg.network_policy.allows_egress());
 
         let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
         // The enablement the guest boots with is all the parent takes from the
