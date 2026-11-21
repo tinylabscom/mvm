@@ -44,6 +44,9 @@ pub mod audit_signer;
 pub mod blocking;
 pub mod broker;
 pub mod caller_identity;
+/// One-exchange adapter for an already-connected macOS commissioning peer.
+#[cfg(feature = "native-caller-identity")]
+pub mod commissioning_bootstrap_connection;
 /// One-use, peer-bound commissioning-bootstrap session.
 #[cfg(feature = "native-caller-identity")]
 pub mod commissioning_bootstrap_session;
