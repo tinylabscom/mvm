@@ -171,6 +171,15 @@ Proposed trusted setup sequence:
    `/private/var/db/mvm/owner-commissioning-intent.json` path. It refuses any
    existing intent, receipt, completion, authority-ready, journal or lock
    artifact and never creates parents, repairs state or overwrites an object.
+   A matching source-only read-only loader uses the same descriptor-relative
+   protected ancestry and object policy, strictly validates the bounded
+   original bytes, and exposes only typed public metadata plus the digest of
+   canonical compact typed bytes. It creates, repairs, cleans up and consumes
+   nothing. Its observation is not an atomic fresh-namespace snapshot or a
+   commissioning capability; an initializer must first acquire
+   installer-provisioned exclusion and then reload and revalidate before any
+   mutation. Hermetic descriptor-root tests cover this policy; no root-owned
+   live deployment is exercised by this slice.
 2. A fixed initialization entry point runs as the authority UID, exclusively
    locks the authority namespace and creates the issuer only for that intent.
    It exposes no secret and accepts no caller-selected key or key path.
