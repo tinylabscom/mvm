@@ -422,6 +422,46 @@ async fn layer_fetch_follows_same_origin_redirect_without_forwarding_auth() {
     assert_eq!(sink, layer_bytes);
 }
 
+/// RFC 9110 lets a GET follow 301, 302 and 303 as well as 307 and 308, and
+/// registries use them: Google Artifact Registry answers blob GETs with 302.
+#[tokio::test]
+async fn layer_fetch_follows_every_get_redirect_status() {
+    for status in [301, 302, 303, 307, 308] {
+        let reg = HermeticRegistry::start().await;
+        let layer_bytes = b"redirected-layer";
+        let token = "registry-only-token";
+        let layer_digest = reg
+            .register_redirected_bearer_blob_with_status(
+                "library/test",
+                LAYER_MEDIA,
+                layer_bytes,
+                token,
+                status,
+            )
+            .await;
+        let layer = LayerDescriptor {
+            digest: layer_digest,
+            size: layer_bytes.len() as u64,
+            media_type: LAYER_MEDIA.to_string(),
+        };
+        let fetcher = OciLayerFetcher::with_config_and_auth(
+            client_config_for(&reg),
+            LayerFetchOptions::default(),
+            RegistryAuthConfig::bearer(reg.host(), token),
+        );
+        let image = reg.image_ref("library/test", "v1");
+        let mut sink = Vec::new();
+
+        let count = fetcher
+            .fetch_layer(&image, &layer, &mut sink)
+            .await
+            .unwrap_or_else(|e| panic!("blob fetch through a {status} redirect: {e}"));
+
+        assert_eq!(count, layer_bytes.len() as u64, "{status}");
+        assert_eq!(sink, layer_bytes, "{status}");
+    }
+}
+
 #[tokio::test]
 async fn layer_fetch_stops_at_bounded_blob_redirect_limit() {
     let reg = HermeticRegistry::start().await;
