@@ -255,8 +255,14 @@ pub enum ProtectedSupervisorStatus {
 impl ProtectedSupervisorStatus {
     pub fn publish(self, state: &std::path::Path) -> std::io::Result<()> {
         let bytes = serde_json::to_vec(&self).map_err(std::io::Error::other)?;
-        mvm_core::util::atomic_io::atomic_write(&state.join("supervisor-status.json"), &bytes)
-            .map_err(std::io::Error::other)
+        let path = state.join("supervisor-status.json");
+        // Progress records describe a live supervisor and are submit-only; a
+        // terminal outcome stays on the durable write.
+        let write = match self {
+            Self::Starting | Self::Running => mvm_core::util::atomic_io::atomic_write_submitted,
+            _ => mvm_core::util::atomic_io::atomic_write,
+        };
+        write(&path, &bytes).map_err(std::io::Error::other)
     }
 }
 
@@ -621,6 +627,27 @@ impl HvfSupervisorConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn status_publish_writes_the_same_bytes_for_progress_and_terminal_states() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor-status.json");
+        for (status, text) in [
+            (ProtectedSupervisorStatus::Starting, "\"starting\""),
+            (ProtectedSupervisorStatus::Running, "\"running\""),
+            (ProtectedSupervisorStatus::Stopped, "\"stopped\""),
+            (ProtectedSupervisorStatus::BootFailed, "\"boot_failed\""),
+        ] {
+            status.publish(dir.path()).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
     #[test]
     fn the_ram_scrub_record_round_trips_and_refuses_unknown_fields() {
         let record = HvfRamScrubRecord {
