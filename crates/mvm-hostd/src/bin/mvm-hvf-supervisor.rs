@@ -956,7 +956,7 @@ fn run() -> anyhow::Result<()> {
         cfg.signing_key_path.as_deref(),
     )
     .map_err(|_| anyhow::anyhow!("restored child plan failed verification"))?;
-    let _wall_clock = match cfg.pid_file.parent() {
+    let (_wall_clock, _liveness) = match cfg.pid_file.parent() {
         Some(vm_state_dir) => {
             let timer_inputs =
                 mvm_hostd::supervisor::lifecycle::wall_clock::SupervisorTimerInputs {
@@ -985,7 +985,18 @@ fn run() -> anyhow::Result<()> {
                 &timer_inputs,
                 Box::new(timer_inputs.preserving_exit_killer()),
             );
-            guard
+            // The unit's liveness deadline, when its topology declares one.
+            match mvm_hostd::supervisor::lifecycle::liveness_expiry::arm_for_supervisor(
+                &timer_inputs,
+            ) {
+                Ok(liveness) => (guard, liveness),
+                Err(e) => {
+                    eprintln!(
+                        "supervisor: refusing to boot a unit whose liveness it cannot watch: {e:#}"
+                    );
+                    std::process::exit(7);
+                }
+            }
         }
         None if cfg.plan.is_some() => {
             eprintln!(
@@ -995,7 +1006,7 @@ fn run() -> anyhow::Result<()> {
             );
             std::process::exit(7);
         }
-        None => None,
+        None => (None, None),
     };
 
     // Egress over vsock is a pure relay to the per-VM endpoint, which owns the
