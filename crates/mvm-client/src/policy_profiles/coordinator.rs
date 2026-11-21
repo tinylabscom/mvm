@@ -4,30 +4,34 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use mvm_hostd::policy_generation::coordinator::{Request, Response, call};
-pub use mvm_hostd::policy_generation::managed::{ManagedCoordinator, ManagedRefusal};
+pub use mvm_hostd::policy_generation::managed::{
+    ManagedCoordinator, ManagedRefusal, ProcessObservation,
+};
 pub use mvm_hostd::policy_generation::{GENERATION_ASSET_PREFIX, ProjectPolicyCandidate};
 
-/// Report the coordinator a systemd user manager runs for this MVM home.
-///
-/// Unlike [`ensure`], this never spawns one: a unit that is absent, stopped
-/// or unverifiable is a refusal. Native manager queries and the coordinator
-/// socket exchange share one five-second IPC budget, not a fresh timeout per
-/// partial read or write. No subprocess is launched and no dormant unit is
-/// loaded to inspect it. A report is identity only — not readiness, current
-/// authority, or permission to commit.
+/// Observe the existing detached coordinator without starting it or creating state.
+/// No service manager is required or queried. The connected kernel peer and
+/// bounded reply are checked within one five-second IPC deadline. This is not
+/// readiness, current authority, service provenance, or permission to commit.
 ///
 /// # Errors
 ///
-/// A [`ManagedRefusal`] naming what is missing or does not match.
-pub fn managed_status() -> Result<ManagedCoordinator, ManagedRefusal> {
+/// The home/socket is missing, observation is unsupported, or identity does not match.
+pub fn process_status() -> Result<ProcessObservation> {
     let home = PathBuf::from(mvm_core::config::mvm_home());
-    let home = home.canonicalize().map_err(|error| {
-        ManagedRefusal::InvalidHome(format!(
-            "canonicalizing MVM home {}: {error}",
-            home.display()
-        ))
-    })?;
-    mvm_hostd::policy_generation::managed::managed_status(&home)
+    let home = home
+        .canonicalize()
+        .with_context(|| format!("canonicalizing MVM home {}", home.display()))?;
+    mvm_hostd::policy_generation::managed::process_status(&home)
+}
+
+/// Legacy manager observation is unsupported; use [`process_status`].
+///
+/// # Errors
+///
+/// Always returns [`ManagedRefusal::Unsupported`].
+pub fn managed_status() -> Result<ManagedCoordinator, ManagedRefusal> {
+    Err(ManagedRefusal::Unsupported)
 }
 
 /// Connect to the resident owner, spawning its separate `mvm-hostd` process
@@ -475,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_status_refuses_without_spawning_a_detached_coordinator() {
+    fn process_status_refuses_without_spawning_a_detached_coordinator() {
         let mut environment = TestEnv::new();
         let root = tempfile::tempdir().unwrap();
         let home = root.path().canonicalize().unwrap();
@@ -491,20 +495,13 @@ mod tests {
         std::fs::set_permissions(&helper, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         environment.set("MVM_POLICY_COORDINATOR_PATH", &helper);
-        // No unit for a scratch home exists on any host this runs on.
-        let refusal = managed_status().unwrap_err();
-        assert!(
-            !matches!(refusal, ManagedRefusal::InvalidHome(_)),
-            "{refusal}"
-        );
+        assert!(process_status().is_err());
         assert!(!socket_path(&home).exists());
         assert!(!marker.exists(), "a detached coordinator was spawned");
 
         environment.isolate_mvm_home(home.join("missing"));
-        assert!(matches!(
-            managed_status(),
-            Err(ManagedRefusal::InvalidHome(_))
-        ));
+        assert!(process_status().is_err());
+        assert!(!home.join("missing").exists());
     }
 
     #[test]

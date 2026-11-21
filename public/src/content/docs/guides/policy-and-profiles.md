@@ -164,65 +164,38 @@ The trust boundary remains a trusted Linux host enforcing policy against an
 untrusted workload. This does not add malicious-host protection or expand
 other backends' security guarantees.
 
-### A coordinator the service manager owns
+### Observe the coordinator without a service manager
 
-By default the coordinator is spawned by whichever command first needs it and
-left running detached. On Linux it can instead be a systemd **user** service,
-so the manager starts it, restarts it and reaps it. There is one unit per user
-and MVM home, and the home is the unit's instance name:
-
-```ini
-# ~/.config/systemd/user/mvm-policy-coordinator@.service
-[Unit]
-Description=mvm policy coordinator for %f
-
-[Service]
-Type=exec
-NotifyAccess=none
-Environment="MVM_HOME=%f"
-ExecStart=%h/.local/bin/mvm-policy-coordinator --managed-home %f
-Restart=on-failure
-```
-
-`mvmctl` does not write this file, enable or start the unit, or turn on
-lingering; provisioning it is an operator decision. The example has no
-`[Install]` section, so an operator starts it with
-`systemctl --user start "mvm-policy-coordinator@$(systemd-escape --path "$HOME/.mvm").service"`.
-`ExecStart` names the helper the installer links beside `mvmctl` and assumes
-the default install directory. The unit fails to start while a detached
-coordinator already serves that home. The instance is the canonical home
-in `systemd-escape --path` form, so `/home/op/.mvm` is
-`mvm-policy-coordinator@home-op-.mvm.service`. Started this way the helper
-refuses to serve unless it is running in that unit's control group for that
-home; it binds its own socket and does not use socket activation.
+The coordinator is spawned by whichever command first needs it and left
+running detached. Neither that direct launch path nor coordinator observation
+requires systemd or any other service manager. Observation never starts it:
 
 ```sh
 mvmctl policy coordinator
 ```
 
-This connects directly to `/run/user/UID/systemd/private`, authenticates the
-user manager's kernel peer and native protocol, and asks for the unit's main
-process and invocation. It connects to the coordinator's socket and requires
-the kernel's credentials and the coordinator's own answer to agree with that
-same manager, before and after the exchange. It reports the unit, invocation,
-process, user and home, or a refusal: no user manager, a unit that is not
-provisioned or not running, an unloaded unit whose state is unknown, or a
-listener that is not the service. An unloaded unit might still be installed;
-observation does not load it to find out. There is no subprocess, unit start,
-or fallback to a detached coordinator.
+On Linux and macOS this connects once to the existing coordinator socket. It
+reads the kernel peer PID and UID before sending a status request, requires
+the peer UID to match the caller, and checks that the reply's protocol, PID,
+UID, canonical home and detached lifetime agree. It reports the observed PID,
+UID and home; `--json` returns those same fields. A missing home or socket,
+stopped listener, unsupported platform or mismatched reply is a refusal.
+A managed-lifetime self-claim is refused, not treated as verified service
+provenance. No service manager is contacted.
 
 Observation does not initialize a missing MVM home, create configuration or
 signing keys, append command-audit records, or start telemetry/update checks.
-Native manager authentication, both observations and the coordinator exchange
-share one five-second IPC budget; partial reads and writes cannot renew it.
+The nonblocking connection and status exchange share one five-second IPC
+budget; partial reads and writes cannot renew it.
 This does not bound filesystem canonicalization or arbitrary OS scheduling
-stalls. Native authentication is limited to 4 KiB and messages to 16 KiB
-before allocating their bodies; unsolicited file descriptors are refused.
+stalls. Status replies are limited to 4 KiB before allocating their bodies.
 
-The report identifies who answered. It does not say the coordinator is ready,
-that its state is current, or that anything may be committed, and the other
-`policy` commands do not yet require a managed coordinator. Processes of the
-same user are not confined from one another by this check.
+The report is a process observation on that connection, not service provenance.
+It does not establish readiness, current authority, permission to commit,
+restart supervision, reaping or survival across reboot. This diagnostic check
+does not confine same-user processes or prove that a peer has not passed its
+connected socket to another process. Activation and recovery keep their
+existing locks and admission checks; observation grants no authority.
 
 ## Groups
 

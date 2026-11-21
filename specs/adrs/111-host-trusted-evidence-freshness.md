@@ -237,36 +237,47 @@ separate broker and signer key-custody boundary, keep durable local state,
 and recover after CLI exit. It is not a new cloud service or a dependency
 on `mvmd`.
 
-The coordinator's lifetime has two forms today, and only one is automatic.
-The launcher-spawned process above is detached: nothing owns or reaps it,
-which is not the service ownership the actor and mailbox commit ordering in
-[#5255](https://github.com/tinylabscom/mvm/issues/5255) requires. On Linux the
-same binary can instead run as a fixed systemd user unit,
-`mvm-policy-coordinator@<home>.service`, whose instance is the canonical MVM
-home in `systemd-escape --path` form. Started with `--managed-home` it serves
-only when its `MVM_HOME` names that home, an invocation ID is present and
-well-formed, and its own control group names that unit. The server does not
-check that the ID is the manager's for this unit; the client's comparison
-with the manager is the check that decides that; it binds its own socket, so a client's
-`SO_PEERCRED` is the service and not the manager.
+**Amendment, 2026-11-21 — no service-manager prerequisite.** The maintainer
+explicitly rejected a systemd dependency for this continuation. This supersedes
+the earlier requirement for systemd-owned coordinator identification in
+[#5255](https://github.com/tinylabscom/mvm/issues/5255#issuecomment-7054714824).
+Neither systemd nor another platform service manager is required for local
+coordinator activation or observation. No service installation or qualification
+is a prerequisite for this path.
 
-A client identifies that service without trusting what it says: it asks the
-user manager for the unit's main PID and invocation, requires the connected
-socket's kernel credentials to be that PID under its own UID before sending
-anything, requires the reply to restate the same user, home, unit and
-invocation, and asks the manager again afterwards so a restart or a reused
-PID fails. Every step is bounded, and an absent, stopped, unreachable or
-mismatched unit is a typed refusal — never a detached spawn. `mvmctl policy
-coordinator` is the consumer. On Linux the coordinator also refuses a connection
-from another UID by kernel credentials (the refusal is Linux-only), and it runs
-at most 256 handler threads, refusing extra connections.
+The existing automatically started coordinator remains a detached process.
+Its serialized spawn lock and lifetime-held exclusive owner lock preserve one
+durable writer per canonical MVM home. Launch and restore retain the activation
+barrier; uncertain publication remains an obligation requiring owner recovery.
+These mechanisms are not supervised restart, reaping, logout survival or
+reboot persistence. Future actor/mailbox commit ordering must establish its
+MVM-owned lifetime and authority fences rather than treating a status reply
+or an external service manager as their substitute.
 
-This is identification only. The report is not readiness, current authority
-or permission to commit; activation and reads still use the detached path and
-do not require a managed coordinator; `mvmctl` installs, enables and starts
-nothing; and no confinement between processes of one user is claimed. The
-real-socket tests supply the manager's answers, so they are component
-evidence, not a witness that a unit was provisioned and run on a host.
+`mvmctl policy coordinator` observes an existing socket without spawning,
+creating state, or contacting a manager. On Linux and macOS it checks kernel
+peer PID and UID before sending `Status`, then requires the reply to match
+the protocol, peer PID/UID, canonical home and detached lifetime on that same
+connection. Connection setup is nonblocking and refuses an unavailable
+connection rather than retrying. The frame exchange shares one five-second
+absolute IPC budget; filesystem canonicalization and arbitrary OS scheduling
+stalls are not hard-bounded by that budget. Missing state, unsupported
+platforms, malformed replies, mismatched identities and expired budgets fail
+without a launch fallback.
+
+This is current connected-socket peer observation only, not proof of launcher
+provenance, readiness, current authority or permission to commit. It does not
+exclude same-user impersonation or socket delegation and does not weaken
+ADR-001's broader same-host threat model. No PID lookup after reconnect can
+upgrade this observation into a lifetime handle.
+
+Legacy `--managed-home` service-mode validation and `Lifetime::Managed` wire
+meaning remain for compatibility, but the direct command refuses that claim
+instead of presenting it as verified provenance. The legacy managed-status
+API explicitly returns unsupported. Its native manager transport and D-Bus
+dependency are removed; no service-manager setup instructions are required
+by the direct path. Linux request-side same-user checks and the 256-handler
+ceiling are unchanged.
 
 Publishing a project's first generation is ordered so that a crash can never
 leave a reader authorizing from an unconfirmed index. The coordinator first

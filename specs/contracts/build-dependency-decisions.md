@@ -28,6 +28,28 @@ declined; the reasons are recorded so they are not re-derived.
 
 ## Native coordinator observation
 
+The manager-only observation decision below is superseded by direct socket
+observation. `policy coordinator` requires no service manager. The production
+and development `zbus` dependencies and native manager observation modules
+have been removed; legacy service-mode wire types retain their original
+meaning, and the legacy manager observation API explicitly refuses.
+The measurements below record the earlier addition, not the current closure.
+
+Measured against `b9c67d557a1228b81e4efea3b570aa9a9a5ac9d8`, direct
+observation reduces the default Linux `mvmctl` normal/build closure from
+362 to 351 unique package rows. The aarch64 macOS closure remains 346,
+and the x86_64 Linux `mvm-builder-guest` closure remains 89. These use
+`cargo tree --locked -p PACKAGE --target TARGET -e normal,build --prefix none`,
+removing repeat markers before deduplication. No replacement dependency is
+added. The `syn` 2/3 and `winnow` 0.7/1 compatibility exceptions are removed
+from both dependency gates, with regressions requiring those pairs to fail.
+Compatible versions of retained packages are not downgraded.
+The Linux release closures measure 371 on x86_64 and 370 on aarch64;
+the all-features Linux workspace measures 579 using the selections below.
+The corresponding budgets ratchet down to these measured values.
+
+### Superseded manager-only measurements
+
 For [#5255](https://github.com/tinylabscom/mvm/issues/5255), the existing
 `policy coordinator` observation replaces `systemctl` subprocess output with
 `zbus` 6.4.0 over the fixed native user-manager socket. Authentication and

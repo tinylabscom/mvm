@@ -96,8 +96,7 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
             "check-duplicate-majors: {} crate(s) newly resolve at two incompatible majors: {}.\n\
              A duplicate major compiles both versions into the build. Unify on one major \
              (align the dependents' version requirements), or, if it is genuinely unavoidable, \
-             add an exact compatibility-pair exception in xtask/src/check_duplicate_majors.rs with a \
-             one-line justification in the PR.",
+             obtain explicit approval for a narrowly justified dependency-policy change.",
             regressions.len(),
             regressions.join(", ")
         );
@@ -179,18 +178,11 @@ fn duplicate_majors(packages: &[(String, String)]) -> DuplicateMajors<'_> {
         .collect()
 }
 
-/// Duplicate-major crates outside the baseline or approved exact pairs.
+/// Duplicate-major crates outside the baseline.
 fn regressions<'a>(found: &DuplicateMajors<'a>, allow: &[&str]) -> Vec<&'a str> {
     found
         .iter()
-        .filter_map(|(&name, keys)| {
-            // Native coordinator observation needs these pairs, not a name-only waiver.
-            let allowed_pair = matches!(
-                (name, keys.as_slice()),
-                ("syn", [(2, 0), (3, 0)]) | ("winnow", [(0, 7), (1, 0)])
-            );
-            (!allow.contains(&name) && !allowed_pair).then_some(name)
-        })
+        .filter_map(|(&name, _)| (!allow.contains(&name)).then_some(name))
         .collect()
 }
 
@@ -293,18 +285,18 @@ mod tests {
     }
 
     #[test]
-    fn approved_compatibility_pairs_are_allowed() {
-        assert!(
+    fn former_coordinator_compatibility_pairs_are_rejected() {
+        assert_eq!(
             package_regressions(&[
                 ("syn", &["2.0.100", "3.0.0"]),
                 ("winnow", &["0.7.13", "1.0.0"]),
-            ])
-            .is_empty()
+            ]),
+            ["syn", "winnow"]
         );
     }
 
     #[test]
-    fn approved_pairs_reject_a_third_compatibility_key() {
+    fn former_coordinator_pairs_reject_a_third_compatibility_key() {
         for extra in ["0.9.0", "1.0.0", "4.0.0"] {
             assert_eq!(
                 package_regressions(&[("syn", &["2.0.100", "3.0.0", extra])]),
@@ -342,13 +334,13 @@ mod tests {
     }
 
     #[test]
-    fn pair_allowances_use_compatibility_keys_not_package_counts() {
-        assert!(
+    fn duplicate_detection_uses_compatibility_keys_not_package_counts() {
+        assert_eq!(
             package_regressions(&[
                 ("syn", &["3.1.1", "2.0.100", "3.0.0", "2.0.101", "3.0.0"]),
                 ("winnow", &["1.2.3", "0.7.13", "1.0.0", "0.7.14", "0.7.13"]),
-            ])
-            .is_empty()
+            ]),
+            ["syn", "winnow"]
         );
         assert!(
             package_regressions(&[
@@ -360,14 +352,14 @@ mod tests {
     }
 
     #[test]
-    fn pair_allowances_do_not_hide_unrelated_duplicates() {
+    fn all_unapproved_duplicates_are_reported() {
         assert_eq!(
             package_regressions(&[
                 ("syn", &["2.0.100", "3.0.0"]),
                 ("winnow", &["0.7.13", "1.0.0"]),
                 ("unrelated", &["1.0.0", "2.0.0"]),
             ]),
-            ["unrelated"]
+            ["syn", "unrelated", "winnow"]
         );
     }
 
@@ -384,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_deny_skips_only_the_older_compatibility_lines() {
+    fn cargo_deny_has_no_coordinator_compatibility_exceptions() {
         let config: toml::Value = include_str!("../../deny.toml").parse().unwrap();
         let skips: Vec<_> = config["bans"]["skip"]
             .as_array()
@@ -393,6 +385,6 @@ mod tests {
             .filter_map(toml::Value::as_str)
             .filter(|entry| entry.starts_with("syn") || entry.starts_with("winnow"))
             .collect();
-        assert_eq!(skips, ["syn:2", "winnow:0.7"]);
+        assert!(skips.is_empty(), "{skips:?}");
     }
 }
