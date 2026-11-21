@@ -354,7 +354,10 @@ fn provision(vm: &str) -> Result<(HvfInstance, UnixListener)> {
         vm_id: vm.into(),
         boot_nonce: nonce,
     };
-    mvm_core::atomic_io::atomic_write_new(
+    // Submitted only: the covering flush is the chain sync below. The record
+    // names a nonce minted for this supervisor process, so it means nothing
+    // once that process is gone.
+    mvm_core::atomic_io::atomic_write_new_submitted(
         &dir.join(wire::INSTANCE_FILE),
         &serde_json::to_vec(&instance)?,
     )?;

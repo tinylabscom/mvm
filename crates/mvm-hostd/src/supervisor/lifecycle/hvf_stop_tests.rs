@@ -253,6 +253,34 @@ fn same_name_start_refuses_without_replacing_original_identity() {
 }
 
 #[test]
+fn provisioned_instance_file_is_private_and_a_planted_one_is_not_replaced() {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = home();
+    let (_owner, _) = control("private-instance");
+    let path = wire::state_dir("private-instance")
+        .unwrap()
+        .join(wire::INSTANCE_FILE);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let dir = wire::state_dir("planted").unwrap();
+    mvm_core::config::create_private_dir(&dir).unwrap();
+    let planted = dir.join(wire::INSTANCE_FILE);
+    std::fs::write(&planted, b"planted").unwrap();
+    let stop = Box::leak(Box::new(AtomicBool::new(false)));
+    let refusal = StopControl::start("planted", stop)
+        .err()
+        .expect("a planted instance file is refused");
+    assert!(
+        mvm_core::atomic_io::is_already_exists(&refusal),
+        "refused for the wrong reason: {refusal:#}"
+    );
+    assert_eq!(std::fs::read(&planted).unwrap(), b"planted");
+}
+
+#[test]
 fn terminal_publication_failure_keeps_evidence_and_refuses_success() {
     let _home = home();
     let (owner, _) = control("failed-terminal");

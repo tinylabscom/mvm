@@ -58,8 +58,10 @@ pub(in crate::stream) fn publish_seed(dir: &Path, seed: &TranscriptManifest) -> 
     );
     mvm_core::transcript::verify_sealed_root(seed)?;
     let body = serde_json::to_vec(seed)?;
-    mvm_core::util::atomic_io::atomic_write_new(&dir.join(SEED_FILENAME), &body)?;
-    File::open(dir)?.sync_all()?;
+    // Submitted, not flushed: every caller records the opening in the audit
+    // chain next, and that entry's device flush covers the seed and its name.
+    mvm_core::util::atomic_io::atomic_write_new_submitted(&dir.join(SEED_FILENAME), &body)?;
+    mvm_core::util::atomic_io::submit_file_data(&File::open(dir)?)?;
     Ok(())
 }
 
