@@ -2,7 +2,7 @@ use sha2::Digest as _;
 
 mod critical;
 mod output_parent;
-pub use critical::{state_cells_dir_at, topologies_dir_at};
+pub use critical::{liveness_dir_at, state_cells_dir_at, topologies_dir_at};
 pub use output_parent::{create_output_parent, create_private_dir_resolved};
 
 /// Default Firecracker version, overridable at build time via `MVM_FC_VERSION` env var.
