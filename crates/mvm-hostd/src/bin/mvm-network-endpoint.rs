@@ -33,7 +33,7 @@ use secrecy::ExposeSecret as _;
 use tracing::{info, warn};
 
 use mvm_hostd::keyholder::secret_placeholder_env;
-use mvm_hostd::supervisor::endpoint::epoch_admission::EndpointEpochGate;
+use mvm_hostd::supervisor::endpoint::epoch_admission::{self, EndpointEpochGate};
 use mvm_hostd::supervisor::endpoint::flowmux::{
     FlowMuxIngressHandle, FlowMuxSession, FlowMuxVmResources, registry::RegistryLimits,
 };
@@ -41,6 +41,10 @@ use mvm_hostd::supervisor::endpoint::network_endpoint::{
     EgressMode, EndpointConfig, EndpointHandshake, EndpointNetworkProjection, EndpointTransport,
     ResolverBackend, assemble_projected, fingerprint_bound_secrets, parse,
 };
+
+/// Exit status of an endpoint that closed because the workload ledger
+/// stopped admitting its plan's execution epoch while it served.
+const EXIT_EPOCH_REVOKED: i32 = 3;
 
 fn main() -> Result<()> {
     mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-network-endpoint");
@@ -194,6 +198,26 @@ fn main() -> Result<()> {
         network_projection.with_audit_sink(sink)
     } else {
         network_projection
+    };
+
+    // A flow opened before the ledger stops admitting this plan's epoch is
+    // not decided again while it relays, so a workload endpoint asks the
+    // ledger on a fixed interval while it serves. On a refusal it records the
+    // revocation once and exits: process exit closes every flow, the session
+    // and the listeners at once, reused HTTP connections and UDP associations
+    // included, and the endpoint cannot come back if the ledger later admits
+    // the epoch again. Started after confinement, so the thread inherits it.
+    let _revocation = {
+        let recorder = network_projection.recorder();
+        let runtime = runtime.handle().clone();
+        epoch_admission::watch_config(
+            &cfg,
+            epoch_admission::REVOCATION_CHECK_INTERVAL,
+            move |gate, refusal| {
+                gate.record_revocation(recorder.as_deref(), &runtime, &refusal);
+                std::process::exit(EXIT_EPOCH_REVOKED);
+            },
+        )?
     };
 
     {
