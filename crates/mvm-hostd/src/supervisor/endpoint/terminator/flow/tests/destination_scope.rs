@@ -212,7 +212,11 @@ fn upstream_answering(
     let received = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&received);
     let served = std::thread::spawn(move || {
-        let Some(socket) = accept_within(&listener, Duration::from_secs(15)) else {
+        // No accept deadline: the listener must stay bound until the forward
+        // leg dials, however long the test body takes to get there under
+        // load. A deadline that lapsed first closed the port, and the dial
+        // was refused.
+        let Ok((socket, _)) = listener.accept() else {
             return;
         };
         let _ = socket.set_read_timeout(Some(Duration::from_secs(10)));
@@ -247,28 +251,6 @@ fn upstream_answering(
         addr,
         received,
         served,
-    }
-}
-
-/// Accept one connection, or give up after `limit` so a forward leg that
-/// never dials cannot hang the test.
-fn accept_within(listener: &TcpListener, limit: Duration) -> Option<std::net::TcpStream> {
-    listener.set_nonblocking(true).ok()?;
-    let deadline = std::time::Instant::now() + limit;
-    loop {
-        match listener.accept() {
-            Ok((socket, _)) => {
-                socket.set_nonblocking(false).ok()?;
-                return Some(socket);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                if std::time::Instant::now() >= deadline {
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => return None,
-        }
     }
 }
 
