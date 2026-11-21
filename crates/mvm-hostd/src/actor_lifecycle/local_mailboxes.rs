@@ -456,7 +456,7 @@ pub(crate) mod tests {
         let (policy, sealer) =
             crate::mailbox_launch::derive_launch_keys(dir.path(), &derived.grant, &Key::random())
                 .unwrap()
-                .trust();
+                .trust(derived.grant.epoch);
         assert_eq!(sealer.capability, derived.child_capability.grant);
         assert_eq!(policy.context.expected_tenant, derived.address.tenant);
         assert_eq!(policy.context.expected_recipient, derived.address.recipient);

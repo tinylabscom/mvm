@@ -17,6 +17,7 @@ use mvm_contract::protocol::mailbox::{
     SignedMailboxDeliveryAck, SignedMailboxDeliveryLease,
 };
 use mvm_core::crypto::aead::{self, Key};
+use mvm_core::host_interface::epoch_gate::admit_at;
 use mvm_core::host_interface::workload::DestinationTip;
 use mvm_core::mailbox::conversation_wire::{
     ConversationBinding, ConversationRequest, ConversationResponse,
@@ -41,9 +42,11 @@ use crate::mailbox_launch::actor_template::{
     ActorEndpointMaterial, ActorPeerBinding, ActorPeerRole,
 };
 
+mod guest_requests;
 mod scope;
 use crate::mailbox_commit::{ActorJournal, ActorOrdering, actor_destination_id, require_reached};
-use scope::{ScopedHistory, address, call_policy, context, key, reader_scope, storage};
+use guest_requests::{AckRequest, ReplyRequest};
+use scope::{ScopedHistory, address, key, reader_scope, storage};
 
 const MAX_RETAINED_CALLS: usize = 4096;
 const MAX_SEGMENT_RECORDS: usize = 64;
@@ -95,6 +98,8 @@ pub struct ActorOperationConfig {
     /// Aggregate disk allowance, including retained call metadata and all segments.
     pub max_storage_bytes: usize,
     pub now_unix_ms: i64,
+    /// This unit's execution epoch, read from the epoch gate when it bound.
+    pub current_epoch: mvm_contract::protocol::mailbox::ExecutionEpoch,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +152,9 @@ pub struct ActorConversationEndpoint {
     /// Orders every journal's commits through the workload ledger; absent for
     /// a development launch.
     ordering: Option<Arc<ActorOrdering>>,
+    /// Asked before each new peer acceptance; absent in unit tests that bind
+    /// no ledger.
+    unit_gate: Option<super::UnitGate>,
     _lock: FileLock,
 }
 
@@ -160,6 +168,10 @@ impl ActorConversationEndpoint {
             .map_err(storage)?;
         if config.binding.address != material.address
             || config.binding.policy_epoch != material.template.capability.policy_epoch
+            || config
+                .plan
+                .mailbox
+                .is_none_or(|grant| admit_at(config.current_epoch, grant.epoch).is_err())
         {
             return Err(Refusal::NotAuthorized);
         }
@@ -246,6 +258,7 @@ impl ActorConversationEndpoint {
             clock_origin_ms,
             poisoned: false,
             ordering: None,
+            unit_gate: None,
             _lock: lock,
         };
         if !existed {
@@ -260,6 +273,41 @@ impl ActorConversationEndpoint {
     pub(crate) fn with_ordering(mut self, ordering: Arc<ActorOrdering>) -> Self {
         self.ordering = Some(ordering);
         self
+    }
+
+    /// Ask the unit's epoch gate before accepting each peer frame, so a
+    /// replacement or quarantine committed after bind refuses the next one.
+    #[must_use]
+    pub(crate) fn gated(mut self, gate: super::UnitGate) -> Self {
+        self.unit_gate = Some(gate);
+        self
+    }
+
+    fn admit_unit(&self) -> Result<()> {
+        self.unit_gate
+            .as_ref()
+            .map_or(Ok(()), super::UnitGate::admit)
+    }
+
+    /// The receipt this endpoint already gave for exactly these bytes, if any.
+    fn accepted_receipt(
+        &self,
+        index: usize,
+        envelope: &MailboxEnvelope,
+        capability: &SignedMailboxCapability,
+    ) -> Result<Option<SignedDestinationReceipt>> {
+        if !self.state.records[index].initialized {
+            return Ok(None);
+        }
+        let (journal, anchor) = self.journal(index)?;
+        journal
+            .accepted_local_receipt(
+                envelope,
+                capability,
+                &self.material.authority_key(),
+                &anchor,
+            )
+            .map_err(storage)
     }
 
     /// The anchor to open a journal with, and the tip the ledger holds for it
@@ -470,7 +518,7 @@ impl ActorConversationEndpoint {
         let record = &self.state.records[index];
         if record.direction == Direction::Outbound {
             let mut conversation = self.conversation(index, peer)?;
-            let policy = call_policy(peer, self.now()?)?;
+            let policy = self.call_policy(peer, self.now()?)?;
             conversation
                 .enqueue_call(CallAdmission {
                     envelope: &record.call,
@@ -570,7 +618,7 @@ impl ActorConversationEndpoint {
             {
                 return Err(Refusal::NotAuthorized);
             }
-            let policy = call_policy(&peer, now)?;
+            let policy = self.call_policy(&peer, now)?;
             let opened = mvm_core::mailbox::open_authenticated_envelope(
                 &record.call,
                 &peer.send_capability,
@@ -646,7 +694,7 @@ impl ActorConversationEndpoint {
             &self.material.sender_key(),
         )
         .map_err(|_| Refusal::NotAuthorized)?;
-        let policy = call_policy(&peer, now)?;
+        let policy = self.call_policy(&peer, now)?;
         mvm_core::mailbox::open_authenticated_envelope(
             &call,
             &peer.send_capability,
@@ -893,7 +941,7 @@ impl ActorConversationEndpoint {
         reply: SignedMailboxCapability,
     ) -> Result<SignedDestinationReceipt> {
         let now = self.now()?;
-        let policy = call_policy(peer, now)?;
+        let policy = self.call_policy(peer, now)?;
         let opened = mvm_core::mailbox::open_authenticated_envelope(
             &envelope,
             &peer.send_capability,
@@ -939,12 +987,12 @@ impl ActorConversationEndpoint {
         {
             return Err(Refusal::NotAuthorized);
         }
-        let index = if let Some(index) = self
+        let existing = self
             .state
             .records
             .iter()
-            .position(|record| record.header.message_id == header.message_id)
-        {
+            .position(|record| record.header.message_id == header.message_id);
+        if let Some(index) = existing {
             let previous = &self.state.records[index];
             if previous.direction != Direction::Inbound
                 || previous.peer != peer.parent_address
@@ -953,6 +1001,14 @@ impl ActorConversationEndpoint {
             {
                 return Err(Refusal::NotAuthorized);
             }
+            if let Some(receipt) = self.accepted_receipt(index, &envelope, &peer.send_capability)? {
+                return Ok(receipt);
+            }
+        }
+        // After recovery, so a retry of a frame already accepted still gets
+        // its receipt; only a new acceptance needs the unit to be current.
+        self.admit_unit()?;
+        let index = if let Some(index) = existing {
             index
         } else {
             if self.state.records.iter().any(|record| {
@@ -1008,7 +1064,7 @@ impl ActorConversationEndpoint {
             if record.direction != Direction::Outbound || record.peer != peer.child_address {
                 continue;
             }
-            let context = context(
+            let context = self.context(
                 &peer.reply_header,
                 &record.reply_capability,
                 self.now()?,
@@ -1032,6 +1088,12 @@ impl ActorConversationEndpoint {
             {
                 return Err(Refusal::NotAuthorized);
             }
+            if let Some(receipt) =
+                self.accepted_receipt(index, &envelope, &record.reply_capability)?
+            {
+                return Ok(receipt);
+            }
+            self.admit_unit()?;
             let mut conversation = self.conversation(index, peer)?;
             return conversation
                 .accept_reply(
@@ -1045,320 +1107,6 @@ impl ActorConversationEndpoint {
     }
 }
 
-impl ActorConversationEndpoint {
-    fn receive_request(
-        &mut self,
-        authority: &CurrentBootAuthority,
-    ) -> Result<ConversationResponse> {
-        for index in 0..self.state.records.len() {
-            let record = &self.state.records[index];
-            if record.direction != Direction::Inbound || record.acknowledged {
-                continue;
-            }
-            let peer = self.peer(record.peer)?;
-            self.initialize_call(index, &peer)?;
-            let record = &self.state.records[index];
-            let context = context(
-                &peer.call.header,
-                authority.capability(),
-                self.now()?,
-                MailboxOperation::Receive,
-            );
-            let (mut journal, anchor) = self.journal(index)?;
-            let payload_key = peer.call_key();
-            let sender = key(peer.parent_sender_key)?;
-            let signer = self.material.authority_key();
-            let leased = journal
-                .lease_next(
-                    JournalGuestLease {
-                        receive: JournalReceive {
-                            capability: authority.capability(),
-                            context: &context,
-                            encryption_key: &payload_key,
-                            sender_key: &sender,
-                        },
-                        plan: authority.grant(),
-                        scope: reader_scope(authority, &context),
-                        enrollment: authority.enrollment(),
-                        challenge: authority.challenge(),
-                        possession_signature: authority.possession_signature(),
-                        signer: &signer,
-                    },
-                    |tip| anchor.advance(tip),
-                )
-                .map_err(storage)?;
-            let Some(leased) = leased else {
-                continue;
-            };
-            if leased.lease().lease.message_id != record.header.message_id {
-                return Err(Refusal::Unavailable);
-            }
-            let response = ConversationResponse::Delivery {
-                header: Box::new(record.header.clone()),
-                payload: leased.payload().to_vec(),
-                lease: Box::new(leased.lease().clone()),
-            };
-            let mut next = self.state.clone();
-            next.records[index].delivery = Some(leased.lease().clone());
-            self.commit(next)?;
-            return Ok(response);
-        }
-        Ok(ConversationResponse::Pending)
-    }
-
-    fn queue_reply(
-        &mut self,
-        boot: BootId,
-        request: ReplyRequest<'_>,
-    ) -> Result<ConversationResponse> {
-        let index = self
-            .state
-            .records
-            .iter()
-            .position(|record| {
-                record.direction == Direction::Inbound
-                    && record.header.message_id == request.request_message_id
-            })
-            .ok_or(Refusal::NotAuthorized)?;
-        let record = &self.state.records[index];
-        if record.delivery.is_none() {
-            return Err(Refusal::NotAuthorized);
-        }
-        if request.payload.len() > record.reply_capability.grant.max_payload_bytes as usize {
-            return Err(Refusal::Oversized(
-                record.reply_capability.grant.max_payload_bytes as usize,
-            ));
-        }
-        let peer = self.peer(record.peer)?;
-        let now = self.now()?;
-        let context = context(
-            &peer.reply_header,
-            &record.reply_capability,
-            now,
-            MailboxOperation::Reply,
-        );
-        if let Some(envelope) = &record.reply {
-            let opened = mvm_core::mailbox::open_authenticated_envelope(
-                envelope,
-                &record.reply_capability,
-                &context,
-                &peer.reply_key(),
-                &self.material.sender_key().verifying_key(),
-                &key(peer.parent_authority_key)?,
-                &mut InMemoryReplayProtector::default(),
-            )
-            .map_err(|_| Refusal::NotAuthorized)?;
-            if opened.header().message_id != request.message_id
-                || opened.header().content_type != *request.content_type
-                || opened.payload() != request.payload
-            {
-                return Err(Refusal::NotAuthorized);
-            }
-            return Ok(ConversationResponse::Queued {
-                call_message_id: request.request_message_id,
-            });
-        }
-        if request.message_id.as_bytes() == &[0; 32]
-            || self.state.records.iter().any(|record| {
-                record.header.message_id == request.message_id
-                    || record
-                        .reply_header
-                        .as_ref()
-                        .is_some_and(|header| header.message_id == request.message_id)
-            })
-        {
-            return Err(Refusal::NotAuthorized);
-        }
-        let mut header = peer.reply_header.clone();
-        header.sender_boot = boot;
-        header.message_id = request.message_id;
-        header.correlation_id = record.header.correlation_id;
-        header.causation_id = CausationId::from_bytes(*record.header.message_id.as_bytes());
-        header.capability_id = record.reply_capability.grant.capability_id;
-        header.issued_at_unix_ms = now;
-        header.expires_at_unix_ms = record.reply_capability.grant.expires_at_unix_ms;
-        header.sequence = record.header.sequence;
-        header.nonce = ReplayNonce::from_bytes(rand::random());
-        header.content_type = request.content_type.clone();
-        header.plaintext_len = request.payload.len().try_into().map_err(|_| {
-            Refusal::Oversized(record.reply_capability.grant.max_payload_bytes as usize)
-        })?;
-        let mut routing = peer.reply_routing.clone();
-        routing.expires_at_unix_ms = header.expires_at_unix_ms;
-        routing.delivery_id = DeliveryId::from_bytes(rand::random());
-        let envelope = mvm_core::mailbox::seal_envelope(
-            SealRequest {
-                routing,
-                header: header.clone(),
-                plaintext: request.payload,
-            },
-            &peer.reply_key(),
-            &self.material.sender_key(),
-        )
-        .map_err(|_| Refusal::NotAuthorized)?;
-        mvm_core::mailbox::open_authenticated_envelope(
-            &envelope,
-            &record.reply_capability,
-            &context,
-            &peer.reply_key(),
-            &self.material.sender_key().verifying_key(),
-            &key(peer.parent_authority_key)?,
-            &mut InMemoryReplayProtector::default(),
-        )
-        .map_err(|_| Refusal::NotAuthorized)?;
-        let mut next = self.state.clone();
-        self.charge_message(&mut next, now)?;
-        next.records[index].reply = Some(envelope);
-        next.records[index].reply_header = Some(header);
-        self.commit(next)?;
-        Ok(ConversationResponse::Queued {
-            call_message_id: request.request_message_id,
-        })
-    }
-
-    fn receive_result(
-        &mut self,
-        authority: &CurrentBootAuthority,
-        id: MessageId,
-    ) -> Result<ConversationResponse> {
-        let index = self
-            .state
-            .records
-            .iter()
-            .position(|record| {
-                record.direction == Direction::Outbound && record.header.message_id == id
-            })
-            .ok_or(Refusal::NotAuthorized)?;
-        let record = &self.state.records[index];
-        let peer = self.peer(record.peer)?;
-        let context = context(
-            &peer.reply_header,
-            authority.capability(),
-            self.now()?,
-            MailboxOperation::Receive,
-        );
-        let mut conversation = self.conversation(index, &peer)?;
-        let identity = ReplayIdentity::from_header(&record.header);
-        match conversation
-            .receive_result(identity, authority.capability(), &context)
-            .map_err(storage)?
-        {
-            CallResult::Pending => Ok(ConversationResponse::Pending),
-            CallResult::TimedOut => Ok(ConversationResponse::TimedOut),
-            CallResult::Settled => Ok(ConversationResponse::Settled),
-            CallResult::Reply(opened) => {
-                let payload_key = peer.reply_key();
-                let sender = key(peer.child_sender_key)?;
-                let signer = self.material.authority_key();
-                let leased = conversation
-                    .lease_result(
-                        identity,
-                        JournalGuestLease {
-                            receive: JournalReceive {
-                                capability: authority.capability(),
-                                context: &context,
-                                encryption_key: &payload_key,
-                                sender_key: &sender,
-                            },
-                            plan: authority.grant(),
-                            scope: reader_scope(authority, &context),
-                            enrollment: authority.enrollment(),
-                            challenge: authority.challenge(),
-                            possession_signature: authority.possession_signature(),
-                            signer: &signer,
-                        },
-                    )
-                    .map_err(storage)?
-                    .ok_or(Refusal::Unavailable)?;
-                if leased.lease().lease.message_id != opened.header().message_id {
-                    return Err(Refusal::Unavailable);
-                }
-                let response = ConversationResponse::Delivery {
-                    header: Box::new(opened.header().clone()),
-                    payload: leased.payload().to_vec(),
-                    lease: Box::new(leased.lease().clone()),
-                };
-                let mut next = self.state.clone();
-                next.records[index].delivery = Some(leased.lease().clone());
-                self.commit(next)?;
-                Ok(response)
-            }
-        }
-    }
-
-    fn acknowledge(
-        &mut self,
-        authority: &CurrentBootAuthority,
-        request: AckRequest<'_>,
-    ) -> Result<ConversationResponse> {
-        let signed = request.signed.ok_or(Refusal::NotAuthorized)?;
-        let index = self
-            .state
-            .records
-            .iter()
-            .position(|record| {
-                record.direction == request.direction && record.header.message_id == request.call_id
-            })
-            .ok_or(Refusal::NotAuthorized)?;
-        let record = &self.state.records[index];
-        if record.delivery.as_ref() != Some(request.lease)
-            || signed.ack.lease != *request.lease
-            || request.lease.lease.message_id != request.delivered_id
-        {
-            return Err(Refusal::NotAuthorized);
-        }
-        let peer = self.peer(record.peer)?;
-        let header = if request.direction == Direction::Outbound {
-            &peer.reply_header
-        } else {
-            &peer.call.header
-        };
-        let context = context(
-            header,
-            authority.capability(),
-            self.now()?,
-            MailboxOperation::Receive,
-        );
-        let payload_key = if request.direction == Direction::Outbound {
-            peer.reply_key()
-        } else {
-            peer.call_key()
-        };
-        let sender = key(if request.direction == Direction::Outbound {
-            peer.child_sender_key
-        } else {
-            peer.parent_sender_key
-        })?;
-        let ack = JournalGuestAck {
-            receive: JournalReceive {
-                capability: authority.capability(),
-                context: &context,
-                encryption_key: &payload_key,
-                sender_key: &sender,
-            },
-            plan: authority.grant(),
-            scope: reader_scope(authority, &context),
-            enrollment: authority.enrollment(),
-            signed,
-        };
-        if request.direction == Direction::Outbound {
-            let mut conversation = self.conversation(index, &peer)?;
-            conversation
-                .acknowledge_result_signed(ReplayIdentity::from_header(&record.header), ack)
-                .map_err(storage)?;
-        } else {
-            let (mut journal, anchor) = self.journal(index)?;
-            journal
-                .acknowledge_signed(ack, |tip| anchor.advance(tip))
-                .map_err(storage)?;
-        }
-        let mut next = self.state.clone();
-        next.records[index].acknowledged = true;
-        self.commit(next)?;
-        Ok(ConversationResponse::Acknowledged)
-    }
-}
-
 struct CallRequest<'a> {
     destination: MailboxAddress,
     message_id: MessageId,
@@ -1366,21 +1114,6 @@ struct CallRequest<'a> {
     deadline: i64,
     content_type: &'a ContentType,
     payload: &'a [u8],
-}
-
-struct ReplyRequest<'a> {
-    request_message_id: MessageId,
-    message_id: MessageId,
-    content_type: &'a ContentType,
-    payload: &'a [u8],
-}
-
-struct AckRequest<'a> {
-    direction: Direction,
-    call_id: MessageId,
-    delivered_id: MessageId,
-    lease: &'a SignedMailboxDeliveryLease,
-    signed: Option<&'a SignedMailboxDeliveryAck>,
 }
 
 impl ConversationOperations for ActorConversationEndpoint {
@@ -1497,6 +1230,7 @@ mod tests {
     use crate::actor_lifecycle::{ActorMailboxes, local_mailboxes::LocalActorMailboxes};
     use crate::mailbox_launch::actor_template;
     use ed25519_dalek::SigningKey;
+    use mvm_contract::protocol::mailbox::ExecutionEpoch;
     use mvm_core::mailbox::reader::MailboxReaderBootBinding;
 
     struct Pair {
@@ -1532,6 +1266,17 @@ mod tests {
         plan: &ExecutionPlan,
         binding: &ConversationBinding,
     ) -> ActorConversationEndpoint {
+        let current = ExecutionEpoch::new(plan.execution_epoch).unwrap();
+        open_at(directory, name, plan, binding, current).unwrap()
+    }
+
+    fn open_at(
+        directory: &std::path::Path,
+        name: &str,
+        plan: &ExecutionPlan,
+        binding: &ConversationBinding,
+        current_epoch: ExecutionEpoch,
+    ) -> Result<ActorConversationEndpoint> {
         let material = actor_template::endpoint_material(directory, plan)
             .unwrap()
             .unwrap();
@@ -1542,10 +1287,10 @@ mod tests {
                 directory: directory.join(name),
                 max_storage_bytes: material.max_storage_bytes as usize,
                 now_unix_ms: actor_template::current_time_ms().unwrap(),
+                current_epoch,
             },
             material,
         )
-        .unwrap()
     }
 
     fn pair() -> Pair {
@@ -1717,6 +1462,139 @@ mod tests {
             &SigningKey::from_bytes(&[ack_seed; 32]),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn an_endpoint_opens_only_at_its_units_gated_epoch() {
+        use crate::mailbox_service::bound_epoch;
+        use crate::policy_generation::workload_store::OwnedWorkloadStore;
+        use mvm_core::host_interface::workload::WorkloadChange;
+
+        let pair = pair();
+        let ledger = tempfile::tempdir().unwrap();
+        let dir = pair.directory.path();
+        let parent = pair.parent_plan.workload.0.clone();
+        let child = pair.child_plan.workload.0.clone();
+        let open_parent = |name: &str| {
+            let current = bound_epoch(ledger.path(), &parent).unwrap();
+            open_at(dir, name, &pair.parent_plan, &pair.parent_binding, current)
+        };
+        let open_child = |name: &str| {
+            let current = bound_epoch(ledger.path(), &child).unwrap();
+            open_at(dir, name, &pair.child_plan, &pair.child_binding, current)
+        };
+        assert!(open_parent("gated-parent-1").is_ok());
+        assert!(open_child("gated-child-1").is_ok());
+
+        let store = OwnedWorkloadStore::open(ledger.path()).unwrap();
+        store
+            .commit(&WorkloadChange::Replace {
+                workload: parent.clone(),
+                from_epoch: ExecutionEpoch::FIRST,
+            })
+            .unwrap();
+        assert!(matches!(
+            open_parent("gated-parent-2"),
+            Err(Refusal::NotAuthorized)
+        ));
+        assert!(open_child("gated-child-2").is_ok());
+
+        store
+            .commit(&WorkloadChange::Quarantine {
+                workload: child.clone(),
+            })
+            .unwrap();
+        let refused = bound_epoch(ledger.path(), &child).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            bound_epoch(ledger.path(), &parent).unwrap(),
+            ExecutionEpoch::new(2).unwrap()
+        );
+    }
+
+    /// A second endpoint for the pair's child that asks the ledger under
+    /// `ledger` before each peer frame, as the mailbox process binds it.
+    fn gated_child(pair: &Pair, ledger: &std::path::Path) -> ActorConversationEndpoint {
+        let gate = super::super::UnitGate::bind(ledger, &pair.child_plan.workload.0).unwrap();
+        open(
+            pair.directory.path(),
+            "gated-child-state",
+            &pair.child_plan,
+            &pair.child_binding,
+        )
+        .gated(gate)
+    }
+
+    fn commit(
+        ledger: &std::path::Path,
+        change: mvm_core::host_interface::workload::WorkloadChange,
+    ) {
+        crate::policy_generation::workload_store::OwnedWorkloadStore::open(ledger)
+            .unwrap()
+            .commit(&change)
+            .unwrap();
+    }
+
+    fn replaced(unit: &str) -> mvm_core::host_interface::workload::WorkloadChange {
+        mvm_core::host_interface::workload::WorkloadChange::Replace {
+            workload: unit.to_owned(),
+            from_epoch: ExecutionEpoch::FIRST,
+        }
+    }
+
+    fn dispatch_one(pair: &mut Pair) -> ActorDispatch {
+        let child_address = pair.child_binding.address;
+        queue(&mut pair.parent, child_address, 40, b"call").unwrap();
+        pair.parent.pending_dispatches().unwrap().pop().unwrap()
+    }
+
+    #[test]
+    fn a_running_endpoint_refuses_a_peer_frame_once_its_unit_is_replaced() {
+        let mut pair = pair();
+        let ledger = tempfile::tempdir().unwrap();
+        let mut child = gated_child(&pair, ledger.path());
+        let dispatch = dispatch_one(&mut pair);
+        commit(ledger.path(), replaced(&pair.child_plan.workload.0));
+        let stale = mvm_core::host_interface::Denial::StaleEpoch { got: 1, current: 2 };
+        assert_eq!(
+            child.accept_peer(dispatch.frame.clone()),
+            Err(Refusal::Mailbox(stale.to_string()))
+        );
+        assert!(child.state.records.is_empty(), "nothing was recorded");
+        // The frame itself is good: an endpoint that asks no ledger takes it.
+        assert!(pair.child.accept_peer(dispatch.frame).is_ok());
+    }
+
+    #[test]
+    fn a_running_endpoint_refuses_a_peer_frame_once_its_unit_is_quarantined() {
+        let mut pair = pair();
+        let ledger = tempfile::tempdir().unwrap();
+        let mut child = gated_child(&pair, ledger.path());
+        let dispatch = dispatch_one(&mut pair);
+        let unit = pair.child_plan.workload.0.clone();
+        commit(
+            ledger.path(),
+            mvm_core::host_interface::workload::WorkloadChange::Quarantine {
+                workload: unit.clone(),
+            },
+        );
+        let quarantined = mvm_core::host_interface::Denial::WorkloadQuarantined(unit);
+        assert_eq!(
+            child.accept_peer(dispatch.frame),
+            Err(Refusal::Mailbox(quarantined.to_string()))
+        );
+    }
+
+    #[test]
+    fn a_retried_frame_accepted_before_the_replacement_still_gets_its_receipt() {
+        let mut pair = pair();
+        let ledger = tempfile::tempdir().unwrap();
+        let mut child = gated_child(&pair, ledger.path());
+        let dispatch = dispatch_one(&mut pair);
+        let accepted = child.accept_peer(dispatch.frame.clone()).unwrap();
+        commit(ledger.path(), replaced(&pair.child_plan.workload.0));
+        assert_eq!(child.accept_peer(dispatch.frame), Ok(accepted));
+        assert_eq!(child.state.records.len(), 1);
     }
 
     #[test]
@@ -2161,6 +2039,7 @@ mod tests {
                     directory: path,
                     max_storage_bytes: material.max_storage_bytes as usize,
                     now_unix_ms: actor_template::current_time_ms().unwrap(),
+                    current_epoch: mvm_contract::protocol::mailbox::ExecutionEpoch::new(1).unwrap(),
                 },
                 material
             )

@@ -230,12 +230,7 @@ impl DerivedMailboxKeys {
         use mvm_core::mailbox::journal::HistoryKeyCustody as _;
 
         let header = &self.template.header;
-        let address = MailboxAddress {
-            tenant: header.tenant,
-            authorization_domain: header.authorization_domain,
-            mailbox: header.mailbox,
-            recipient: header.recipient,
-        };
+        let address = self.address();
         if address != retained.address()
             || self.template.capability.address != address
             || header.execution_epoch != retained.epoch()
@@ -259,9 +254,22 @@ impl DerivedMailboxKeys {
         Ok(self)
     }
 
-    /// The host trust and sealer these keys stand for. Pure: no file is read,
-    /// so it can be rebuilt on every dial attempt.
-    pub fn trust(&self) -> (MailboxPolicy, GuestSealer) {
+    /// The mailbox address these keys were derived for.
+    pub(crate) fn address(&self) -> MailboxAddress {
+        let header = &self.template.header;
+        MailboxAddress {
+            tenant: header.tenant,
+            authorization_domain: header.authorization_domain,
+            mailbox: header.mailbox,
+            recipient: header.recipient,
+        }
+    }
+
+    /// The host trust and sealer these keys stand for, accepting messages at
+    /// `current`: the receiving unit's epoch, which the caller read from the
+    /// epoch gate when it bound ([`crate::mailbox_service::bound_epoch`]).
+    /// Pure: no file is read, so it can be rebuilt on every dial attempt.
+    pub fn trust(&self, current: ExecutionEpoch) -> (MailboxPolicy, GuestSealer) {
         let sender_key = SigningKey::from_bytes(&self.sender);
         let authority_key = SigningKey::from_bytes(&self.authority);
         let template = self.template.clone();
@@ -275,7 +283,7 @@ impl DerivedMailboxKeys {
                 expected_recipient: h.recipient,
                 acting_principal: template.capability.subject,
                 expected_capability_issuer: template.capability.issuer,
-                current_execution_epoch: h.execution_epoch,
+                current_execution_epoch: current,
                 current_policy_epoch: h.policy_epoch,
                 required_operation: MailboxOperation::Send,
                 now_unix_ms: now_unix_ms(),
@@ -285,6 +293,7 @@ impl DerivedMailboxKeys {
             encryption_key: Key::from_bytes(self.encryption),
             sender_key: sender_key.verifying_key(),
             authority_key: authority_key.verifying_key(),
+            unit_gate: None,
         };
         let sealer = GuestSealer {
             encryption_key: Key::from_bytes(self.encryption),
@@ -364,13 +373,15 @@ pub fn derive_launch_keys(
     })
 }
 
-/// The host trust and sealer for `grant`, from the host key directory.
+/// The host trust and sealer for `grant`, from the host key directory,
+/// accepting messages at the receiving unit's `current` epoch.
 pub fn host_trust(
     keys_dir: &Path,
     grant: &MailboxGrant,
     secret: &Key,
+    current: ExecutionEpoch,
 ) -> Result<(MailboxPolicy, GuestSealer)> {
-    Ok(derive_launch_keys(keys_dir, grant, secret)?.trust())
+    Ok(derive_launch_keys(keys_dir, grant, secret)?.trust(current))
 }
 
 const VALID_FOR_MS: i64 = 60 * 60 * 1000;
@@ -521,13 +532,16 @@ pub struct ServePaths {
 
 /// Bind the mailbox and dial for the VM lifetime: fast until a quiet window,
 /// slow while idle, and fast again after a guest frame. Returns immediately.
+/// `current` is the receiving unit's epoch, read from the epoch gate at bind
+/// ([`crate::mailbox_service::bound_epoch`]).
 pub fn serve_derived(
     grant: MailboxGrant,
     keys: DerivedMailboxKeys,
     paths: ServePaths,
     limits: MailboxLimits,
+    current: ExecutionEpoch,
 ) -> MailboxLaunch {
-    serve_derived_with(grant, keys, paths, limits, FAST_DIAL_ATTEMPTS)
+    serve_derived_with(grant, keys, paths, limits, current, FAST_DIAL_ATTEMPTS)
 }
 
 fn serve_derived_with(
@@ -535,13 +549,14 @@ fn serve_derived_with(
     keys: DerivedMailboxKeys,
     paths: ServePaths,
     limits: MailboxLimits,
+    current: ExecutionEpoch,
     fast_attempts: u32,
 ) -> MailboxLaunch {
     let stop = Arc::new(AtomicBool::new(false));
     let service = Arc::new(OnceLock::new());
     let (thread_stop, thread_service) = (stop.clone(), service.clone());
     std::thread::spawn(move || {
-        let (trust, mut sealer) = keys.trust();
+        let (trust, mut sealer) = keys.trust(current);
         sealer.intent_dir = paths.intent_dir;
         let (Ok(trust), Ok(mut sealer)) = (trust.with_grant(&grant), sealer.with_grant(&grant))
         else {
@@ -734,7 +749,7 @@ mod tests {
         let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
         let intents = dir.path().join("intents");
         let sealer = || {
-            let (_, mut sealer) = keys.trust();
+            let (_, mut sealer) = keys.trust(epoch(1));
             sealer.intent_dir = Some(intents.clone());
             sealer.with_grant(&grant).unwrap()
         };
@@ -792,7 +807,14 @@ mod tests {
         let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
         // The guest port does not exist yet: every early dial fails, and with
         // a zero-length fast window all of them are on the slow schedule.
-        let launch = serve_derived_with(grant, keys, serve_paths(dir.path()), LAUNCH_LIMITS, 0);
+        let launch = serve_derived_with(
+            grant,
+            keys,
+            serve_paths(dir.path()),
+            LAUNCH_LIMITS,
+            epoch(1),
+            0,
+        );
         std::thread::sleep(Duration::from_millis(300));
         let listener = UnixListener::bind(dir.path().join("port.sock")).unwrap();
         let outbox = dir.path().join("outbox");
@@ -827,7 +849,14 @@ mod tests {
         let grant = grant(dir.path(), [8; 32]);
         let keys = derive_launch_keys(dir.path(), &grant, &test_secret()).unwrap();
         let stop = {
-            let launch = serve_derived_with(grant, keys, serve_paths(dir.path()), LAUNCH_LIMITS, 0);
+            let launch = serve_derived_with(
+                grant,
+                keys,
+                serve_paths(dir.path()),
+                LAUNCH_LIMITS,
+                epoch(1),
+                0,
+            );
             launch.stop.clone()
         };
         assert!(stop.load(Ordering::SeqCst));
@@ -880,7 +909,7 @@ mod tests {
     fn launch_against(dir: &Path, limits: MailboxLimits) -> MailboxLaunch {
         let grant = grant(dir, [7; 32]);
         let keys = derive_launch_keys(dir, &grant, &test_secret()).unwrap();
-        serve_derived_with(grant, keys, serve_paths(dir), limits, 300)
+        serve_derived_with(grant, keys, serve_paths(dir), limits, epoch(1), 300)
     }
 
     #[test]
@@ -936,8 +965,13 @@ mod tests {
     fn without_a_template_file_the_derived_defaults_serve_a_matching_grant() {
         let dir = keys_dir();
         assert!(!dir.path().join(TEMPLATE_FILE).exists());
-        let (policy, sealer) =
-            host_trust(dir.path(), &grant(dir.path(), [4; 32]), &test_secret()).unwrap();
+        let (policy, sealer) = host_trust(
+            dir.path(),
+            &grant(dir.path(), [4; 32]),
+            &test_secret(),
+            epoch(1),
+        )
+        .unwrap();
         assert_eq!(
             policy.authority_key,
             authority_key_for(dir.path(), &MailboxId::from_bytes([4; 32]), epoch(1)).unwrap()
@@ -956,12 +990,14 @@ mod tests {
             dir.path(),
             &grant_at(dir.path(), [4; 32], 1),
             &test_secret(),
+            epoch(1),
         )
         .unwrap();
         let (p2, _) = host_trust(
             dir.path(),
             &grant_at(dir.path(), [4; 32], 2),
             &test_secret(),
+            epoch(2),
         )
         .unwrap();
         assert_ne!(p1.sender_key, p2.sender_key);
@@ -972,7 +1008,7 @@ mod tests {
         let dir = keys_dir();
         let mut g = grant_at(dir.path(), [4; 32], 2);
         g.authority_key = grant_at(dir.path(), [4; 32], 1).authority_key;
-        let err = host_trust(dir.path(), &g, &test_secret())
+        let err = host_trust(dir.path(), &g, &test_secret(), epoch(1))
             .err()
             .expect("refused");
         assert_eq!(err.kind(), ErrorKind::PermissionDenied);
@@ -983,7 +1019,7 @@ mod tests {
         let dir = keys_dir();
         let mut g = grant(dir.path(), [4; 32]);
         g.authority_key = SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
-        let err = host_trust(dir.path(), &g, &test_secret())
+        let err = host_trust(dir.path(), &g, &test_secret(), epoch(1))
             .err()
             .expect("refused");
         assert_eq!(err.kind(), ErrorKind::PermissionDenied);
@@ -1007,9 +1043,14 @@ mod tests {
     fn a_template_file_overrides_the_defaults_and_a_malformed_one_is_refused() {
         let dir = keys_dir();
         std::fs::write(dir.path().join(TEMPLATE_FILE), b"{}").unwrap();
-        let err = host_trust(dir.path(), &grant(dir.path(), [4; 32]), &test_secret())
-            .err()
-            .expect("malformed template refused");
+        let err = host_trust(
+            dir.path(),
+            &grant(dir.path(), [4; 32]),
+            &test_secret(),
+            epoch(1),
+        )
+        .err()
+        .expect("malformed template refused");
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     }
 
@@ -1021,7 +1062,7 @@ mod tests {
         let keys = derive_launch_keys(dir.path(), &g, &test_secret()).unwrap();
         let wire = serde_json::to_vec(&keys).unwrap();
         let back: DerivedMailboxKeys = serde_json::from_slice(&wire).unwrap();
-        let (policy, sealer) = back.trust();
+        let (policy, sealer) = back.trust(epoch(1));
         assert_eq!(policy.authority_key.to_bytes(), g.authority_key);
         assert_eq!(
             sealer.authority_key.verifying_key().to_bytes(),

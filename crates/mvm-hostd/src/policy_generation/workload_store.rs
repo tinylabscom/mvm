@@ -21,6 +21,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use mvm_core::host_interface::destination::{is_hex64, parse_key};
+use mvm_core::host_interface::epoch_gate::admit_at;
 use mvm_core::host_interface::workload::{
     CanonicalLedger, DestinationCommit, DestinationEnrollment, DestinationEntry, MAX_DESTINATIONS,
     MAX_LEDGER_BYTES, PENDING_FILE, SignedPreparedHead, WorkloadChange, WorkloadCommit,
@@ -172,9 +173,9 @@ fn make_room(canonical: &mut CanonicalLedger, keep: &str) -> Result<()> {
         return Ok(());
     }
     let workloads = &canonical.workloads;
-    canonical
-        .destinations
-        .retain(|id, d| id == keep || workloads.entry(&d.workload).epoch == d.epoch);
+    canonical.destinations.retain(|id, d| {
+        id == keep || admit_at(workloads.entry(&d.workload).epoch, d.epoch).is_ok()
+    });
     while !fits(canonical)? {
         let oldest = canonical
             .destinations
@@ -401,7 +402,7 @@ impl WorkloadStore {
         let workload = canonical.workloads.entry(&enrollment.workload);
         refuse_unless(!workload.quarantined, "workload is quarantined")?;
         refuse_unless(
-            workload.epoch == enrollment.epoch,
+            admit_at(workload.epoch, enrollment.epoch).is_ok(),
             &format!(
                 "workload epoch changed: expected {}, current {}",
                 enrollment.epoch.get(),
@@ -460,9 +461,13 @@ impl WorkloadStore {
             "prepared head diverges from the destination's committed tip",
         )?;
         let workload = canonical.workloads.entry(&entry.workload);
-        refuse_unless(!workload.quarantined, "workload is quarantined")?;
+        // A retention head is the one commit a quarantined destination still makes.
         refuse_unless(
-            workload.epoch == entry.epoch,
+            !workload.quarantined || head.retention,
+            "workload is quarantined",
+        )?;
+        refuse_unless(
+            admit_at(workload.epoch, entry.epoch).is_ok(),
             &format!(
                 "workload epoch changed: expected {}, current {}",
                 entry.epoch.get(),

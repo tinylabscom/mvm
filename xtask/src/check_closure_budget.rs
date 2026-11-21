@@ -91,6 +91,7 @@ const MACOS_CLOSURE_BUDGET: usize = 346;
 /// Maximum distinct packages in the default Linux closure.
 /// Includes the shared authored-policy crate used by client and host admission;
 /// the extraction adds one first-party package and no third-party dependencies.
+/// Direct coordinator observation reuses the existing Unix socket dependencies.
 pub(crate) const CLOSURE_BUDGET: usize = 351;
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {

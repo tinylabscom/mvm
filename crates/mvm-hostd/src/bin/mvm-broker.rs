@@ -37,6 +37,7 @@ use tracing::{error, info, warn};
 
 use mvm_hostd::broker::audit_client::AuditClient;
 use mvm_hostd::broker::config::{SubprocessConfig, parse as parse_config};
+use mvm_hostd::broker::epoch::BrokerEpochGate;
 use mvm_hostd::broker::handlers::host_audit_v1::HostAuditV1Handler;
 use mvm_hostd::broker::handlers::host_beacon_v1::HostBeaconV1Handler;
 use mvm_hostd::broker::handlers::register_bound_handlers;
@@ -82,6 +83,11 @@ fn main() -> Result<()> {
         let listener = UnixListener::bind(&cfg.uds_path)
             .with_context(|| format!("mvm-broker UDS bind failed on {}", cfg.uds_path.display()))?;
         let mut registry = Registry::new();
+        registry.bind_epoch_gate(BrokerEpochGate::from_registration(
+            cfg.workload.as_deref(),
+            cfg.execution_epoch,
+            mvm_core::config::mvm_home_strict,
+        )?);
         registry
             .admit_capabilities(cfg.capability_bindings.clone())
             .context("load admitted extension capability bindings")?;

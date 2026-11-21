@@ -93,10 +93,12 @@ struct Fixture {
     audit_dir: PathBuf,
     scratch: PathBuf,
     key: SigningKey,
+    _environment: mvm_core::util::test_env::TestEnv,
 }
 
 impl Fixture {
     fn new() -> Self {
+        let environment = mvm_core::util::test_env::TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let audit_dir = dir.path().join("audit");
         let scratch = dir.path().join("scratch");
@@ -107,6 +109,7 @@ impl Fixture {
             audit_dir,
             scratch,
             key: fresh_key(),
+            _environment: environment,
         }
     }
 
@@ -121,6 +124,22 @@ impl Fixture {
 
 fn read_all(reader: &LocalAuditReader) -> AuditReadResponse {
     reader.read(&AuditReadRequest::builder().build()).unwrap()
+}
+
+#[test]
+fn fixture_retains_its_home_through_audit_state_cleanup() {
+    mvm_core::util::test_env::isolated_env_probe(|| {
+        let previous_home = std::env::var_os("MVM_HOME");
+        let fixture = Fixture::new();
+        let fixture_home = PathBuf::from(mvm_core::config::mvm_home());
+        assert_ne!(Some(fixture_home.as_os_str()), previous_home.as_deref());
+        assert!(fixture_home.is_dir());
+        let audit_dir = fixture.audit_dir.clone();
+        drop(fixture);
+        assert!(!audit_dir.exists());
+        assert_eq!(std::env::var_os("MVM_HOME"), previous_home);
+        assert!(!fixture_home.exists());
+    });
 }
 
 // ─── valid chains ────────────────────────────────────────────────────

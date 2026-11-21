@@ -52,6 +52,10 @@ const RAW_ALLOWED: &[(&str, &str)] = &[
         "documentation of the store",
     ),
     (
+        "crates/mvm-core/src/image_set/fixtures/prepared_owner.rs",
+        "test-only #[path] fixture enrolls a synthetic kernel bundle publisher",
+    ),
+    (
         "crates/mvm-client/src/instruction_trust/gate.rs",
         "instruction policy trust, not a bundle",
     ),
@@ -138,7 +142,7 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-fn is_production_source(rel: &str) -> bool {
+pub(crate) fn is_production_source(rel: &str) -> bool {
     rel.contains("/src/")
         && !rel.contains("/tests/")
         && !rel.ends_with("tests.rs")
@@ -148,7 +152,7 @@ fn is_production_source(rel: &str) -> bool {
 
 /// Text before the test module, which by convention closes the file: the first
 /// `#[cfg(test)]` whose item is a `mod` with "test" in its name.
-fn production_part(text: &str) -> &str {
+pub(crate) fn production_part(text: &str) -> &str {
     let re = regex::Regex::new(
         r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([a-z]+\))?\s+)?mod\s+\w*test",
     )

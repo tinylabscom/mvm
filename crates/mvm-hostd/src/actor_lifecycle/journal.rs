@@ -282,7 +282,7 @@ mod tests {
         };
         let derived =
             crate::mailbox_launch::derive_launch_keys(keys, &grant, &Key::random()).unwrap();
-        let (_, sealer) = derived.trust();
+        let (_, sealer) = derived.trust(epoch);
         let capability =
             mvm_core::mailbox::sign_capability(sealer.capability.clone(), &sealer.authority_key)
                 .unwrap();

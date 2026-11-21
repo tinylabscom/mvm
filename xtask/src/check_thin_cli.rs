@@ -98,6 +98,7 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("commands/mod.rs", BUILD),
     ("commands/pack/build.rs", BUILD),
     ("commands/shared/parse.rs", BUILD),
+    ("commands/vm/checkpoint/fork_vm_full.rs", BUILD),
     ("commands/vm/exec.rs", BUILD),
     ("commands/vm/exec/composition.rs", BUILD),
     ("commands/vm/exec/image_source.rs", BUILD),

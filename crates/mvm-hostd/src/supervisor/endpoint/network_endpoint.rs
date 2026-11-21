@@ -381,6 +381,15 @@ impl EndpointNetworkProjection {
             Some(policy) => build_egress_gate(policy),
             None => mvm_runtime::vmm::egress_gate::EgressGate::default_deny(),
         };
+        // Every decision asks the epoch gate first. A plan whose gate cannot
+        // be built is refused at start; should one get here, nothing passes.
+        let gate = match super::epoch_admission::EndpointEpochGate::for_config(cfg) {
+            Ok(Some(epoch)) => gate.with_admission(epoch.into_check()),
+            Ok(None) => gate,
+            Err(_) => {
+                gate.with_admission(mvm_runtime::vmm::egress_gate::AdmissionCheck::new(|| false))
+            }
+        };
         Self {
             gate: Arc::new(gate),
             // Attributed to this VM: the endpoint records unbound, and every

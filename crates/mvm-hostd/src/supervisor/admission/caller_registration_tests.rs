@@ -12,6 +12,9 @@ fn readonly_data_fixture() -> (tempfile::TempDir, std::fs::File) {
     std::fs::write(&path, [17; 512]).unwrap();
     let file = std::fs::File::open(&path).unwrap();
     std::fs::remove_file(path).unwrap();
+    // Pin the unlinked inode for the process: once freed, another thread's file
+    // can reuse its fd and inode numbers and make a closed descriptor look open.
+    std::mem::forget(file.try_clone().unwrap());
     (dir, file)
 }
 
@@ -315,6 +318,9 @@ fn assert_startup_lock_failure_cleanup(restore: bool) {
         contender.try_lock().is_err(),
         "failed adoption must not unlock another description"
     );
+    // A flock belongs to the open description, which a child forked by another
+    // test thread shares until it execs; unlock explicitly so dropping suffices.
+    lock_owner.unlock().unwrap();
     drop(lock_owner);
     contender.try_lock().unwrap();
 }
@@ -399,9 +405,9 @@ fn startup_preflight_refuses_collisions_aliases_linked_and_writable_without_clos
     let writable = std::fs::File::create(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
     assert!(validate_startup_descriptors(&[writable.as_raw_fd()]).is_err());
-    let closed = alias.as_raw_fd();
-    drop(alias);
-    assert!(validate_startup_descriptors(&[closed]).is_err());
+    // A number a sibling test could have reopened after a close proves nothing; no process
+    // can hold i32::MAX (descriptor limits are far lower), so it is never open.
+    assert!(validate_startup_descriptors(&[i32::MAX]).is_err());
     // These are descriptor-policy negatives, never native or signed-open proof.
 }
 

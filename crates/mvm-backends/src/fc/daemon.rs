@@ -1526,6 +1526,9 @@ mod tests {
     fn detached_launch_atomically_publishes_a_parseable_pid_before_exec() {
         use std::os::unix::fs::PermissionsExt;
 
+        // Other tests temporarily replace the process-wide PATH, which this spawn and the
+        // PATH read below resolve through.
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let root = tempfile::tempdir().expect("temporary launch root");
         let bin = root.path().join("bin");
         let vm_dir = root.path().join("vm");

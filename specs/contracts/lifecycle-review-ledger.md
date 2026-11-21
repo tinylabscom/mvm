@@ -14,6 +14,35 @@ separately, the files that were not read. Absence from the "read" column is not 
 soundness. "Read" is taken from the fixing PR descriptions and the review notes for the lane; the
 line ranges are as recorded there and were not re-derived when this file was written.
 
+## Direct coordinator process observation
+
+Reviewed the read-only `policy coordinator` route through client
+`process_status`, host observation, the bounded status exchange and connected
+socket peer helpers. Observation owns only its socket and drops it on every
+success or refusal. It neither launches a process nor initializes a home,
+keys, socket, spawn lock or durable store. Existing activation, pending
+obligations, publication recovery and resident ownership remain unchanged.
+
+Linux uses `SO_PEERCRED`; macOS reuses the connected-peer PID helper and adds
+`getpeereid` for the effective UID. The same connection supplies credentials
+before sending Status and carries the reply. Nonblocking connect and all
+status reads/writes share one absolute five-second IPC deadline. Unsupported
+platforms refuse. Canonicalization and OS scheduling stalls are not bounded.
+The reply must match protocol 1, peer PID/UID, requested canonical home and
+detached lifetime; a managed self-claim cannot establish service provenance.
+
+Focused tests cover a connected detached reply, replacement of the socket
+pathname without reconnecting, wrong home/protocol/PID/UID/lifetime,
+missing/stopped sockets without state creation, expired and trickled-frame
+deadlines, malformed/truncated/oversized replies and CLI startup bypass.
+This is diagnostic process observation, not readiness, current authority,
+commit permission, restart/reap supervision, reboot persistence or confinement
+from same-user processes. Socket delegation is not excluded by these checks.
+No service manager or live workload was exercised; this review does not
+extend backend security guarantees or change the broader same-host threat
+model. Legacy service startup validation and wire meanings remain, but
+native manager observation code and its D-Bus dependencies are removed.
+
 ## Conformance authenticated HVF cleanup
 
 Reviewed the conformance reaper, its scenario after-hook, interrupt handler,
@@ -290,6 +319,13 @@ lower checkpoint transaction still checks the child grant subset and tenant
 lineage, reseeds identity, restores paused, refuses a NIC before resume, commits
 child checkpoint metadata, and returns a typed uncertain-stop outcome when
 rollback cannot be confirmed.
+The retained full-VM fork dispatch uses the same post-live workload-ledger
+recheck and uncertain-stop policy as the prior direct restore wrapper, after
+the child is live and registered and before returning it to the caller.
+A containment commit since admission stops the child; if that stop cannot be
+confirmed, the typed uncertain-stop outcome retains child custody rather than
+reporting a successful fork. Fixture tests cover quarantine after admission,
+including a failed stop.
 `plan.launched`, post-restore identity/grant delivery and runtime metadata
 persistence retain their existing source order.
 
@@ -472,18 +508,44 @@ extra-owner rejection rule. This does not identify the cause of a particular
 live EOF, nor prove guest application readiness. No guest execution or broad
 supervisor/lifecycle review is implied by this focused change.
 
-## Manager-owned policy coordinator identification
+## Superseded: manager-owned policy coordinator identification
+
+This records the former implementation, not the current command contract.
+The direct coordinator observation review above and ADR-111's 2026-11-21
+amendment supersede it. The native manager transport has been removed;
+`mvmctl policy coordinator` no longer queries or requires a service manager.
 
 Covers `mvm-hostd/src/policy_generation/managed.rs`, the `Status` request and
 connection handling in `policy_generation/coordinator.rs`, and the
 `mvmctl policy coordinator` caller, for
 [#5255](https://github.com/tinylabscom/mvm/issues/5255). A systemd user
 manager owns the process: it creates, restarts and reaps the unit, and the
-coordinator only refuses to serve when it is not that unit. The client owns
-nothing but one connection, which it drops on every outcome. Deadlines are the
-manager query bound, a non-waiting connect and an exchange bounded per read and per write (five
-seconds each, not five seconds in total); there is no retry. No durable state is written, so there is nothing to recover: a
-restart between the two manager observations is reported as unknown. The
+coordinator only refuses to serve when it is not that unit. The client owns a
+native manager connection and one coordinator stream, not the service. The
+fixed user-manager socket is kernel-authenticated before native EXTERNAL/P2P
+authentication; the same connection remains alive across both observations.
+Only `GetUnit` and typed property reads are sent. An unloaded unit is unknown,
+not evidence that its unit file is absent. No subprocess or loading/start
+operation is used.
+
+All IPC shares one absolute five-second budget after home validation. Partial
+reads and writes cannot renew it, and an expired deadline sends no request
+bytes. The native transport caps authentication at 4 KiB and frames at 16 KiB
+before allocating a body; unsolicited descriptors are refused and disposed.
+The socket shutdown guard covers failed or canceled authentication and
+observation. A read canceled midway becomes unusable. Linux uses a zero-sized
+ancillary buffer and close-on-exec reception; non-Linux socket-pair fixtures
+do not qualify arbitrary ancillary truncation on those platforms.
+
+The coordinator stream moves to one blocking exchange task so the native
+reader can progress. Its handle is awaited rather than detached on timeout,
+and the stream itself enforces the original deadline. The native owner stays
+alive through that join and the final observation. Return drops both
+connections. This IPC budget is not a hard bound on filesystem lookups or OS
+scheduling stalls. There is no retry. The CLI observes before configuration,
+signer, command-audit, telemetry and update startup. No durable state is
+written, so there is nothing to recover: a restart between the two manager
+observations is reported as unknown. The
 detached spawn path, activation and generation storage are unchanged and not
 re-reviewed here. Not reviewed: a provisioned unit on a real host, restart
 limits, and any commit, migration or signing path.
@@ -568,8 +630,23 @@ the archive predates every later commit. Waiting activations cannot take the
 last 32 handler slots, which keeps a quarantine from being refused at the
 connection limit by activations alone.
 
-Limits: a launch that read the ledger before a quarantine commit can still
-start after it, so the operator stops the machine after quarantining; mailbox
+Limits: a launch reads the ledger at admission and again once its VM is live,
+before grants, charges, the launch record, the assurance session and the
+mailbox process. A refusal on that second read stops the VM the launch started
+and records `plan.failed` at stage `workload-contained`, so a quarantine or
+replacement committed in between is seen either by the operator's stop or by
+the launch itself. The guest can run for the interval between spawn and that
+read. Only hostd's admitted start, warm claim and checkpoint fork read it a
+second time; a start that reaches the backend without an admitted plan in hand
+(`start_prepared` in `mvm-client`, the unadmitted branch of the transient exec
+path in `mvm-cli`) does not, so the operator still stops the machine after
+quarantining. The admitted start, the CLI warm-claim path and the checkpoint fork
+call site are each tested with a workload quarantined after admission: the
+child is stopped and the caller gets an error, not a claimed child, and a stop
+that fails is reported as uncertain. The warm claim is tested on the mock
+backend through `claim_warm` in `mvm-client`, and the fork with a Firecracker
+shaped checkpoint and a recording restorer; neither runs a real VMM. Only a
+quarantine is tested at those two sites, not a replacement. Mailbox
 destination commits are ordered by this lane only on the production local path
 (next section). Quarantine and replace need the coordinator process and are
 refused when it cannot start. A failure
@@ -664,9 +741,21 @@ holds no lane, and the commit it was about to make is refused after the
 quarantine, while a record it already wrote but did not commit is left in its
 journal until a reopen is refused. A development mailbox is not ordered by the
 ledger. Nothing restarts a mailbox helper that exits after an unknown outcome or
-a coordinator outage. After a quarantine a destination's journal is no longer
-compacted or expired, so retained ciphertext can outlive its retention until the
-workload is replaced and the store is removed by hand. The ordering hook is
+a coordinator outage. When the per-VM helper sees its workload quarantined it
+stops serving, runs one bounded expiry-and-compaction pass whose commits are
+marked retention-only and accepted by the ledger, and exits. The mark is signed
+by the destination key and trusted from the host helper; the ledger cannot check
+that a marked commit only expires or compacts. A test runs the whole
+helper loop against an in-process coordinator: a quarantine that lands while the
+helper is parked on the guest, with nothing due, ends it with the retention
+pass and a permission-denied exit. A second test quarantines with a message
+already past expiry: the helper reads the ledger again after its wait on the
+guest and before its ordinary maintenance, so the pass expires the message and
+the destination's tip advances. Records whose retention ends
+later, a helper whose ordinary maintenance commit raced the quarantine between
+that read and the commit, an already-exited helper,
+and actor journals are not covered, and their ciphertext can outlive its
+retention until the store is removed by hand. The ordering hook is
 attached by the one production opener; a future opener must attach it too. A
 connection that has been accepted but has sent no frame holds a connection slot
 until its read timeout.

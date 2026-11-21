@@ -340,6 +340,7 @@ mod tests {
             profile: AgentProfile::Dev,
             composition_depth: 0,
             composition_width: 0,
+            epoch: None,
         }
     }
 

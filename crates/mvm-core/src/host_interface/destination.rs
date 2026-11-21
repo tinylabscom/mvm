@@ -74,6 +74,14 @@ pub struct PreparedHead {
     pub epoch: ExecutionEpoch,
     pub expected: DestinationTip,
     pub next: DestinationTip,
+    /// Set by a helper that stopped serving because its workload is quarantined.
+    /// Absent from the signed bytes when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retention: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A [`PreparedHead`] and the destination key's signature over it.
@@ -158,6 +166,7 @@ mod tests {
             epoch: ExecutionEpoch::new(1).unwrap(),
             expected: tip(1),
             next: tip(2),
+            retention: false,
         }
     }
 
@@ -226,6 +235,21 @@ mod tests {
         let mut malformed = signed;
         malformed.signature = "00".into();
         assert!(malformed.verify(&signing.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn the_retention_mark_is_signed_and_absent_when_unset() {
+        let signing = key(1);
+        let signed = head().sign(&signing).unwrap();
+        let json = String::from_utf8(serde_jcs::to_vec(&signed.head).unwrap()).unwrap();
+        assert!(!json.contains("retention"));
+        let mut marked = signed;
+        marked.head.retention = true;
+        assert!(marked.verify(&signing.verifying_key()).is_err());
+        let resigned = marked.head.sign(&signing).unwrap();
+        resigned.verify(&signing.verifying_key()).unwrap();
+        let json = String::from_utf8(serde_jcs::to_vec(&resigned.head).unwrap()).unwrap();
+        assert!(json.contains("\"retention\":true"));
     }
 
     #[test]

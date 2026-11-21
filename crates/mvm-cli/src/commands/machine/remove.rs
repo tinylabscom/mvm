@@ -54,6 +54,7 @@ pub(super) fn remove_machine_spec_in_lifecycle(
         "machine {name:?} still owns its runtime state"
     );
     lifecycle.remove_saved_state()?;
+    lifecycle.drop_runtime_evidence();
     fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
     Ok(MachineRemoveSummary {
         name: name.to_string(),

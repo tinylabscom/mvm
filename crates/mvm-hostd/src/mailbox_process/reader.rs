@@ -240,7 +240,7 @@ mod tests {
         let derive =
             || crate::mailbox_launch::derive_launch_keys(keys.path(), &grant, &secret).unwrap();
         let first_keys = derive();
-        let first_send = first_keys.trust().1.capability;
+        let first_send = first_keys.trust(grant.epoch).1.capability;
         let first = load_or_enroll(
             state.path(),
             &grant,
@@ -250,7 +250,7 @@ mod tests {
         )
         .unwrap();
         let second_keys = derive();
-        let second_send = second_keys.trust().1.capability;
+        let second_send = second_keys.trust(grant.epoch).1.capability;
         let second = load_or_enroll(
             state.path(),
             &grant,

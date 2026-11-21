@@ -120,10 +120,13 @@ fn only_firecracker_declares_the_scope_cpuset() {
 }
 
 #[test]
-fn a_liveness_period_is_refused_with_its_unit_on_every_backend() {
+fn a_liveness_period_is_refused_with_its_unit_where_no_deadline_is_held() {
     let mut topology = stating_nothing();
     topology.units[3].liveness_period_ms = Some(ms(100));
     for &kind in BackendKind::ALL {
+        if ResourceControls::for_backend(kind).liveness == LivenessControl::HostDeadline {
+            continue;
+        }
         assert_eq!(
             check_requirements(
                 &topology,
@@ -139,11 +142,68 @@ fn a_liveness_period_is_refused_with_its_unit_on_every_backend() {
     }
 }
 
+fn host_deadline() -> ResourceControls {
+    ResourceControls {
+        liveness: LivenessControl::HostDeadline,
+        ..vm_backend()
+    }
+}
+
 #[test]
-fn a_state_cell_is_refused_with_its_name() {
+fn a_liveness_period_within_the_host_range_passes_where_the_host_holds_the_deadline() {
+    for period in [MIN_LIVENESS_PERIOD_MS, 5_000, MAX_LIVENESS_PERIOD_MS] {
+        let mut topology = stating_nothing();
+        topology.units[3].liveness_period_ms = Some(ms(period));
+        assert_eq!(
+            check_requirements(&topology, host_deadline(), None),
+            Ok(()),
+            "{period}"
+        );
+    }
+}
+
+#[test]
+fn a_liveness_period_outside_the_host_range_is_refused_with_its_unit() {
+    for period in [1, MIN_LIVENESS_PERIOD_MS - 1, MAX_LIVENESS_PERIOD_MS + 1] {
+        let mut topology = stating_nothing();
+        topology.units[3].liveness_period_ms = Some(ms(period));
+        assert_eq!(
+            check_requirements(&topology, host_deadline(), None),
+            Err(UnmetRequirement::LivenessPeriodOutOfRange {
+                unit: id("w1-standby"),
+                period_ms: ms(period),
+            }),
+            "{period}"
+        );
+    }
+}
+
+#[test]
+fn more_liveness_units_than_the_host_holds_are_refused_by_count() {
+    let mut topology = stating_nothing();
+    let template = topology.units[0].clone();
+    topology.units = (0..=MAX_LIVENESS_UNITS)
+        .map(|i| Unit {
+            workload: id(&alloc::format!("u{i:03}")),
+            liveness_period_ms: Some(ms(1_000)),
+            ..template.clone()
+        })
+        .collect();
+    assert_eq!(
+        check_requirements(&topology, host_deadline(), None),
+        Err(UnmetRequirement::TooManyLivenessUnits {
+            count: MAX_LIVENESS_UNITS + 1
+        })
+    );
+    topology.units.pop();
+    assert_eq!(check_requirements(&topology, host_deadline(), None), Ok(()));
+}
+
+#[test]
+fn a_state_cell_is_refused_with_its_name_where_no_host_store_exists() {
     let mut topology = stating_nothing();
     topology.cells = full().cells;
-    for &kind in BackendKind::ALL {
+    for kind in [BackendKind::Wasm, BackendKind::WebLinux] {
         assert_eq!(
             check_requirements(&topology, ResourceControls::for_backend(kind), None),
             Err(UnmetRequirement::StateCell {
@@ -152,6 +212,49 @@ fn a_state_cell_is_refused_with_its_name() {
             "{kind:?}"
         );
     }
+}
+
+#[test]
+fn a_plain_state_cell_is_admitted_on_the_host_store() {
+    let mut topology = stating_nothing();
+    topology.cells = full().cells;
+    topology.cells[0].update = CellUpdate::AtPromotion;
+    topology.cells[0].per_write_audit = false;
+    for &kind in BackendKind::ALL {
+        let controls = ResourceControls::for_backend(kind);
+        let expected = match controls.state_cells {
+            StateCellControl::HostStore => Ok(()),
+            StateCellControl::None => Err(UnmetRequirement::StateCell {
+                cell: "brake".into(),
+            }),
+        };
+        assert_eq!(
+            check_requirements(&topology, controls, None),
+            expected,
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn a_cell_asking_for_follow_or_per_write_audit_is_refused_on_the_host_store() {
+    let mut topology = stating_nothing();
+    topology.cells = full().cells;
+    topology.cells[0].per_write_audit = false;
+    assert_eq!(
+        check_requirements(&topology, vm_backend(), None),
+        Err(UnmetRequirement::CellFollow {
+            cell: "brake".into()
+        })
+    );
+    topology.cells[0].update = CellUpdate::AtPromotion;
+    topology.cells[0].per_write_audit = true;
+    assert_eq!(
+        check_requirements(&topology, vm_backend(), None),
+        Err(UnmetRequirement::CellPerWriteAudit {
+            cell: "brake".into()
+        })
+    );
 }
 
 #[test]

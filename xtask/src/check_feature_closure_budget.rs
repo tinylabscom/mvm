@@ -39,6 +39,7 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 // Includes dev-only tools: Cucumber's existing closure is now counted when
 // conformance's optional bdd dependency is enabled, not in ordinary tests.
 // The shared authored-policy extraction adds one first-party package only.
+// Direct coordinator observation uses the existing Unix socket dependencies.
 const FEATURE_CLOSURE_BUDGET: usize = 579;
 
 /// The two gates measure nested sets — everything in the default closure is

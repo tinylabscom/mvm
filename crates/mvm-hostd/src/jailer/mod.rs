@@ -288,6 +288,14 @@ impl ConfinementSpec {
         self
     }
 
+    /// Leave the workload ledger readable, read-only, for an endpoint whose
+    /// egress decisions ask the epoch gate. Empty for a builder endpoint.
+    #[must_use]
+    pub fn with_workload_ledger(mut self, paths: Vec<PathBuf>) -> Self {
+        self.readable_paths.extend(paths);
+        self
+    }
+
     /// Permit the embedded telemetry collector's I/O: the VM state dir
     /// (records + status files, and the per-VM sockets bound inside it). The
     /// host anchor it reads lives in the keys dir, which `network_endpoint`
@@ -754,6 +762,19 @@ mod tests {
 
         assert!(spec.read_write_paths.contains(&marker_parent));
         assert_eq!(spec.read_write_paths.len(), 2);
+    }
+
+    #[test]
+    fn the_workload_ledger_is_granted_read_only() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ledger = dir.join("src");
+        let base =
+            ConfinementSpec::network_endpoint(dir.clone(), dir.clone(), dir.clone(), dir, None);
+        let spec = base.clone().with_workload_ledger(vec![ledger.clone()]);
+        assert!(spec.readable_paths.contains(&ledger));
+        assert!(!spec.read_write_paths.contains(&ledger));
+        assert_eq!(spec.read_write_paths, base.read_write_paths);
+        assert_eq!(spec.readable_paths.len(), base.readable_paths.len() + 1);
     }
 
     /// M3: `Remote { uds_path, .. }` (`Some(uds)`) additionally permits

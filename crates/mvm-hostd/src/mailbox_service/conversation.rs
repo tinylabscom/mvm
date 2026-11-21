@@ -308,8 +308,7 @@ impl Conversation {
             || grant.subject != header.recipient
             || grant.issuer != self.config.issuer
             || grant.policy_epoch != self.config.policy_epoch
-            || grant.minimum_execution_epoch > self.config.epoch
-            || grant.maximum_execution_epoch < self.config.epoch
+            || !grant.admits_epoch(self.config.epoch)
             || grant.not_before_unix_ms > now
             || grant.expires_at_unix_ms <= now
             || !grant.operations.allows(MailboxOperation::Reply)
@@ -853,8 +852,7 @@ impl Conversation {
             || grant.issuer != self.config.issuer
             || !grant.operations.allows(MailboxOperation::Receive)
             || !grant.message_kinds.contains(&MailboxMessageKind::Reply)
-            || grant.minimum_execution_epoch > self.config.epoch
-            || grant.maximum_execution_epoch < self.config.epoch
+            || !grant.admits_epoch(self.config.epoch)
             || grant.policy_epoch != self.config.policy_epoch
             || context.now_unix_ms < grant.not_before_unix_ms
             || context.now_unix_ms >= grant.expires_at_unix_ms

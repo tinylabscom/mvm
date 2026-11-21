@@ -6,7 +6,7 @@ use super::*;
 
 pub(super) trait TopLevelCommand {
     fn run(self, cli: &Cli, cfg: &MvmConfig) -> Result<()>;
-    fn is_offline_audit_command(&self) -> bool;
+    fn skips_startup(&self) -> bool;
     fn is_early_command(&self) -> bool;
     fn try_run_early(&self) -> Option<Result<()>>;
 }
@@ -90,7 +90,7 @@ impl TopLevelCommand for Commands {
         }
     }
 
-    fn is_offline_audit_command(&self) -> bool {
+    fn skips_startup(&self) -> bool {
         if let Commands::Machine(machine::Args {
             action: machine::MachineAction::Logs(args),
         }) = self
@@ -104,6 +104,8 @@ impl TopLevelCommand for Commands {
                     action: ops::audit::AuditAction::ProveConsistency(_)
                         | ops::audit::AuditAction::VerifyConsistency(_),
                 }),
+            }) | Commands::Policy(policy::Args {
+                action: policy::PolicyAction::Coordinator(_),
             })
         )
     }
@@ -119,7 +121,7 @@ impl TopLevelCommand for Commands {
         // `backend detect` is install.sh's probe of a just-extracted mvmctl:
         // it must answer without creating any state.
         // Consistency tooling must not mint a signer or append command events.
-        self.is_offline_audit_command()
+        self.skips_startup()
             || matches!(
                 self,
                 Commands::QemuVsockBridge(_)
@@ -148,6 +150,9 @@ impl TopLevelCommand for Commands {
             return None;
         }
         match self {
+            Commands::Policy(policy::Args {
+                action: policy::PolicyAction::Coordinator(args),
+            }) => Some(policy::coordinator(args)),
             Commands::Machine(machine::Args {
                 action: machine::MachineAction::Logs(args),
             }) => Some(vm::logs::execute(args.clone())),

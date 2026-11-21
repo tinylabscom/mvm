@@ -44,10 +44,10 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::plan::types::{PlanId, TenantId, WorkloadId};
+use crate::timestamp::UtcTimestamp;
 
 /// The longest window an assertion may claim, in seconds.
 ///
@@ -138,15 +138,15 @@ pub struct WorkloadIdentityClaims {
     pub audience: Vec<String>,
     /// When it was minted.
     #[serde(rename = "iat")]
-    pub issued_at: DateTime<Utc>,
+    pub issued_at: UtcTimestamp,
     /// Not valid before this. Carried explicitly rather than assumed equal to
     /// `issued_at`, so an issuer can absorb known clock skew deliberately
     /// instead of every consumer guessing a tolerance.
     #[serde(rename = "nbf")]
-    pub not_before: DateTime<Utc>,
+    pub not_before: UtcTimestamp,
     /// Expiry.
     #[serde(rename = "exp")]
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: UtcTimestamp,
     /// The execution this was minted for — an audit breadcrumb joining a
     /// provider-side log line to our own chain. **Not** the subject; see the
     /// module docs.
@@ -181,7 +181,7 @@ impl WorkloadIdentityClaims {
         if self.not_before >= self.expires_at {
             return Err(ClaimsInvalid::InvertedWindow);
         }
-        let secs = (self.expires_at - self.not_before).num_seconds();
+        let secs = self.expires_at.whole_secs_since(self.not_before);
         if secs > MAX_LIFETIME_SECS {
             return Err(ClaimsInvalid::LifetimeTooLong { secs });
         }
@@ -194,7 +194,7 @@ impl WorkloadIdentityClaims {
     /// rather than reading a clock so this crate stays `no_std` and the
     /// boundary cases are directly testable.
     #[must_use]
-    pub fn is_current_at(&self, now: DateTime<Utc>) -> bool {
+    pub fn is_current_at(&self, now: UtcTimestamp) -> bool {
         now >= self.not_before && now < self.expires_at
     }
 }
@@ -202,12 +202,15 @@ impl WorkloadIdentityClaims {
 #[cfg(test)]
 mod tests {
     use alloc::vec;
-    use chrono::{Duration, TimeZone};
 
     use super::*;
 
-    fn t0() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 8, 17, 12, 0, 0).unwrap()
+    fn t0() -> UtcTimestamp {
+        UtcTimestamp::from_unix(1_786_968_000, 0).unwrap()
+    }
+
+    fn plus(t: UtcTimestamp, secs: i64) -> UtcTimestamp {
+        t.checked_add_secs(secs).unwrap()
     }
 
     fn claims() -> WorkloadIdentityClaims {
@@ -220,7 +223,7 @@ mod tests {
             audience: vec!["sts.amazonaws.com".to_string()],
             issued_at: t0(),
             not_before: t0(),
-            expires_at: t0() + Duration::seconds(300),
+            expires_at: plus(t0(), 300),
             plan_id: None,
         }
     }
@@ -287,7 +290,7 @@ mod tests {
         let mut c = claims();
         c.expires_at = c.not_before;
         assert_eq!(c.validate(), Err(ClaimsInvalid::InvertedWindow));
-        c.expires_at = c.not_before - Duration::seconds(1);
+        c.expires_at = plus(c.not_before, -1);
         assert_eq!(c.validate(), Err(ClaimsInvalid::InvertedWindow));
     }
 
@@ -296,7 +299,7 @@ mod tests {
     #[test]
     fn a_window_longer_than_the_cap_is_refused() {
         let mut c = claims();
-        c.expires_at = c.not_before + Duration::seconds(MAX_LIFETIME_SECS + 1);
+        c.expires_at = plus(c.not_before, MAX_LIFETIME_SECS + 1);
         assert_eq!(
             c.validate(),
             Err(ClaimsInvalid::LifetimeTooLong {
@@ -304,16 +307,16 @@ mod tests {
             })
         );
         // Exactly at the cap is allowed — the boundary is inclusive.
-        c.expires_at = c.not_before + Duration::seconds(MAX_LIFETIME_SECS);
+        c.expires_at = plus(c.not_before, MAX_LIFETIME_SECS);
         assert!(c.validate().is_ok());
     }
 
     #[test]
     fn the_validity_window_is_half_open() {
         let c = claims();
-        assert!(!c.is_current_at(c.not_before - Duration::seconds(1)));
+        assert!(!c.is_current_at(plus(c.not_before, -1)));
         assert!(c.is_current_at(c.not_before), "nbf is inclusive");
-        assert!(c.is_current_at(c.expires_at - Duration::seconds(1)));
+        assert!(c.is_current_at(plus(c.expires_at, -1)));
         assert!(
             !c.is_current_at(c.expires_at),
             "an assertion is dead the instant it expires"
@@ -325,8 +328,8 @@ mod tests {
     #[test]
     fn validate_does_not_consult_the_clock() {
         let mut c = claims();
-        c.not_before = t0() - Duration::days(3650);
-        c.expires_at = c.not_before + Duration::seconds(60);
+        c.not_before = plus(t0(), -3650 * 86_400);
+        c.expires_at = plus(c.not_before, 60);
         c.validate()
             .expect("long-expired claims are still well-formed");
         assert!(!c.is_current_at(t0()), "but they are not current");
@@ -358,5 +361,20 @@ mod tests {
         // it does not understand.
         let sneaky = json.replace("{", "{\"extra\":1,");
         assert!(serde_json::from_str::<WorkloadIdentityClaims>(&sneaky).is_err());
+    }
+
+    /// The claims are signed by whoever consumes them, so the exact bytes
+    /// (field order, `Z` form, fractional seconds only when present) are pinned.
+    #[test]
+    fn the_serialized_claims_are_byte_stable() {
+        let mut c = claims();
+        c.plan_id = Some(PlanId("sha256:aaa".to_string()));
+        assert_eq!(
+            serde_json::to_string(&c).unwrap(),
+            "{\"iss\":\"https://issuer.example/mvm\",\"sub\":{\"tenant\":\"acme\",\"workload\":\"billing\"},\"aud\":[\"sts.amazonaws.com\"],\"iat\":\"2026-08-17T12:00:00Z\",\"nbf\":\"2026-08-17T12:00:00Z\",\"exp\":\"2026-08-17T12:05:00Z\",\"plan_id\":\"sha256:aaa\"}"
+        );
+        let json = r#"{"iss":"i","sub":{"tenant":"t","workload":"w"},"aud":["a"],"iat":"2026-08-17T12:00:00.250Z","nbf":"2026-08-17T12:00:00.250Z","exp":"2026-08-17T12:00:01.123456Z"}"#;
+        let parsed: WorkloadIdentityClaims = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
     }
 }

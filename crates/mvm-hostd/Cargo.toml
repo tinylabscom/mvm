@@ -84,6 +84,13 @@ name = "actor_live_hvf"
 path = "examples/actor_live_hvf/main.rs"
 required-features = ["hvf-live-validation"]
 
+# The scripted three-node demo advances an epoch outside the workload ledger,
+# which only a test-support build can do.
+[[test]]
+name = "mission_demo"
+path = "tests/mission_demo.rs"
+required-features = ["test-support"]
+
 # Per-VM supervisor host processes — one process per guest VM. libkrun VMM +
 # merged in-process bridge; libkrun-sys-gated so a host without libkrun.h
 # skips it on a default workspace build.

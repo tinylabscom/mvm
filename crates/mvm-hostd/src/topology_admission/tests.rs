@@ -435,7 +435,13 @@ fn each_unmet_requirement_is_refused_named_and_persists_nothing() {
         update: Default::default(),
         per_write_audit: false,
     }];
-    cases.push((cell, BackendKind::Firecracker, None));
+    cases.push((cell.clone(), BackendKind::Wasm, None));
+    let mut follow = cell.clone();
+    follow.cells[0].update = mvm_contract::plan::topology::CellUpdate::Follow;
+    cases.push((follow, BackendKind::Firecracker, None));
+    let mut per_write = cell;
+    per_write.cells[0].per_write_audit = true;
+    cases.push((per_write, BackendKind::Firecracker, None));
 
     let mut liveness = topology(1);
     liveness.units[0].liveness_period_ms = NonZeroU32::new(50);
@@ -474,7 +480,7 @@ fn each_unmet_requirement_is_refused_named_and_persists_nothing() {
         );
     }
     kinds.dedup();
-    assert_eq!(kinds.len(), 8, "every requirement kind is covered once");
+    assert_eq!(kinds.len(), 10, "every requirement kind is covered once");
 }
 
 #[test]

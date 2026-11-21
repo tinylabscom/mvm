@@ -415,13 +415,13 @@ fn run_command() -> Result<()> {
             crate::observability::exit(exit_code);
         }
     };
-    // Offline proof tooling bypasses telemetry and interactive update checks,
-    // not just the command recorder and signer initialization.
-    if cli.command.is_offline_audit_command() {
+    // Offline proofs and coordinator observation bypass telemetry and update
+    // checks as well as configuration, command recording and signer creation.
+    if cli.command.skips_startup() {
         return cli
             .command
             .try_run_early()
-            .expect("offline audit command dispatch");
+            .expect("startup-free command dispatch");
     }
     let result = run_configured_command(cli);
     // Best-effort ambient "update available" line on interactive terminals;

@@ -63,43 +63,49 @@ pub(super) fn key(bytes: [u8; 32]) -> Result<VerifyingKey> {
     VerifyingKey::from_bytes(&bytes).map_err(|_| Refusal::NotAuthorized)
 }
 
-pub(super) fn context(
-    header: &MailboxEnvelopeHeader,
-    capability: &SignedMailboxCapability,
-    now: i64,
-    operation: MailboxOperation,
-) -> OpenContext {
-    OpenContext {
-        expected_tenant: header.tenant,
-        expected_authorization_domain: header.authorization_domain,
-        expected_mailbox: header.mailbox,
-        expected_sender: header.sender,
-        expected_recipient: header.recipient,
-        acting_principal: if operation == MailboxOperation::Receive {
-            header.recipient
-        } else {
-            header.sender
-        },
-        expected_capability_issuer: capability.grant.issuer,
-        current_execution_epoch: header.execution_epoch,
-        current_policy_epoch: header.policy_epoch,
-        required_operation: operation,
-        now_unix_ms: now,
-        accepted_content_types: capability.grant.content_types.clone(),
-        revoked_capabilities: vec![],
+impl super::ActorConversationEndpoint {
+    /// The open context for one request. Its current epoch is this unit's,
+    /// read from the epoch gate when the endpoint bound, never the header's.
+    pub(super) fn context(
+        &self,
+        header: &MailboxEnvelopeHeader,
+        capability: &SignedMailboxCapability,
+        now: i64,
+        operation: MailboxOperation,
+    ) -> OpenContext {
+        OpenContext {
+            expected_tenant: header.tenant,
+            expected_authorization_domain: header.authorization_domain,
+            expected_mailbox: header.mailbox,
+            expected_sender: header.sender,
+            expected_recipient: header.recipient,
+            acting_principal: if operation == MailboxOperation::Receive {
+                header.recipient
+            } else {
+                header.sender
+            },
+            expected_capability_issuer: capability.grant.issuer,
+            current_execution_epoch: self.config.current_epoch,
+            current_policy_epoch: header.policy_epoch,
+            required_operation: operation,
+            now_unix_ms: now,
+            accepted_content_types: capability.grant.content_types.clone(),
+            revoked_capabilities: vec![],
+        }
     }
-}
 
-pub(super) fn call_policy(peer: &ActorPeerBinding, now: i64) -> Result<MailboxPolicy> {
-    Ok(MailboxPolicy {
-        context: context(
-            &peer.call.header,
-            &peer.send_capability,
-            now,
-            MailboxOperation::Send,
-        ),
-        encryption_key: peer.call_key(),
-        sender_key: key(peer.parent_sender_key)?,
-        authority_key: key(peer.child_authority_key)?,
-    })
+    pub(super) fn call_policy(&self, peer: &ActorPeerBinding, now: i64) -> Result<MailboxPolicy> {
+        Ok(MailboxPolicy {
+            context: self.context(
+                &peer.call.header,
+                &peer.send_capability,
+                now,
+                MailboxOperation::Send,
+            ),
+            encryption_key: peer.call_key(),
+            sender_key: key(peer.parent_sender_key)?,
+            authority_key: key(peer.child_authority_key)?,
+            unit_gate: None,
+        })
+    }
 }

@@ -364,6 +364,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             .iter()
             .flat_map(|extension| extension.capabilities.iter().cloned())
             .collect();
+        let child_epoch = super::broker::plan_call_epoch(&plan)
+            .map_err(|e| StandbyError::ClaimFailed(format!("child broker epoch: {e:#}")))?;
         let broker_guard = self
             .broker
             .register(&BrokerRegisterRequest {
@@ -374,6 +376,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 services: &plan.services,
                 capability_bindings: &child_capabilities,
                 service_proxies: &child_cfg.service_proxies,
+                epoch: Some(&child_epoch),
             })
             .map_err(|e| StandbyError::ClaimFailed(format!("register child broker: {e:#}")))?;
         cleanup.track_broker(broker_guard);

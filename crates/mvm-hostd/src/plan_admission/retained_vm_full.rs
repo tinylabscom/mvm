@@ -192,7 +192,8 @@ impl RetainedVmFullFork {
                 restorer.matches(self.source.origin()),
                 "full-VM fork selected a restorer for the wrong backend"
             );
-            mvm_runtime::checkpoint::fork_vm_full_verified_with_rollback(
+            let child_name = self.params.child_vm_name.clone();
+            let meta = mvm_runtime::checkpoint::fork_vm_full_verified_with_rollback(
                 store,
                 self.params,
                 restorer.restorer(),
@@ -200,7 +201,15 @@ impl RetainedVmFullFork {
                 &self.source.runtime,
                 &self.source.restored_rootfs_sha256,
                 stop_child,
-            )
+            )?;
+            // The child is live after restore. Share the original fork path's
+            // containment/uncertain-stop boundary before handing it to the caller.
+            super::containment_recheck::recheck_live_fork(
+                self.admitted.plan(),
+                &child_name,
+                stop_child,
+            )?;
+            Ok(meta)
         })();
         VmFullForkDispatch {
             result,

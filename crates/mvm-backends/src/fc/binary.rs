@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use mvm_core::arch::GuestArch;
 use mvm_core::crypto::verified_digest::sha256_open_file_verified;
 use mvm_core::firecracker_lock::{FirecrackerArchPin, firecracker_lock};
+use mvm_vmm::host::file_memo::{FileStamp, file_stamp_of, now_ns, stamp_is_settled};
 
 /// The environment variable that names a Firecracker to run instead of the
 /// shipped one.
@@ -165,8 +166,106 @@ fn open_no_follow(path: &Path) -> Result<File, ResolveError> {
         })
 }
 
+/// A remembered successful digest check of the shipped Firecracker, so an
+/// unchanged binary is not re-hashed by every process (the in-memory digest
+/// registry does not outlive one).
+///
+/// This is a trusted-host compatibility cache, never authorization: the pin
+/// decides what may run, and the memo only lets a launch skip re-reading bytes
+/// that already matched it. Like the helper probe memo it assumes trusted host
+/// storage, not a writer forging the memo. File timestamps and the clock must
+/// be the same clock: a network filesystem whose server clock lags more than
+/// the racy margin brings the same-tick rewrite race back.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct BinaryMemo {
+    memo_version: u32,
+    path: PathBuf,
+    stamp: FileStamp,
+    sha256: String,
+    /// Nanoseconds since the Unix epoch, read before the stamp and the hash.
+    recorded_ns: i64,
+}
+
+const BINARY_MEMO_VERSION: u32 = 1;
+const BINARY_MEMO_FILE: &str = "firecracker-binary.json";
+
+/// Whether the memo proves `path` still holds the pinned bytes. Any doubt
+/// (unreadable, unparseable, another file, another stamp, another digest, a
+/// memo from the future, a stamp too recent to trust) answers no.
+fn memo_accepts(
+    memo_file: &Path,
+    path: &Path,
+    stamp: &FileStamp,
+    pin: &FirecrackerArchPin,
+    observed_ns: i64,
+) -> bool {
+    // A symlinked memo is refused rather than followed.
+    let Ok(mut handle) = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(memo_file)
+    else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    if io::Read::read_to_end(&mut handle, &mut bytes).is_err() {
+        return false;
+    }
+    let Ok(memo) = serde_json::from_slice::<BinaryMemo>(&bytes) else {
+        return false;
+    };
+    memo.memo_version == BINARY_MEMO_VERSION
+        && memo.path == path
+        && memo.stamp == *stamp
+        && memo.sha256 == pin.binary_sha256.as_str()
+        && stamp_is_settled(stamp, memo.recorded_ns, observed_ns)
+}
+
+/// Remember a digest that just matched the pin. Best effort: a failed write
+/// only means the next launch hashes again.
+fn record_memo(
+    memo_dir: &Path,
+    path: &Path,
+    stamp: FileStamp,
+    pin: &FirecrackerArchPin,
+    recorded_ns: i64,
+) {
+    let memo = BinaryMemo {
+        memo_version: BINARY_MEMO_VERSION,
+        path: path.to_path_buf(),
+        stamp,
+        sha256: pin.binary_sha256.as_str().to_string(),
+        recorded_ns,
+    };
+    let Ok(bytes) = serde_json::to_vec(&memo) else {
+        return;
+    };
+    if std::fs::create_dir_all(memo_dir).is_ok() {
+        let _ =
+            mvm_core::atomic_io::write_private_ephemeral(&memo_dir.join(BINARY_MEMO_FILE), &bytes);
+    }
+}
+
 /// Check `path` against `pin`, reading everything from one open handle.
-fn verify(path: &Path, pin: &FirecrackerArchPin, euid: u32) -> Result<(), ResolveError> {
+fn verify(
+    path: &Path,
+    pin: &FirecrackerArchPin,
+    euid: u32,
+    memo_dir: Option<&Path>,
+) -> Result<(), ResolveError> {
+    verify_at(path, pin, euid, memo_dir, now_ns()).map(|_hashed| ())
+}
+
+/// [`verify`] with the clock reading supplied, answering whether the bytes had
+/// to be hashed. The reading is taken before the handle's stamp, so a memo
+/// recorded from it never claims to be younger than the bytes it describes.
+fn verify_at(
+    path: &Path,
+    pin: &FirecrackerArchPin,
+    euid: u32,
+    memo_dir: Option<&Path>,
+    observed_ns: i64,
+) -> Result<bool, ResolveError> {
     let refuse = |reason: String| ResolveError::Refused {
         path: path.to_path_buf(),
         reason,
@@ -199,6 +298,12 @@ fn verify(path: &Path, pin: &FirecrackerArchPin, euid: u32) -> Result<(), Resolv
             meta.uid()
         )));
     }
+    let stamp = file_stamp_of(&meta);
+    if let (Some(dir), Some(stamp)) = (memo_dir, &stamp)
+        && memo_accepts(&dir.join(BINARY_MEMO_FILE), path, stamp, pin, observed_ns)
+    {
+        return Ok(false);
+    }
     let found = sha256_open_file_verified(&file).map_err(|source| ResolveError::Io {
         path: path.to_path_buf(),
         source,
@@ -210,7 +315,10 @@ fn verify(path: &Path, pin: &FirecrackerArchPin, euid: u32) -> Result<(), Resolv
             found,
         });
     }
-    Ok(())
+    if let (Some(dir), Some(stamp)) = (memo_dir, stamp) {
+        record_memo(dir, path, stamp, pin, observed_ns);
+    }
+    Ok(true)
 }
 
 /// A named Firecracker must be an absolute path to an executable file.
@@ -242,6 +350,7 @@ pub fn resolve_with(
     pin: &FirecrackerArchPin,
     override_bin: Option<&Path>,
     euid: u32,
+    memo_dir: Option<&Path>,
 ) -> Result<ResolvedFirecracker, ResolveError> {
     if let Some(path) = override_bin {
         return check_override(path);
@@ -250,7 +359,7 @@ pub fn resolve_with(
         let candidate = directory.join(SHIPPED_FILE);
         match std::fs::symlink_metadata(&candidate) {
             Ok(_) => {
-                verify(&candidate, pin, euid)?;
+                verify(&candidate, pin, euid, memo_dir)?;
                 return Ok(ResolvedFirecracker {
                     path: candidate,
                     origin: FirecrackerOrigin::Shipped,
@@ -288,6 +397,7 @@ pub fn resolve_for_host() -> Result<ResolvedFirecracker, ResolveError> {
         firecracker_lock().pin(GuestArch::host()),
         override_bin.as_deref(),
         super::daemon::effective_user_id(),
+        Some(&PathBuf::from(mvm_core::config::mvm_cache_dir()).join("firecracker-verify")),
     )
 }
 
@@ -331,7 +441,7 @@ mod tests {
         dirs: &[&tempfile::TempDir],
         bytes: &[u8],
     ) -> Result<ResolvedFirecracker, ResolveError> {
-        resolve_with(&locations(dirs), &pin_for(bytes), None, my_uid())
+        resolve_with(&locations(dirs), &pin_for(bytes), None, my_uid(), None)
     }
 
     #[test]
@@ -367,7 +477,7 @@ mod tests {
         let tampered = shipped(&same_size, 0o755);
         let good = shipped(BINARY, 0o755);
         let pin = pin_for(BINARY);
-        let outcome = resolve_with(&locations(&[&tampered, &good]), &pin, None, my_uid());
+        let outcome = resolve_with(&locations(&[&tampered, &good]), &pin, None, my_uid(), None);
         assert!(
             matches!(outcome, Err(ResolveError::DigestMismatch { .. })),
             "a present-but-wrong binary must stop the search, got {outcome:?}"
@@ -408,7 +518,7 @@ mod tests {
         if owner == 0 {
             return; // root owns it, and root-owned files are always accepted
         }
-        let outcome = resolve_with(&locations(&[&dir]), &pin_for(BINARY), None, owner + 1);
+        let outcome = resolve_with(&locations(&[&dir]), &pin_for(BINARY), None, owner + 1, None);
         assert!(
             matches!(outcome, Err(ResolveError::Refused { .. })),
             "{outcome:?}"
@@ -449,7 +559,7 @@ mod tests {
     fn a_named_firecracker_is_used_without_checking_the_lock() {
         let dir = shipped(b"\x7fELF the operator's own build\n", 0o755);
         let named = dir.path().join("firecracker");
-        let resolved = resolve_with(&[], &pin_for(BINARY), Some(&named), my_uid()).unwrap();
+        let resolved = resolve_with(&[], &pin_for(BINARY), Some(&named), my_uid(), None).unwrap();
         assert_eq!(resolved.origin, FirecrackerOrigin::Override);
         assert_eq!(resolved.path, named);
     }
@@ -464,6 +574,7 @@ mod tests {
             &pin_for(BINARY),
             Some(&named),
             my_uid(),
+            None,
         )
         .unwrap();
         assert_eq!(resolved.path, named);
@@ -479,7 +590,8 @@ mod tests {
             (dir.path().to_path_buf(), "not a file"),
             (not_executable, "not executable"),
         ] {
-            let error = resolve_with(&[], &pin_for(BINARY), Some(&value), my_uid()).unwrap_err();
+            let error =
+                resolve_with(&[], &pin_for(BINARY), Some(&value), my_uid(), None).unwrap_err();
             assert!(
                 matches!(error, ResolveError::BadOverride { .. })
                     && error.to_string().contains(reason),
@@ -505,6 +617,196 @@ mod tests {
             ]
         );
         assert!(shipped_locations(Path::new("mvmctl")).len() <= 2);
+    }
+
+    /// A verify against a memo directory at a chosen clock reading, answering
+    /// whether the bytes were hashed.
+    fn verify_memoed(
+        dir: &tempfile::TempDir,
+        memo: &tempfile::TempDir,
+        bytes: &[u8],
+        observed_ns: i64,
+    ) -> Result<bool, ResolveError> {
+        verify_at(
+            &dir.path().join("firecracker"),
+            &pin_for(bytes),
+            my_uid(),
+            Some(memo.path()),
+            observed_ns,
+        )
+    }
+
+    const SEC: i64 = 1_000_000_000;
+
+    /// A memo whose clock is past the racy margin of the file's fresh
+    /// timestamps, so the next check may trust it.
+    fn settled_memo(dir: &tempfile::TempDir, memo: &tempfile::TempDir) -> i64 {
+        let _ = std::fs::remove_file(memo.path().join(BINARY_MEMO_FILE));
+        let base = now_ns();
+        assert!(verify_memoed(dir, memo, BINARY, base + 3 * SEC).unwrap());
+        base
+    }
+
+    /// Rewrites the binary and moves its mtime a second on, so the stamp
+    /// differs even where the filesystem's timestamps are coarser than the
+    /// time between two writes.
+    fn rewrite(dir: &tempfile::TempDir, bytes: &[u8]) {
+        let path = dir.path().join("firecracker");
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(before + std::time::Duration::from_secs(1))
+            .unwrap();
+    }
+
+    fn memo_bytes(memo: &tempfile::TempDir) -> Vec<u8> {
+        std::fs::read(memo.path().join(BINARY_MEMO_FILE)).unwrap()
+    }
+
+    fn edit_memo(memo: &tempfile::TempDir, edit: impl FnOnce(&mut serde_json::Value)) {
+        let file = memo.path().join(BINARY_MEMO_FILE);
+        let mut value: serde_json::Value = serde_json::from_slice(&memo_bytes(memo)).unwrap();
+        edit(&mut value);
+        std::fs::write(file, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_settled_unchanged_binary_is_accepted_without_hashing() {
+        let dir = shipped(BINARY, 0o755);
+        let memo = tempfile::tempdir().unwrap();
+        let base = settled_memo(&dir, &memo);
+        assert!(!verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
+    }
+
+    #[test]
+    fn a_memo_within_the_racy_margin_of_the_file_is_not_trusted() {
+        let dir = shipped(BINARY, 0o755);
+        let memo = tempfile::tempdir().unwrap();
+        let base = now_ns();
+        assert!(verify_memoed(&dir, &memo, BINARY, base).unwrap());
+        assert!(verify_memoed(&dir, &memo, BINARY, base + SEC).unwrap());
+    }
+
+    #[test]
+    fn a_memo_older_than_the_file_is_not_trusted() {
+        let dir = shipped(BINARY, 0o755);
+        let memo = tempfile::tempdir().unwrap();
+        let base = settled_memo(&dir, &memo);
+        edit_memo(&memo, |value| value["recorded_ns"] = 0.into());
+        assert!(verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
+    }
+
+    #[test]
+    fn a_changed_binary_is_refused_and_the_memo_is_not_renewed() {
+        let dir = shipped(BINARY, 0o755);
+        let memo = tempfile::tempdir().unwrap();
+        let base = settled_memo(&dir, &memo);
+        let before = memo_bytes(&memo);
+        let mut tampered = vec![0u8; BINARY.len()];
+        tampered[..4].copy_from_slice(b"\x7fELF");
+        rewrite(&dir, &tampered);
+        let outcome = verify_memoed(&dir, &memo, BINARY, base + 10 * SEC);
+        assert!(
+            matches!(outcome, Err(ResolveError::DigestMismatch { .. })),
+            "{outcome:?}"
+        );
+        assert_eq!(memo_bytes(&memo), before);
+    }
+
+    #[test]
+    fn a_memo_that_is_corrupt_future_dated_or_missing_a_field_is_hashed() {
+        let dir = shipped(BINARY, 0o755);
+        let memo = tempfile::tempdir().unwrap();
+        let base = settled_memo(&dir, &memo);
+        let observed = base + 10 * SEC;
+        edit_memo(&memo, |value| value["recorded_ns"] = (observed + 1).into());
+        assert!(verify_memoed(&dir, &memo, BINARY, observed).unwrap());
+        // The hash renewed the memo; break it three other ways.
+        let base = settled_memo(&dir, &memo);
+        edit_memo(&memo, |value| {
+            value.as_object_mut().unwrap().remove("recorded_ns");
+        });
+        assert!(verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
+        let base = settled_memo(&dir, &memo);
+        edit_memo(&memo, |value| value["sha256"] = "00".into());
+        assert!(verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
+        std::fs::write(memo.path().join(BINARY_MEMO_FILE), b"{not json").unwrap();
+        assert!(verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
+    }
+
+    fn current_stamp(dir: &tempfile::TempDir) -> (FileStamp, i64) {
+        let meta = std::fs::metadata(dir.path().join("firecracker")).unwrap();
+        let ctime = meta.ctime() * SEC + meta.ctime_nsec();
+        let mtime = meta.mtime() * SEC + meta.mtime_nsec();
+        (file_stamp_of(&meta).unwrap(), ctime.max(mtime))
+    }
+
+    /// Writes a memo for the file as it stands, recorded at `recorded_ns`.
+    fn memo_recorded_at(dir: &tempfile::TempDir, memo: &tempfile::TempDir, recorded_ns: i64) {
+        let (stamp, _) = current_stamp(dir);
+        let path = dir.path().join("firecracker");
+        record_memo(memo.path(), &path, stamp, &pin_for(BINARY), recorded_ns);
+    }
+
+    #[test]
+    fn the_racy_margin_boundary_is_exact() {
+        use mvm_vmm::host::file_memo::RACY_MARGIN_NS;
+        let dir = shipped(BINARY, 0o755);
+        let memo = tempfile::tempdir().unwrap();
+        let (_, newest) = current_stamp(&dir);
+        memo_recorded_at(&dir, &memo, newest + RACY_MARGIN_NS - 1);
+        let observed = newest + RACY_MARGIN_NS + 10 * SEC;
+        assert!(verify_memoed(&dir, &memo, BINARY, observed).unwrap());
+        memo_recorded_at(&dir, &memo, newest + RACY_MARGIN_NS);
+        assert!(!verify_memoed(&dir, &memo, BINARY, observed).unwrap());
+    }
+
+    #[test]
+    fn a_memo_for_another_path_or_stamp_or_version_is_hashed() {
+        let dir = shipped(BINARY, 0o755);
+        let memo = tempfile::tempdir().unwrap();
+        let base = settled_memo(&dir, &memo);
+        let observed = base + 10 * SEC;
+        edit_memo(&memo, |value| {
+            value["path"] = "/elsewhere/firecracker".into()
+        });
+        assert!(verify_memoed(&dir, &memo, BINARY, observed).unwrap());
+        let base = settled_memo(&dir, &memo);
+        edit_memo(&memo, |value| value["memo_version"] = 99.into());
+        assert!(verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
+        // Same bytes, new timestamps: the stamp no longer matches.
+        let base = settled_memo(&dir, &memo);
+        rewrite(&dir, BINARY);
+        assert!(verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
+    }
+
+    #[test]
+    fn without_a_usable_memo_dir_verification_still_hashes_and_succeeds() {
+        let dir = shipped(BINARY, 0o755);
+        let file = dir.path().join("firecracker");
+        let hashed = |memo_dir: Option<&Path>| {
+            verify_at(&file, &pin_for(BINARY), my_uid(), memo_dir, now_ns()).unwrap()
+        };
+        assert!(hashed(None));
+        let blocker = tempfile::NamedTempFile::new().unwrap();
+        // A regular file where the directory should be: creating it fails.
+        assert!(hashed(Some(&blocker.path().join("sub"))));
+        assert!(hashed(Some(&dir.path().join("missing").join("deeper"))));
+    }
+
+    #[test]
+    fn a_symlinked_memo_is_refused_and_hashed() {
+        let dir = shipped(BINARY, 0o755);
+        let memo = tempfile::tempdir().unwrap();
+        let base = settled_memo(&dir, &memo);
+        let real = memo.path().join("real.json");
+        let link = memo.path().join(BINARY_MEMO_FILE);
+        std::fs::rename(&link, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(verify_memoed(&dir, &memo, BINARY, base + 10 * SEC).unwrap());
     }
 
     /// The launch budget is absolute, so the check has to stay cheap at the

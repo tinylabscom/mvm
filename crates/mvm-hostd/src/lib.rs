@@ -68,6 +68,8 @@ pub mod jailer;
 /// [`keyholder::SecretResolver`] trait + the single-host
 /// [`keyholder::LocalResolver`].
 pub mod keyholder;
+/// Host-held liveness deadlines of topology units.
+pub mod liveness;
 mod mailbox_commit;
 mod mailbox_custody;
 pub mod mailbox_launch;
@@ -94,6 +96,8 @@ pub mod run;
 /// The one check every post-admission change to a running unit passes.
 pub mod seal_gate;
 pub mod session_resume;
+/// Host-held single-writer state cells declared by an admitted topology.
+pub mod state_cells;
 pub mod stream;
 pub mod supervisor;
 /// The per-VM host telemetry collector worker: resolve → assert-current →

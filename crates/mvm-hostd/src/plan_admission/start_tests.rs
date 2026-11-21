@@ -3170,3 +3170,113 @@ fn admit_and_start_refuses_a_grant_over_the_host_ceiling_and_boots_nothing() {
         "a refused launch must not be signed"
     );
 }
+
+enum Containment {
+    Quarantine,
+    Replace,
+}
+
+/// Admit a launch, commit `change` to the ledger, then start it: the order a
+/// quarantine racing the launch would produce.
+fn start_after_containment(
+    name: &str,
+    change: Containment,
+    cli_transient: bool,
+) -> (
+    anyhow::Result<String>,
+    mvm_runtime::mock::MockBackend,
+    String,
+) {
+    use mvm_core::host_interface::workload::WorkloadChange;
+    let (_env, home) = host_with_ceiling(Default::default());
+    let dir = tempfile::tempdir().expect("test directory");
+    let mock = mvm_runtime::mock::MockBackend::new();
+    let backend = mvm_runtime::AnyBackend::Mock(mock.clone());
+    let config = VmStartConfig {
+        name: name.into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(dir.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+    )
+    .expect("admitted before the containment");
+    let workload = admitted.plan().workload.0.clone();
+    let epoch =
+        mvm_contract::protocol::mailbox::ExecutionEpoch::new(admitted.plan().execution_epoch)
+            .unwrap();
+    let store = crate::policy_generation::workload_store::OwnedWorkloadStore::open(home.path())
+        .expect("workload store");
+    store
+        .commit(&match change {
+            Containment::Quarantine => WorkloadChange::Quarantine {
+                workload: workload.clone(),
+            },
+            Containment::Replace => WorkloadChange::Replace {
+                workload: workload.clone(),
+                from_epoch: epoch,
+            },
+        })
+        .expect("containment commit");
+    drop(store);
+    let audit_dir = dir.path().join("audit");
+    let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+        ed25519_dalek::SigningKey::from_bytes(&[43; 32]),
+        &audit_dir,
+    )
+    .expect("emitter");
+    let params = StartAdmittedParams {
+        backend: &backend,
+        admitted,
+        config,
+        policy_bundle: None,
+        emitter: Some(&emitter),
+        assurance: None,
+    };
+    let result = if cli_transient {
+        start_cli_transient(params, None, Vec::new()).map(|id| id.0)
+    } else {
+        start_admitted(params).map(|started| started.vm_id.0)
+    };
+    let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).unwrap_or_default();
+    (result, mock, chain)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_launch_contained_after_admission_is_stopped_and_audited() {
+    for (name, change) in [
+        ("contained-quarantine", Containment::Quarantine),
+        ("contained-replace", Containment::Replace),
+    ] {
+        let (result, mock, chain) = start_after_containment(name, change, false);
+        let error = result.expect_err("a contained launch must not succeed");
+        assert!(
+            format!("{error:#}").contains("no longer admits"),
+            "{error:#}"
+        );
+        assert_eq!(mock.count(), 0, "the started VM was stopped");
+        assert!(chain.contains("plan.failed"), "{chain}");
+        assert!(chain.contains("workload-contained"), "{chain}");
+        assert!(!chain.contains("plan.launched"), "{chain}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_cli_transient_contained_after_admission_is_stopped() {
+    for (name, change) in [
+        ("cli-contained-quarantine", Containment::Quarantine),
+        ("cli-contained-replace", Containment::Replace),
+    ] {
+        let (result, mock, chain) = start_after_containment(name, change, true);
+        assert!(result.is_err());
+        assert_eq!(mock.count(), 0, "the started VM was stopped");
+        assert!(!chain.contains("plan.launched"), "{chain}");
+    }
+}

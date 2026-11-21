@@ -77,7 +77,11 @@ async fn exercise_https_connect(cert_name: &str, trust_origin: bool, expect_succ
                 head.push(tls.read_u8().await.unwrap());
                 assert!(head.len() < 8192, "origin request head must be bounded");
             }
-            tls.write_all(OK_BODY).await.unwrap();
+            // Consume TLS closure before the client drops the tunnel, rather
+            // than closing after a fixed body while the proxy still forwards it.
+            tls.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhi")
+                .await
+                .unwrap();
             tls.shutdown().await.unwrap();
             Some(String::from_utf8(head).unwrap())
         });
@@ -111,6 +115,7 @@ async fn exercise_https_connect(cert_name: &str, trust_origin: bool, expect_succ
         if expect_success {
             let response = response.expect("verified HTTPS through CONNECT");
             assert_eq!(response.status().as_u16(), 200);
+            assert_eq!(response.content_length(), None, "body ends at TLS closure");
             assert_eq!(response.text().await.unwrap(), "hi");
         } else {
             let error = response.expect_err("invalid origin certificate must be rejected");

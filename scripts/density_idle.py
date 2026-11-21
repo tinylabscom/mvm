@@ -3,6 +3,8 @@
 
 Linux reads procfs; wakeups are voluntary context switches summed over a
 process's threads, so a thread that blocks and is woken counts once per wake.
+Linux also attributes them per thread name within each component
+(`/proc/<pid>/task/<tid>/comm`), so a figure can say which thread wakes.
 
 macOS reads libproc through ctypes (no subprocess, no third-party package) and
 sees only processes the caller may inspect, which includes the caller's own.
@@ -52,6 +54,8 @@ class ProcessSample:
     descriptors: int
     cpu_ticks: int
     voluntary_switches: int
+    # (tid, thread name, voluntary switches); empty where the host has no per-thread counter.
+    tasks: tuple[tuple[int, str, int], ...] = ()
 
 
 def component_of(program: str) -> str | None:
@@ -85,15 +89,22 @@ def sample_process(directory: Path) -> ProcessSample | None:
     component = component_of(program)
     if component is None:
         return None
-    tasks = [task for task in (directory / "task").iterdir() if task.name.isdigit()]
+    tasks = tuple(sorted(
+        (
+            int(task.name),
+            (task / "comm").read_text().strip(),
+            voluntary_switches((task / "status").read_text()),
+        )
+        for task in (directory / "task").iterdir()
+        if task.name.isdigit()
+    ))
     return ProcessSample(
         component=component,
         threads=len(tasks),
         descriptors=sum(1 for _ in (directory / "fd").iterdir()),
         cpu_ticks=cpu_ticks((directory / "stat").read_text()),
-        voluntary_switches=sum(
-            voluntary_switches((task / "status").read_text()) for task in tasks
-        ),
+        voluntary_switches=sum(switches for _, _, switches in tasks),
+        tasks=tasks,
     )
 
 
@@ -249,6 +260,58 @@ def summarize(
     return rows
 
 
+def summarize_threads(
+    before: dict[int, ProcessSample],
+    after: dict[int, ProcessSample],
+    seconds: float,
+) -> list[tuple[str, str, int, float]]:
+    """Per component and thread name: threads, wakeups per second.
+
+    Only threads present in both passes, under the same name, in a process
+    `summarize` would count, are counted.
+    """
+    if seconds <= 0:
+        raise ValueError("window must be positive")
+    totals: dict[tuple[str, str], list[int]] = {}
+    for pid, taken in after.items():
+        earlier = before.get(pid)
+        if earlier is None or earlier.component != taken.component:
+            continue
+        previous = {tid: (name, switches) for tid, name, switches in earlier.tasks}
+        for tid, name, switches in taken.tasks:
+            prior = previous.get(tid)
+            if prior is None or prior[0] != name:
+                continue
+            woke = switches - prior[1]
+            if woke < 0:
+                raise ValueError(f"{taken.component}/{name}: a counter went backwards")
+            entry = totals.setdefault((taken.component, name), [0, 0])
+            entry[0] += 1
+            entry[1] += woke
+    order = {name: index for index, name in enumerate(COMPONENTS)}
+    return [
+        (component, name, threads, woke / seconds)
+        for (component, name), (threads, woke) in sorted(
+            totals.items(), key=lambda item: (order[item[0][0]], item[0][1])
+        )
+    ]
+
+
+def thread_key(name: str) -> str:
+    """A thread name as one summary-key token: whitespace becomes underscores."""
+    return "_".join(name.split()) or "unnamed"
+
+
+def render_threads(rows: list[tuple[str, str, int, float]], wave: int) -> tuple[str, str]:
+    table = "component\tthread\tthreads\twakeups_per_second\n"
+    summary = ""
+    for component, name, threads, wakeups in rows:
+        table += f"{component}\t{name}\t{threads}\t{wakeups:.1f}\n"
+        key = f"wave_{wave}_thread_{component}_{thread_key(name)}"
+        summary += f"{key}_threads\t{threads}\n{key}_wakeups_per_second\t{wakeups:.1f}\n"
+    return table, summary
+
+
 def render(rows: list[tuple[str, int, int, int, float, float]], wave: int) -> tuple[str, str]:
     table = "component\tprocesses\tthreads\tdescriptors\tcpu_millicores\twakeups_per_second\n"
     summary = ""
@@ -311,6 +374,11 @@ def main() -> int:
         rows = summarize(before, after, elapsed, ticks_per_second)
         table, summary = render(rows, wave)
         (wave_dir / "idle-settled.tsv").write_text(table)
+        thread_rows = summarize_threads(before, after, elapsed)
+        if thread_rows:
+            thread_table, thread_summary = render_threads(thread_rows, wave)
+            (wave_dir / "idle-threads.tsv").write_text(thread_table)
+            summary += thread_summary
         if standbys:
             summary += render_per_standby(rows, wave, standbys)
         print(f"wave_{wave}_idle_window_seconds\t{elapsed:.1f}\n{summary}", end="")

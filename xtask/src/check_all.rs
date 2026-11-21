@@ -242,6 +242,7 @@ pub(crate) const GATES: &[Gate] = &[
         "check-bundle-trust-sites",
         crate::check_bundle_trust_sites::run,
     ),
+    ("check-epoch-gate", crate::check_epoch_gate::run),
     (
         "check-builder-shell-job-sites",
         crate::check_builder_shell_job_sites::run,

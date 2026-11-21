@@ -1,11 +1,5 @@
-//! The coordinator as a fixed systemd user service, and the checks that bind
-//! one connection to it.
-//!
-//! There is one template unit per OS user and canonical MVM home; the home is
-//! the unit's instance, so the name alone says which state root it owns. The
-//! manager creates and reaps the process. Nothing here installs, enables or
-//! starts a unit: one that is absent or stopped is reported, never replaced by
-//! a process this code spawns.
+//! Read-only coordinator process observation and legacy service-mode types.
+//! Observation uses one connected socket, never a service manager or launcher.
 //!
 //! A verified connection says who answered. It is not readiness, current
 //! authority, or permission to commit, and it does not confine anything from
@@ -26,9 +20,94 @@ const MAX_UNIT_NAME_BYTES: usize = 255;
 pub const MANAGED_HOME_FLAG: &str = "--managed-home";
 /// Version of the [`CoordinatorStatus`] reply.
 pub const STATUS_PROTOCOL: u32 = 1;
-/// What the client asks the manager for on each observation.
-#[cfg(target_os = "linux")]
-const OBSERVED_PROPERTIES: [&str; 4] = ["LoadState", "ActiveState", "MainPID", "InvocationID"];
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod process_tests;
+
+/// A detached coordinator's reply bound to the kernel peer on one connection.
+///
+/// This is process observation, not service provenance, readiness, current
+/// authority, permission to commit, or confinement from same-user processes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProcessObservation {
+    pub pid: u32,
+    pub uid: u32,
+    pub home: PathBuf,
+}
+
+/// Observe an existing detached coordinator without creating any local state.
+///
+/// No service manager is required or queried. One five-second absolute budget
+/// covers the nonblocking connection and bounded status exchange.
+///
+/// # Errors
+///
+/// The platform cannot bind the peer, the canonical home or socket is missing,
+/// the deadline expires, or the reply does not match the connected process.
+pub fn process_status(home: &Path) -> Result<ProcessObservation> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        process_status_until(
+            home,
+            std::time::Instant::now() + super::coordinator::STATUS_TIMEOUT,
+        )
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = home;
+        anyhow::bail!("coordinator process observation is unsupported on this platform")
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn process_status_until(home: &Path, deadline: std::time::Instant) -> Result<ProcessObservation> {
+    let budget = || {
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "coordinator observation deadline expired"
+        );
+        Ok::<_, anyhow::Error>(())
+    };
+    budget()?;
+    ensure!(
+        home.is_absolute() && home.canonicalize()? == home && home.is_dir(),
+        "coordinator home must be an existing canonical directory"
+    );
+    budget()?;
+    let stream = connect_without_waiting(&super::coordinator::socket_path(home))
+        .context("connecting to coordinator socket")?;
+    let peer = peer_credentials(&stream).context("reading coordinator kernel peer identity")?;
+    require_observation_peer(peer)?;
+    budget()?;
+    let status = super::coordinator::exchange_status(stream, deadline)?;
+    budget()?;
+    ensure!(
+        status
+            == CoordinatorStatus {
+                protocol: STATUS_PROTOCOL,
+                pid: peer.pid,
+                uid: peer.uid,
+                home: home.to_path_buf(),
+                lifetime: Lifetime::Detached,
+            },
+        "coordinator reply does not match the connected detached process"
+    );
+    Ok(ProcessObservation {
+        pid: peer.pid,
+        uid: peer.uid,
+        home: home.to_path_buf(),
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn require_observation_peer(peer: PeerProcess) -> Result<()> {
+    ensure!(peer.pid != 0, "coordinator socket has no usable peer PID");
+    ensure!(
+        peer.uid == rustix::process::geteuid().as_raw(),
+        "coordinator socket belongs to another user"
+    );
+    Ok(())
+}
 
 /// The user, state root and unit one managed coordinator is bound to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,8 +197,7 @@ pub enum Lifetime {
     Managed { unit: String, invocation: String },
 }
 
-/// What a coordinator says about itself. Every field is a claim the caller
-/// checks against the kernel and the manager before believing it.
+/// What a coordinator says about itself, not verified provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoordinatorStatus {
@@ -169,8 +247,8 @@ fn cgroup_names_unit(cgroup: &str, unit: &str) -> bool {
 ///
 /// The invocation ID is the manager's; the control group is read from the
 /// kernel. Neither stops another process of the same user imitating a
-/// service, which is why a client asks the manager who the service is rather
-/// than taking this process's word.
+/// service. Direct observation refuses this lifetime rather than treating
+/// this process's self-claim as verified service provenance.
 ///
 /// # Errors
 ///
@@ -262,7 +340,7 @@ pub(crate) fn peer_credentials(
 }
 
 /// Accept a kernel-reported peer only if it names a real process.
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 fn peer_from_raw(pid: i32, uid: u32) -> std::io::Result<PeerProcess> {
     let pid = u32::try_from(pid)
         .ok()
@@ -273,13 +351,19 @@ fn peer_from_raw(pid: i32, uid: u32) -> std::io::Result<PeerProcess> {
     Ok(PeerProcess { pid, uid })
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn peer_credentials(
+    stream: &std::os::unix::net::UnixStream,
+) -> std::io::Result<PeerProcess> {
+    use mvm_vmm::host::uds_peer::{connected_peer_pid, connected_peer_uid};
+    peer_from_raw(connected_peer_pid(stream)?, connected_peer_uid(stream)?)
+}
+
 /// Why no authenticated managed coordinator could be reported. None of these
 /// is evidence about what the coordinator has or has not committed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ManagedRefusal {
-    #[error(
-        "a manager-owned policy coordinator is supported only under a Linux systemd user manager"
-    )]
+    #[error("manager-owned coordinator observation is unsupported")]
     Unsupported,
     #[error("{0}")]
     InvalidHome(String),
@@ -299,54 +383,7 @@ pub enum ManagedRefusal {
     IdentityMismatch { unit: String, detail: String },
 }
 
-/// One manager answer about the unit while it was running.
-#[cfg(any(test, target_os = "linux"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct UnitObservation {
-    main_pid: u32,
-    invocation: String,
-}
-
-#[cfg(any(test, target_os = "linux"))]
-fn observe(unit: &str, show: &str) -> Result<UnitObservation, ManagedRefusal> {
-    let property = |key: &str| {
-        mvm_core::spawn_scope::show_property(show, key).ok_or_else(|| ManagedRefusal::Unknown {
-            unit: unit.to_string(),
-            detail: format!("the manager's answer has no {key}"),
-        })
-    };
-    let load_state = property("LoadState")?;
-    if load_state != "loaded" {
-        return Err(ManagedRefusal::NotProvisioned {
-            unit: unit.to_string(),
-            load_state: load_state.to_string(),
-        });
-    }
-    let active_state = property("ActiveState")?;
-    if active_state != "active" {
-        return Err(ManagedRefusal::NotRunning {
-            unit: unit.to_string(),
-            active_state: active_state.to_string(),
-        });
-    }
-    let main_pid = property("MainPID")?
-        .parse::<u32>()
-        .ok()
-        .filter(|pid| *pid > 1);
-    let invocation = property("InvocationID")?;
-    match main_pid {
-        Some(main_pid) if is_invocation_id(invocation) => Ok(UnitObservation {
-            main_pid,
-            invocation: invocation.to_string(),
-        }),
-        _ => Err(ManagedRefusal::Unknown {
-            unit: unit.to_string(),
-            detail: "the manager reports it active without a main process and invocation".into(),
-        }),
-    }
-}
-
-/// The managed coordinator one authenticated connection reached.
+/// Legacy manager observation shape; direct observation never returns this.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ManagedCoordinator {
     pub unit: String,
@@ -356,151 +393,41 @@ pub struct ManagedCoordinator {
     pub home: PathBuf,
 }
 
-/// The connection's kernel peer must be the manager's main process for the
-/// unit, running as this user. Checked before anything is sent to it.
-#[cfg(any(test, target_os = "linux"))]
-fn verify_peer(
-    expected: &ManagedIdentity,
-    manager: &UnitObservation,
-    peer: PeerProcess,
-) -> Result<(), ManagedRefusal> {
-    let mismatch = |detail: String| ManagedRefusal::IdentityMismatch {
-        unit: expected.unit.clone(),
-        detail,
-    };
-    if peer.uid != expected.uid {
-        return Err(mismatch(format!(
-            "the socket is served by uid {}, not {}",
-            peer.uid, expected.uid
-        )));
-    }
-    if peer.pid != manager.main_pid {
-        return Err(mismatch(format!(
-            "the socket is served by pid {}, the unit's main process is {}",
-            peer.pid, manager.main_pid
-        )));
-    }
-    Ok(())
-}
-
-/// The reply must restate the binding the caller derived independently, and
-/// the manager must report the same invocation after the exchange as before
-/// it, so a restart or a reused PID in between cannot pass.
-#[cfg(any(test, target_os = "linux"))]
-fn verify_status(
-    expected: &ManagedIdentity,
-    before: &UnitObservation,
-    peer: PeerProcess,
-    status: &CoordinatorStatus,
-    after: &UnitObservation,
-) -> Result<ManagedCoordinator, ManagedRefusal> {
-    let claimed = CoordinatorStatus {
-        protocol: STATUS_PROTOCOL,
-        pid: peer.pid,
-        uid: expected.uid,
-        home: expected.home.clone(),
-        lifetime: Lifetime::Managed {
-            unit: expected.unit.clone(),
-            invocation: before.invocation.clone(),
-        },
-    };
-    if *status != claimed {
-        return Err(ManagedRefusal::IdentityMismatch {
-            unit: expected.unit.clone(),
-            detail: format!("it reports {status:?}, the manager and kernel establish {claimed:?}"),
-        });
-    }
-    if after != before {
-        return Err(ManagedRefusal::Unknown {
-            unit: expected.unit.clone(),
-            detail: "the unit was restarted while its status was being read".into(),
-        });
-    }
-    Ok(ManagedCoordinator {
-        unit: expected.unit.clone(),
-        invocation: before.invocation.clone(),
-        pid: peer.pid,
-        uid: expected.uid,
-        home: expected.home.clone(),
-    })
-}
-
 /// Connect without waiting: a listener whose backlog is full answers
 /// `EAGAIN` at once instead of blocking the caller.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn connect_without_waiting(socket: &Path) -> std::io::Result<std::os::unix::net::UnixStream> {
-    use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
 
+    #[cfg(target_os = "linux")]
     let fd = rustix::net::socket_with(
         AddressFamily::UNIX,
         SocketType::STREAM,
-        SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
+        rustix::net::SocketFlags::NONBLOCK | rustix::net::SocketFlags::CLOEXEC,
         None,
     )?;
+    #[cfg(target_os = "macos")]
+    let fd = {
+        // Darwin has no atomic SOCK_NONBLOCK/SOCK_CLOEXEC socket flags.
+        let fd = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
+        rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)?;
+        rustix::fs::fcntl_setfl(&fd, rustix::fs::OFlags::NONBLOCK)?;
+        fd
+    };
     rustix::net::connect(&fd, &SocketAddrUnix::new(socket)?)?;
     rustix::fs::fcntl_setfl(&fd, rustix::fs::OFlags::empty())?;
     Ok(fd.into())
 }
 
-#[cfg(target_os = "linux")]
-fn status_with(
-    home: &Path,
-    show: &dyn Fn(&str) -> Result<String, mvm_core::spawn_scope::UserManagerGap>,
-) -> Result<ManagedCoordinator, ManagedRefusal> {
-    use mvm_core::spawn_scope::UserManagerGap;
-
-    let expected = ManagedIdentity::for_home(rustix::process::geteuid().as_raw(), home)
-        .map_err(|error| ManagedRefusal::InvalidHome(format!("{error:#}")))?;
-    let unit = expected.unit();
-    let ask = || {
-        let answer = show(unit).map_err(|gap| ManagedRefusal::ManagerUnavailable {
-            unit: unit.to_string(),
-            reason: match gap {
-                UserManagerGap::SystemctlMissing => "systemctl is not on PATH",
-                UserManagerGap::NoUserSessionBus => "this process has no user session bus",
-                UserManagerGap::NoAnswer => "it did not answer in time",
-            },
-        })?;
-        observe(unit, &answer)
-    };
-    let unknown = |detail: String| ManagedRefusal::Unknown {
-        unit: unit.to_string(),
-        detail,
-    };
-    let before = ask()?;
-    let mut stream = connect_without_waiting(&super::coordinator::socket_path(home))
-        .map_err(|error| unknown(format!("connecting to its socket: {error}")))?;
-    let peer = peer_credentials(&stream)
-        .map_err(|error| unknown(format!("reading its kernel credentials: {error}")))?;
-    verify_peer(&expected, &before, peer)?;
-    let status = super::coordinator::exchange_status(&mut stream)
-        .map_err(|error| unknown(format!("{error:#}")))?;
-    let after = ask()?;
-    verify_status(&expected, &before, peer, &status, &after)
-}
-
-/// Report the manager-owned coordinator for `home`, over one connection
-/// authenticated against the kernel and the user manager.
-///
-/// Read-only and bounded: two manager queries with a deadline each, one
-/// non-waiting connect, one small request and reply under a short timeout.
-/// It never installs, starts or spawns anything.
+/// Legacy manager observation is no longer supported.
+/// Use [`process_status`] for direct detached-process observation.
 ///
 /// # Errors
 ///
-/// A [`ManagedRefusal`] naming what is missing or does not match.
+/// Always returns [`ManagedRefusal::Unsupported`].
 pub fn managed_status(home: &Path) -> Result<ManagedCoordinator, ManagedRefusal> {
-    #[cfg(target_os = "linux")]
-    {
-        status_with(home, &|unit| {
-            mvm_core::spawn_scope::show_user_unit(unit, &OBSERVED_PROPERTIES)
-        })
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = home;
-        Err(ManagedRefusal::Unsupported)
-    }
+    let _ = home;
+    Err(ManagedRefusal::Unsupported)
 }
 
 #[cfg(all(test, unix))]
@@ -517,20 +444,6 @@ mod tests {
         }
     }
 
-    fn observation() -> UnitObservation {
-        UnitObservation {
-            main_pid: 4242,
-            invocation: INVOCATION.into(),
-        }
-    }
-
-    fn peer() -> PeerProcess {
-        PeerProcess {
-            pid: 4242,
-            uid: 1000,
-        }
-    }
-
     fn status() -> CoordinatorStatus {
         CoordinatorStatus {
             protocol: STATUS_PROTOCOL,
@@ -542,12 +455,6 @@ mod tests {
                 invocation: INVOCATION.into(),
             },
         }
-    }
-
-    fn show(load: &str, active: &str, pid: &str, invocation: &str) -> String {
-        format!(
-            "LoadState={load}\nActiveState={active}\nMainPID={pid}\nInvocationID={invocation}\n"
-        )
     }
 
     #[test]
@@ -656,315 +563,6 @@ mod tests {
             "g123456789abcdef0123456789abcdef",
         ] {
             assert!(!is_invocation_id(bad), "{bad:?}");
-        }
-    }
-
-    #[test]
-    fn a_manager_answer_is_running_only_with_a_process_and_invocation() {
-        let unit = "u.service";
-        assert_eq!(
-            observe(unit, &show("loaded", "active", "4242", INVOCATION)).unwrap(),
-            observation()
-        );
-        assert!(matches!(
-            observe(unit, &show("not-found", "inactive", "0", "")),
-            Err(ManagedRefusal::NotProvisioned { load_state, .. }) if load_state == "not-found"
-        ));
-        for state in ["inactive", "failed", "activating", "deactivating"] {
-            assert!(matches!(
-                observe(unit, &show("loaded", state, "4242", INVOCATION)),
-                Err(ManagedRefusal::NotRunning { active_state, .. }) if active_state == state
-            ));
-        }
-        for (pid, invocation) in [
-            ("0", INVOCATION),
-            ("1", INVOCATION),
-            ("x", INVOCATION),
-            ("4242", ""),
-        ] {
-            assert!(matches!(
-                observe(unit, &show("loaded", "active", pid, invocation)),
-                Err(ManagedRefusal::Unknown { .. })
-            ));
-        }
-        assert!(matches!(
-            observe(unit, "LoadState=loaded\nActiveState=active\n"),
-            Err(ManagedRefusal::Unknown { .. })
-        ));
-    }
-
-    #[test]
-    fn the_kernel_peer_must_be_the_managers_main_process_for_this_user() {
-        verify_peer(&identity(), &observation(), peer()).unwrap();
-        for wrong in [
-            PeerProcess {
-                pid: 4243,
-                ..peer()
-            },
-            PeerProcess {
-                uid: 1001,
-                ..peer()
-            },
-        ] {
-            assert!(matches!(
-                verify_peer(&identity(), &observation(), wrong),
-                Err(ManagedRefusal::IdentityMismatch { .. })
-            ));
-        }
-    }
-
-    #[test]
-    fn a_reply_must_restate_the_binding_the_manager_and_kernel_establish() {
-        let verified = verify_status(
-            &identity(),
-            &observation(),
-            peer(),
-            &status(),
-            &observation(),
-        )
-        .unwrap();
-        assert_eq!(
-            verified,
-            ManagedCoordinator {
-                unit: identity().unit,
-                invocation: INVOCATION.into(),
-                pid: 4242,
-                uid: 1000,
-                home: PathBuf::from("/home/op/.state"),
-            }
-        );
-        let other_invocation = "f".repeat(32);
-        for wrong in [
-            CoordinatorStatus {
-                protocol: 2,
-                ..status()
-            },
-            CoordinatorStatus {
-                pid: 4243,
-                ..status()
-            },
-            CoordinatorStatus { uid: 0, ..status() },
-            CoordinatorStatus {
-                home: PathBuf::from("/home/op/other"),
-                ..status()
-            },
-            CoordinatorStatus {
-                lifetime: Lifetime::Detached,
-                ..status()
-            },
-            CoordinatorStatus {
-                lifetime: Lifetime::Managed {
-                    unit: "mvm-policy-coordinator@other.service".into(),
-                    invocation: INVOCATION.into(),
-                },
-                ..status()
-            },
-            CoordinatorStatus {
-                lifetime: Lifetime::Managed {
-                    unit: identity().unit,
-                    invocation: other_invocation.clone(),
-                },
-                ..status()
-            },
-        ] {
-            assert!(
-                matches!(
-                    verify_status(&identity(), &observation(), peer(), &wrong, &observation()),
-                    Err(ManagedRefusal::IdentityMismatch { .. })
-                ),
-                "{wrong:?}"
-            );
-        }
-        for restarted in [
-            UnitObservation {
-                main_pid: 4243,
-                ..observation()
-            },
-            UnitObservation {
-                invocation: other_invocation,
-                ..observation()
-            },
-        ] {
-            assert!(matches!(
-                verify_status(&identity(), &observation(), peer(), &status(), &restarted),
-                Err(ManagedRefusal::Unknown { .. })
-            ));
-        }
-    }
-
-    /// A real listener in this process stands in for the service, so the
-    /// kernel's peer PID is this test's own. The manager's answers are
-    /// supplied; nothing here shows a unit was installed or started.
-    #[cfg(target_os = "linux")]
-    mod over_a_real_socket {
-        use std::cell::Cell;
-
-        use mvm_core::spawn_scope::UserManagerGap;
-        use mvm_core::util::test_env::TestEnv;
-
-        use super::super::super::coordinator::{bind, serve_on, socket_path};
-        use super::*;
-
-        struct Service {
-            _environment: TestEnv,
-            _root: tempfile::TempDir,
-            home: PathBuf,
-            unit: String,
-        }
-
-        fn canonical_home() -> (TestEnv, tempfile::TempDir, PathBuf) {
-            let mut environment = TestEnv::new();
-            let root = tempfile::tempdir().unwrap();
-            let home = root.path().canonicalize().unwrap().join("home");
-            std::fs::create_dir(&home).unwrap();
-            environment.isolate_mvm_home(&home);
-            (environment, root, home)
-        }
-
-        fn serving(lifetime: impl FnOnce(&ManagedIdentity) -> Lifetime) -> Service {
-            let (environment, root, home) = canonical_home();
-            let identity =
-                ManagedIdentity::for_home(rustix::process::geteuid().as_raw(), &home).unwrap();
-            let status = CoordinatorStatus::of_this_process(&home, lifetime(&identity));
-            let bound = bind(&home).unwrap();
-            std::thread::spawn(move || {
-                let _owner = bound.owner;
-                serve_on(
-                    &bound.listener,
-                    &bound.generations,
-                    &bound.workloads,
-                    &status,
-                )
-            });
-            Service {
-                _environment: environment,
-                _root: root,
-                home,
-                unit: identity.unit,
-            }
-        }
-
-        fn managed(identity: &ManagedIdentity) -> Lifetime {
-            Lifetime::Managed {
-                unit: identity.unit.clone(),
-                invocation: INVOCATION.into(),
-            }
-        }
-
-        fn running_as(pid: u32, invocation: &str) -> String {
-            show("loaded", "active", &pid.to_string(), invocation)
-        }
-
-        #[test]
-        fn the_managers_main_process_is_authenticated_and_reported() {
-            let service = serving(managed);
-            let asked = Cell::new(0);
-            let reported = status_with(&service.home, &|unit| {
-                assert_eq!(unit, service.unit);
-                asked.set(asked.get() + 1);
-                Ok(running_as(std::process::id(), INVOCATION))
-            })
-            .unwrap();
-            assert_eq!(asked.get(), 2, "the manager is asked before and after");
-            assert_eq!(
-                reported,
-                ManagedCoordinator {
-                    unit: service.unit.clone(),
-                    invocation: INVOCATION.into(),
-                    pid: std::process::id(),
-                    uid: rustix::process::geteuid().as_raw(),
-                    home: service.home.clone(),
-                }
-            );
-        }
-
-        #[test]
-        fn a_listener_that_is_not_the_units_main_process_is_refused() {
-            let service = serving(managed);
-            let refusal = status_with(&service.home, &|_| {
-                Ok(running_as(std::process::id() + 1, INVOCATION))
-            })
-            .unwrap_err();
-            assert!(
-                matches!(&refusal, ManagedRefusal::IdentityMismatch { detail, .. } if detail.contains("main process")),
-                "{refusal}"
-            );
-        }
-
-        #[test]
-        fn a_detached_coordinator_never_passes_for_the_service() {
-            let service = serving(|_| Lifetime::Detached);
-            let refusal = status_with(&service.home, &|_| {
-                Ok(running_as(std::process::id(), INVOCATION))
-            })
-            .unwrap_err();
-            assert!(
-                matches!(refusal, ManagedRefusal::IdentityMismatch { .. }),
-                "{refusal}"
-            );
-        }
-
-        #[test]
-        fn another_invocations_identity_is_refused() {
-            let service = serving(managed);
-            let refusal = status_with(&service.home, &|_| {
-                Ok(running_as(std::process::id(), &"f".repeat(32)))
-            })
-            .unwrap_err();
-            assert!(
-                matches!(refusal, ManagedRefusal::IdentityMismatch { .. }),
-                "{refusal}"
-            );
-        }
-
-        #[test]
-        fn a_unit_that_stops_or_restarts_during_the_exchange_is_not_verified() {
-            let service = serving(managed);
-            for (second, expected) in [
-                (show("loaded", "activating", "0", ""), "not running"),
-                (
-                    running_as(std::process::id(), &"f".repeat(32)),
-                    "restarted while its status was being read",
-                ),
-            ] {
-                let asked = Cell::new(0);
-                let refusal = status_with(&service.home, &|_| {
-                    asked.set(asked.get() + 1);
-                    Ok(if asked.get() == 1 {
-                        running_as(std::process::id(), INVOCATION)
-                    } else {
-                        second.clone()
-                    })
-                })
-                .unwrap_err();
-                assert!(refusal.to_string().contains(expected), "{refusal}");
-            }
-        }
-
-        #[test]
-        fn absent_stopped_or_unreachable_is_reported_and_nothing_is_started() {
-            let (_environment, _root, home) = canonical_home();
-            let socket = socket_path(&home);
-            for (answer, expected) in [
-                (
-                    Ok(show("not-found", "inactive", "0", "")),
-                    "is not provisioned",
-                ),
-                (
-                    Ok(show("loaded", "failed", "0", "")),
-                    "provisioned but not running",
-                ),
-                (Err(UserManagerGap::NoUserSessionBus), "no user session bus"),
-                (Err(UserManagerGap::NoAnswer), "did not answer in time"),
-                (
-                    Ok(running_as(std::process::id(), INVOCATION)),
-                    "connecting to its socket",
-                ),
-            ] {
-                let refusal = status_with(&home, &|_| answer.clone()).unwrap_err();
-                assert!(refusal.to_string().contains(expected), "{refusal}");
-                assert!(!socket.exists(), "a refusal must not start a coordinator");
-            }
         }
     }
 

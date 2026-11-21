@@ -459,6 +459,7 @@ mod destinations {
             epoch: ExecutionEpoch::new(epoch).unwrap(),
             expected: tip(from),
             next: tip(from + 1),
+            retention: false,
         }
         .sign(signer)
         .unwrap()
@@ -565,6 +566,59 @@ mod destinations {
             let error = store.commit_destination(&refused).unwrap_err();
             assert!(!is_unresolved(&error), "{error:#}");
         }
+        assert_eq!(ledger_bytes(home.path()), before);
+    }
+
+    fn retention(from: u64, signer: &SigningKey) -> SignedPreparedHead {
+        PreparedHead {
+            retention: true,
+            ..prepared("w", 1, from, signer).head
+        }
+        .sign(signer)
+        .unwrap()
+    }
+
+    #[test]
+    fn a_quarantined_destination_accepts_only_a_valid_retention_head() {
+        let (home, store) = enrolled();
+        store
+            .commit_destination(&prepared("w", 1, 0, &key()))
+            .unwrap();
+        store.commit(&quarantine("w")).unwrap();
+        let before = ledger_bytes(home.path());
+        let plain = store
+            .commit_destination(&prepared("w", 1, 1, &key()))
+            .unwrap_err();
+        assert!(format!("{plain:#}").contains("quarantined"), "{plain:#}");
+        let other_key = SigningKey::from_bytes(&[8; 32]);
+        let divergent = PreparedHead {
+            expected: tip(5),
+            next: tip(6),
+            ..retention(1, &key()).head
+        }
+        .sign(&key())
+        .unwrap();
+        for refused in [retention(1, &other_key), divergent] {
+            assert!(store.commit_destination(&refused).is_err());
+        }
+        assert_eq!(ledger_bytes(home.path()), before);
+        store.commit_destination(&retention(1, &key())).unwrap();
+        assert_eq!(disk_tip(home.path()), tip(2));
+    }
+
+    #[test]
+    fn a_retention_head_is_refused_after_a_replacement() {
+        let (home, store) = enrolled();
+        store
+            .commit(&WorkloadChange::Replace {
+                workload: "w".into(),
+                from_epoch: ExecutionEpoch::new(1).unwrap(),
+            })
+            .unwrap();
+        store.commit(&quarantine("w")).unwrap();
+        let before = ledger_bytes(home.path());
+        let error = store.commit_destination(&retention(0, &key())).unwrap_err();
+        assert!(format!("{error:#}").contains("epoch changed"), "{error:#}");
         assert_eq!(ledger_bytes(home.path()), before);
     }
 
@@ -678,6 +732,7 @@ mod destinations {
             epoch: ExecutionEpoch::new(1).unwrap(),
             expected: tip(0),
             next: tip(1),
+            retention: false,
         }
         .sign(&key())
         .unwrap();

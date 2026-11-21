@@ -2450,6 +2450,127 @@ pub(crate) mod admit_plan_tests {
         assert!(matches!(owner, CliAdmission::Dispatched(_)));
     }
 
+    /// Admit a warm child, quarantine its workload, then claim it on `mock`.
+    #[cfg(feature = "test-support")]
+    fn claim_warm_after_quarantine(
+        mock: mvm_runtime::mock::MockBackend,
+    ) -> anyhow::Result<crate::standby::OwnedWarmClaim> {
+        let (_env, home) = isolated_home();
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let rootfs = write_rootfs(home.path(), b"warm child image");
+        let ledger = InMemoryNonceLedger::new();
+        let context = admit_plan_for_boot(AdmitPlanForBootParams {
+            vm_name: "warm-child",
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            ..pinning_params(&rootfs, &ledger)
+        })
+        .expect("admit warm child");
+        let plan_json = serde_json::to_string(context.admitted.signed()).expect("signed plan");
+        let bundle_json = context
+            .policy_bundle
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .expect("policy");
+        let workload = context.admitted.plan().workload.0.clone();
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "warm-child".into(),
+            rootfs_path: rootfs.display().to_string(),
+            plan_json: Some(plan_json),
+            bundle_json,
+            ..Default::default()
+        };
+        let owner = CliAdmission::new_for_rootfs(context, &rootfs);
+        let store =
+            mvm_hostd::policy_generation::workload_store::OwnedWorkloadStore::open(home.path())
+                .expect("workload store");
+        store
+            .commit(&mvm_core::host_interface::workload::WorkloadChange::Quarantine { workload })
+            .expect("quarantine after admission");
+        drop(store);
+        let pool = mvm_runtime::standby_pool::SupervisorStandbyPool::at(home.path().join("pool"));
+        let checkpoints = mvm_runtime::checkpoint::CheckpointStore::at(home.path().join("checks"));
+        let snapshots = mvm_fs::snapshot_store::FsSnapshotStore::new(home.path().join("snaps"))
+            .expect("snapshot store");
+        let anchor = crate::checkpoint::anchor::SignedChainAnchor::empty();
+        let parent = mvm_core::checkpoint::CheckpointId::new("mock-parent");
+        let registry_path = home.path().join("names.json");
+        let claim_context = crate::ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent,
+            registry_path: &registry_path,
+            grant_issuer: None,
+        };
+        let handle = mvm_core::vm_backend::StandbyHandle {
+            id: "mock-standby".into(),
+            template_id: None,
+            control_socket: String::new(),
+            pid: 0,
+            kernel_sha256: String::new(),
+            vcpus: 2,
+            mem_mib: 512,
+            binding_nonce: String::new(),
+            spawned_unix_secs: 0,
+            state: mvm_core::vm_backend::StandbyState::Idle,
+            image_sha256: None,
+            root_strategy: Default::default(),
+            parent_checkpoint: None,
+            preloaded_child_vm_name: None,
+            vsock_egress: false,
+        };
+        let backend = mvm_runtime::AnyBackend::Mock(mock);
+        owner
+            .claim_warm(&backend, config, &claim_context, &handle)
+            .1
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_warm_child_contained_after_admission_is_stopped_before_custody() {
+        let mock = mvm_runtime::mock::MockBackend::new().with_standby();
+        let error = claim_warm_after_quarantine(mock.clone())
+            .expect_err("a quarantined workload must not hand back a claimed child");
+        assert!(
+            format!("{error:#}").contains("no longer admits"),
+            "{error:#}"
+        );
+        assert!(
+            !matches!(
+                error.downcast_ref::<mvm_hostd::plan_admission::CliStartFailure>(),
+                Some(mvm_hostd::plan_admission::CliStartFailure::UncertainStop(_))
+            ),
+            "{error:#}"
+        );
+        assert_eq!(mock.count(), 0, "the claimed child was stopped");
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_warm_child_that_cannot_be_stopped_is_reported_uncertain() {
+        let mock = mvm_runtime::mock::MockBackend::new()
+            .with_standby()
+            .with_failing_stop();
+        let error = claim_warm_after_quarantine(mock.clone())
+            .expect_err("a quarantined workload must not hand back a claimed child");
+        assert!(
+            matches!(
+                error.downcast_ref::<mvm_hostd::plan_admission::CliStartFailure>(),
+                Some(mvm_hostd::plan_admission::CliStartFailure::UncertainStop(_))
+            ),
+            "{error:#}"
+        );
+        assert_eq!(
+            mock.count(),
+            1,
+            "the child that would not stop is still live"
+        );
+    }
+
     #[test]
     fn record_boot_audits_the_root_strategy_label() {
         let _home = isolated_home();

@@ -424,6 +424,13 @@ impl MachineLifecycleLock {
     pub fn remove_saved_state(&self) -> Result<()> {
         remove_saved_state_in(&mvm_core::config::instance_dir(&self.name))
     }
+
+    /// Best effort: a kept or unremovable evidence dir never fails the removal.
+    pub fn drop_runtime_evidence(&self) {
+        if let Err(error) = crate::runtime_evidence::remove_retired_vm_evidence(&self.name) {
+            tracing::warn!(machine = %self.name, %error, "runtime evidence left in place");
+        }
+    }
 }
 
 /// Clear instance payloads without replacing the inode used by lifecycle waiters.

@@ -49,6 +49,21 @@ pub struct ServiceCallCtx {
     /// Current composition width (cap 5). Resets per top-level call;
     /// incremented per sub-invocation by the same composing handler.
     pub composition_width: u8,
+    /// The unit and execution epoch the call runs under, from the admitted
+    /// plan the VM registered with. `None` for a registration that carried
+    /// none, which the broker serves without an epoch gate.
+    pub epoch: Option<CallEpoch>,
+}
+
+/// The admitted plan's workload and execution epoch a broker call is made
+/// under. The broker asks the epoch gate whether `epoch` may still act for
+/// `unit` before it dispatches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallEpoch {
+    /// The plan's workload: the key the epoch gate is read by.
+    pub unit: String,
+    /// The plan's execution epoch.
+    pub epoch: mvm_contract::protocol::mailbox::ExecutionEpoch,
 }
 
 /// A handler for one host-side service.

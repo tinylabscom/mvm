@@ -664,4 +664,82 @@ mod tests {
             .unwrap()
         );
     }
+
+    fn retained_fork_contained_after_admission(
+        stop_fails: bool,
+    ) -> (anyhow::Error, bool, Vec<String>) {
+        use std::cell::{Cell, RefCell};
+
+        let (_env, home, root, store, meta) = fixture();
+        let prepared = prepare_vm_full_fork(&store, request(&meta, root.path())).unwrap();
+        let PreparedVmFullFork {
+            store,
+            anchor,
+            source,
+            admission,
+            params,
+        } = prepared;
+        let crate::admission::AdmissionContext { admitted, .. } = admission;
+        let bound = source.bind_child(admitted, params);
+        let restored = Cell::new(false);
+        let stops = RefCell::new(Vec::new());
+        let restorer = |_child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
+            restored.set(true);
+            mvm_hostd::policy_generation::workload_store::OwnedWorkloadStore::open(home.path())?
+                .commit(
+                    &mvm_core::host_interface::workload::WorkloadChange::Quarantine {
+                        workload: "child-vm".into(),
+                    },
+                )?;
+            Ok(())
+        };
+        let dispatched = bound.dispatch(
+            &store,
+            mvm_hostd::plan_admission::VmFullForkRestorer::Hvf(&restorer),
+            &anchor,
+            &|name| {
+                stops.borrow_mut().push(name.to_string());
+                if stop_fails {
+                    anyhow::bail!("stop not confirmed");
+                }
+                Ok(())
+            },
+        );
+        assert!(dispatched.admitted.was_dispatched());
+        (
+            dispatched
+                .result
+                .expect_err("quarantined child must not be returned"),
+            restored.get(),
+            stops.into_inner(),
+        )
+    }
+
+    #[test]
+    fn retained_fork_stops_child_quarantined_after_admission() {
+        let (error, restored, stopped) = retained_fork_contained_after_admission(false);
+        assert!(restored, "restorer was not invoked: {error:#}");
+        assert_eq!(stopped, vec!["child-vm"]);
+        assert!(
+            format!("{error:#}").contains("no longer admits"),
+            "{error:#}"
+        );
+        assert!(
+            error
+                .downcast_ref::<mvm_runtime::checkpoint::ForkStopUncertain>()
+                .is_none(),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn retained_fork_keeps_uncertain_stop_custody() {
+        let (error, restored, stopped) = retained_fork_contained_after_admission(true);
+        assert!(restored, "restorer was not invoked: {error:#}");
+        assert_eq!(stopped, vec!["child-vm"]);
+        let uncertain = error
+            .downcast_ref::<mvm_runtime::checkpoint::ForkStopUncertain>()
+            .unwrap_or_else(|| panic!("expected ForkStopUncertain: {error:#}"));
+        assert_eq!(uncertain.name, "child-vm");
+    }
 }

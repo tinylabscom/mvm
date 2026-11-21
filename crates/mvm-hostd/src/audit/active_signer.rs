@@ -61,6 +61,7 @@ pub fn active_signer_for(audit_dir: &Path) -> Option<Arc<FileAuditSigner>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::test_fixtures::AuditDir;
 
     fn signer_in(dir: &Path, seed: u8) -> Arc<FileAuditSigner> {
         Arc::new(
@@ -73,7 +74,7 @@ mod tests {
     /// gone once the guard drops.
     #[test]
     fn a_registered_signer_is_scoped_to_its_directory_and_its_guard() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let other = tempfile::tempdir().unwrap();
         let signer = signer_in(dir.path(), 41);
 
@@ -89,7 +90,7 @@ mod tests {
     /// The registration does not keep the signer alive.
     #[test]
     fn a_dropped_signer_is_not_offered() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = AuditDir::new();
         let signer = signer_in(dir.path(), 42);
         let _guard = register_active_signer(dir.path(), &signer);
         drop(signer);

@@ -22,7 +22,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod namespace;
+mod retire;
 use namespace::{check_owner, private_directory};
+pub use retire::remove_retired_vm_evidence;
 
 /// Guest RPC compatibility, distinct from the host instance-control protocol.
 pub const MIN_GUEST_RPC_PROTOCOL_VERSION: u32 = mvm_agentd::vsock::MIN_SUPPORTED_PROTOCOL_VERSION;

@@ -283,10 +283,13 @@ if args[:3] == ["pool", "status", "--json"]:
             metadata = json.loads((base / "out/metadata.json").read_text())
             self.assertEqual(metadata["configuration"]["standby_form"], "on_disk_snapshot")
 
+    # Only HVF keeps a resident process per standby, and its run reads macOS
+    # host memory tools; the Firecracker form is the snapshot test above.
+    @unittest.skipUnless(platform.system() == "Darwin", "the HVF standby form needs macOS")
     def test_a_resident_standby_records_its_form_as_a_process(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             base = Path(tmp)
-            result = self.run_standby(base, {})
+            result = self.run_standby(base, {"MVM_HVF_DENSITY_BACKEND": "hvf"})
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("standby_form\tresident_process\n", (base / "out/summary.tsv").read_text())
 

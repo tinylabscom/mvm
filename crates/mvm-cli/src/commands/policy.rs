@@ -35,7 +35,7 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) enum PolicyAction {
     /// Commit the first policy generation for a quiescent local project.
     Activate(ActivateArgs),
-    /// Identify the manager-owned policy coordinator (read-only)
+    /// Observe the existing detached policy coordinator (read-only)
     Coordinator(CoordinatorArgs),
     /// Resolve a profile into the manifest `run --plan` accepts
     Resolve(ResolveArgs),
@@ -168,22 +168,20 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 }
 
-/// Report the coordinator the systemd user manager runs for this home. A
-/// refusal is the answer when there is none; nothing is installed or started.
-fn coordinator(args: &CoordinatorArgs) -> Result<()> {
-    let managed = mvm_client::policy_profiles::coordinator::managed_status()?;
+/// Observe the connected detached coordinator; never initialize or start it.
+pub(in crate::commands) fn coordinator(args: &CoordinatorArgs) -> Result<()> {
+    let observed = mvm_client::policy_profiles::coordinator::process_status()?;
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&managed)?);
+        println!("{}", serde_json::to_string_pretty(&observed)?);
         return Ok(());
     }
-    println!("Policy coordinator: {}", managed.unit);
-    println!("  invocation  {}", managed.invocation);
-    println!("  pid         {}", managed.pid);
-    println!("  uid         {}", managed.uid);
-    println!("  home        {}", managed.home.display());
+    println!("Policy coordinator: observed detached process");
+    println!("  pid         {}", observed.pid);
+    println!("  uid         {}", observed.uid);
+    println!("  home        {}", observed.home.display());
     println!(
-        "Identity only, checked against the systemd user manager and the socket's kernel \
-         credentials. Not readiness, current authority, or permission to commit."
+        "Process observation only, checked against the connected socket's kernel credentials. \
+         Not service provenance, readiness, current authority, or permission to commit."
     );
     Ok(())
 }
