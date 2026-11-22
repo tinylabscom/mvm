@@ -23,5 +23,6 @@ fn main() -> Result<()> {
         .init();
     let raw = mvm_hostd::read_launch_config("mvm-mailbox")?;
     let config = parse(&raw).context("mvm-mailbox config parse failed")?;
+    mvm_hostd::mailbox_process::stop_on_sigterm();
     std::process::exit(serve(config));
 }
