@@ -16,6 +16,10 @@ MEMORY="${MVM_HVF_DENSITY_MEMORY:-512M}"
 CPUS="${MVM_HVF_DENSITY_CPUS:-2}"
 SKIP_BUILD="${MVM_HVF_DENSITY_SKIP_BUILD:-0}"
 MAILBOX="${MVM_HVF_DENSITY_MAILBOX:-0}"
+SERVING_ENDPOINT="${MVM_HVF_DENSITY_SERVING_ENDPOINT:-0}"
+# TEST-NET-1 (RFC 5737): a literal, so admission resolves no name, and an idle
+# guest sends nothing, so the endpoint never dials it.
+SERVING_DESTINATION="192.0.2.1:443"
 MODE="${MVM_HVF_DENSITY_MODE:-cold}"
 
 usage() {
@@ -47,6 +51,10 @@ Useful overrides:
   MVM_HVF_DENSITY_MEMORY=512M               guest memory setting
   MVM_HVF_DENSITY_CPUS=2                    guest vCPU setting
   MVM_HVF_DENSITY_MAILBOX=1                  grant one distinct mailbox per VM
+  MVM_HVF_DENSITY_SERVING_ENDPOINT=1         admit one egress destination (${SERVING_DESTINATION})
+                                             per VM, so each unit's endpoint serves
+                                             instead of only collecting telemetry; cold only.
+                                             summary.tsv and metadata.json record endpoint_form.
   MVM_HVF_DENSITY_ACK_LARGE=1                explicitly permit waves over 100 VMs
   Large waves also require configured guest RAM to fit within 80% of host RAM.
   Linux requires MVM's shipped Firecracker; unpinned overrides are refused.
@@ -199,6 +207,14 @@ if [[ "${MAILBOX}" != "0" && "${MAILBOX}" != "1" ]]; then
 fi
 if [[ "${MODE}" != "cold" && "${MODE}" != "warm" && "${MODE}" != "standby" ]]; then
   echo "refusing: MVM_HVF_DENSITY_MODE must be cold, warm or standby" >&2
+  exit 70
+fi
+if [[ "${SERVING_ENDPOINT}" != "0" && "${SERVING_ENDPOINT}" != "1" ]]; then
+  echo "refusing: MVM_HVF_DENSITY_SERVING_ENDPOINT must be 0 or 1" >&2
+  exit 70
+fi
+if [[ "${MODE}" != "cold" && "${SERVING_ENDPOINT}" == "1" ]]; then
+  echo "refusing: the serving-endpoint setting is measured on cold launches only" >&2
   exit 70
 fi
 if [[ "${MODE}" != "cold" && "${MAILBOX}" == "1" ]]; then
@@ -383,6 +399,12 @@ if [[ "${MODE}" == "standby" ]]; then
     STANDBY_FORM="on_disk_snapshot"
   fi
 fi
+ENDPOINT_FORM="collector_only"
+egress_args=()
+if [[ "${SERVING_ENDPOINT}" == "1" ]]; then
+  ENDPOINT_FORM="serving"
+  egress_args=(--allow-host "${SERVING_DESTINATION}")
+fi
 run_env=(
   env
   "MVM_HOME=${DATA_DIR}"
@@ -518,7 +540,8 @@ refuse_busy_host
 prime_name="${RUN_ID}-prime"
 if ! "${run_env[@]}" "MVM_RESIDENCY=cold" "${MVMCTL_BIN}" machine run \
   --name "${prime_name}" --hypervisor "${BACKEND}" --image "${IMAGE_REF}" \
-  --memory "${MEMORY}" --cpus "${CPUS}" -- sleep 1 \
+  --memory "${MEMORY}" --cpus "${CPUS}" \
+  "${egress_args[@]+"${egress_args[@]}"}" -- sleep 1 \
   >"${OUT_DIR}/prime.stdout" 2>"${OUT_DIR}/prime.stderr"; then
   echo "refusing: first-use preparation failed; see ${OUT_DIR}/prime.stderr" >&2
   exit 71
@@ -751,6 +774,7 @@ cleanup_wave() {
   echo -e "max_wave_guest_memory_mib\t${requested_memory_mib}"
   echo -e "cpus\t${CPUS}"
   echo -e "mailbox\t${MAILBOX}"
+  echo -e "endpoint_form\t${ENDPOINT_FORM}"
   echo -e "custom_workload\t${CUSTOM_WORKLOAD}"
   echo -e "seeded_kernel_source\t${SEEDED_KERNEL_SOURCE}"
   echo -e "mvmctl\t${MVMCTL_BIN}"
@@ -851,6 +875,7 @@ for wave in "${WAVES[@]}"; do
       --cpus "${CPUS}" \
       --receipt "${receipt}" \
       "${mailbox_args[@]+"${mailbox_args[@]}"}" \
+      "${egress_args[@]+"${egress_args[@]}"}" \
       -- "${GUEST_COMMAND[@]}" \
       >"${stdout}" 2>"${stderr}" &
     pid=$!

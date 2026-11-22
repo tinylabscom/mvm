@@ -17,15 +17,19 @@ const COMPARED_STATS: [&str; 2] = ["p50", "p95"];
 
 /// Section fields that are not figure groups: labels, and the per-thread
 /// wakeup attribution, whose thread names are not stable enough to compare.
-const SECTION_SCALARS: [&str; 4] = [
+const SECTION_SCALARS: [&str; 5] = [
     "backend",
     "architecture",
     "memory_quantity",
+    "endpoint_form",
     "thread_wakeups",
 ];
 
 /// What a section's memory figures mean when it predates the label.
 const DEFAULT_MEMORY_QUANTITY: &str = "physical_footprint";
+
+/// The endpoint a section measured when the CLI omits the label.
+const DEFAULT_ENDPOINT_FORM: &str = "collector_only";
 
 /// The flag that lets a comparison run on reports that cannot be published.
 const ALLOW_UNPUBLISHABLE: &str = "--allow-unpublishable";
@@ -48,6 +52,7 @@ pub(super) struct Section {
     pub backend: String,
     pub architecture: String,
     pub memory_quantity: String,
+    pub endpoint_form: String,
     pub figures: Vec<Figure>,
 }
 
@@ -124,10 +129,15 @@ pub(super) fn parse_report(name: &str, text: &str) -> Result<Report> {
             None => DEFAULT_MEMORY_QUANTITY.to_owned(),
             Some(_) => text_field("memory_quantity")?,
         };
+        let endpoint_form = match obj.get("endpoint_form") {
+            None => DEFAULT_ENDPOINT_FORM.to_owned(),
+            Some(_) => text_field("endpoint_form")?,
+        };
         out.push(Section {
             backend: text_field("backend")?,
             architecture: text_field("architecture")?,
             memory_quantity,
+            endpoint_form,
             figures,
         });
     }
@@ -322,6 +332,13 @@ pub(super) fn compare(a: &Report, b: &Report, tolerance: f64) -> Result<()> {
                 "section {id} measures memory as {} in A and {} in B; the two are not comparable",
                 sa.memory_quantity,
                 sb.memory_quantity
+            );
+        }
+        if sa.endpoint_form != sb.endpoint_form {
+            bail!(
+                "section {id} measured a {} endpoint in A and a {} endpoint in B; the two are not comparable",
+                sa.endpoint_form,
+                sb.endpoint_form
             );
         }
         if let Some(fb) = sb
@@ -658,6 +675,16 @@ mod tests {
                 .remove("memory_quantity");
         });
         compare(&a, &unlabelled, 0.0).unwrap();
+    }
+
+    #[test]
+    fn sections_measuring_different_endpoint_forms_are_not_compared() {
+        let a = parse(CLI_REPORT);
+        assert_eq!(a.sections[0].endpoint_form, "collector_only");
+        let serving = cli_report_with(|v| v["sections"][0]["endpoint_form"] = "serving".into());
+        let e = compare(&a, &serving, 100.0).unwrap_err().to_string();
+        assert!(e.contains("collector_only") && e.contains("serving"), "{e}");
+        compare(&serving, &serving, 0.0).unwrap();
     }
 
     #[test]

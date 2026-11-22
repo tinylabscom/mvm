@@ -15,8 +15,8 @@ use serde_json::Value;
 
 use super::cold_launch::{ColdLaunchReport, LaunchLane, SpanStats};
 use super::resource_report::{
-    Figure, MemoryQuantity, ResourceReport, Section, SourceRevision, ThreadWakeups, UnitCost,
-    WakeupQuantity, Wakeups,
+    EndpointForm, Figure, MemoryQuantity, ResourceReport, Section, SourceRevision, ThreadWakeups,
+    UnitCost, WakeupQuantity, Wakeups,
 };
 
 /// Launch mode the harness records in `metadata.json`.
@@ -44,6 +44,18 @@ fn standby_form_of(meta: &Value) -> Result<StandbyForm> {
         None => bail!(
             "metadata.json records no standby_form; the run predates the field, so rerun the harness"
         ),
+    }
+}
+
+/// A run recorded before the harness could admit egress launched every unit
+/// collector-only, so an absent label is that form.
+fn endpoint_form_of(meta: &Value) -> Result<EndpointForm> {
+    match meta["configuration"]["endpoint_form"].as_str() {
+        None | Some("collector_only") => Ok(EndpointForm::CollectorOnly),
+        Some("serving") => Ok(EndpointForm::Serving),
+        Some(other) => {
+            bail!("metadata.json endpoint_form `{other}` is not collector_only or serving")
+        }
     }
 }
 
@@ -544,6 +556,7 @@ pub fn from_density_dir(dir: &Path) -> Result<Section> {
     let memory_quantity = memory_quantity_of(string_at(&meta, &["host", "os"])?);
     let mut section = Section::unmeasured(backend, architecture, quantity);
     section.memory_quantity = memory_quantity;
+    section.endpoint_form = endpoint_form_of(&meta)?;
 
     summary
         .count("wave_0_matching_processes")
@@ -954,6 +967,26 @@ mod tests {
         .unwrap();
         let err = format!("{:#}", from_density_dir(dir.path()).unwrap_err());
         assert!(err.contains("standby_form"), "{err}");
+    }
+
+    #[test]
+    fn the_endpoint_form_is_carried_and_an_unlabelled_run_is_collector_only() {
+        let s = from_density_dir(&fixture()).unwrap();
+        assert_eq!(s.endpoint_form, EndpointForm::CollectorOnly);
+        let label = |form: &str| {
+            with_meta(|m| {
+                m.replace(
+                    "\"build_profile\"",
+                    &format!("\"endpoint_form\": \"{form}\", \"build_profile\""),
+                )
+            })
+        };
+        let s = from_density_dir(label("serving").path()).unwrap();
+        assert_eq!(s.endpoint_form, EndpointForm::Serving);
+        let s = from_density_dir(label("collector_only").path()).unwrap();
+        assert_eq!(s.endpoint_form, EndpointForm::CollectorOnly);
+        let err = error_of(&label("both"));
+        assert!(err.contains("endpoint_form"), "{err}");
     }
 
     fn launch_report(lane: LaunchLane, samples: &[f64]) -> ColdLaunchReport {

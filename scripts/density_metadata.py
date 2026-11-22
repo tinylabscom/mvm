@@ -108,9 +108,9 @@ def collect(root: Path, summary: dict[str, str], environ: dict[str, str]) -> dic
         },
         "configuration": {
             key: summary[key] for key in (
-                "run_id", "image", "backend", "launch_mode", "standby_form", "waves", "memory",
-                "cpus", "settle_seconds", "idle_sample_seconds", "custom_workload",
-                "build_profile",
+                "run_id", "image", "backend", "launch_mode", "standby_form", "endpoint_form",
+                "waves", "memory", "cpus", "settle_seconds", "idle_sample_seconds",
+                "custom_workload", "build_profile",
             )
         },
         "guards": {
