@@ -21,6 +21,7 @@ SERVING_ENDPOINT="${MVM_HVF_DENSITY_SERVING_ENDPOINT:-0}"
 # guest sends nothing, so the endpoint never dials it.
 SERVING_DESTINATION="192.0.2.1:443"
 MODE="${MVM_HVF_DENSITY_MODE:-cold}"
+LAUNCH_SAMPLES="${MVM_HVF_DENSITY_LAUNCH_SAMPLES:-20}"
 
 usage() {
   cat <<USAGE
@@ -44,6 +45,12 @@ Useful overrides:
                                              records standby_form. Needs a short data dir
                                              (MVM_HVF_DENSITY_DATA_DIR) for the VM sockets.
   MVM_HVF_DENSITY_WAVES="1 5 10 25 50 100"  wave sizes to run
+  MVM_HVF_DENSITY_LAUNCH_SAMPLES=20         cold launches of a command that exits, taken
+                                             before the waves, for the report's launch
+                                             latency (invocation to a reachable guest,
+                                             artifact hashing reported apart); cold mode
+                                             only, 0 skips them. A percentile needs
+                                             1/(1-p) samples: 20 for p95, 100 for p99.
   MVM_HVF_DENSITY_IMAGE=alpine              OCI image reference
   MVM_HVF_DENSITY_GUEST_SLEEP_SECONDS=240   in-guest sleep duration
   MVM_HVF_DENSITY_SETTLE_SECONDS=20         settle time before sampling
@@ -207,6 +214,10 @@ if [[ "${MAILBOX}" != "0" && "${MAILBOX}" != "1" ]]; then
 fi
 if [[ "${MODE}" != "cold" && "${MODE}" != "warm" && "${MODE}" != "standby" ]]; then
   echo "refusing: MVM_HVF_DENSITY_MODE must be cold, warm or standby" >&2
+  exit 70
+fi
+if [[ ! "${LAUNCH_SAMPLES}" =~ ^[0-9]+$ ]]; then
+  echo "refusing: MVM_HVF_DENSITY_LAUNCH_SAMPLES must be a count" >&2
   exit 70
 fi
 if [[ "${SERVING_ENDPOINT}" != "0" && "${SERVING_ENDPOINT}" != "1" ]]; then
@@ -555,6 +566,57 @@ if ! "${run_env[@]}" "${MVMCTL_BIN}" machine stop --all --yes \
 fi
 record_resident_pids
 
+# Cold launches of a command that exits, each writing its launch sample: the
+# waves launch resident guests, which never finish and so never write one.
+# Records `launch_samples` in the summary: taken, or why there are none.
+take_launch_samples() {
+  local dir="${OUT_DIR}/launch-samples"
+  local ok=0 failed=0 first_failure="" status name last i
+  if [[ "${MODE}" != "cold" ]]; then
+    status="unavailable:taken_in_cold_mode_only"
+  elif [[ "${LAUNCH_SAMPLES}" == "0" ]]; then
+    status="unavailable:not_requested"
+  else
+    mkdir -p "${dir}"
+    for ((i = 1; i <= LAUNCH_SAMPLES; i++)); do
+      name="${RUN_ID}-s$(printf '%03d' "${i}")"
+      if "${run_env[@]}" "MVM_RESIDENCY=cold" "MVM_PHASE_TIMING=1" \
+        "MVM_LAUNCH_SAMPLE_JSON=${dir}/${name}.sample.json" \
+        "${MVMCTL_BIN}" machine run --name "${name}" --hypervisor "${BACKEND}" \
+        --image "${IMAGE_REF}" --memory "${MEMORY}" --cpus "${CPUS}" \
+        "${egress_args[@]+"${egress_args[@]}"}" -- true \
+        >"${dir}/${name}.stdout" 2>"${dir}/${name}.stderr" &&
+        [[ -s "${dir}/${name}.sample.json" ]]; then
+        ok=$((ok + 1))
+      else
+        failed=$((failed + 1))
+        rm -f "${dir}/${name}.sample.json"
+        if [[ -z "${first_failure}" ]]; then
+          last="$(tail -n 1 "${dir}/${name}.stderr" 2>/dev/null | tr '\t\r' '  ' | cut -c1-160)"
+          first_failure="${last:-no_output}"
+        fi
+      fi
+    done
+    if ! "${run_env[@]}" "${MVMCTL_BIN}" machine stop --all --yes \
+      >"${OUT_DIR}/sample-stop.stdout" 2>"${OUT_DIR}/sample-stop.stderr" ||
+      ! "${run_env[@]}" "${MVMCTL_BIN}" machine rm --all --yes \
+        >"${OUT_DIR}/sample-rm.stdout" 2>"${OUT_DIR}/sample-rm.stderr"; then
+      echo "refusing: the launch samples left a machine; see ${OUT_DIR}/sample-*.stderr" >&2
+      exit 71
+    fi
+    if [[ "${ok}" -gt 0 ]]; then
+      status="taken"
+    else
+      status="unavailable:every_launch_failed:${first_failure}"
+    fi
+  fi
+  {
+    printf 'launch_samples\t%s\n' "${status}"
+    printf 'launch_samples_requested\t%s\n' "${LAUNCH_SAMPLES}"
+    printf 'launch_samples_failed\t%s\n' "${failed}"
+  } >>"${SUMMARY}"
+}
+
 capture_host_memory() {
   local phase="$1"
   local dir="$2"
@@ -785,6 +847,8 @@ cleanup_wave() {
 
 python3 "${ROOT}/scripts/density_metadata.py" "${ROOT}" "${SUMMARY}" \
   >"${OUT_DIR}/metadata.json"
+
+take_launch_samples
 
 # Wave 0: the host with no unit launched, so fixed cost can be told from per-unit cost.
 zero_dir="${OUT_DIR}/wave-0"

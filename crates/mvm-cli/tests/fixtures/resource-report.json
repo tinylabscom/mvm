@@ -144,6 +144,18 @@
           "status": "unmeasured",
           "reason": "not measured"
         },
+        "cold_launch_startup_ms": {
+          "status": "unmeasured",
+          "reason": "the run recorded no launch samples; it predates them"
+        },
+        "cold_launch_artifact_hash_ms": {
+          "status": "unmeasured",
+          "reason": "the run recorded no launch samples; it predates them"
+        },
+        "cold_launch_boot_ms": {
+          "status": "unmeasured",
+          "reason": "the run recorded no launch samples; it predates them"
+        },
         "warm_launch_ms": {
           "status": "unmeasured",
           "reason": "not measured"

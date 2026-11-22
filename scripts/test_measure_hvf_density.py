@@ -46,6 +46,12 @@ if args[:2] == ["machine", "run"]:
     if "--receipt" not in args:
         if os.environ.get("MVM_FAKE_PRIME_FAIL") == "1":
             sys.exit(3)
+        sample = os.environ.get("MVM_LAUNCH_SAMPLE_JSON")
+        if sample and os.environ.get("MVM_FAKE_SAMPLE_FAIL") == "1":
+            print("launch refused\\textra", file=sys.stderr)
+            sys.exit(5)
+        if sample:
+            Path(sample).write_text("{}")
         sys.exit(0)  # The first-use preparation is outside the measured wave.
     if os.environ.get("MVM_FAKE_RESIDENT") == "1":
         time.sleep(30)  # No completion receipt while the guest is resident.
@@ -84,6 +90,7 @@ if args[:2] == ["machine", "run"]:
                     "MVM_HVF_DENSITY_IDLE_SAMPLE_SECONDS": "0",
                     "MVM_HVF_DENSITY_LAUNCH_SPACING_SECONDS": "0",
                     "MVM_HVF_DENSITY_CLEANUP_GRACE_SECONDS": "0",
+            "MVM_HVF_DENSITY_LAUNCH_SAMPLES": "0",
                 })
                 result = subprocess.run(
                     ["/bin/bash" if platform.system() == "Darwin" else "bash",
@@ -171,6 +178,35 @@ if args[:2] == ["machine", "run"]:
                     (base / "out-resident/summary.tsv").read_text(),
                 )
                 env.pop("MVM_FAKE_RESIDENT")
+                env["MVM_HVF_DENSITY_LAUNCH_SAMPLES"] = "2"
+                for fail, name in (("0", "out-samples"), ("1", "out-sample-fail")):
+                    env["MVM_FAKE_SAMPLE_FAIL"] = fail
+                    env["MVM_HVF_DENSITY_OUT_DIR"] = str(base / name)
+                    sampled = subprocess.run(
+                        ["/bin/bash" if platform.system() == "Darwin" else "bash",
+                         str(ROOT / "scripts/measure-hvf-density.sh")],
+                        env=env, capture_output=True, text=True, timeout=20,
+                    )
+                    self.assertEqual(sampled.returncode, 0, sampled.stderr)
+                    summary = (base / name / "summary.tsv").read_text()
+                    files = list((base / name / "launch-samples").glob("*.sample.json"))
+                    if mode != "cold":
+                        self.assertIn(
+                            "launch_samples\tunavailable:taken_in_cold_mode_only\n", summary)
+                        self.assertEqual(files, [])
+                    elif fail == "0":
+                        self.assertIn("launch_samples\ttaken\n", summary)
+                        self.assertIn("launch_samples_failed\t0\n", summary)
+                        self.assertEqual(len(files), 2)
+                    else:
+                        # The first failure's last stderr line is the reason; a tab
+                        # in it must not split the summary row.
+                        self.assertIn(
+                            "launch_samples\tunavailable:every_launch_failed:"
+                            "launch refused extra\n", summary)
+                        self.assertEqual(files, [])
+                env.pop("MVM_FAKE_SAMPLE_FAIL")
+                env["MVM_HVF_DENSITY_LAUNCH_SAMPLES"] = "0"
                 env["MVM_FAKE_PRIME_FAIL"] = "1"
                 env["MVM_HVF_DENSITY_OUT_DIR"] = str(base / "out-fail")
                 failed = subprocess.run(
@@ -272,6 +308,7 @@ if args[:3] == ["pool", "status", "--json"]:
             "MVM_HVF_DENSITY_IDLE_SAMPLE_SECONDS": "0",
             "MVM_HVF_DENSITY_LAUNCH_SPACING_SECONDS": "0",
             "MVM_HVF_DENSITY_CLEANUP_GRACE_SECONDS": "0",
+            "MVM_HVF_DENSITY_LAUNCH_SAMPLES": "0",
         })
         env.update(extra)
         return subprocess.run(
@@ -521,6 +558,7 @@ if args[:2] == ["machine", "run"] and "--receipt" in args:
             "MVM_HVF_DENSITY_IDLE_SAMPLE_SECONDS": "0",
             "MVM_HVF_DENSITY_LAUNCH_SPACING_SECONDS": "0",
             "MVM_HVF_DENSITY_CLEANUP_GRACE_SECONDS": "0",
+            "MVM_HVF_DENSITY_LAUNCH_SAMPLES": "0",
         })
         return subprocess.run(HARNESS, env=env, capture_output=True, text=True, timeout=30)
 
