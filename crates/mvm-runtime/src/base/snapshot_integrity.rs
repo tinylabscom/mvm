@@ -2,10 +2,9 @@
 //! snapshots.
 //!
 //! These helpers live here (out of `crate::vm::template::lifecycle`) so
-//! both the snapshot **verify** side (called from
-//! `crate::microvm::restore_from_template_snapshot`) and the **seal**
-//! side (called from `crate::vm::template::lifecycle::create_snapshot`)
-//! reach them via the same module.
+//! template snapshot creation and integrity tooling share one implementation.
+//! Transient template restore is disabled; verification here does not authorize
+//! a runtime restore.
 //!
 //! Failure model:
 //!

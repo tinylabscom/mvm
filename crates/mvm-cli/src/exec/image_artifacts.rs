@@ -4,8 +4,7 @@ use super::ImageSource;
 use anyhow::{Context, Result};
 
 /// Kernel/rootfs/initrd + provenance resolved from `req.image`: either a
-/// named template lookup (which also probes for a snapshot) or a pre-built
-/// kernel/rootfs pair carried through as-is.
+/// named template lookup or a pre-built kernel/rootfs pair carried through as-is.
 pub(super) struct ResolvedImage {
     pub(super) vmlinux: String,
     pub(super) initrd: Option<String>,
@@ -13,13 +12,11 @@ pub(super) struct ResolvedImage {
     pub(super) revision: String,
     pub(super) flake_ref: String,
     pub(super) profile: Option<String>,
-    pub(super) snap_info: Option<mvm_core::template::SnapshotInfo>,
+    pub(super) snapshot_available: bool,
     pub(super) template_id: Option<String>,
 }
 
-/// Resolve image artifacts: either a named template or a pre-built pair. For
-/// templates, also probe for a pre-built snapshot so the caller can skip the
-/// cold-boot cost when the request turns out to be snapshot-eligible.
+/// Resolve image artifacts as either a named template or a pre-built pair.
 pub(super) fn resolve_image_artifacts(image: &ImageSource, backend: &str) -> Result<ResolvedImage> {
     match image {
         ImageSource::RegistryPack { pin } => {
@@ -34,7 +31,7 @@ pub(super) fn resolve_image_artifacts(image: &ImageSource, backend: &str) -> Res
                 revision: image.revision_hash,
                 flake_ref: image.flake_ref,
                 profile: Some("standard".to_owned()),
-                snap_info: None,
+                snapshot_available: false,
                 template_id: None,
             })
         }
@@ -42,10 +39,11 @@ pub(super) fn resolve_image_artifacts(image: &ImageSource, backend: &str) -> Res
             let (spec, vmlinux, initrd, rootfs, rev) =
                 mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(name)
                     .with_context(|| format!("Loading template '{name}'"))?;
-            let snap_info =
+            let snapshot_available =
                 mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(name)
                     .ok()
-                    .flatten();
+                    .flatten()
+                    .is_some();
             Ok(ResolvedImage {
                 vmlinux,
                 initrd,
@@ -53,7 +51,7 @@ pub(super) fn resolve_image_artifacts(image: &ImageSource, backend: &str) -> Res
                 revision: rev,
                 flake_ref: spec.flake_ref.clone(),
                 profile: Some(spec.profile.clone()),
-                snap_info,
+                snapshot_available,
                 template_id: Some(name.clone()),
             })
         }
@@ -76,7 +74,7 @@ pub(super) fn resolve_image_artifacts(image: &ImageSource, backend: &str) -> Res
                 revision: rev,
                 flake_ref: spec.flake_ref,
                 profile: Some(spec.profile),
-                snap_info: None,
+                snapshot_available: false,
                 template_id: Some(slot_hash.clone()),
             })
         }
@@ -93,7 +91,7 @@ pub(super) fn resolve_image_artifacts(image: &ImageSource, backend: &str) -> Res
             revision: String::new(),
             flake_ref: label.clone(),
             profile: None,
-            snap_info: None,
+            snapshot_available: false,
             template_id: None,
         }),
         ImageSource::WasmModule { module_path, label } => Ok(ResolvedImage {
@@ -103,7 +101,7 @@ pub(super) fn resolve_image_artifacts(image: &ImageSource, backend: &str) -> Res
             revision: String::new(),
             flake_ref: label.clone(),
             profile: None,
-            snap_info: None,
+            snapshot_available: false,
             template_id: None,
         }),
     }

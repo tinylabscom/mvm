@@ -373,6 +373,29 @@ cleanup, stale-parent quarantine and refill counting.
 These are source and hermetic-mock witnesses only: they do not qualify a live
 HVF or Firecracker parent, a child claim, cloud/GCP, or cold/warm performance.
 
+## Template transient snapshot acceleration remains disabled
+
+The template-transient source slice under
+[#5520](https://github.com/tinylabscom/mvm/issues/5520) retires the CLI's raw
+snapshot-directory, slot and `FlakeRunConfig` assembler. A mechanically
+eligible template source with snapshot metadata is classified as having a
+disabled accelerator. A compatible authenticated warm claim still runs first;
+after a warm miss, the source selects the existing cold path without allocating
+a slot, creating partial restore state or calling a runtime restore primitive.
+An admitted CLI source remains explicitly template-restore-ineligible while
+retaining its existing warm-claim eligibility. The cold launch mode, warm-miss
+reason and audit outcome are unchanged; no failed restore is fabricated.
+
+Template restore remains disabled because no approved capability yet enforces
+strict HMAC, signature, epoch, retained-runtime binding, and paused no-NIC
+verification before resume. The unauthenticated public runtime entry point is
+removed, and an architecture gate rejects direct template-restore calls or raw
+CLI/client snapshot path/config assembly. Same-identity `vm_full` restore and
+sealed instance resume remain separate authenticated sources with their
+existing lineage, HMAC/epoch/runtime and no-NIC checks. This source-only
+retirement does not promote or broaden any ADR-001 claim and provides no live
+backend or performance evidence.
+
 ## Admitted warm-child claim ownership
 
 The admitted warm-child slice under

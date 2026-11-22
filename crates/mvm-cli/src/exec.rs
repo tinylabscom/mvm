@@ -28,8 +28,8 @@ mod built_pack;
 mod either;
 mod guest_command;
 pub use guest_command::{
-    ExecOutput, PostureSink, build_guest_wrapper, build_healthcheck, run, run_captured,
-    snapshot_eligible, transient_run_dev_console, transient_vm_name,
+    ExecOutput, PostureSink, TemplateAcceleration, build_guest_wrapper, build_healthcheck, run,
+    run_captured, template_acceleration, transient_run_dev_console, transient_vm_name,
 };
 pub(crate) use guest_command::{
     quote_argv_for_exec, remove_transient_state_dir, reported_exit_code, run_captured_started,
@@ -420,9 +420,8 @@ fn run_inner(
         verified_runtime,
         mailbox_posture,
         cli_admission,
-        use_snapshot,
+        template_acceleration,
         root_strategy,
-        image: resolved,
         _built_runtime,
     } = launch;
     if let Some(admission) = cli_admission {
@@ -451,8 +450,8 @@ fn run_inner(
     let t_drives_ready = resolve_marks.drives_ready;
     let t_admitted = resolve_marks.admitted;
 
-    // Reap stale standbys, try a warm-pool claim, then fall back to
-    // snapshot-restore / cold boot. See `boot_transient_vm`.
+    // Reap stale standbys, try a warm-pool claim, then fall back to the
+    // classified cold path. See `boot_transient_vm`.
     let mut warm_claim_marks = crate::commands::vm::phase_timing::WarmClaimMarks::default();
     let requested_vm_name = vm_name.clone();
     let requested_lifecycle = match named_lifecycle {
@@ -469,7 +468,6 @@ fn run_inner(
         verified_release: verified_runtime.as_ref().map(|runtime| runtime.release()),
         admission: audit_owner,
         mailbox_posture: mailbox_posture.as_ref(),
-        resolved: &resolved,
         user_named: req.name.is_some(),
         writable_images: &mut disk_images,
     };
@@ -484,7 +482,7 @@ fn run_inner(
     }
     let booted = boot_transient_vm(
         vm_name,
-        use_snapshot,
+        template_acceleration,
         &mut boot_attempt,
         timing.then_some(&mut warm_claim_marks),
         &mut sub_marks,
@@ -877,19 +875,19 @@ fn finish_warm_memory_measurement(
     })
 }
 
-/// The run-path tier gate's outputs for one boot: whether the request is
-/// still snapshot-restore eligible, the dm-verity sidecar (if any), the
+/// The run-path tier gate's outputs for one boot: the template accelerator
+/// classification, the dm-verity sidecar (if any), the
 /// resolved rootfs strategy + runtime source policy, and the effective
 /// initrd.
 struct BootStrategy {
-    use_snapshot: bool,
+    template_acceleration: TemplateAcceleration,
     verity_path: Option<String>,
     roothash: Option<String>,
     root_strategy: mvm_build::run_image::RootStrategy,
     effective_initrd: Option<String>,
 }
 
-/// Resolve the boot strategy for `resolved`: snapshot eligibility, the
+/// Resolve the boot strategy for `resolved`: template acceleration posture, the
 /// dm-verity sidecar probe, the virtiofs-root tier gate, the runtime source
 /// policy, and the effective initrd. All of these fall out of the resolved
 /// image + `req` + the backend's capabilities.
@@ -901,13 +899,17 @@ fn resolve_boot_strategy(
 ) -> Result<BootStrategy> {
     use crate::commands::vm::phase_timing::SubPhase;
 
-    // Snapshot path is taken when the request is eligible; otherwise cold boot.
-    let use_snapshot = snapshot_eligible(
+    let template_acceleration = template_acceleration(
         shape.image,
         shape.dir_shares,
-        resolved.snap_info.is_some(),
+        resolved.snapshot_available,
         backend.capabilities().snapshot_capability,
-    ) && shape.disk_volumes.is_empty();
+    );
+    let template_acceleration = if shape.disk_volumes.is_empty() {
+        template_acceleration
+    } else {
+        TemplateAcceleration::Ineligible
+    };
 
     // Probe for the verity sidecar alongside the rootfs: production microVMs
     // ship `rootfs.verity` + `rootfs.roothash` next to `rootfs.ext4`. Their
@@ -934,7 +936,7 @@ fn resolve_boot_strategy(
     )?;
 
     Ok(BootStrategy {
-        use_snapshot,
+        template_acceleration,
         verity_path,
         roothash,
         root_strategy,
@@ -1100,14 +1102,11 @@ pub struct ResolvedLaunch {
     pub mailbox_posture: Option<mvm_hostd::plan_admission::MailboxLaunchPosture>,
     /// Opaque host-prepared owner for the admitted CLI cold alternative.
     pub cli_admission: Option<mvm_client::admission::CliAdmission>,
-    /// Whether snapshot restore survives admission (an admitted workload
-    /// always cold-boots).
-    pub use_snapshot: bool,
+    /// Why this source cold-boots instead of using template acceleration.
+    pub template_acceleration: TemplateAcceleration,
     /// Rootfs strategy the run-path tier gate selected — the value the run path
     /// records as `plan.boot_posture`.
     pub root_strategy: mvm_build::run_image::RootStrategy,
-    /// Resolved image artifacts, kept for the snapshot-restore leg of the boot.
-    image: ResolvedImage,
     /// Retained until normal runtime lifecycle binding has taken ownership.
     _built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
 }
@@ -1165,9 +1164,7 @@ fn resolve_launch_with_admit(
         shape.hypervisor,
     )?;
 
-    // Resolve image artifacts: either a named template or a pre-built pair.
-    // For templates, also probe for a pre-built snapshot so we can skip the
-    // cold-boot cost when the request is snapshot-eligible.
+    // Resolve image artifacts as either a named template or a pre-built pair.
     let image = resolve_image_artifacts(shape.image, backend.name())?;
     marks.image_resolved = marks.now();
 
@@ -1178,18 +1175,12 @@ fn resolve_launch_with_admit(
         .map(str::to_string)
         .unwrap_or_else(transient_vm_name);
 
-    // Snapshot eligibility, the dm-verity sidecar probe, the virtiofs-root
-    // tier gate, and the effective initrd all fall out of the resolved image
-    // + backend capabilities; see `resolve_boot_strategy`.
+    // Template acceleration posture, the dm-verity sidecar probe, the
+    // virtiofs-root tier gate, and the effective initrd all fall out of the
+    // resolved image + backend capabilities; see `resolve_boot_strategy`.
     let boot = resolve_boot_strategy(shape, &backend, &image, sub)?;
     marks.drives_ready = marks.now();
 
-    // Template-restore VMs run without plan admission. Leave tenant_id /
-    // plan_json / bundle_json at their None defaults (via
-    // `..Default::default()`) so the libkrun/HVF backends take the legacy
-    // `run_supervisor` dispatch. Routing template restores through
-    // admission would add an `admit_for_run` call here and a
-    // `populate_audit_substrate` invocation after the struct literal.
     // `admit_ms` is a window, not a call: it spans config assembly, admission,
     // and the two artifact attachments. Admission instruments itself, and its
     // spans account for roughly half the window, so the rest needs naming
@@ -1214,7 +1205,7 @@ fn resolve_launch_with_admit(
         ms = t_build.elapsed().as_secs_f64() * 1000.0,
         "admit window: build_start_config"
     );
-    let mut use_snapshot = boot.use_snapshot;
+    let mut template_acceleration = boot.template_acceleration;
     let mut built_pack_check = None;
     let mut mailbox_posture = None;
     let mut host_budget = None;
@@ -1368,7 +1359,7 @@ fn resolve_launch_with_admit(
         host_budget = Some(prepared.host_budget);
         mailbox_posture = prepared.mailbox_posture;
         cli_admission = Some(prepared.admission);
-        use_snapshot = false;
+        template_acceleration = TemplateAcceleration::AdmittedRestoreDisabled;
     }
 
     if !matches!(admit, Some(LaunchAdmit::CliCold(_))) {
@@ -1461,7 +1452,7 @@ fn resolve_launch_with_admit(
                     volume.read_only = true;
                 }
             }
-            use_snapshot = false;
+            template_acceleration = TemplateAcceleration::AdmittedRestoreDisabled;
 
             refuse_unloadable_sidecar(
                 &image.rootfs,
@@ -1498,9 +1489,8 @@ fn resolve_launch_with_admit(
         verified_runtime,
         mailbox_posture,
         cli_admission,
-        use_snapshot,
+        template_acceleration,
         root_strategy: boot.root_strategy,
-        image,
         _built_runtime: built_runtime,
     })
 }
@@ -1924,7 +1914,7 @@ mod tests {
         );
     }
 
-    // -- snapshot_eligible --
+    // -- template acceleration --
 
     fn prebuilt() -> ImageSource {
         ImageSource::Prebuilt {
@@ -2060,13 +2050,15 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_eligible_false_for_prebuilt_image() {
-        // The bundled default image isn't a registered template — no snapshot exists.
-        assert!(!snapshot_eligible(
-            &prebuilt(),
-            &[],
-            true,
-            mvm_core::vm_backend::SnapshotCapability::LiveMemory
-        ));
+    fn template_acceleration_is_ineligible_for_prebuilt_image() {
+        assert_eq!(
+            template_acceleration(
+                &prebuilt(),
+                &[],
+                false,
+                mvm_core::vm_backend::SnapshotCapability::LiveMemory
+            ),
+            TemplateAcceleration::Ineligible
+        );
     }
 }
