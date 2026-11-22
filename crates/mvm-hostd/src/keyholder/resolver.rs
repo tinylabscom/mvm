@@ -410,6 +410,36 @@ mod tests {
             .unwrap();
     }
 
+    /// The stored token set is persisted JSON; the expiry's text is pinned for
+    /// whole-second and fractional instants, and previously written forms
+    /// (`Z`, fractional, `+00:00`) still read.
+    #[test]
+    fn token_set_expiry_wire_text_is_pinned() {
+        let set = |expires_at: &str| -> OAuthTokenSet {
+            serde_json::from_value(serde_json::json!({
+                "access_token": "a",
+                "expires_at": expires_at,
+            }))
+            .unwrap()
+        };
+        for (written, canonical) in [
+            ("2026-07-16T12:00:00Z", "2026-07-16T12:00:00Z"),
+            ("2026-07-16T12:00:00.123Z", "2026-07-16T12:00:00.123Z"),
+            (
+                "2026-07-16T12:00:00.123456789Z",
+                "2026-07-16T12:00:00.123456789Z",
+            ),
+            ("2026-07-16T12:00:00+00:00", "2026-07-16T12:00:00Z"),
+        ] {
+            let json = serde_json::to_value(set(written)).unwrap();
+            assert_eq!(json["expires_at"], canonical, "{written}");
+        }
+        assert_eq!(
+            serde_json::to_string(&set("2026-07-16T12:00:00Z")).unwrap(),
+            r#"{"access_token":"a","expires_at":"2026-07-16T12:00:00Z","grant":"client_credentials"}"#
+        );
+    }
+
     #[test]
     fn local_resolver_with_bindings_returns_oauth_access_token() {
         let dir = tempdir().unwrap();
