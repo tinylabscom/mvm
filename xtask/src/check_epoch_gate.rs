@@ -70,6 +70,12 @@ const AGREEMENT: &[Entry] = &[
         "an enrollment and a lease name the plan's epoch",
     ),
     (
+        "crates/mvm-hostd/src/hvf_owner_signer.rs",
+        "new",
+        2,
+        "binds the holder: refuses the uncommissioned sentinel epoch and requires the derived provider identity to name the grants store's recorded epoch",
+    ),
+    (
         "crates/mvm-core/src/host_interface/offline.rs",
         "check_epoch",
         1,

@@ -13,6 +13,7 @@ pub mod ed25519_keypair;
 pub mod egress_ca;
 pub mod entrypoint_delegation;
 pub mod entrypoint_identity;
+pub mod hvf_owner_grant;
 pub mod image_verify;
 pub mod key_rotation;
 // Key-provider backends (env/file/OS keychain). Only the pure

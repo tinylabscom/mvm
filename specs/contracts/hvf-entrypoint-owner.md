@@ -144,6 +144,36 @@ provider owner selected above. It supplies authenticated final bytes for the
 future root-installed provider cohort. No current caller prepares, executes or
 probes the owner, and existing HVF/Firecracker factory gates remain unchanged.
 
+### Durable pre-birth quarantine
+
+The protected grant journal also owns one absorbing birth record. After grant
+consumption and before any native effect, the runtime durably records the exact
+provider, grant, operation, owner incarnation, workload, request digest and
+expiry as `Prepared`. Only the live non-serializable reservation returned by
+that first successful publication can attempt birth. A retained observation,
+retry, PID, name or reconstructed DTO cannot recreate it.
+The grant journal rejects another consumed grant carrying either the same
+operation ID or the same complete request digest, even under another grant ID.
+One commissioned provider identity owns one journal; deployment must not create
+parallel journals for that identity.
+Journal schema v2 adds the retained operation identity and pre-birth record.
+Any populated source-preview v1 journal refuses as incompatible; it is never
+silently migrated to empty state. No production caller or commissioned provider
+used v1.
+
+This slice deliberately exposes no method that accepts a public `HvfInstance`
+and no durable `Bound` state: a serializable identity cannot establish original
+native custody. The later birth integration must move this reservation into an
+aggregate retaining the opaque `ColdHvfOwner`, derive the actual generation
+from that owner, and preserve it on every error before extending the journal.
+Publication failure, process death or loss of the live reservation leaves
+`Prepared` quarantined and returns no reusable capability.
+
+The source-only API also has no retirement operation. Later work may clear
+quarantine only from the original live owner after the complete terminal,
+cleanup and audit proof. Merely reading `Prepared` never proves a VM exists or
+stopped.
+
 ## Process and authority
 
 `mvm-hvf-run-owner` is the proposed binary in `mvm-client`, with a thin entry

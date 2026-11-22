@@ -65,6 +65,8 @@ pub mod host_agent_idle;
 /// no per-VM supervisor.
 pub mod host_agent_sessions;
 pub mod host_signer;
+pub mod hvf_owner_grants;
+pub mod hvf_owner_signer;
 pub mod jailer;
 /// Secret keyholder — the `SecretRef` → credential boundary: the
 /// [`keyholder::SecretResolver`] trait + the single-host
