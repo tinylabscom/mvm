@@ -46,19 +46,7 @@ pub fn dispatch_vm_full_fork(
         &admitted_image,
         stop_child,
     )?;
-    // The child is live and registered; a containment committed since its
-    // admission stops it here rather than letting it keep running.
-    if let Err(error) = super::containment_recheck::still_admitted(admitted.plan()) {
-        return Err(match stop_child(&child_name) {
-            Ok(()) => error,
-            Err(stop) => mvm_runtime::checkpoint::ForkStopUncertain {
-                name: child_name,
-                primary: error,
-                stop,
-            }
-            .into(),
-        });
-    }
+    super::containment_recheck::recheck_live_fork(admitted.plan(), &child_name, stop_child)?;
     Ok(meta)
 }
 

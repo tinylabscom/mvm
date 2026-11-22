@@ -17,6 +17,26 @@ pub(crate) fn still_admitted(plan: &ExecutionPlan) -> Result<()> {
         .context("the workload ledger no longer admits this launch")
 }
 
+/// A restored fork is live; stop it if contained, retaining custody on uncertain stop.
+pub(super) fn recheck_live_fork(
+    plan: &ExecutionPlan,
+    child_name: &str,
+    stop_child: &dyn Fn(&str) -> Result<()>,
+) -> Result<()> {
+    if let Err(error) = still_admitted(plan) {
+        return Err(match stop_child(child_name) {
+            Ok(()) => error,
+            Err(stop) => mvm_runtime::checkpoint::ForkStopUncertain {
+                name: child_name.to_string(),
+                primary: error,
+                stop,
+            }
+            .into(),
+        });
+    }
+    Ok(())
+}
+
 /// The rollback of a launch refused by [`still_admitted`]: the VM is live, so
 /// it is stopped and the launch is recorded as failed, never as launched.
 pub(super) fn undo<'a>(

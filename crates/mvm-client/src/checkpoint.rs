@@ -14,6 +14,7 @@ pub mod admitted;
 pub mod anchor;
 pub mod fs_quick;
 pub mod prompt_step;
+pub mod vm_full;
 
 // Types and the liveness probe commands need without naming the runtime.
 pub use mvm_hostd::audit::bind::{
@@ -43,30 +44,6 @@ pub use mvm_runtime::microvm::{
 pub use mvm_runtime::vm::instance_snapshot::lock_resume;
 pub use mvm_runtime::vm::snapshot_key::SNAPSHOT_TENANT_KEY_ENV;
 pub use mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot_revision;
-
-/// Consume a full-VM fork child's own admission through the hostd restore gate.
-///
-/// The caller retains the context for the fork's existing success/failure
-/// audit and post-restore generation handshake; it cannot dispatch it twice.
-pub fn dispatch_vm_full_fork(
-    admission: &mut crate::admission::AdmissionContext,
-    store: &CheckpointStore,
-    params: ForkParams,
-    restore: &mvm_runtime::checkpoint::ForkRestore<'_>,
-    anchor: &dyn CheckpointChainAnchor,
-    runtime: &VerifiedRetainedRuntime,
-    stop_child: &dyn Fn(&str) -> Result<()>,
-) -> Result<CheckpointMeta> {
-    mvm_hostd::plan_admission::dispatch_vm_full_fork(
-        &mut admission.admitted,
-        store,
-        params,
-        restore,
-        anchor,
-        runtime,
-        stop_child,
-    )
-}
 
 /// Host-local checkpoint catalog, lineage verification, removal and workspace images.
 pub struct Checkpoints {

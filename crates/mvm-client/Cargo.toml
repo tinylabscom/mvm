@@ -65,6 +65,9 @@ mvm-policy.workspace = true
 # + the VmBackend implementations. mvm-runtime does NOT depend on this crate, so
 # this edge is acyclic.
 mvm-runtime = { workspace = true, default-features = false }
+# Full-VM fork restoration constructs the authenticated Firecracker restorer
+# inside the client facade rather than accepting an arbitrary CLI callback.
+mvm-backends.workspace = true
 # The in-process admitted-boot seam (`run::admit_and_boot_local`). mvm-hostd is
 # already in the mvmctl closure (the CLI links it), so this edge adds no crates
 # to the default build; mvm-hostd has no dependency back on this crate.
