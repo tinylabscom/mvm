@@ -58,6 +58,13 @@ pub struct UndoLaunchFailure {
     stop: anyhow::Error,
 }
 
+impl UndoLaunchFailure {
+    /// Classify an already-attempted compensating stop as uncertain custody.
+    pub(crate) fn unconfirmed(primary: anyhow::Error, stop: anyhow::Error) -> Self {
+        Self { primary, stop }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum FailureAuditPolicy {
     LegacyImmediate,

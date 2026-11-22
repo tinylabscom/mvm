@@ -201,7 +201,7 @@ pub(crate) fn attach_guest_runtime(
         .transpose()
 }
 
-fn attach_guest_runtime_selection(
+pub(crate) fn attach_guest_runtime_selection(
     config: &mut VmStartConfig,
     backend_name: &str,
 ) -> Result<Option<std::sync::Arc<mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>>> {

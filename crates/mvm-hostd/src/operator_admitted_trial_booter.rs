@@ -50,7 +50,6 @@ use crate::audit::host_keypair::load_or_init_at;
 use crate::broker::handlers::host_assurance_v1::HOST_ASSURANCE_SERVICE;
 use crate::plan_admission::{
     AdmitAndStartParams, ExtensionAdmissionContext, InMemoryNonceLedger, SystemClock,
-    admit_and_start,
 };
 use mvm_contract::assurance::policy_digest_from_refs;
 
@@ -272,6 +271,179 @@ pub struct OperatorConfiguredTrialBooter {
     emitter: Arc<AuditEmitter>,
 }
 
+/// A started operator trial whose missing-controller rollback could not be confirmed.
+///
+/// The error retains the exact backend object, started admission and audit
+/// owner. Callers must reconcile that custody; an uncertain child is not
+/// terminal and its audit chain is deliberately left without a terminal
+/// failure entry.
+pub struct OperatorTrialCustodyUncertain {
+    backend: AnyBackend,
+    vm_id: mvm_core::vm_backend::VmId,
+    admitted: crate::plan_admission::AdmittedPlan,
+    enforced_grants: Option<mvm_contract::protocol::resource_controls::EnforcedGrants>,
+    emitter: Arc<AuditEmitter>,
+    uncertainty: anyhow::Error,
+}
+
+impl std::fmt::Debug for OperatorTrialCustodyUncertain {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OperatorTrialCustodyUncertain")
+            .field("backend", &self.backend.kind())
+            .field("vm_id", &self.vm_id)
+            .field("state", &"started")
+            .field("enforced_grants", &self.enforced_grants)
+            .field("uncertainty", &format_args!("{:#}", self.uncertainty))
+            .finish()
+    }
+}
+
+impl std::fmt::Display for OperatorTrialCustodyUncertain {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "operator trial {} remains in started custody: {}",
+            self.vm_id.0, self.uncertainty
+        )
+    }
+}
+
+impl std::error::Error for OperatorTrialCustodyUncertain {}
+
+impl OperatorTrialCustodyUncertain {
+    /// The exact backend object kind that still owns the child.
+    #[must_use]
+    pub fn backend_kind(&self) -> mvm_core::vm_backend::BackendKind {
+        self.backend.kind()
+    }
+
+    /// The exact started VM identity whose stop was not confirmed.
+    #[must_use]
+    pub fn vm_id(&self) -> &mvm_core::vm_backend::VmId {
+        &self.vm_id
+    }
+
+    /// Lifecycle state retained by this error.
+    #[must_use]
+    pub fn state(&self) -> &'static str {
+        "started"
+    }
+
+    /// Exact backend, started admission and audit owner retained for reconciliation.
+    #[must_use]
+    pub fn into_custody(
+        self,
+    ) -> (
+        AnyBackend,
+        mvm_core::vm_backend::VmId,
+        crate::plan_admission::AdmittedPlan,
+        Option<mvm_contract::protocol::resource_controls::EnforcedGrants>,
+        Arc<AuditEmitter>,
+        anyhow::Error,
+    ) {
+        (
+            self.backend,
+            self.vm_id,
+            self.admitted,
+            self.enforced_grants,
+            self.emitter,
+            self.uncertainty,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let signer_id = "host:operator-trial-custody-test".to_string();
+        let signed = mvm_core::plan::signing::sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[37; 32]),
+            &signer_id,
+        );
+        let admitted = crate::plan_admission::AdmittedPlan::for_test(plan, signer_id, signed);
+        let audit_root = tempfile::tempdir()
+            .expect("operator trial uncertain audit root")
+            .keep();
+        let emitter = Arc::new(
+            AuditEmitter::with_dir(
+                ed25519_dalek::SigningKey::from_bytes(&[38; 32]),
+                &audit_root,
+            )
+            .expect("operator trial uncertain audit emitter"),
+        );
+        Self {
+            backend: AnyBackend::Mock(mvm_runtime::MockBackend::new()),
+            vm_id: mvm_core::vm_backend::VmId("operator-trial-uncertain".to_string()),
+            admitted,
+            enforced_grants: Some(
+                mvm_contract::protocol::resource_controls::EnforcedGrants::all_declared(),
+            ),
+            emitter,
+            uncertainty: anyhow::Error::new(crate::plan_admission::UndoLaunchFailure::unconfirmed(
+                anyhow::anyhow!("controller missing"),
+                anyhow::anyhow!("stop unconfirmed"),
+            )),
+        }
+    }
+}
+
+fn refuse_missing_controller(
+    backend: AnyBackend,
+    started: crate::plan_admission::StartedMachine,
+    emitter: Arc<AuditEmitter>,
+) -> anyhow::Error {
+    let refusal = anyhow::anyhow!("admitted assurance boot did not install its controller plane");
+    match backend.stop(&started.vm_id) {
+        Ok(_) => {
+            if let Err(error) = emitter.emit_failed(
+                started.admitted.plan(),
+                "controller-plane",
+                &format!("{refusal:#}"),
+            ) {
+                tracing::warn!(%error, "recording confirmed operator-trial rollback failed");
+            }
+            refusal
+        }
+        Err(stop) => {
+            tracing::warn!(
+                vm = %started.vm_id.0,
+                error = %stop,
+                "operator-trial controller rollback is unconfirmed; retaining custody"
+            );
+            let uncertainty = anyhow::Error::new(
+                crate::plan_admission::UndoLaunchFailure::unconfirmed(refusal, stop),
+            );
+            anyhow::Error::new(OperatorTrialCustodyUncertain {
+                backend,
+                vm_id: started.vm_id,
+                admitted: started.admitted,
+                enforced_grants: Some(started.enforced_grants),
+                emitter,
+                uncertainty,
+            })
+        }
+    }
+}
+
+fn retain_dispatch_custody(
+    error: anyhow::Error,
+    backend: AnyBackend,
+    emitter: Arc<AuditEmitter>,
+) -> anyhow::Error {
+    match error.downcast::<crate::plan_admission::OperatorTrialDispatchUncertain>() {
+        Ok(uncertain) => anyhow::Error::new(OperatorTrialCustodyUncertain {
+            backend,
+            vm_id: uncertain.vm_id,
+            admitted: uncertain.admitted,
+            enforced_grants: uncertain.enforced_grants,
+            emitter,
+            uncertainty: uncertain.uncertainty,
+        }),
+        Err(error) => error,
+    }
+}
+
 impl OperatorConfiguredTrialBooter {
     /// Load the fixed private config and initialize only state beneath the
     /// explicit provider root.
@@ -474,44 +646,50 @@ impl OperatorConfiguredTrialBooter {
             &self.config.tenant,
             &network_policy,
             &vm_name,
-            backend_name,
-        )?;
+        );
         let campaign_now_unix_ms = now_unix_ms()?;
         let extension_context = ExtensionAdmissionContext::at(&cache_root, &verify);
         let keys_root = self.state_root.join("host-signing-keys");
         let clock = SystemClock;
-        let started = {
-            let campaign = CampaignRequest {
-                declaration: declaration.clone(),
-                emitter: Arc::clone(&self.emitter),
-                policy_ceiling: self.config.authority.ceiling.clone(),
-                policy: network_policy,
-                backend: backend_name.to_string(),
-                now_unix_ms: campaign_now_unix_ms,
-            };
-            admit_and_start(
-                &backend,
-                AdmitAndStartParams::builder()
-                    .synthesis(&synthesis)
-                    .config(config)
-                    .clock(&clock)
-                    .ledger(&self.ledger)
-                    .host_signer_keys_dir(keys_root.as_path())
-                    .extension_ctx(&extension_context)
-                    .variant(self.config.admission_tier.plan_variant())
-                    .emitter(self.emitter.as_ref())
-                    .audit_durability(AuditDurability::Required)
-                    .assurance(&campaign)
-                    .build()?,
-            )?
+        let campaign = CampaignRequest {
+            declaration: declaration.clone(),
+            emitter: Arc::clone(&self.emitter),
+            policy_ceiling: self.config.authority.ceiling.clone(),
+            policy: network_policy,
+            backend: backend_name.to_string(),
+            now_unix_ms: campaign_now_unix_ms,
+        };
+        let prepared = crate::plan_admission::operator_trial::prepare(
+            &backend,
+            AdmitAndStartParams::builder()
+                .synthesis(&synthesis)
+                .config(config)
+                .clock(&clock)
+                .ledger(&self.ledger)
+                .host_signer_keys_dir(keys_root.as_path())
+                .extension_ctx(&extension_context)
+                .variant(self.config.admission_tier.plan_variant())
+                .emitter(self.emitter.as_ref())
+                .audit_durability(AuditDurability::Required)
+                .assurance(&campaign)
+                .build()?,
+        )?;
+        let started = match prepared.dispatch() {
+            Ok(started) => started,
+            Err(error) => {
+                return Err(retain_dispatch_custody(
+                    error,
+                    backend,
+                    Arc::clone(&self.emitter),
+                ));
+            }
         };
         let Some(plane) = host_assurance_plane() else {
-            // The machine is already running; refusing without stopping it
-            // would leave a detached VMM behind the error.
-            if let Err(error) = backend.stop(&started.vm_id) {
-                tracing::warn!(vm = %started.vm_id.0, "stopping a refused assurance boot: {error:#}");
-            }
-            anyhow::bail!("admitted assurance boot did not install its controller plane");
+            return Err(refuse_missing_controller(
+                backend,
+                started,
+                Arc::clone(&self.emitter),
+            ));
         };
         Ok(AdmittedTrialBoot {
             backend,
@@ -672,9 +850,8 @@ fn workload_start_config(
     tenant: &AssuranceId,
     network_policy: &NetworkPolicy,
     vm_name: &str,
-    backend_name: &str,
-) -> Result<VmStartConfig> {
-    let mut config = VmStartConfig {
+) -> VmStartConfig {
+    VmStartConfig {
         name: vm_name.to_string(),
         rootfs_path: workload.rootfs_path.display().to_string(),
         kernel_path: workload
@@ -707,23 +884,7 @@ fn workload_start_config(
         tenant_id: Some(tenant.as_str().to_string()),
         network_policy: network_policy.clone(),
         ..Default::default()
-    };
-    // Resolve the ordinary cached runtime only when the operator has not
-    // selected one. Partial or invalid explicit selections must fail closed,
-    // not be replaced with a different runtime.
-    if config.runtime_overlay_path.is_none()
-        && config.runtime_overlay_verity_path.is_none()
-        && config.runtime_overlay_roothash.is_none()
-        && config.runtime_overlay_version.is_none()
-        && config.initrd_path.is_none()
-        && config.runtime_release_proof.is_none()
-        && config.legacy_bundle_runtime.is_none()
-    {
-        crate::run::attach_guest_runtime(&mut config, backend_name)
-            .context("resolving guest runtime for admitted assurance boot")?;
     }
-    verify_assurance_guest_protocol(&config)?;
-    Ok(config)
 }
 
 impl AdmittedTrialBooter for OperatorConfiguredTrialBooter {
@@ -947,6 +1108,126 @@ fn read_bounded_regular_file(path: &Path, max_bytes: u64, private: bool) -> Resu
 mod tests {
     use super::*;
 
+    fn started_fixture(
+        name: &str,
+        backend: &AnyBackend,
+        audit: &std::path::Path,
+    ) -> (crate::plan_admission::StartedMachine, Arc<AuditEmitter>) {
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .workload(name)
+            .build();
+        let signer_id = "host:operator-trial-rollback-test".to_string();
+        let signed = mvm_core::plan::signing::sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[53; 32]),
+            &signer_id,
+        );
+        let admitted = crate::plan_admission::AdmittedPlan::for_test(plan, signer_id, signed);
+        let emitter = Arc::new(
+            AuditEmitter::with_dir(ed25519_dalek::SigningKey::from_bytes(&[54; 32]), audit)
+                .expect("operator trial rollback emitter"),
+        );
+        let vm_id = backend
+            .start(&VmStartConfig {
+                name: name.to_string(),
+                rootfs_path: "/store/rootfs.ext4".into(),
+                ..Default::default()
+            })
+            .expect("mock operator trial start");
+        (
+            crate::plan_admission::StartedMachine {
+                vm_id,
+                admitted,
+                enforced_grants:
+                    mvm_contract::protocol::resource_controls::EnforcedGrants::all_declared(),
+            },
+            emitter,
+        )
+    }
+
+    #[test]
+    fn missing_controller_confirmed_stop_emits_terminal_failure() {
+        let audit = tempfile::tempdir().expect("audit");
+        let backend = AnyBackend::Mock(mvm_runtime::MockBackend::new());
+        let (started, emitter) =
+            started_fixture("operator-controller-confirmed", &backend, audit.path());
+
+        let error = refuse_missing_controller(backend, started, emitter);
+
+        assert!(
+            error
+                .to_string()
+                .contains("did not install its controller plane"),
+            "{error:#}"
+        );
+        assert!(
+            error
+                .downcast_ref::<OperatorTrialCustodyUncertain>()
+                .is_none()
+        );
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap_or_default();
+        assert!(chain.contains("plan.failed"), "{chain}");
+        assert!(chain.contains("controller-plane"), "{chain}");
+    }
+
+    #[test]
+    fn missing_controller_failed_stop_retains_started_custody_without_terminal_failure() {
+        let audit = tempfile::tempdir().expect("audit");
+        let backend = AnyBackend::Mock(mvm_runtime::MockBackend::new().with_failing_stop());
+        let (started, emitter) =
+            started_fixture("operator-controller-uncertain", &backend, audit.path());
+        let plan_id = started.admitted.plan_id().clone();
+
+        let error = refuse_missing_controller(backend, started, emitter);
+        let custody = error
+            .downcast::<OperatorTrialCustodyUncertain>()
+            .expect("failed stop retains exact operator-trial custody");
+        assert_eq!(custody.admitted.plan_id(), &plan_id);
+        assert_eq!(custody.state(), "started");
+        let (backend, vm_id, admitted, enforced, emitter, uncertainty) = custody.into_custody();
+        assert_eq!(admitted.plan_id(), &plan_id);
+        assert!(enforced.is_some());
+        assert!(matches!(
+            backend.status(&vm_id),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ));
+        drop(uncertainty);
+        drop(emitter);
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap_or_default();
+        assert!(!chain.contains("plan.failed"), "{chain}");
+        assert!(!chain.contains("session.sealed"), "{chain}");
+    }
+
+    #[test]
+    fn shared_dispatch_uncertainty_is_promoted_to_operator_owned_custody() {
+        let audit = tempfile::tempdir().expect("audit");
+        let backend = AnyBackend::Mock(mvm_runtime::MockBackend::new());
+        let (started, emitter) =
+            started_fixture("operator-shared-rollback-uncertain", &backend, audit.path());
+        let plan_id = started.admitted.plan_id().clone();
+        let internal = crate::plan_admission::OperatorTrialDispatchUncertain {
+            vm_id: started.vm_id,
+            admitted: started.admitted,
+            enforced_grants: Some(started.enforced_grants),
+            uncertainty: anyhow::Error::new(crate::plan_admission::UndoLaunchFailure::unconfirmed(
+                anyhow::anyhow!("post-start check failed"),
+                anyhow::anyhow!("stop unconfirmed"),
+            )),
+        };
+
+        let error =
+            retain_dispatch_custody(anyhow::Error::new(internal), backend, Arc::clone(&emitter));
+        let custody = error
+            .downcast::<OperatorTrialCustodyUncertain>()
+            .expect("shared uncertainty must retain operator-owned custody");
+        assert_eq!(custody.admitted.plan_id(), &plan_id);
+        assert_eq!(custody.vm_id().0, "operator-shared-rollback-uncertain");
+        drop(custody);
+        drop(emitter);
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap_or_default();
+        assert!(!chain.contains("plan.failed"), "{chain}");
+    }
+
     #[test]
     fn assurance_guest_protocol_refuses_unauthed_current_sidecar() {
         let root = tempfile::tempdir().expect("sidecar directory");
@@ -1091,26 +1372,27 @@ mod tests {
             memory_mib: 256,
             boot_timeout_seconds: 60,
         };
-        let error = workload_start_config(
+        let config = workload_start_config(
             &workload,
             &AssuranceId::parse("assurance-tenant").expect("tenant"),
             &NetworkPolicy::deny_all(),
             "assurance-runtime-test",
-            "firecracker",
-        )
-        .expect_err("a cached source runtime must not satisfy assurance");
-        assert!(format!("{error:#}").contains("unsigned development runtimes"));
+        );
+        assert!(
+            config.runtime_overlay_path.is_none(),
+            "config construction must not attach ambient cached runtime"
+        );
 
         // An incomplete operator selection must not be replaced by that cache.
         workload.runtime_overlay_path = Some(home.path().join("selected.ext4"));
-        let error = workload_start_config(
+        let selected = workload_start_config(
             &workload,
             &AssuranceId::parse("assurance-tenant").expect("tenant"),
             &NetworkPolicy::deny_all(),
             "assurance-runtime-test",
-            "firecracker",
-        )
-        .expect_err("partial explicit runtime must fail without cache fallback");
+        );
+        let error = verify_assurance_guest_protocol(&selected)
+            .expect_err("partial explicit runtime must fail without cache fallback");
         assert!(format!("{error:#}").contains("selected guest runtime has no version"));
     }
 

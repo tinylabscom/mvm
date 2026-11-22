@@ -42,6 +42,23 @@ pub fn release_confirmed_start_failure(
     }
 }
 
+/// Synthetic unconfirmed native start custody for cross-crate lifecycle tests.
+#[cfg(all(feature = "test-support", unix))]
+#[doc(hidden)]
+pub fn uncertain_native_start_failure_for_test() -> anyhow::Error {
+    anyhow::Error::new(mvm_backends::driver::hvf::ColdHvfBootFailure::uncertain_test_fixture())
+}
+
+/// Reap a synthetic native start failure after a custody-classification test.
+#[cfg(all(feature = "test-support", unix))]
+#[doc(hidden)]
+pub fn reap_uncertain_native_start_failure_for_test(error: anyhow::Error) {
+    error
+        .downcast::<mvm_backends::driver::hvf::ColdHvfBootFailure>()
+        .expect("synthetic native start custody remains intact")
+        .reap_uncertain_test_fixture();
+}
+
 /// A warm child whose lifecycle gate remains held until the caller takes custody.
 #[must_use]
 pub struct OwnedWarmClaim {

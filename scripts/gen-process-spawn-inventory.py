@@ -242,6 +242,7 @@ A = {
     # host libraries
     "mvm-backends/src/driver/hvf.rs": ("hypervisor supervisor", "spawn mvm-hvf-supervisor for an HVF VM (cold and restore)"),
     "mvm-backends/src/driver/hvf_restore.rs": ("hypervisor supervisor", "spawn mvm-hvf-supervisor for a snapshot restore"),
+    "mvm-backends/src/driver/hvf/cold_channel.rs": ("test harness", "test-support only: synthetic unconfirmed-launch custody fixture spawning an idle sh child (absent from a build without the test-support feature)"),
     "mvm-backends/src/driver/libkrun.rs": ("hypervisor supervisor", "spawn mvm-libkrun-supervisor"),
     "mvm-backends/src/driver/qemu.rs": ("hypervisor", "launch QEMU"),
     "mvm-backends/src/driver/qemu_process.rs": ("mvmctl self re-exec", "start `mvmctl __qemu-vsock-bridge`"),
@@ -330,6 +331,7 @@ AUTH_OVERRIDE["mvm-hostd/src/bin/mvm-network-endpoint.rs"] = "per-VM endpoint bi
 AUTH_OVERRIDE["mvm-hostd/src/bin/mvm-host-agent.rs"] = "host daemon bin"
 AUTH_OVERRIDE["mvm-cli/src/commands/bootstrap.rs"] = "CLI hidden verb"
 AUTH_OVERRIDE["mvm-core/src/bounded_run.rs"] = "dev harness, not shipped"
+AUTH_OVERRIDE["mvm-backends/src/driver/hvf/cold_channel.rs"] = "dev harness, not shipped"
 LIB_AUTH = "library: caller's process (CLI, daemon, embedder)"
 
 
