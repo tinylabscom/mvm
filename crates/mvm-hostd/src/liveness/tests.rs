@@ -22,7 +22,7 @@ use crate::topology_admission::{
 };
 
 const TENANT: &str = "acme";
-const PERIOD_MS: u32 = 1_000;
+const PERIOD_MS: u32 = 2_000;
 
 /// A clock the test moves by hand.
 struct TestClock(Mutex<DateTime<Utc>>);
@@ -215,6 +215,22 @@ fn keys_dir(home: &Path) -> PathBuf {
 fn refusal(err: &anyhow::Error) -> &LivenessRefusal {
     err.downcast_ref::<LivenessRefusal>()
         .unwrap_or_else(|| panic!("expected a liveness refusal, got {err:#}"))
+}
+
+#[test]
+fn a_same_identity_resume_is_refused_only_for_a_unit_with_a_period() {
+    let host = Host::admitted();
+    let err = refuse_unwatched_resume(&tenant(), &id("controller"), None).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains(&format!("{PERIOD_MS} ms liveness period")),
+        "{err:#}"
+    );
+    refuse_unwatched_resume(&tenant(), &id("reader"), None).expect("no period, nothing to hold");
+    refuse_unwatched_resume(&tenant(), &id("not-a-unit"), None).expect("not in the topology");
+    refuse_unwatched_resume(&TenantId("other".into()), &id("controller"), None)
+        .expect("a tenant with no topology");
+    drop(host);
 }
 
 #[test]
@@ -775,5 +791,100 @@ mod owner {
             "no period and no written cell"
         );
         assert!(!host.path().exists(), "nothing was read or armed");
+    }
+
+    /// Wait until a timer armed in this test has made its first pass. The
+    /// pass resolves the mvm home when it starts, so the test must not hand
+    /// the environment back before then.
+    fn wait_for_first_pass(host: &Host) {
+        let dir = mvm_core::config::liveness_dir_at(host.home.path());
+        let started = std::time::Instant::now();
+        while !dir.exists() {
+            assert!(
+                started.elapsed() < StdDuration::from_secs(30),
+                "the armed timer never made a pass"
+            );
+            std::thread::sleep(StdDuration::from_millis(5));
+        }
+    }
+
+    /// The controller's plan, bound to the admitted topology.
+    fn controller_plan(host: &Host) -> mvm_core::plan::ExecutionPlan {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant(TENANT)
+            .workload("controller")
+            .build();
+        let admitted = crate::topology_admission::last_admitted_topology(
+            host.home.path(),
+            &tenant(),
+            Some(&keys_dir(host.home.path())),
+        )
+        .unwrap()
+        .expect("a topology is admitted");
+        plan.topology = Some(mvm_contract::plan::topology::TopologyBinding {
+            topology: admitted.digest(),
+            unit: id("controller"),
+        });
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        plan
+    }
+
+    #[test]
+    fn a_cold_booted_supervisor_arms_the_timer_for_a_unit_with_a_period_or_refuses_to_boot() {
+        let host = Host::admitted();
+        let key_path = keys_dir(host.home.path()).join("host-signer.ed25519");
+        let audit = host.home.path().join("audit");
+        let state = tempfile::tempdir().unwrap();
+        let pid = state.path().join("vm.pid");
+        let plan = serde_json::to_value(controller_plan(&host)).unwrap();
+        let inputs = |audit_dir| SupervisorTimerInputs {
+            plan_json: Some(&plan),
+            audit_dir,
+            signing_key_path: Some(&key_path),
+            vm_state_dir: state.path(),
+            pid_file: &pid,
+        };
+        let guard = arm_for_supervisor(&inputs(Some(&audit))).unwrap();
+        assert!(guard.is_some(), "the unit's deadline has an owner");
+        wait_for_first_pass(&host);
+        let error = arm_for_supervisor(&inputs(None))
+            .err()
+            .expect("an expiry nobody could record is refused");
+        assert!(format!("{error:#}").contains("audit chain"), "{error:#}");
+    }
+
+    #[test]
+    fn a_restored_childs_supervisor_arms_the_timer_from_its_verified_plan() {
+        let host = Host::admitted();
+        let keys = keys_dir(host.home.path());
+        let key_path = keys.join("host-signer.ed25519");
+        let audit = host.home.path().join("audit");
+        let state = tempfile::tempdir().unwrap();
+        let pid = state.path().join("vm.pid");
+        let signer = crate::audit::host_keypair::load_or_init_at(&keys).unwrap();
+        let signed = serde_json::to_value(mvm_core::plan::sign_plan(
+            &controller_plan(&host),
+            &signer.signing,
+            "host:t",
+        ))
+        .unwrap();
+        let armed = crate::supervisor::admission::restored_plan::plan_to_arm(
+            Some(&signed),
+            true,
+            "controller",
+            Some(&key_path),
+        )
+        .expect("the child's own plan verifies")
+        .expect("a plan to arm from");
+        let guard = arm_for_supervisor(&SupervisorTimerInputs {
+            plan_json: Some(&armed),
+            audit_dir: Some(&audit),
+            signing_key_path: Some(&key_path),
+            vm_state_dir: state.path(),
+            pid_file: &pid,
+        })
+        .unwrap();
+        assert!(guard.is_some(), "the restored unit's deadline has an owner");
+        wait_for_first_pass(&host);
     }
 }

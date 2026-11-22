@@ -185,11 +185,19 @@ impl ResourceControls {
     /// mock, whose store is the same host store. A wasm module has no such
     /// channel and a browser-hosted guest has no host store.
     ///
-    /// The liveness deadline is held in the host's store too, but only the
-    /// mock offers it. A real tier would need the host to know it cannot
-    /// suspend, since every deadline would expire at once on resume, and a
-    /// measured shortest period that tier holds without false expiries under
-    /// load; until both exist a period is refused there.
+    /// The liveness deadline is held in the host's store too, but something
+    /// has to fence the unit once it passes. That is the per-VM supervisor,
+    /// so the tiers with one offer a period: libkrun, HVF and AppleContainer,
+    /// the same answer as `wall_clock` for the same reason, and the mock,
+    /// whose tests run the pass themselves. Firecracker and QEMU leave no
+    /// process of ours beside the guest, and a wasm module or a
+    /// browser-hosted guest has no unit timer at all, so a period is refused
+    /// there rather than declared and watched by nothing.
+    ///
+    /// A host that suspends does not refuse a period. The deadline is an
+    /// absolute time and is not extended across the suspend, so a deadline
+    /// that passed while the host slept fences when the supervisor next runs,
+    /// and the expiry records how long the host was seen suspended.
     #[must_use]
     pub const fn for_backend(kind: BackendKind) -> Self {
         match kind {
@@ -217,7 +225,7 @@ impl ResourceControls {
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
                 state_cells: StateCellControl::HostStore,
-                liveness: LivenessControl::None,
+                liveness: LivenessControl::HostDeadline,
                 isolation: Some(IsolationTier::Vm),
                 suite: SuiteControl::ClassicalOnly,
             },
@@ -229,7 +237,8 @@ impl ResourceControls {
             // is no process of ours left to hold a deadline. Answering
             // `SupervisorTimer` here would be the same overstatement the macOS
             // CPU arm below exists to avoid — a bound accepted at admission and
-            // enforced by nothing.
+            // enforced by nothing. A liveness deadline is refused for the same
+            // want of an owner.
             //
             // The two part on isolation. Firecracker refuses to start without
             // `/dev/kvm`. QEMU falls back to TCG software emulation when KVM is
@@ -279,7 +288,7 @@ impl ResourceControls {
                 placement: PlacementControl::None,
                 standby: StandbyControl::None,
                 state_cells: StateCellControl::HostStore,
-                liveness: LivenessControl::None,
+                liveness: LivenessControl::HostDeadline,
                 isolation: Some(IsolationTier::Vm),
                 suite: SuiteControl::ClassicalOnly,
             },
@@ -1275,13 +1284,28 @@ mod tests {
         }
     }
 
+    /// A deadline needs a process that outlives the launch to fence it: the
+    /// per-VM supervisor. This is the wall-clock matrix for the VMM tiers.
     #[test]
-    fn only_the_mock_holds_a_liveness_deadline() {
+    fn a_liveness_deadline_is_held_only_where_a_supervisor_owns_the_guest() {
         for &kind in BackendKind::ALL {
             let expected = match kind {
-                BackendKind::Mock => LivenessControl::HostDeadline,
-                _ => LivenessControl::None,
+                BackendKind::Libkrun
+                | BackendKind::Hvf
+                | BackendKind::AppleContainer
+                | BackendKind::Mock => LivenessControl::HostDeadline,
+                BackendKind::Firecracker
+                | BackendKind::Qemu
+                | BackendKind::Wasm
+                | BackendKind::WebLinux => LivenessControl::None,
             };
+            if expected == LivenessControl::HostDeadline && kind != BackendKind::Mock {
+                assert_eq!(
+                    ResourceControls::for_backend(kind).wall_clock,
+                    WallClockControl::SupervisorTimer,
+                    "{kind:?} holds a deadline without a supervisor to fence it"
+                );
+            }
             assert_eq!(
                 ResourceControls::for_backend(kind).liveness,
                 expected,

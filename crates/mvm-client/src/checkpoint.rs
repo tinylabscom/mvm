@@ -42,6 +42,11 @@ pub use mvm_runtime::microvm::{
     fc_pid_path, firecracker_vsock_uds_path, resolve_running_vm_dir, stop_vm,
 };
 pub use mvm_runtime::vm::instance_snapshot::lock_resume;
+
+/// Refuses a same-identity restore of a unit whose topology declares a
+/// liveness period: the restored supervisor is handed no plan, so nothing
+/// would hold the deadline.
+pub use mvm_hostd::liveness::refuse_unwatched_resume;
 pub use mvm_runtime::vm::snapshot_key::SNAPSHOT_TENANT_KEY_ENV;
 pub use mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot_revision;
 

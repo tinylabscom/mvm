@@ -484,6 +484,79 @@ fn each_unmet_requirement_is_refused_named_and_persists_nothing() {
 }
 
 #[test]
+fn a_liveness_period_is_admitted_where_a_supervisor_holds_the_deadline() {
+    use mvm_contract::plan::topology::requirements::{
+        MAX_LIVENESS_PERIOD_MS, MIN_LIVENESS_PERIOD_MS,
+    };
+    let host = Host::new();
+    let now = t0() + Duration::days(1);
+    let watched = |period_ms: u32| {
+        let mut topology = topology(1);
+        topology.units[0].liveness_period_ms = NonZeroU32::new(period_ms);
+        topology
+    };
+    let unit = topology(1).units[0].workload.clone();
+
+    // No owner for the deadline: refused, whatever the period.
+    for backend in [
+        BackendKind::Firecracker,
+        BackendKind::Qemu,
+        BackendKind::Wasm,
+        BackendKind::WebLinux,
+    ] {
+        let topology = watched(5_000);
+        let err = host
+            .admit_with(&host.sign(&topology), backend, None, now)
+            .expect_err("no process holds a deadline on this backend");
+        assert_eq!(
+            refusal(&err).reason,
+            UnmetRequirement::LivenessPeriod {
+                unit: unit.clone(),
+                period_ms: NonZeroU32::new(5_000).unwrap(),
+            }
+            .to_string(),
+            "{backend:?}"
+        );
+    }
+
+    // An owner, and the range still applies.
+    for backend in [
+        BackendKind::Libkrun,
+        BackendKind::Hvf,
+        BackendKind::AppleContainer,
+    ] {
+        for period_ms in [MIN_LIVENESS_PERIOD_MS - 1, MAX_LIVENESS_PERIOD_MS + 1] {
+            let topology = watched(period_ms);
+            let err = host
+                .admit_with(&host.sign(&topology), backend, None, now)
+                .expect_err("outside the range the host holds");
+            assert_eq!(
+                refusal(&err).reason,
+                UnmetRequirement::LivenessPeriodOutOfRange {
+                    unit: unit.clone(),
+                    period_ms: NonZeroU32::new(period_ms).unwrap(),
+                }
+                .to_string(),
+                "{backend:?} {period_ms}"
+            );
+        }
+    }
+    assert!(host.records().is_empty(), "no refusal persisted a record");
+
+    // The same generation presented on each: admitted once, then recognised.
+    let topology = watched(MIN_LIVENESS_PERIOD_MS);
+    for backend in [
+        BackendKind::Libkrun,
+        BackendKind::Hvf,
+        BackendKind::AppleContainer,
+    ] {
+        host.admit_with(&host.sign(&topology), backend, None, now)
+            .unwrap_or_else(|e| panic!("{backend:?} holds the deadline: {e:#}"));
+    }
+    assert_eq!(host.records().len(), 1);
+}
+
+#[test]
 fn a_topology_over_the_host_budget_is_refused() {
     let host = Host::with_memory_budget(300);
 

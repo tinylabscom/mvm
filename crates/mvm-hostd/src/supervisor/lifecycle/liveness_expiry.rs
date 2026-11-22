@@ -32,6 +32,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -225,6 +226,24 @@ impl UnitTimer {
             }
         }
     }
+
+    /// [`Self::run`] on a thread of its own, until there is nothing left to do
+    /// or the returned sender is dropped.
+    ///
+    /// # Errors
+    ///
+    /// The thread could not be spawned.
+    pub fn spawn(self) -> std::io::Result<(Sender<()>, JoinHandle<()>)> {
+        let (stop, stopped) = channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("mvm-unit-timer".to_string())
+            .spawn(move || {
+                self.run(|pause| {
+                    matches!(stopped.recv_timeout(pause), Err(RecvTimeoutError::Timeout))
+                });
+            })?;
+        Ok((stop, thread))
+    }
 }
 
 /// How far the wall clock ran ahead of the monotonic clock between two
@@ -306,13 +325,6 @@ pub fn arm_for_supervisor(inputs: &SupervisorTimerInputs<'_>) -> Result<Option<L
         digest,
         monotonic: Arc::new(SystemMonotonic::new()),
     };
-    let (stop, stopped) = channel::<()>();
-    std::thread::Builder::new()
-        .name("mvm-unit-timer".to_string())
-        .spawn(move || {
-            timer
-                .run(|pause| matches!(stopped.recv_timeout(pause), Err(RecvTimeoutError::Timeout)));
-        })
-        .context("spawning the unit timer thread")?;
+    let (stop, _thread) = timer.spawn().context("spawning the unit timer thread")?;
     Ok(Some(LivenessGuard { _stop: stop }))
 }
