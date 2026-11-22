@@ -2336,6 +2336,7 @@ mod tests {
                 // dev-dependency, so their test lanes compile and run it.
                 "crates/mvm-hostd/src/seal_gate.rs",
                 "crates/mvm-hostd/src/mailbox_service.rs",
+                "crates/mvm-hostd/src/plan_admission/cli_cold.rs",
                 "tests/audit_emissions_live.rs",
             ]
             .iter()

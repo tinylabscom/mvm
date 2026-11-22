@@ -2375,7 +2375,7 @@ pub(crate) mod admit_plan_tests {
 
     #[cfg(feature = "test-support")]
     #[test]
-    fn cli_warm_dispatch_spends_the_actual_admission_not_a_json_projection() {
+    fn legacy_pending_cli_admission_cannot_enter_the_warm_claim_path() {
         let (_env, home) = isolated_home();
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
@@ -2388,20 +2388,6 @@ pub(crate) mod admit_plan_tests {
             ..pinning_params(&rootfs, &ledger)
         })
         .expect("admit warm child");
-        let plan_json = serde_json::to_string(context.admitted.signed()).expect("signed plan");
-        let bundle_json = context
-            .policy_bundle
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .expect("policy");
-        let config = mvm_core::vm_backend::VmStartConfig {
-            name: "warm-child".into(),
-            rootfs_path: rootfs.display().to_string(),
-            plan_json: Some(plan_json),
-            bundle_json,
-            ..Default::default()
-        };
         let owner = CliAdmission::new_for_rootfs(context, &rootfs);
         let pool = mvm_runtime::standby_pool::SupervisorStandbyPool::at(home.path().join("pool"));
         let checkpoints = mvm_runtime::checkpoint::CheckpointStore::at(home.path().join("checks"));
@@ -2439,14 +2425,14 @@ pub(crate) mod admit_plan_tests {
         let backend =
             mvm_runtime::AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
 
-        let mut substituted = config.clone();
-        substituted.plan_json = Some("{}".into());
-        let (owner, error) = owner.claim_warm(&backend, substituted, &claim_context, &handle);
-        assert!(error.is_err(), "a JSON substitution cannot spend admission");
-        assert!(matches!(owner, CliAdmission::Pending(_)));
-        let (owner, result) = owner.claim_warm(&backend, config, &claim_context, &handle);
-        let (claimed, _lifecycle) = result.expect("mock warm dispatch").into_parts();
-        assert_eq!(claimed, mvm_core::vm_backend::VmId(handle.id));
+        let (owner, result) = owner.claim_prepared_warm(&backend, &claim_context, &handle);
+        let error = result.expect_err("legacy pending admission cannot claim warm");
+        assert!(
+            error
+                .to_string()
+                .contains("requires host-prepared CLI cold authority"),
+            "{error:#}"
+        );
         assert!(matches!(owner, CliAdmission::Dispatched(_)));
     }
 
@@ -2455,39 +2441,76 @@ pub(crate) mod admit_plan_tests {
     fn claim_warm_after_quarantine(
         mock: mvm_runtime::mock::MockBackend,
     ) -> anyhow::Result<crate::standby::OwnedWarmClaim> {
+        let backend = mvm_runtime::AnyBackend::Mock(mock);
         let (_env, home) = isolated_home();
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
+        let runtime_dir = tempfile::tempdir().expect("runtime");
         let rootfs = write_rootfs(home.path(), b"warm child image");
         let ledger = InMemoryNonceLedger::new();
-        let context = admit_plan_for_boot(AdmitPlanForBootParams {
-            vm_name: "warm-child",
-            keys_dir: Some(keys_dir.path()),
-            audit_dir: Some(audit_dir.path()),
-            ..pinning_params(&rootfs, &ledger)
-        })
-        .expect("admit warm child");
-        let plan_json = serde_json::to_string(context.admitted.signed()).expect("signed plan");
-        let bundle_json = context
-            .policy_bundle
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .expect("policy");
-        let workload = context.admitted.plan().workload.0.clone();
-        let config = mvm_core::vm_backend::VmStartConfig {
-            name: "warm-child".into(),
-            rootfs_path: rootfs.display().to_string(),
-            plan_json: Some(plan_json),
-            bundle_json,
-            ..Default::default()
-        };
-        let owner = CliAdmission::new_for_rootfs(context, &rootfs);
+        let runtime = mvm_build::guest_runtime::evidence::verified_release_runtime_fixture(
+            runtime_dir.path(),
+            mvm_core::arch::GuestArch::host(),
+            mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+            mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
+        );
+        let release = std::sync::Arc::clone(&runtime.release);
+        let workload = std::cell::RefCell::new(None);
+        let prepared = crate::admission::prepare_cli_cold(
+            &backend,
+            mvm_core::vm_backend::VmStartConfig {
+                name: "warm-child".into(),
+                rootfs_path: rootfs.display().to_string(),
+                ..Default::default()
+            },
+            |config| {
+                config.runtime_release_proof = Some(release.proof().clone());
+                config.runtime_overlay_path = Some(runtime.overlay.display().to_string());
+                config.runtime_overlay_verity_path =
+                    Some(runtime.overlay_verity.display().to_string());
+                config.runtime_overlay_roothash = Some(runtime.overlay_roothash.clone());
+                config.runtime_overlay_version = Some(release.proof().version.clone());
+                config.initrd_path = Some(runtime.initramfs.display().to_string());
+                Ok(Some(release))
+            },
+            |config, verified_runtime| {
+                let verified_runtime =
+                    verified_runtime.context("fixture must retain verified runtime")?;
+                let (context, durability) =
+                    admit_plan_for_boot_with_verified_runtime_syncing_beside_boot(
+                        AdmitPlanForBootParams {
+                            vm_name: "warm-child",
+                            keys_dir: Some(keys_dir.path()),
+                            audit_dir: Some(audit_dir.path()),
+                            runtime_config: Some(config),
+                            ..pinning_params(&rootfs, &ledger)
+                        },
+                        verified_runtime,
+                    )?;
+                config.admission_durability = Some(durability);
+                config.plan_json = Some(serde_json::to_string(context.admitted.signed())?);
+                config.bundle_json = context
+                    .policy_bundle
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?;
+                *workload.borrow_mut() = Some(context.admitted.plan().workload.0.clone());
+                Ok(crate::admission::CliColdAdmissionInput::new(
+                    CliAdmission::new_for_rootfs(context, &rootfs),
+                    None,
+                ))
+            },
+        )
+        .expect("prepare warm child");
         let store =
             mvm_hostd::policy_generation::workload_store::OwnedWorkloadStore::open(home.path())
                 .expect("workload store");
         store
-            .commit(&mvm_core::host_interface::workload::WorkloadChange::Quarantine { workload })
+            .commit(
+                &mvm_core::host_interface::workload::WorkloadChange::Quarantine {
+                    workload: workload.borrow_mut().take().expect("admitted workload"),
+                },
+            )
             .expect("quarantine after admission");
         drop(store);
         let pool = mvm_runtime::standby_pool::SupervisorStandbyPool::at(home.path().join("pool"));
@@ -2523,9 +2546,9 @@ pub(crate) mod admit_plan_tests {
             preloaded_child_vm_name: None,
             vsock_egress: false,
         };
-        let backend = mvm_runtime::AnyBackend::Mock(mock);
-        owner
-            .claim_warm(&backend, config, &claim_context, &handle)
+        prepared
+            .admission
+            .claim_prepared_warm(&backend, &claim_context, &handle)
             .1
     }
 

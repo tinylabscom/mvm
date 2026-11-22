@@ -2215,6 +2215,7 @@ fn failed_handshake_and_failed_kill_retain_child_and_parent_reservation() {
     let error = out
         .result
         .expect_err("failed handshake must refuse the claim");
+    assert!(matches!(error, StandbyError::StopUnconfirmed(_)), "{error}");
     assert!(error.to_string().contains("child stop unconfirmed"));
     assert!(error.to_string().contains("mock child termination failed"));
     assert_eq!(out.parent_state, Some(StandbyState::Claimed));
@@ -2233,12 +2234,9 @@ fn failed_handshake_and_unavailable_handle_retain_child_and_parent_reservation()
             .with_unreachable_child_agent()
             .refusing_attach(),
     );
-    assert!(
-        out.result
-            .expect_err("attach failure is unknown")
-            .to_string()
-            .contains("child stop unconfirmed")
-    );
+    let error = out.result.expect_err("attach failure is unknown");
+    assert!(matches!(error, StandbyError::StopUnconfirmed(_)), "{error}");
+    assert!(error.to_string().contains("child stop unconfirmed"));
     assert_eq!(out.parent_state, Some(StandbyState::Claimed));
     assert_eq!(out.orphan_child_dirs, 1);
     assert!(out.driver.killed_vms().is_empty());
@@ -3448,8 +3446,8 @@ fn concurrent_claims_do_not_double_claim_one_parent() {
         .as_ref()
         .unwrap_err();
     assert!(
-        loser.to_string().contains("not in a claimable state"),
-        "the losing claim must be refused by the reserve check, not some other error: {loser}"
+        matches!(loser, StandbyError::ReservationLost),
+        "the losing claim must report reservation loss, not some other error: {loser}"
     );
 
     // Exactly one fork happened and exactly one child dir landed — never
@@ -3469,6 +3467,57 @@ fn concurrent_claims_do_not_double_claim_one_parent() {
         StandbyState::Claimed,
         "the winner's parent stays reserved, never returned mid-race"
     );
+}
+
+#[test]
+fn selected_parent_removed_by_winner_reports_reservation_lost_before_child_effects() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.set("MVM_HOME", home.path());
+
+    let store_root = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let (checkpoints, snapshots, parent_id, parent_meta) =
+        seed_audited_parent(store_root.path(), src.path(), true);
+    let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
+    let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+    let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+    pool.record(&handle).unwrap();
+    let registry_path = store_root.path().join("vm-names.json");
+    let anchor = ClaimTestAnchor::audited(&parent_meta);
+    let claim = admitted_child_claim(
+        &src.path().join("rootfs.ext4"),
+        signed_child_plan_json(&parent_digest),
+    );
+    let runner = WorkloadRunner::new(
+        MockDriver::default(),
+        KeyingSpawner::default(),
+        RecordingBrokerRegistrar::new(),
+    );
+    let ctx = ClaimContext {
+        pool: &pool,
+        checkpoints: &checkpoints,
+        snapshots: &snapshots,
+        anchor: &anchor,
+        parent_checkpoint: &parent_id,
+        registry_path: &registry_path,
+        grant_issuer: None,
+    };
+
+    pool.remove(&handle.id)
+        .expect("winner removed the selected parent");
+    let error = runner
+        .claim_standby(&ctx, &handle, &claim)
+        .expect_err("removed selected parent loses the reservation");
+    assert!(matches!(error, StandbyError::ReservationLost), "{error}");
+    assert!(
+        runner.driver.forked_children().is_empty(),
+        "reservation loss precedes child effects"
+    );
+    assert_eq!(orphan_child_dirs(), 0);
 }
 
 /// There is no code path on this runner that takes an existing standby

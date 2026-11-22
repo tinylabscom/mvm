@@ -20,7 +20,9 @@ use mvm_core::vm_backend::{StandbyHandle, StandbyState};
 pub use mvm_runtime::backend::OwnedWarmClaim;
 pub use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool};
 
+mod claim;
 mod prepared;
+pub use claim::{CliWarmClaimOutcome, claim_selected_cli_warm};
 pub use prepared::{
     PlanlessWarmParentAnchor, PreparedWarmParent, WarmRefillResult,
     is_warm_parent_ownership_uncertain, standby_compat,
