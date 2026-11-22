@@ -22,7 +22,7 @@ const FEED: &[u8] = include_bytes!(
 const SIGNATURE: &[u8] = include_bytes!(
     "../../../mvm-core/tests/fixtures/image-set-revocations/revocation-list-v1/revocations.json.bundle"
 );
-fn clock() -> chrono::DateTime<Utc> {
+fn clock() -> mvm_contract::timestamp::UtcTimestamp {
     "2026-10-15T12:00:00Z".parse().unwrap()
 }
 

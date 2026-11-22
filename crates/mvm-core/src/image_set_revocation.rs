@@ -25,8 +25,10 @@
 //! A verified list is only as current as the moment it was loaded; a caller
 //! re-loads it for each admission rather than holding one across a long run.
 
-use chrono::{DateTime, Duration, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
 use thiserror::Error;
 
 use crate::crypto::image_verify::VerifiedSigner;
@@ -53,7 +55,7 @@ pub const IMAGE_SET_REVOCATION_CHANNEL: &str =
 
 /// Longest validity window a list may claim. The producer renews on a 45-day
 /// window; anything longer than this is refused rather than trusted for longer.
-pub const MAX_IMAGE_SET_REVOCATION_VALIDITY: Duration = Duration::days(62);
+pub const MAX_IMAGE_SET_REVOCATION_VALIDITY: Duration = Duration::from_secs(62 * 86_400);
 
 const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_BUNDLE_BYTES: usize = 1024 * 1024;
@@ -67,7 +69,7 @@ pub struct ImageSetRevocationCheckpoint {
     /// `N` of the `revocation-list/v<N>` tag the signing certificate names.
     pub publication: u64,
     /// The accepted list's own `issued_at`.
-    pub issued_at: DateTime<Utc>,
+    pub issued_at: UtcTimestamp,
     /// SHA-256 of the exact signed document bytes.
     pub sha256: Sha256Hex,
 }
@@ -125,7 +127,7 @@ impl VerifiedImageSetRevocations {
     }
 
     /// The end of the list's validity window.
-    pub fn not_after(&self) -> DateTime<Utc> {
+    pub fn not_after(&self) -> UtcTimestamp {
         self.list.not_after
     }
 
@@ -161,21 +163,21 @@ pub enum ImageSetRevocationError {
     InvalidValidityWindow,
     #[error(
         "image-set revocation list claims a validity window longer than {} days",
-        MAX_IMAGE_SET_REVOCATION_VALIDITY.num_days()
+        MAX_IMAGE_SET_REVOCATION_VALIDITY.as_secs() / 86_400
     )]
     ValidityTooLong,
     #[error("image-set revocation list was issued at {issued_at}, after the current time {now}")]
     IssuedInFuture {
-        issued_at: DateTime<Utc>,
-        now: DateTime<Utc>,
+        issued_at: UtcTimestamp,
+        now: UtcTimestamp,
     },
     #[error(
         "image-set revocation list expired at {not_after} (now {now}); fetch and apply the \
          current list from {IMAGE_SET_REVOCATION_CHANNEL}"
     )]
     Expired {
-        not_after: DateTime<Utc>,
-        now: DateTime<Utc>,
+        not_after: UtcTimestamp,
+        now: UtcTimestamp,
     },
     #[error(
         "image-set revocation list rolled back from publication {previous_publication} issued \
@@ -183,9 +185,9 @@ pub enum ImageSetRevocationError {
     )]
     Rollback {
         previous_publication: u64,
-        previous_issued_at: DateTime<Utc>,
+        previous_issued_at: UtcTimestamp,
         received_publication: u64,
-        received_issued_at: DateTime<Utc>,
+        received_issued_at: UtcTimestamp,
     },
     #[error(
         "image-set revocation publication {publication} issued {issued_at} conflicts with a \
@@ -193,7 +195,7 @@ pub enum ImageSetRevocationError {
     )]
     Equivocation {
         publication: u64,
-        issued_at: DateTime<Utc>,
+        issued_at: UtcTimestamp,
     },
 }
 
@@ -204,7 +206,7 @@ pub enum ImageSetRevocationError {
 pub fn verify_image_set_revocations(
     document: &[u8],
     bundle: &[u8],
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     previous: Option<&ImageSetRevocationCheckpoint>,
 ) -> Result<VerifiedImageSetRevocations, ImageSetRevocationError> {
     verify_image_set_revocations_with(document, bundle, now, previous, verify_keyless_signer)
@@ -218,7 +220,7 @@ fn verify_keyless_signer(document: &[u8], bundle: &[u8]) -> Result<VerifiedSigne
 pub(crate) fn verify_image_set_revocations_with<F>(
     document: &[u8],
     bundle: &[u8],
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     previous: Option<&ImageSetRevocationCheckpoint>,
     verify_signer: F,
 ) -> Result<VerifiedImageSetRevocations, ImageSetRevocationError>
@@ -259,10 +261,7 @@ fn authorized_publication(signer: &VerifiedSigner) -> Result<u64, ImageSetRevoca
     })
 }
 
-fn check_list(
-    list: &PackRevocationList,
-    now: DateTime<Utc>,
-) -> Result<(), ImageSetRevocationError> {
+fn check_list(list: &PackRevocationList, now: UtcTimestamp) -> Result<(), ImageSetRevocationError> {
     if list.schema_version != PACK_REVOCATION_SCHEMA_VERSION {
         return Err(ImageSetRevocationError::UnsupportedSchema {
             found: list.schema_version,
@@ -272,7 +271,11 @@ fn check_list(
     if list.issued_at >= list.not_after {
         return Err(ImageSetRevocationError::InvalidValidityWindow);
     }
-    if list.not_after - list.issued_at > MAX_IMAGE_SET_REVOCATION_VALIDITY {
+    if list
+        .not_after
+        .duration_since(list.issued_at)
+        .is_some_and(|window| window > MAX_IMAGE_SET_REVOCATION_VALIDITY)
+    {
         return Err(ImageSetRevocationError::ValidityTooLong);
     }
     if list.issued_at > now {

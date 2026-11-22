@@ -1146,7 +1146,7 @@ fn a_host_with_no_applied_revocations_acquires_as_before() {
 #[test]
 fn a_list_that_cannot_be_used_is_not_enforced_and_does_not_block_acquisition() {
     use mvm_core::image_set_revocation::{ImageSetRevocationError, ImageSetRevocationStoreError};
-    let now = chrono::Utc::now();
+    let now = mvm_core::util::time::utc_timestamp_now();
     for error in [
         ImageSetRevocationStoreError::Corrupt,
         ImageSetRevocationStoreError::Incomplete,

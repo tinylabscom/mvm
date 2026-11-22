@@ -68,6 +68,12 @@ pub fn utc_now() -> String {
     rfc3339_from_system_time(std::time::SystemTime::now())
 }
 
+/// `ts` in the `+00:00` form `chrono::DateTime::to_rfc3339` prints, for output
+/// that predates `UtcTimestamp` (its own `Display` ends in `Z`).
+pub fn rfc3339_offset(ts: UtcTimestamp) -> String {
+    chrono::DateTime::<chrono::Utc>::from(ts).to_rfc3339()
+}
+
 /// The current instant as a [`UtcTimestamp`], nanosecond precision. Saturates
 /// at the epoch if the system clock is before 1970.
 pub fn utc_timestamp_now() -> UtcTimestamp {
@@ -130,6 +136,14 @@ pub fn parse_iso8601(s: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rfc3339_offset_keeps_the_chrono_form() {
+        let whole = UtcTimestamp::from_unix(1_790_812_800, 0).unwrap();
+        assert_eq!(rfc3339_offset(whole), "2026-10-01T00:00:00+00:00");
+        let frac = UtcTimestamp::from_unix(1_790_812_800, 123_000_000).unwrap();
+        assert_eq!(rfc3339_offset(frac), "2026-10-01T00:00:00.123+00:00");
+    }
 
     #[test]
     fn test_utc_now_format() {

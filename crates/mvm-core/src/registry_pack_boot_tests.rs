@@ -966,7 +966,7 @@ fn refused_admission(store_root: &std::path::Path) -> String {
             builder_boot_abi: crate::image_set::BuilderBootAbiRange::WITH_PAYLOAD,
         },
         &ImageSetRevocationStore::new(store_root.to_owned()),
-        Utc::now(),
+        crate::util::time::utc_timestamp_now(),
     )
     .expect_err("admission without an applied image-set list must refuse");
     format!("{error:#}")

@@ -66,9 +66,14 @@ fn run(rest: &[String]) -> Result<(), String> {
         issuer: issuer.to_string(),
     };
 
-    verify_pack_revocation_list(&list_bytes, &bundle, &trust, chrono::Utc::now())
-        .map(|_| ())
-        .map_err(|e| format!("revocation list verification failed: {e}"))
+    verify_pack_revocation_list(
+        &list_bytes,
+        &bundle,
+        &trust,
+        mvm_core::util::time::utc_timestamp_now(),
+    )
+    .map(|_| ())
+    .map_err(|e| format!("revocation list verification failed: {e}"))
 }
 
 fn required<'a>(rest: &'a [String], key: &str) -> Result<&'a str, String> {

@@ -45,7 +45,7 @@ impl From<&client::ImageSetRevocationCheckpoint> for CheckpointReport {
     fn from(checkpoint: &client::ImageSetRevocationCheckpoint) -> Self {
         Self {
             publication: checkpoint.publication,
-            issued_at: checkpoint.issued_at.to_rfc3339(),
+            issued_at: mvm_core::util::time::rfc3339_offset(checkpoint.issued_at),
             sha256: checkpoint.sha256.as_str().to_owned(),
         }
     }
@@ -86,10 +86,10 @@ fn answer(method: &str, request: &[u8]) -> Result<Outcome, Outcome> {
             let checkpoint = status.checkpoint();
             Ok(Outcome::ok(&StatusReport {
                 publication: checkpoint.publication,
-                issued_at: checkpoint.issued_at.to_rfc3339(),
+                issued_at: mvm_core::util::time::rfc3339_offset(checkpoint.issued_at),
                 sha256: checkpoint.sha256.as_str().to_owned(),
                 signer_identity: status.signer_identity().into(),
-                not_after: status.not_after().to_rfc3339(),
+                not_after: mvm_core::util::time::rfc3339_offset(status.not_after()),
                 entries: status.entry_count(),
             }))
         }
