@@ -164,8 +164,8 @@ impl ParentActivation {
         ensure!(active == self.active, "controller activation is stale");
         self.grant()?.check_operation(operation, now_unix_ms)?;
         ensure!(
-            now_unix_ms >= self.plan.valid_from.timestamp_millis()
-                && now_unix_ms < self.plan.valid_until.timestamp_millis(),
+            now_unix_ms >= self.plan.valid_from.unix_millis()
+                && now_unix_ms < self.plan.valid_until.unix_millis(),
             "controller plan expired"
         );
         let epoch = ExecutionEpoch::new(self.plan.execution_epoch)
@@ -223,9 +223,9 @@ mod tests {
                         LifecycleOperation::ObserveChild,
                         LifecycleOperation::ReleaseChild,
                     ],
-                    not_before_unix_ms: plan.valid_from.timestamp_millis(),
-                    expires_at_unix_ms: plan.valid_until.timestamp_millis(),
-                    workflow_deadline_unix_ms: plan.valid_until.timestamp_millis(),
+                    not_before_unix_ms: plan.valid_from.unix_millis(),
+                    expires_at_unix_ms: plan.valid_until.unix_millis(),
+                    workflow_deadline_unix_ms: plan.valid_until.unix_millis(),
                 },
             },
         });
@@ -282,7 +282,7 @@ mod tests {
             active
                 .check_current_record(
                     LifecycleOperation::Launch,
-                    machine.admitted.plan().valid_until.timestamp_millis()
+                    machine.admitted.plan().valid_until.unix_millis()
                 )
                 .is_err()
         );

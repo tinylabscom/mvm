@@ -66,13 +66,11 @@ impl Freshness for ExecutionPlan {
     fn nonce(&self) -> &Nonce {
         &self.nonce
     }
-    // Temporary: the plan's window is still chrono-typed, so a window outside
-    // the representable years is refused here rather than clamped.
     fn valid_from(&self) -> Result<UtcTimestamp, PlanValidityError> {
-        Ok(self.valid_from.try_into()?)
+        Ok(self.valid_from)
     }
     fn valid_until(&self) -> Result<UtcTimestamp, PlanValidityError> {
-        Ok(self.valid_until.try_into()?)
+        Ok(self.valid_until)
     }
 }
 
@@ -356,23 +354,6 @@ mod tests {
         assert!(
             store.check_and_insert("host-signer", &plan).is_err(),
             "replayed plan refused"
-        );
-    }
-
-    // The plan's window is still chrono-typed; one outside years 0000..=9999
-    // is refused rather than clamped.
-    #[test]
-    fn a_plan_window_outside_the_representable_years_is_refused() {
-        let now = Utc::now();
-        let far = DateTime::<Utc>::MAX_UTC;
-        let plan = PlanFixture::new().validity(now, far).build();
-        assert_eq!(
-            check_window(&plan, at(now)),
-            Err(PlanValidityError::TimestampOutOfRange)
-        );
-        assert_eq!(
-            NonceStore::new().check_and_insert("s", &plan),
-            Err(PlanValidityError::TimestampOutOfRange)
         );
     }
 }

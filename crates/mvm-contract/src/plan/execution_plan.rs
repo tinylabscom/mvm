@@ -9,7 +9,6 @@
 
 use alloc::vec::Vec;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::lifecycle::SnapshotAt;
@@ -26,6 +25,7 @@ use crate::plan::types::{
 use crate::plan::verb::VerbId;
 use crate::protocol::broker::ServiceId;
 use crate::protocol::extension_pack::ExtensionPlanBinding;
+use crate::timestamp::UtcTimestamp;
 
 /// Wire-format version of the `ExecutionPlan`. New fields are additive with
 /// `#[serde(default)]`; the verifier rejects any plan whose `schema_version`
@@ -220,12 +220,12 @@ pub struct ExecutionPlan {
 
     /// Plan validity window — start. The supervisor refuses to admit
     /// a plan before `valid_from`.
-    pub valid_from: DateTime<Utc>,
+    pub valid_from: UtcTimestamp,
 
     /// Plan validity window — end. The supervisor refuses to admit
     /// a plan at or after `valid_until`. Without this bound, signed
     /// plans are forever-valid and replayable.
-    pub valid_until: DateTime<Utc>,
+    pub valid_until: UtcTimestamp,
 
     /// Per-plan nonce for replay protection. The supervisor maintains
     /// a seen-nonce ledger keyed by signer; an admission attempt with
@@ -447,11 +447,9 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
     use alloc::collections::BTreeMap;
     use alloc::string::ToString;
 
-    use chrono::{Duration, TimeZone};
-
     use crate::plan::types::{AttestationMode, PlanSeccompTier, TimeoutSpec};
 
-    let valid_from = Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap();
+    let valid_from = UtcTimestamp::from_unix(1_784_203_200, 0).unwrap(); // 2026-07-16T12:00:00Z
     ExecutionPlan {
         workflow: None,
         execution_epoch: 1,
@@ -508,7 +506,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
             idle_secs: 0,
         },
         valid_from,
-        valid_until: valid_from + Duration::minutes(10),
+        valid_until: valid_from.checked_add_secs(600).unwrap(),
         nonce: Nonce::from_bytes([0u8; 16]),
         agent_verbs: None,
         bundle: None,
@@ -550,6 +548,21 @@ mod tests {
             signer_identity: "release@example.org".into(),
             signer_issuer: "https://issuer.example.org".into(),
         }
+    }
+
+    /// The validity pair's wire text is signed evidence: whole-second and
+    /// sub-second instants must serialize and round-trip exactly as pinned.
+    #[test]
+    fn validity_pair_wire_text_is_pinned() {
+        let mut json = serde_json::to_value(minimal_plan()).expect("plan json");
+        assert_eq!(json["valid_from"], "2026-07-16T12:00:00Z");
+        assert_eq!(json["valid_until"], "2026-07-16T12:10:00Z");
+        json["valid_from"] = "2026-07-16T12:00:00.123456789Z".into();
+        json["valid_until"] = "2026-07-16T12:10:00.5Z".into();
+        let plan: ExecutionPlan = serde_json::from_value(json.clone()).expect("plan");
+        let again = serde_json::to_value(&plan).expect("plan json");
+        assert_eq!(again["valid_from"], "2026-07-16T12:00:00.123456789Z");
+        assert_eq!(again["valid_until"], "2026-07-16T12:10:00.500Z");
     }
 
     #[test]

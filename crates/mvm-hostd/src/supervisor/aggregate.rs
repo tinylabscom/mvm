@@ -1337,8 +1337,12 @@ mod tests {
                 idle_secs: 0,
             },
             // Stable validity window and nonce for admission tests.
-            valid_from: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
-            valid_until: Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
+            valid_from: mvm_core::plan::test_support::utc_timestamp(
+                Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
+            ),
+            valid_until: mvm_core::plan::test_support::utc_timestamp(
+                Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
+            ),
             nonce: Nonce::from_bytes([0xab; 16]),
             bundle: None,
             deps_volume: None,
@@ -1876,8 +1880,12 @@ mod tests {
         // This pins the order: signature → window → nonce, so a
         // forged plan never gets its window/nonce examined.
         let mut plan = sample_plan();
-        plan.valid_until = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap(); // very expired
-        plan.valid_from = Utc.with_ymd_and_hms(2019, 1, 1, 0, 0, 0).unwrap();
+        plan.valid_until = mvm_core::plan::test_support::utc_timestamp(
+            Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap(),
+        ); // very expired
+        plan.valid_from = mvm_core::plan::test_support::utc_timestamp(
+            Utc.with_ymd_and_hms(2019, 1, 1, 0, 0, 0).unwrap(),
+        );
         let (mut signed, _sk, vk) = sign_sample(&plan);
         signed.0.payload[0] ^= 0x01; // tamper
         let backend = Arc::new(MockBackend::new());

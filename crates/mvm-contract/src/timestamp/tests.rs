@@ -264,3 +264,19 @@ fn the_chrono_bridge_keeps_the_instant_and_refuses_what_it_cannot_hold() {
         assert_eq!(UtcTimestamp::try_from(dt), Err(ParseTimestampError));
     }
 }
+
+#[cfg(feature = "protocol")]
+#[test]
+fn the_chrono_grant_bridge_round_trips_at_the_range_edges() {
+    for (secs, nanos) in [
+        (0, 0),
+        (1_784_205_296, 123_456_789),
+        (MIN_SECS, 0),
+        (MAX_SECS, 999_999_999),
+    ] {
+        let t = ours(secs, nanos);
+        let dt: DateTime<Utc> = t.into();
+        assert_eq!(dt, chrono_at(secs, nanos));
+        assert_eq!(UtcTimestamp::try_from(dt), Ok(t));
+    }
+}

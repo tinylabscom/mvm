@@ -443,7 +443,7 @@ mod tests {
             &keystore,
             vm,
             &plan.nonce,
-            plan.valid_until,
+            plan.valid_until.into(),
             Vec::new(),
             crate::host_signer::VerbGrantAuthority {
                 drive: plan.grants.as_ref().and_then(|grants| grants.drive.clone()),

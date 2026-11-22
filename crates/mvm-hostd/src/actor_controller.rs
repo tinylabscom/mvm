@@ -508,7 +508,7 @@ fn workflow_deadline(bootstrap: &ActorBootstrap) -> Result<Instant> {
     };
     let expires = grant
         .workflow_deadline_unix_ms
-        .min(bootstrap.parent.valid_until.timestamp_millis());
+        .min(bootstrap.parent.valid_until.unix_millis());
     let remaining = expires
         .checked_sub(chrono::Utc::now().timestamp_millis())
         .filter(|value| *value > 0)

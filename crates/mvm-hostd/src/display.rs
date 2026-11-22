@@ -205,7 +205,7 @@ mod tests {
             &keystore,
             vm,
             &plan.nonce,
-            plan.valid_until,
+            plan.valid_until.into(),
             verbs
                 .iter()
                 .map(|verb| mvm_contract::plan::VerbId::new(verb).unwrap())

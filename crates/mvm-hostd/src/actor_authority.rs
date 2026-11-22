@@ -333,8 +333,8 @@ fn validate_mailbox(
             && cc.delegation_depth == 0
             && cc.not_before_unix_ms >= pc.not_before_unix_ms
             && cc.expires_at_unix_ms <= pc.expires_at_unix_ms
-            && cc.not_before_unix_ms >= child.valid_from.timestamp_millis()
-            && cc.expires_at_unix_ms <= child.valid_until.timestamp_millis()
+            && cc.not_before_unix_ms >= child.valid_from.unix_millis()
+            && cc.expires_at_unix_ms <= child.valid_until.unix_millis()
             && cc.max_payload_bytes <= pc.max_payload_bytes
             && cc.max_messages_per_minute <= pc.max_messages_per_minute
             && cc.max_outstanding_calls <= pc.max_outstanding_calls

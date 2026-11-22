@@ -394,7 +394,7 @@ fn stash_plan_for_bridge_writes_verb_grant_when_agent_verbs_present() {
     );
     assert_eq!(
         envelope.grant.not_after,
-        admitted.plan().valid_until,
+        chrono::DateTime::from(admitted.plan().valid_until),
         "a verb grant must not outlive its admitted plan"
     );
     let pub_arr: [u8; 32] = hex::decode(&envelope.pubkey_hex)

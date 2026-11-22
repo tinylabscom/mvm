@@ -83,7 +83,7 @@ fn accepts_identical_authority_with_distinct_identity_and_restricted_child() {
         cpu: Some(CpuGrant::Share { millicores: 500 }),
         ..Grants::default()
     });
-    child.valid_until -= chrono::Duration::seconds(1);
+    child.valid_until = child.valid_until.checked_add_secs(-1).unwrap();
     child.network_limits.max_tcp_flows = 1;
     child.action_budget = Some(ActionBudget::default().with_max_output_bytes(1));
     assert_eq!(check(&parent, &child), Ok(()));
@@ -116,10 +116,10 @@ fn individual_plan_widenings_are_refused() {
         (D::Artifacts, |p| p.artifact_policy.retention_days += 1),
         (D::Attestation, |p| p.key_rotation.interval_days = 1),
         (D::Lifetime, |p| {
-            p.valid_until += chrono::Duration::seconds(1)
+            p.valid_until = p.valid_until.checked_add_secs(1).unwrap()
         }),
         (D::Lifetime, |p| {
-            p.valid_from -= chrono::Duration::seconds(1)
+            p.valid_from = p.valid_from.checked_add_secs(-1).unwrap()
         }),
         (D::Lifetime, |p| p.post_run.destroy_on_exit = false),
         (D::Lifetime, |p| p.post_run.snapshot_on_idle = true),
@@ -320,8 +320,8 @@ fn signed_mailbox(
             minimum_execution_epoch: epoch,
             maximum_execution_epoch: epoch,
             policy_epoch: 1,
-            not_before_unix_ms: plan.valid_from.timestamp_millis(),
-            expires_at_unix_ms: plan.valid_until.timestamp_millis(),
+            not_before_unix_ms: plan.valid_from.unix_millis(),
+            expires_at_unix_ms: plan.valid_until.unix_millis(),
             revocation_id: RevocationId::from_bytes([id; 32]),
             delegation_depth: 0,
         },

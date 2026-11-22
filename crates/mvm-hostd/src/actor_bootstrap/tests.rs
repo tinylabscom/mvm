@@ -115,8 +115,8 @@ pub(crate) fn authored() -> ActorBootstrap {
             max_queue_contribution_bytes: 4096,
             max_storage_bytes: 4096,
             policy_epoch: 1,
-            not_before_unix_ms: parent.valid_from.timestamp_millis(),
-            expires_at_unix_ms: parent.valid_until.timestamp_millis(),
+            not_before_unix_ms: parent.valid_from.unix_millis(),
+            expires_at_unix_ms: parent.valid_until.unix_millis(),
         },
     };
     parent
@@ -143,9 +143,9 @@ pub(crate) fn authored() -> ActorBootstrap {
                     LifecycleOperation::ObserveChild,
                     LifecycleOperation::ReleaseChild,
                 ],
-                not_before_unix_ms: parent.valid_from.timestamp_millis(),
-                expires_at_unix_ms: parent.valid_until.timestamp_millis(),
-                workflow_deadline_unix_ms: parent.valid_until.timestamp_millis(),
+                not_before_unix_ms: parent.valid_from.unix_millis(),
+                expires_at_unix_ms: parent.valid_until.unix_millis(),
+                workflow_deadline_unix_ms: parent.valid_until.unix_millis(),
             },
         },
     });

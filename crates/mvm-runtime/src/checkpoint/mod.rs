@@ -576,7 +576,7 @@ fn validate_child_fork_plan(
         plan.tenant.0,
         tenant_id
     );
-    let now = chrono::Utc::now();
+    let now = mvm_contract::timestamp::UtcTimestamp::try_from(chrono::Utc::now())?;
     anyhow::ensure!(
         plan.valid_from <= now && now < plan.valid_until,
         "admitted child plan is outside its validity window"

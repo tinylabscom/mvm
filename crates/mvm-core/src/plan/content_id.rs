@@ -165,7 +165,7 @@ mod tests {
         assert_ne!(base, compute_plan_id(&p), "nonce");
 
         let mut p = base_plan.clone();
-        p.valid_until += chrono::Duration::seconds(1);
+        p.valid_until = p.valid_until.checked_add_secs(1).unwrap();
         assert_ne!(base, compute_plan_id(&p), "valid_until");
 
         let mut p = base_plan;
