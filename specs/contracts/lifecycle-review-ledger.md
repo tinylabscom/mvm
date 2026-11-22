@@ -436,6 +436,46 @@ witnesses only. They do not qualify a native HVF or Firecracker claim, Linux
 confinement, cloud/GCP behavior, formal cold/warm performance, operator trial,
 or same-identity restore.
 
+## Operator-admitted trial preparation capability
+
+The operator trial now keeps operator-owned campaign/session joining,
+attestation posture, backend and artifact digest checks, signed extension
+promotion, authority attenuation, declaration/network/audit labels and
+controller lifecycle assembly in `operator_admitted_trial_booter`. The
+attach-if-absent → one launch-scoped selected-release verification → signed
+admission with Required durability → final gates/assurance bind → dispatch
+sequence is owned by a private, one-shot hostd capability over the shared
+`prepare_launch` and admitted-start tail. The same `Arc<VerifiedRuntimeSet>`
+reaches admission and dispatch; assurance compares that retained release
+identity and the selected config/rootfs/kernel/verity observations rather than
+authenticating a second release archive.
+
+This is deliberately a structural, no-behavior-change migration. An
+operator-selected legacy bundle remains on the existing authenticated legacy
+branch and has no release `RuntimeIdentity`; portable runtime selection is not
+exposed by the operator configuration. This source and mock evidence does
+**not** qualify the legacy format as a current release artifact or justify a
+release-only production claim. Retiring it requires separate compatibility
+evidence and policy approval.
+
+Required audit synchronization retains its overlap contract: isolated
+initialization may overlap the sync, but workload activation, controller,
+secret, writable-volume, egress and mailbox authority remain behind its
+successful completion. If the controller plane is missing after start, a
+confirmed stop produces the ordinary terminal refusal. A failed stop returns
+typed uncertain custody retaining the exact backend, VM identity, admission,
+available enforced-grant state and audit owner, without a terminal failure
+audit or cleanup claim. The same owned policy applies to post-start grant,
+budget, assurance-session and mailbox rollback uncertainty. The campaign
+runner propagates that custody and stops instead of converting it to missing
+evidence and advancing to another trial.
+
+Focused source and hermetic tests cover source ordering, retained runtime
+identity, tamper/refusal-before-start behavior, authority attenuation, audit
+labels and controller rollback classification. They do not qualify a live
+Firecracker/HVF trial, hardware attestation, cloud/GCP behavior, native
+backend custody, Nix artifacts or formal launch performance.
+
 ## Signed application HVF startup diagnostics
 
 Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone

@@ -143,6 +143,17 @@ where
                 .context("rejoining provider and operator campaign identity")?;
             let boot = match self.booter.boot(request, session) {
                 Ok(boot) => boot,
+                Err(error)
+                    if error
+                        .downcast_ref::<
+                            crate::operator_admitted_trial_booter::OperatorTrialCustodyUncertain,
+                        >()
+                        .is_some() =>
+                {
+                    return Err(error.context(
+                        "operator trial boot retained uncertain started-child custody",
+                    ));
+                }
                 Err(_) => {
                     missing.insert(MISSING_ADMITTED_BOOT.to_string());
                     continue;
@@ -506,6 +517,21 @@ mod tests {
             _session: &AssuranceSessionRequest,
         ) -> Result<AdmittedTrialBoot> {
             anyhow::bail!("signed pack unavailable")
+        }
+    }
+
+    struct UncertainBoot<'a>(&'a AtomicUsize);
+
+    impl AdmittedTrialBooter for UncertainBoot<'_> {
+        fn boot(
+            &self,
+            _request: &CampaignProviderRequest,
+            _session: &AssuranceSessionRequest,
+        ) -> Result<AdmittedTrialBoot> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::Error::new(
+                crate::operator_admitted_trial_booter::OperatorTrialCustodyUncertain::for_test(),
+            ))
         }
     }
 
@@ -940,6 +966,55 @@ mod tests {
                 .next()
                 .is_none(),
             "no ambient or speculative state is created before admitted boot"
+        );
+    }
+
+    #[test]
+    fn uncertain_operator_trial_custody_stops_the_campaign() {
+        let state = tempfile::tempdir().expect("state root");
+        let boot_calls = AtomicUsize::new(0);
+        let mut provider = request();
+        provider.max_trials = 2;
+        let mut second_campaign = provider.campaigns[0].clone();
+        second_campaign.campaign_id =
+            mvm_contract::assurance::AssuranceId::parse("campaign-second")
+                .expect("second campaign id");
+        second_campaign.finding_id = mvm_contract::assurance::AssuranceId::parse("finding-second")
+            .expect("second finding id");
+        provider.campaigns.push(second_campaign);
+        let first_session = session();
+        let mut second_session = first_session.clone();
+        second_session.session.campaign_id =
+            mvm_contract::assurance::AssuranceId::parse("campaign-second")
+                .expect("second campaign id");
+        second_session.session.trial_id =
+            mvm_contract::assurance::AssuranceId::parse("trial-second").expect("second trial id");
+        second_session.session.idempotency_key =
+            mvm_contract::assurance::AssuranceId::parse("idempotency-second")
+                .expect("second idempotency key");
+        let runner = LifecycleAdmittedCampaignRunner::new(
+            state.path(),
+            UncertainBoot(&boot_calls),
+            NeverExecutes,
+        )
+        .expect("runner");
+
+        let error = runner
+            .run(&provider, &[first_session, second_session])
+            .expect_err("uncertain started-child custody must not become missing evidence");
+
+        assert!(
+            error
+                .downcast_ref::<
+                    crate::operator_admitted_trial_booter::OperatorTrialCustodyUncertain,
+                >()
+                .is_some(),
+            "typed custody must reach the reconciliation caller: {error:#}"
+        );
+        assert_eq!(
+            boot_calls.load(Ordering::SeqCst),
+            1,
+            "the campaign must stop on uncertain started-child custody"
         );
     }
 
