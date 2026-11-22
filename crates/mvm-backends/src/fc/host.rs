@@ -150,7 +150,14 @@ pub fn download_assets() -> Result<()> {
 /// communicate via vsock only.
 pub fn prepare_rootfs() -> Result<()> {
     ui::info("Preparing root filesystem...");
-    run_in_vm_visible(&format!(
+    run_in_vm_visible(&prepare_rootfs_script())?;
+
+    Ok(())
+}
+
+/// The script [`prepare_rootfs`] runs.
+fn prepare_rootfs_script() -> String {
+    format!(
         r#"
         set -euo pipefail
         cd {dir}
@@ -165,6 +172,7 @@ pub fn prepare_rootfs() -> Result<()> {
         if ls ubuntu-*.ext4 >/dev/null 2>&1; then
             echo '[mvm] ext4 rootfs already exists, skipping.'
         else
+{resolve_mkfs}
             echo '[mvm] Extracting squashfs...'
             # Root needs no privilege-escalation helper — and root hosts such
             # as rescue shells and root containers often have no sudo at all.
@@ -174,7 +182,7 @@ pub fn prepare_rootfs() -> Result<()> {
 
             echo '[mvm] Creating ext4 filesystem (1GB)...'
             truncate -s 1G "ubuntu-${{ubuntu_version}}.ext4"
-            $SUDO mkfs.ext4 -d squashfs-root -F "ubuntu-${{ubuntu_version}}.ext4"
+            $SUDO "$mkfs_ext4" -d squashfs-root -F "ubuntu-${{ubuntu_version}}.ext4"
 
             $SUDO rm -rf squashfs-root
             echo '[mvm] Root filesystem prepared.'
@@ -188,9 +196,37 @@ pub fn prepare_rootfs() -> Result<()> {
         [ -f "$ROOTFS" ] && echo "  Rootfs:  $ROOTFS" || echo "  ERROR: Rootfs not found"
         "#,
         dir = MICROVM_DIR,
-    ))?;
+        resolve_mkfs = resolve_mkfs_ext4_script(MKFS_EXT4_FALLBACK_DIRS),
+    )
+}
 
-    Ok(())
+/// Where `mkfs.ext4` lives when `PATH` lacks it: e2fsprogs installs it under
+/// sbin, which a non-root user's `PATH` often omits.
+const MKFS_EXT4_FALLBACK_DIRS: &[&str] = &["/usr/sbin", "/sbin"];
+
+/// Shell that sets `mkfs_ext4` to `mkfs.ext4` from `PATH`, else from the first
+/// of `fallback_dirs` that has it, and exits non-zero naming where it looked
+/// when none does. The resolved path is what runs, so a `sudo` that keeps the
+/// caller's `PATH` finds the same binary.
+fn resolve_mkfs_ext4_script(fallback_dirs: &[&str]) -> String {
+    let dirs: Vec<String> = fallback_dirs
+        .iter()
+        .map(|d| mvm_vmm::host::shell::shell_quote(d))
+        .collect();
+    let dirs = dirs.join(" ");
+    let shown = fallback_dirs.join(" ");
+    format!(
+        r#"mkfs_ext4=$(command -v mkfs.ext4 || true)
+if [ -z "$mkfs_ext4" ]; then
+    for d in {dirs}; do
+        if [ -x "$d/mkfs.ext4" ]; then mkfs_ext4="$d/mkfs.ext4"; break; fi
+    done
+fi
+if [ -z "$mkfs_ext4" ]; then
+    echo '[mvm] ERROR: mkfs.ext4 not found on PATH or in {shown}; install e2fsprogs.' >&2
+    exit 1
+fi"#
+    )
 }
 
 /// Write the state file with discovered asset filenames.
@@ -961,6 +997,102 @@ impl FcForkRestorer {
 
 #[cfg(test)]
 mod tests {
+
+    /// Run the mkfs.ext4 resolution under `path`, with `fallbacks` standing in
+    /// for /usr/sbin and /sbin, and return (exit code, stdout).
+    fn resolve_mkfs(path: &std::path::Path, fallbacks: &[&std::path::Path]) -> (i32, String) {
+        let dirs: Vec<String> = fallbacks.iter().map(|d| d.display().to_string()).collect();
+        let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+        let script = format!(
+            "{}\nprintf '%s' \"$mkfs_ext4\"",
+            super::resolve_mkfs_ext4_script(&dirs)
+        );
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", &script])
+            .env_clear()
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    }
+
+    fn fake_mkfs(dir: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("mkfs.ext4");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    #[test]
+    fn the_rootfs_script_parses_and_runs_the_resolved_mkfs_ext4() {
+        let script = super::prepare_rootfs_script();
+        let out = std::process::Command::new("bash")
+            .args(["-n", "-c", &script])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            script.contains(r#"$SUDO "$mkfs_ext4" -d squashfs-root"#),
+            "{script}"
+        );
+        assert!(!script.contains("$SUDO mkfs.ext4"), "{script}");
+        let resolve = script.find("mkfs_ext4=$(command -v mkfs.ext4").unwrap();
+        let extract = script.find("unsquashfs").unwrap();
+        assert!(
+            resolve < extract,
+            "resolve mkfs.ext4 before any privileged step"
+        );
+    }
+
+    #[test]
+    fn mkfs_ext4_is_found_in_sbin_when_path_lacks_it() {
+        let root = tempfile::tempdir().unwrap();
+        let (path_dir, sbin) = (root.path().join("bin"), root.path().join("sbin"));
+        std::fs::create_dir_all(&path_dir).unwrap();
+        std::fs::create_dir_all(&sbin).unwrap();
+        let bin = fake_mkfs(&sbin);
+        let (code, found) = resolve_mkfs(&path_dir, &[&root.path().join("none"), &sbin]);
+        assert_eq!((code, found), (0, bin.display().to_string()));
+    }
+
+    #[test]
+    fn mkfs_ext4_on_path_wins_over_the_fallbacks() {
+        let root = tempfile::tempdir().unwrap();
+        let (path_dir, sbin) = (root.path().join("bin"), root.path().join("sbin"));
+        std::fs::create_dir_all(&path_dir).unwrap();
+        std::fs::create_dir_all(&sbin).unwrap();
+        let on_path = fake_mkfs(&path_dir);
+        fake_mkfs(&sbin);
+        let (code, found) = resolve_mkfs(&path_dir, &[&sbin]);
+        assert_eq!((code, found), (0, on_path.display().to_string()));
+    }
+
+    #[test]
+    fn a_missing_mkfs_ext4_fails_naming_where_it_looked() {
+        let root = tempfile::tempdir().unwrap();
+        let script = super::resolve_mkfs_ext4_script(&["/nonexistent-sbin"]);
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", &script])
+            .env_clear()
+            .env("PATH", root.path())
+            .output()
+            .unwrap();
+        assert_ne!(out.status.code(), Some(0));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("mkfs.ext4") && stderr.contains("/nonexistent-sbin"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("e2fsprogs"), "{stderr}");
+    }
 
     #[test]
     fn the_pid_marker_probe_keeps_a_hostile_path_one_inert_word() {
