@@ -11,9 +11,9 @@
 //! boot), so following it closes both windows.
 //!
 //! **Event-driven where the host allows it.** Between reads the follower
-//! blocks on a `ConsoleWait`: inotify on Linux, so an idle console costs no
+//! blocks on a `FileWait`: inotify on Linux, so an idle console costs no
 //! host wakeup, and a fixed-interval re-check elsewhere (see the
-//! `console_wait` module). Only *when* to look differs; the
+//! `file_wait` module). Only *when* to look differs; the
 //! read path below is shared, so truncation, rotation and a file that does not
 //! exist yet are handled identically on every host.
 //!
@@ -40,8 +40,8 @@ use std::thread::JoinHandle;
 
 use mvm_contract::stream::{StreamKind, StreamSource};
 
+use crate::file_wait::{self, FileWait};
 use crate::stream::broker::StreamBroker;
-use crate::stream::console_wait::{self, ConsoleWait};
 
 /// A [`StreamBroker`] shared between producers. `ingest` takes `&mut self`,
 /// and the console follower runs on its own thread alongside whatever else
@@ -55,11 +55,11 @@ pub type SharedBroker = Arc<Mutex<StreamBroker>>;
 /// paid on the teardown path of every workload.
 struct StopSignal {
     stopped: AtomicBool,
-    waiter: Box<dyn ConsoleWait>,
+    waiter: Box<dyn FileWait>,
 }
 
 impl StopSignal {
-    fn new(waiter: Box<dyn ConsoleWait>) -> Self {
+    fn new(waiter: Box<dyn FileWait>) -> Self {
         Self {
             stopped: AtomicBool::new(false),
             waiter,
@@ -119,7 +119,7 @@ impl ConsoleSource {
             std::thread::Builder::new(),
             path,
             broker,
-            console_wait::for_console(),
+            file_wait::for_file(),
         )
     }
 
@@ -132,7 +132,7 @@ impl ConsoleSource {
         builder: std::thread::Builder,
         path: &Path,
         broker: SharedBroker,
-        waiter: Box<dyn ConsoleWait>,
+        waiter: Box<dyn FileWait>,
     ) -> io::Result<ConsoleSourceHandle> {
         let stop = Arc::new(StopSignal::new(waiter));
         let thread_stop = Arc::clone(&stop);
@@ -332,7 +332,7 @@ pub(in crate::stream) fn lock_broker(broker: &SharedBroker) -> MutexGuard<'_, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::console_wait::POLL_INTERVAL;
+    use crate::file_wait::POLL_INTERVAL;
     use crate::stream::redact::StreamRedaction;
     use mvm_core::policy::RedactionPolicy;
     use mvm_core::transcript::{CaptureBinding, TranscriptWriter};
@@ -472,11 +472,11 @@ mod tests {
     /// Delegates to the host's real waiter and counts every return from
     /// `wait`, each of which is one wakeup of the follower thread.
     struct Counted {
-        inner: Box<dyn ConsoleWait>,
+        inner: Box<dyn FileWait>,
         wakeups: Arc<AtomicUsize>,
     }
 
-    impl ConsoleWait for Counted {
+    impl FileWait for Counted {
         fn arm(&self, path: &Path) {
             self.inner.arm(path);
         }
@@ -494,7 +494,7 @@ mod tests {
     fn follow_counted(fx: &Fixture) -> (ConsoleSourceHandle, Arc<AtomicUsize>) {
         let wakeups = Arc::new(AtomicUsize::new(0));
         let waiter = Box::new(Counted {
-            inner: console_wait::for_console(),
+            inner: file_wait::for_file(),
             wakeups: Arc::clone(&wakeups),
         });
         let handle = ConsoleSource::follow_with(
@@ -630,7 +630,7 @@ mod tests {
             doomed,
             &path,
             Arc::clone(&fx.broker),
-            console_wait::for_console(),
+            file_wait::for_file(),
         );
         assert!(
             result.is_err(),
