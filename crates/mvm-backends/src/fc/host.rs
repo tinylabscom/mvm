@@ -15,6 +15,22 @@ pub fn is_installed() -> Result<bool> {
     Ok(super::binary::resolve_for_host().is_ok())
 }
 
+/// Whether this host can launch Firecracker: it can open `/dev/kvm`, and the
+/// pinned binary either resolves or is simply not fetched yet. A launch fetches
+/// an absent binary on first use, so absence alone is not unavailability; a
+/// binary that is present and refused is.
+pub fn is_launchable() -> Result<bool> {
+    Ok(crate::driver::qemu_process::kvm_available()
+        && fetchable_or_present(&super::binary::resolve_for_host()))
+}
+
+fn fetchable_or_present<T>(resolved: &Result<T, super::binary::ResolveError>) -> bool {
+    matches!(
+        resolved,
+        Ok(_) | Err(super::binary::ResolveError::NotFound { .. })
+    )
+}
+
 /// Check if the kernel image exists in ~/microvm/.
 pub fn has_kernel() -> Result<bool> {
     let output = run_in_vm(&format!(
@@ -1057,6 +1073,32 @@ mod tests {
             ]);
             assert_eq!(super::has_base_assets().unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn a_firecracker_not_fetched_yet_does_not_make_the_host_unavailable() {
+        use crate::fc::binary::ResolveError;
+        assert!(super::fetchable_or_present(&Ok(())));
+        assert!(super::fetchable_or_present::<()>(&Err(
+            ResolveError::NotFound { searched: vec![] }
+        )));
+        assert!(!super::fetchable_or_present::<()>(&Err(
+            ResolveError::Refused {
+                path: "/x/firecracker".into(),
+                reason: "not executable".into(),
+            }
+        )));
+    }
+
+    #[test]
+    fn a_host_that_cannot_open_kvm_cannot_launch_even_with_a_firecracker() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set(crate::fc::binary::OVERRIDE_ENV, "/bin/sh");
+        assert!(super::is_installed().unwrap());
+        assert_eq!(
+            super::is_launchable().unwrap(),
+            crate::driver::qemu_process::kvm_available()
+        );
     }
 
     #[test]
