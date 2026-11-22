@@ -119,6 +119,10 @@ pub(in crate::commands) struct ReportArgs {
     /// A launch report JSON written by `mvmctl bench`; repeat for cold and warm.
     #[arg(long, value_name = "FILE")]
     pub launch_report: Vec<std::path::PathBuf>,
+    /// State-cell write samples taken on the same host by `mvm-hostd`'s
+    /// state-cell latency measurement.
+    #[arg(long, value_name = "FILE")]
+    pub state_cell_latency: Option<std::path::PathBuf>,
     /// Print the report as JSON instead of a markdown table.
     #[arg(long)]
     pub json: bool,
@@ -128,7 +132,11 @@ pub(in crate::commands) struct ReportArgs {
 }
 
 fn run_report(args: ReportArgs) -> Result<()> {
-    let report = crate::bench::resource_ingest::assemble(&args.density_dir, &args.launch_report)?;
+    let report = crate::bench::resource_ingest::assemble(
+        &args.density_dir,
+        &args.launch_report,
+        args.state_cell_latency.as_deref(),
+    )?;
     let path = crate::bench::write_report_with_latest(&report, args.out, "resource")
         .context("writing the resource report")?;
     if args.json {

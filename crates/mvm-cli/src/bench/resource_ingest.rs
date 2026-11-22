@@ -657,9 +657,61 @@ pub fn fold_launch_reports(section: &mut Section, reports: &[ColdLaunchReport]) 
     Ok(())
 }
 
-/// The whole report: one density section plus any launch reports.
-pub fn assemble(density_dir: &Path, launch_reports: &[PathBuf]) -> Result<ResourceReport> {
+/// State-cell write samples, as `mvm-hostd`'s state-cell latency measurement
+/// writes them. Other fields in the file are for a reader and are ignored.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct StateCellLatency {
+    pub architecture: String,
+    pub write_ms: Vec<f64>,
+}
+
+/// Fold state-cell write samples into the section's update latency.
+///
+/// The samples are taken on the host, through the broker path behind the
+/// backend's vsock splice, which is the same for every backend, so the file
+/// is matched to the section by architecture alone. It has to come from the
+/// host the density run measured; nothing in either file can check that.
+pub fn fold_state_cell_latency(section: &mut Section, latency: &StateCellLatency) -> Result<()> {
+    if latency.architecture != section.architecture {
+        bail!(
+            "the state-cell latency was measured on {}, the density run on {}",
+            latency.architecture,
+            section.architecture
+        );
+    }
+    if latency.write_ms.is_empty() {
+        bail!("the state-cell latency file carries no samples");
+    }
+    if latency
+        .write_ms
+        .iter()
+        .any(|ms| !ms.is_finite() || *ms < 0.0)
+    {
+        bail!("the state-cell latency file carries a sample that is not a duration");
+    }
+    section.latencies.state_cell_update_ms =
+        Figure::measured(SpanStats::from_samples(&latency.write_ms));
+    Ok(())
+}
+
+fn read_state_cell_latency(path: &Path) -> Result<StateCellLatency> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&text)
+        .with_context(|| format!("{} is not a state-cell latency file", path.display()))
+}
+
+/// The whole report: one density section plus any launch reports and
+/// state-cell latency.
+pub fn assemble(
+    density_dir: &Path,
+    launch_reports: &[PathBuf],
+    state_cell_latency: Option<&Path>,
+) -> Result<ResourceReport> {
     let mut section = from_density_dir(density_dir)?;
+    if let Some(path) = state_cell_latency {
+        fold_state_cell_latency(&mut section, &read_state_cell_latency(path)?)?;
+    }
     let reports = launch_reports
         .iter()
         .map(|path| {
@@ -1260,7 +1312,7 @@ mod tests {
 
     #[test]
     fn the_report_carries_the_recorded_source_commit_and_dirty_flag() {
-        let report = assemble(&fixture(), &[]).unwrap();
+        let report = assemble(&fixture(), &[], None).unwrap();
         assert_eq!(
             report.source,
             Some(SourceRevision {
@@ -1269,13 +1321,13 @@ mod tests {
             })
         );
         let dir = with_meta(|m| m.replace("\"dirty\": false", "\"dirty\": true"));
-        let report = assemble(dir.path(), &[]).unwrap();
+        let report = assemble(dir.path(), &[], None).unwrap();
         assert!(
             report.source.unwrap().dirty,
             "a dirty run is reported, not refused"
         );
         let dir = with_meta(|m| m.replace("\"dirty\": false", "\"dirty\": \"yes\""));
-        let err = format!("{:#}", assemble(dir.path(), &[]).unwrap_err());
+        let err = format!("{:#}", assemble(dir.path(), &[], None).unwrap_err());
         assert!(err.contains("source.dirty"), "{err}");
     }
 
@@ -1287,7 +1339,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/resource-report.json");
         let current = format!(
             "{}\n",
-            serde_json::to_string_pretty(&assemble(&fixture(), &[]).unwrap()).unwrap()
+            serde_json::to_string_pretty(&assemble(&fixture(), &[], None).unwrap()).unwrap()
         );
         if std::env::var_os("MVM_UPDATE_RESOURCE_REPORT_FIXTURE").is_some() {
             std::fs::write(&path, &current).unwrap();
@@ -1316,6 +1368,47 @@ mod tests {
         assert_eq!(measured(&s.latencies.cold_launch_ms).samples, 2);
         assert_eq!(measured(&s.latencies.warm_launch_ms).samples, 1);
         assert!(s.latencies.failover_ms.value().is_none());
+    }
+
+    #[test]
+    fn state_cell_samples_fold_into_the_update_latency_of_their_architecture() {
+        let mut s = from_density_dir(&fixture()).unwrap();
+        assert_eq!(
+            s.latencies.state_cell_update_ms,
+            Figure::unmeasured(super::super::resource_report::NOT_MEASURED_REASON)
+        );
+        let latency = |architecture: &str, write_ms: Vec<f64>| StateCellLatency {
+            architecture: architecture.into(),
+            write_ms,
+        };
+        let arch = s.architecture.clone();
+        fold_state_cell_latency(&mut s, &latency(&arch, vec![1.0, 2.0, 3.0])).unwrap();
+        let stats = measured(&s.latencies.state_cell_update_ms);
+        assert_eq!(stats.samples, 3);
+        assert_eq!(stats.max, Some(3.0));
+
+        assert!(fold_state_cell_latency(&mut s, &latency("riscv64", vec![1.0])).is_err());
+        assert!(fold_state_cell_latency(&mut s, &latency(&arch, Vec::new())).is_err());
+        assert!(fold_state_cell_latency(&mut s, &latency(&arch, vec![f64::NAN])).is_err());
+        assert!(fold_state_cell_latency(&mut s, &latency(&arch, vec![-1.0])).is_err());
+    }
+
+    #[test]
+    fn a_state_cell_latency_file_is_read_by_assemble() {
+        let arch = from_density_dir(&fixture()).unwrap().architecture;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state-cell-latency.json");
+        std::fs::write(
+            &path,
+            format!(r#"{{"architecture": "{arch}", "cell_bytes": 32768, "write_ms": [0.5, 0.7]}}"#),
+        )
+        .unwrap();
+        let report = assemble(&fixture(), &[], Some(&path)).unwrap();
+        let stats = measured(&report.sections[0].latencies.state_cell_update_ms);
+        assert_eq!(stats.samples, 2);
+        std::fs::write(&path, "{}").unwrap();
+        let err = format!("{:#}", assemble(&fixture(), &[], Some(&path)).unwrap_err());
+        assert!(err.contains("not a state-cell latency file"), "{err}");
     }
 
     #[test]

@@ -154,7 +154,7 @@
         },
         "state_cell_update_ms": {
           "status": "unmeasured",
-          "reason": "feature not implemented"
+          "reason": "not measured"
         },
         "mailbox_round_trip_ms": {
           "status": "unmeasured",

@@ -615,7 +615,7 @@ fn warm_residency_enabled(world: &mut CliWorld) {
     world.warm_residency = true;
 }
 
-fn selected_live_home(world: &mut CliWorld) -> PathBuf {
+pub(crate) fn selected_live_home(world: &mut CliWorld) -> PathBuf {
     let warm_home = std::env::var_os("MVM_E2E_HOME").map(PathBuf::from);
     if warm_home.is_none() && world.isolated_home.is_none() {
         world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
@@ -707,6 +707,26 @@ fn workload_origin_network_secret_argv() -> Vec<String> {
 /// reuse exactly the home/cwd/PATH wiring the plain step uses.
 pub(crate) fn run_mvmctl_isolated_live_home_argv(world: &mut CliWorld, argv: Vec<String>) {
     run_live_home(world, argv, Terminal::Inherited);
+}
+
+/// A hook run against the live home and the stdout capture while mvmctl runs.
+pub(crate) type During<'a> = &'a mut dyn FnMut(&Path, &Path);
+
+/// The live-home run, with `during` called on this thread while mvmctl is
+/// still running. It is given the live home and the file mvmctl's stdout is
+/// being written to, so a step can act on the host partway through a boot.
+pub(crate) fn run_mvmctl_isolated_live_home_during(
+    world: &mut CliWorld,
+    argv: Vec<String>,
+    during: During<'_>,
+) {
+    run_live_home_in(
+        world,
+        argv,
+        Terminal::Inherited,
+        &workspace_root(),
+        Some(during),
+    );
 }
 
 /// The live-home run in a new session, with no controlling terminal: what a CI
@@ -805,14 +825,20 @@ pub(crate) fn run_mvmctl_isolated_live_home_argv_in(
     argv: Vec<String>,
     directory: &Path,
 ) {
-    run_live_home_in(world, argv, Terminal::Inherited, directory);
+    run_live_home_in(world, argv, Terminal::Inherited, directory, None);
 }
 
 fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
-    run_live_home_in(world, argv, terminal, &workspace_root());
+    run_live_home_in(world, argv, terminal, &workspace_root(), None);
 }
 
-fn run_live_home_in(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal, directory: &Path) {
+fn run_live_home_in(
+    world: &mut CliWorld,
+    argv: Vec<String>,
+    terminal: Terminal,
+    directory: &Path,
+    during: Option<During<'_>>,
+) {
     // Like `run_mvmctl_isolated_home`, but for scenarios that boot a real
     // microVM. The working directory is the workspace root so relative flake
     // paths (e.g. `examples/exit_code`) resolve the same way as a manual run
@@ -867,9 +893,38 @@ fn run_live_home_in(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal,
         }
     }
     mvm_conformance::vmm_reaper::register_launched_home(&home);
-    let output = command.output().expect("failed to spawn mvmctl");
+    let output = match during {
+        None => command.output().expect("failed to spawn mvmctl"),
+        Some(during) => output_while(&mut command, &home, during),
+    };
     world.last_live_home = Some(home);
     world.last_run = Some(output);
+}
+
+/// Run `command` with its output in files rather than pipes, so `during` can
+/// read stdout while it runs and neither side can stall on a full pipe. A
+/// panic in `during` kills mvmctl before it propagates.
+fn output_while(command: &mut Command, home: &Path, during: During<'_>) -> std::process::Output {
+    let capture = tempfile::tempdir().expect("create an output capture directory");
+    let (stdout, stderr) = (capture.path().join("stdout"), capture.path().join("stderr"));
+    let mut child = command
+        .stdout(std::fs::File::create(&stdout).expect("create the stdout capture"))
+        .stderr(std::fs::File::create(&stderr).expect("create the stderr capture"))
+        .spawn()
+        .expect("failed to spawn mvmctl");
+    if let Err(panic) =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| during(home, &stdout)))
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        std::panic::resume_unwind(panic);
+    }
+    let status = child.wait().expect("wait for mvmctl");
+    std::process::Output {
+        status,
+        stdout: std::fs::read(&stdout).expect("read the stdout capture"),
+        stderr: std::fs::read(&stderr).expect("read the stderr capture"),
+    }
 }
 
 /// The cached default development rootfs in the home the last live step used.

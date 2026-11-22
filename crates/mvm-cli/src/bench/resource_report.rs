@@ -264,7 +264,7 @@ impl Default for Latencies {
             cold_launch_ms: Figure::default(),
             warm_launch_ms: Figure::default(),
             failover_ms: Figure::not_implemented(),
-            state_cell_update_ms: Figure::not_implemented(),
+            state_cell_update_ms: Figure::default(),
             mailbox_round_trip_ms: Figure::not_implemented(),
         }
     }
@@ -312,9 +312,9 @@ pub struct Section {
 }
 
 impl Section {
-    /// A section where nothing is measured yet. Failover, state-cell and
-    /// mailbox latencies are declared empty because those features do not
-    /// exist; the rest are simply not measured.
+    /// A section where nothing is measured yet. Failover and mailbox
+    /// latencies are declared empty because those features do not exist; the
+    /// rest are simply not measured.
     #[must_use]
     pub fn unmeasured(
         backend: impl Into<String>,
@@ -614,11 +614,8 @@ mod tests {
     #[test]
     fn declared_empty_sections_are_unmeasured_by_construction() {
         let l = empty_section().latencies;
-        for f in [
-            &l.failover_ms,
-            &l.state_cell_update_ms,
-            &l.mailbox_round_trip_ms,
-        ] {
+        assert_eq!(l.state_cell_update_ms, Figure::default());
+        for f in [&l.failover_ms, &l.mailbox_round_trip_ms] {
             assert_eq!(
                 f,
                 &Figure::Unmeasured {
