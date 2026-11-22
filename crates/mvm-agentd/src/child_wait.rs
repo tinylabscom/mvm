@@ -18,7 +18,7 @@
 //!
 //! - Code that spawns a child registers it with [`OwnedChild`], an RAII
 //!   token that deregisters on drop.
-//! - [`install_orphan_reaper`] starts a polling thread. It reaps
+//! - [`install_orphan_reaper`] starts a sweeper thread. It reaps
 //!   everything, records the status of *registered* pids in a table, and
 //!   discards the rest — those are the orphans it exists to clean up.
 //! - Owners call [`try_wait`] / [`wait`] instead of the inherent `Child`
@@ -42,9 +42,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-/// How often the orphan reaper sweeps. Zombie orphans are harmless while
-/// they wait — they hold a pid table slot and nothing else — so this
-/// trades a little latency for not needing an async-signal-safe handler.
+/// Least time between two orphan-reaper sweeps. The reaper sleeps until a
+/// child exits and then waits this long before it sweeps; with no children
+/// at all it sweeps at this cadence. Zombie orphans are harmless while they
+/// wait — they hold a pid table slot and nothing else — so this trades a
+/// little latency for not needing an async-signal-safe handler.
 const REAP_INTERVAL: Duration = Duration::from_millis(200);
 
 /// First poll gap for [`wait`] once a reaper is running and the kernel may
@@ -180,6 +182,9 @@ pub fn install_orphan_reaper() {
         .spawn(|| {
             loop {
                 reap_in(registry(), waitpid_any);
+                block_until_a_child_exits();
+                // Still a floor between sweeps, so a zombie the sweep could
+                // not take (a poisoned registry) cannot turn this into a spin.
                 std::thread::sleep(REAP_INTERVAL);
             }
         });
@@ -278,6 +283,26 @@ fn waitpid_any(raw: &mut i32) -> i32 {
     // `i32`. `WNOHANG` means it never blocks, so the registry lock the
     // caller holds is held for a bounded, non-blocking span.
     unsafe { libc::waitpid(-1, raw, libc::WNOHANG) }
+}
+
+/// Block until some child has exited, without reaping it.
+///
+/// `WNOWAIT` leaves the zombie in place, so the sweep that follows collects
+/// and publishes it under the registry lock exactly as before; this only
+/// replaces a timer that fired every [`REAP_INTERVAL`] whether or not
+/// anything had exited. Returns at once when there are no children at all,
+/// in which case the caller's floor sleep is the old cadence.
+fn block_until_a_child_exits() {
+    // SAFETY: `siginfo_t` is plain old data; all-zero is a valid value and
+    // `waitid` only writes through the pointer to this live local.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    loop {
+        // SAFETY: `info` outlives the call; `P_ALL` ignores the id argument.
+        let rc = unsafe { libc::waitid(libc::P_ALL, 0, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        if rc == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
+        }
+    }
 }
 
 fn exit_status_from_raw(raw: i32) -> ExitStatus {
@@ -497,5 +522,24 @@ mod tests {
         // wait(2) packs a normal exit as `code << 8`.
         assert_eq!(exit_status_from_raw(3 << 8).code(), Some(3));
         assert_eq!(exit_status_from_raw(0).code(), Some(0));
+    }
+
+    #[test]
+    fn waiting_for_an_exit_returns_and_leaves_the_status_to_collect() {
+        // `WNOWAIT` only observes, so this cannot steal another test's child:
+        // whatever exit ends the wait, the status stays with its owner.
+        let mut child = spawn_exiting_with(3);
+        let (done, waited) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            block_until_a_child_exits();
+            let _ = done.send(());
+        });
+        waited
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the wait returned once a child had exited");
+        assert_eq!(
+            child.wait().expect("status still collectable").code(),
+            Some(3)
+        );
     }
 }

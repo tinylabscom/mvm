@@ -32,9 +32,9 @@ use std::collections::VecDeque;
 use std::io::Read;
 use std::os::fd::OwnedFd;
 use std::process::{Child, ExitStatus};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mvm_core::transcript::{Admission, CaptureBounds, GapMarker, GapTally, RingState};
 
@@ -54,6 +54,12 @@ const READ_BUF_BYTES: usize = 64 * 1024;
 /// deadline check — without it, a workload that never stops writing would
 /// never reach its own timeout.
 const EVENTS_PER_POLL: usize = 64;
+
+/// Longest an idle drain loop waits on its channel before looking at the child
+/// again. A chunk or the child's exit ends the wait sooner; this only bounds
+/// the cases no event announces, at one wakeup a second instead of one per
+/// poll interval.
+const IDLE_WAIT_MAX: Duration = Duration::from_secs(1);
 
 /// Per-frame header limit on the fd-3 control channel. Defense in depth: a
 /// wrapper writes short envelope JSON there, never arbitrary blobs.
@@ -416,7 +422,7 @@ impl<'a> Pump<'a> {
                 break outcome;
             }
             if drained == 0 {
-                std::thread::sleep(self.caps.poll_interval);
+                self.wait_for_activity(&rx, &ladder, sink);
             }
         };
 
@@ -473,6 +479,56 @@ impl<'a> Pump<'a> {
                 )
             }
         }
+    }
+
+    /// Wait for the next thing the loop has to act on, delivering one event if
+    /// that is what ended the wait.
+    ///
+    /// While any reader holds the channel open, a chunk arriving ends the wait
+    /// at once, and so does the child exiting, because its exit closes the
+    /// pipes the readers hold and the channel hangs up. An idle workload then
+    /// costs no timer every poll interval for its whole life. The wait is
+    /// still bounded by [`Self::idle_wait`], so a deadline, a kill rung or a
+    /// child that exited while a descendant keeps its pipes is acted on in
+    /// time. A hung-up channel, or a call another thread can cancel, falls
+    /// back to the plain poll interval.
+    fn wait_for_activity(
+        &self,
+        rx: &Receiver<EntrypointEvent>,
+        ladder: &KillLadder,
+        sink: &mut dyn FnMut(EntrypointEvent),
+    ) {
+        let Some(wait) = self.idle_wait(ladder, Instant::now()) else {
+            std::thread::sleep(self.caps.poll_interval);
+            return;
+        };
+        match rx.recv_timeout(wait) {
+            Ok(event) => deliver(event, sink),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => std::thread::sleep(self.caps.poll_interval),
+        }
+    }
+
+    /// How long an idle loop may wait on the channel before looking at the
+    /// child again: until the deadline or the next kill rung, at most
+    /// [`IDLE_WAIT_MAX`] and at least the poll interval. `None` when a
+    /// cancellation token is attached: another thread may request it, and
+    /// only polling notices that.
+    fn idle_wait(&self, ladder: &KillLadder, now: Instant) -> Option<Duration> {
+        if self.cancellation.is_some() {
+            return None;
+        }
+        let due = match ladder {
+            KillLadder::Running => self.deadline,
+            KillLadder::Terminated { escalate_at, .. } => Some(*escalate_at),
+            KillLadder::Killed { .. } => Some(now),
+        };
+        let until_due = due.map_or(IDLE_WAIT_MAX, |at| at.saturating_duration_since(now));
+        Some(
+            until_due
+                .min(IDLE_WAIT_MAX)
+                .max(self.caps.poll_interval.min(IDLE_WAIT_MAX)),
+        )
     }
 
     /// Advance the SIGTERM → grace → SIGKILL ladder by at most one rung. Each
@@ -551,26 +607,31 @@ fn drain_batch(rx: &Receiver<EntrypointEvent>, sink: &mut dyn FnMut(EntrypointEv
     while drained < EVENTS_PER_POLL {
         match rx.try_recv() {
             Ok(event) => {
-                // Workload output also goes to guest capture, so it reaches
-                // the VM's collector whoever is (or is not) reading this call.
-                match &event {
-                    EntrypointEvent::Stdout { chunk } => crate::telemetry_capture::offer_stdio(
-                        mvm_core::protocol::telemetry::StdioStream::Stdout,
-                        chunk,
-                    ),
-                    EntrypointEvent::Stderr { chunk } => crate::telemetry_capture::offer_stdio(
-                        mvm_core::protocol::telemetry::StdioStream::Stderr,
-                        chunk,
-                    ),
-                    _ => {}
-                }
-                sink(event);
+                deliver(event, sink);
                 drained += 1;
             }
             Err(_) => break,
         }
     }
     drained
+}
+
+/// Hand one queued event to the sink.
+fn deliver(event: EntrypointEvent, sink: &mut dyn FnMut(EntrypointEvent)) {
+    // Workload output also goes to guest capture, so it reaches the VM's
+    // collector whoever is (or is not) reading this call.
+    match &event {
+        EntrypointEvent::Stdout { chunk } => crate::telemetry_capture::offer_stdio(
+            mvm_core::protocol::telemetry::StdioStream::Stdout,
+            chunk,
+        ),
+        EntrypointEvent::Stderr { chunk } => crate::telemetry_capture::offer_stdio(
+            mvm_core::protocol::telemetry::StdioStream::Stderr,
+            chunk,
+        ),
+        _ => {}
+    }
+    sink(event);
 }
 
 fn outcome_from_status(status: &ExitStatus) -> PumpOutcome {
@@ -1988,5 +2049,102 @@ mod tests {
         let mut child = sh("printf out; exit 7");
         let outcome = pump_child(&mut child, &mut |_| {}, &caps_with_stdout_max(1024));
         assert_eq!(outcome, PumpOutcome::Exited(7));
+    }
+
+    #[test]
+    fn an_idle_wait_runs_to_the_next_due_instant_within_its_bounds() {
+        let caps = CallCaps::v1();
+        let now = Instant::now();
+        let running = KillLadder::Running;
+
+        assert_eq!(
+            Pump::new(&caps).idle_wait(&running, now),
+            Some(IDLE_WAIT_MAX),
+            "without a deadline only the bound limits the wait"
+        );
+        let soon = Pump::new(&caps).deadline(now + Duration::from_millis(300));
+        assert_eq!(
+            soon.idle_wait(&running, now),
+            Some(Duration::from_millis(300))
+        );
+        let past = Pump::new(&caps).deadline(now);
+        assert_eq!(
+            past.idle_wait(&running, now),
+            Some(caps.poll_interval),
+            "an overdue deadline waits no less than the poll interval"
+        );
+        let terminated = KillLadder::Terminated {
+            escalate_at: now + Duration::from_millis(200),
+            reason: TerminationReason::Timeout,
+        };
+        assert_eq!(
+            Pump::new(&caps).idle_wait(&terminated, now),
+            Some(Duration::from_millis(200))
+        );
+        let killed = KillLadder::Killed {
+            reason: TerminationReason::Timeout,
+        };
+        assert_eq!(
+            Pump::new(&caps).idle_wait(&killed, now),
+            Some(caps.poll_interval)
+        );
+        let cancellable = Pump::new(&caps).cancellation(CancellationToken::default());
+        assert_eq!(
+            cancellable.idle_wait(&running, now),
+            None,
+            "a call another thread can cancel keeps polling"
+        );
+    }
+
+    #[test]
+    fn an_idle_childs_exit_is_noticed_without_waiting_out_the_idle_bound() {
+        let caps = CallCaps::v1();
+        let mut child = sh("sleep 0.2");
+        let started = Instant::now();
+        let outcome = Pump::new(&caps).run(&mut child, &mut |_| {});
+        assert_eq!(outcome, PumpOutcome::Exited(0));
+        assert!(
+            started.elapsed() < Duration::from_millis(200) + IDLE_WAIT_MAX / 2,
+            "the exit waited for the idle bound: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn voluntary_switches_of_this_thread() -> u64 {
+        std::fs::read_to_string("/proc/thread-self/status")
+            .expect("read thread status")
+            .lines()
+            .find_map(|line| line.strip_prefix("voluntary_ctxt_switches:"))
+            .and_then(|count| count.trim().parse().ok())
+            .expect("voluntary_ctxt_switches in thread status")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_idle_child_wakes_the_pump_without_a_poll_interval_timer() {
+        // At the default 50 ms poll a two-second idle child cost the pump
+        // about forty wakeups. Waiting on the channel costs a handful: the
+        // early chunk, one per idle bound, the hang-up at exit and the tail.
+        let caps = CallCaps::v1();
+        let mut child = sh("printf early; sleep 2");
+        let started = Instant::now();
+        let mut first_chunk_at = None;
+        let before = voluntary_switches_of_this_thread();
+        let outcome = Pump::new(&caps).run(&mut child, &mut |event| {
+            if matches!(event, EntrypointEvent::Stdout { .. }) && first_chunk_at.is_none() {
+                first_chunk_at = Some(started.elapsed());
+            }
+        });
+        let wakeups = voluntary_switches_of_this_thread() - before;
+        assert_eq!(outcome, PumpOutcome::Exited(0));
+        assert!(
+            first_chunk_at.is_some_and(|at| at < Duration::from_secs(1)),
+            "output did not reach the sink before the child exited: {first_chunk_at:?}"
+        );
+        assert!(
+            wakeups < 15,
+            "the pump woke {wakeups} times over an idle two-second child"
+        );
     }
 }
