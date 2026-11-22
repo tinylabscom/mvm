@@ -464,7 +464,9 @@ pub fn sha256_file(path: &Path) -> io::Result<String> {
 /// path: a check over a name can be satisfied by one file and the use handed
 /// another.
 pub fn sha256_reader(reader: impl io::Read) -> io::Result<String> {
+    let started = std::time::Instant::now();
     let (digest, read_total) = sha256_reader_counted(reader)?;
+    crate::launch_trace::record_artifact_hash_time(started.elapsed());
     // Reported here rather than at the call sites because this is the function
     // that actually reads the bytes; a caller that forgot to report would make
     // a launch look cheaper than it was, which is the direction that hides

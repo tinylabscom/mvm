@@ -1506,6 +1506,7 @@ mod tests {
             mount_materialize: true,
             warm_claim: true,
             artifact_bytes_hashed: 1_205_739_520,
+            artifact_hash_us: 0,
             process_table_scans: 1,
             bundle_verify_us: Some(4_000),
         };

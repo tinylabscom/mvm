@@ -252,6 +252,15 @@ impl StandbyCosts {
 #[serde(deny_unknown_fields)]
 pub struct Latencies {
     pub cold_launch_ms: Figure<SpanStats>,
+    /// Cold launch from invocation to a reachable guest, hashing included.
+    #[serde(default)]
+    pub cold_launch_startup_ms: Figure<SpanStats>,
+    /// The part of that spent reading and digesting artifacts.
+    #[serde(default)]
+    pub cold_launch_artifact_hash_ms: Figure<SpanStats>,
+    /// The remainder: resolving, admitting and booting, with hashing taken out.
+    #[serde(default)]
+    pub cold_launch_boot_ms: Figure<SpanStats>,
     pub warm_launch_ms: Figure<SpanStats>,
     pub failover_ms: Figure<SpanStats>,
     pub state_cell_update_ms: Figure<SpanStats>,
@@ -262,11 +271,38 @@ impl Default for Latencies {
     fn default() -> Self {
         Self {
             cold_launch_ms: Figure::default(),
+            cold_launch_startup_ms: Figure::default(),
+            cold_launch_artifact_hash_ms: Figure::default(),
+            cold_launch_boot_ms: Figure::default(),
             warm_launch_ms: Figure::default(),
             failover_ms: Figure::not_implemented(),
             state_cell_update_ms: Figure::default(),
             mailbox_round_trip_ms: Figure::not_implemented(),
         }
+    }
+}
+
+/// Fewest samples at which a percentile is something other than the largest
+/// sample: `ceil(1 / (1 - p))`. Below it the percentile is the maximum, and
+/// printing it as a p95 or p99 would claim a tail nobody observed.
+#[must_use]
+pub const fn min_samples_for_percentile(percent: u32) -> u32 {
+    100_u32.div_ceil(100 - percent)
+}
+
+/// `stats` with every percentile its sample count cannot support removed, so
+/// the report states "too few samples" by the absence of the number. The
+/// count and the maximum stay: both are facts about the samples taken.
+#[must_use]
+pub fn supported(stats: SpanStats) -> SpanStats {
+    let keep = |percent: u32, value: Option<f64>| {
+        value.filter(|_| stats.samples >= min_samples_for_percentile(percent))
+    };
+    SpanStats {
+        p50: keep(50, stats.p50),
+        p95: keep(95, stats.p95),
+        p99: keep(99, stats.p99),
+        ..stats
     }
 }
 
@@ -405,14 +441,22 @@ fn unit_row(name: &str, cost: &UnitCost) -> String {
     )
 }
 
+/// A percentile cell: the value, or the sample count it would need.
+fn percentile_cell(percent: u32, value: Option<f64>) -> String {
+    value.map_or_else(
+        || format!("n<{}", min_samples_for_percentile(percent)),
+        |ms| format!("{ms:.1}"),
+    )
+}
+
 fn latency_row(name: &str, f: &Figure<SpanStats>) -> String {
     match f.value() {
         Some(s) => format!(
             "| {name} | {} | {} | {} | {} | {} |\n",
             s.samples,
-            ms_cell(s.p50),
-            ms_cell(s.p95),
-            ms_cell(s.p99),
+            percentile_cell(50, s.p50),
+            percentile_cell(95, s.p95),
+            percentile_cell(99, s.p99),
             ms_cell(s.max)
         ),
         None => format!("| {name} | {DASH} | {DASH} | {DASH} | {DASH} | {DASH} |\n"),
@@ -437,6 +481,29 @@ fn render_threads(out: &mut String, s: &Section) {
             "| {} | {} | {} | {:.2} | {:.2} |\n",
             t.component, t.thread, t.threads, t.per_second, t.per_unit_per_second
         ));
+    }
+}
+
+/// Why each unmeasured latency has no number, when the run said. The dash
+/// alone cannot, and a bare "not measured" would only repeat it.
+fn render_latency_reasons(out: &mut String, l: &Latencies) {
+    let rows = [
+        ("cold launch (plan admitted to dispatch)", &l.cold_launch_ms),
+        (
+            "cold launch, invocation to reachable guest",
+            &l.cold_launch_startup_ms,
+        ),
+        ("artifact hashing", &l.cold_launch_artifact_hash_ms),
+        ("resolve, admit and boot", &l.cold_launch_boot_ms),
+        ("warm launch (plan admitted to dispatch)", &l.warm_launch_ms),
+        ("state-cell update", &l.state_cell_update_ms),
+    ];
+    for (name, figure) in rows {
+        if let Figure::Unmeasured { reason } = figure
+            && reason != NOT_MEASURED_REASON
+        {
+            out.push_str(&format!("\nNot measured, {name}: {reason}.\n"));
+        }
     }
 }
 
@@ -489,9 +556,26 @@ fn render_section(out: &mut String, s: &Section) {
         "warm launch (plan admitted to dispatch)",
         &l.warm_launch_ms,
     ));
+    out.push_str(&latency_row(
+        "cold launch, invocation to reachable guest",
+        &l.cold_launch_startup_ms,
+    ));
+    out.push_str(&latency_row(
+        "- of which artifact hashing",
+        &l.cold_launch_artifact_hash_ms,
+    ));
+    out.push_str(&latency_row(
+        "- of which resolve, admit and boot",
+        &l.cold_launch_boot_ms,
+    ));
     out.push_str(&latency_row("failover", &l.failover_ms));
     out.push_str(&latency_row("state-cell update", &l.state_cell_update_ms));
     out.push_str(&latency_row("mailbox round trip", &l.mailbox_round_trip_ms));
+    out.push_str(
+        "\nA percentile needs 1/(1-p) samples before it is more than the maximum; \
+         `n<N` means fewer than N were taken.\n",
+    );
+    render_latency_reasons(out, l);
     out.push('\n');
 }
 
@@ -609,6 +693,37 @@ mod tests {
         assert!(md.contains("12.50 m"));
         assert!(md.contains("777 B"));
         assert!(md.contains("| warm launch (plan admitted to dispatch) | 2 |"));
+    }
+
+    #[test]
+    fn a_percentile_needs_one_over_one_minus_p_samples() {
+        assert_eq!([50, 95, 99].map(min_samples_for_percentile), [2, 20, 100]);
+        let at = |n: usize| {
+            let samples: Vec<f64> = (1..=n).map(|i| i as f64).collect();
+            supported(SpanStats::from_samples(&samples))
+        };
+        let one = at(1);
+        assert_eq!((one.samples, one.p50, one.max), (1, None, Some(1.0)));
+        assert!(at(2).p50.is_some() && at(2).p95.is_none());
+        assert!(at(19).p95.is_none());
+        assert!(at(20).p95.is_some() && at(20).p99.is_none());
+        assert!(at(99).p99.is_none());
+        assert!(at(100).p99.is_some());
+    }
+
+    #[test]
+    fn too_few_samples_render_the_count_they_need_not_a_number() {
+        let mut section = empty_section();
+        let samples: Vec<f64> = (1..=5).map(f64::from).collect();
+        section.latencies.cold_launch_startup_ms =
+            Figure::measured(supported(SpanStats::from_samples(&samples)));
+        section.latencies.cold_launch_boot_ms = Figure::unmeasured("unavailable:no_kvm");
+        let md = render_markdown(&report_with(section));
+        assert!(md.contains(
+            "| cold launch, invocation to reachable guest | 5 | 3.0 | n<20 | n<100 | 5.0 |"
+        ));
+        assert!(md.contains("Not measured, resolve, admit and boot: unavailable:no_kvm."));
+        assert!(!md.contains("Not measured, warm launch"));
     }
 
     #[test]
