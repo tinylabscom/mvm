@@ -2617,16 +2617,16 @@ mod tests {
             let err = backend
                 .claim_standby_via_runner(&s.ctx(), &idle_handle(), &minimal_claim())
                 .expect_err("an empty pool has no parent to fork");
-            // Reaching the runner's guarded sequence (which fails reserving a
-            // parent from the empty pool) instead of short-circuiting on the
-            // fail-closed trait stub is the proof the fork substrate is reachable.
+            // Reaching the runner's guarded sequence (which loses the reservation
+            // when the selected parent is absent) instead of short-circuiting on
+            // the fail-closed trait stub proves the fork substrate is reachable.
             assert!(
                 !matches!(err, StandbyError::Unsupported { .. }),
                 "firecracker must route to the runner, not the Unsupported trait stub: {err}"
             );
             assert!(
-                matches!(err, StandbyError::ClaimFailed(_)),
-                "the runner refuses inside its guarded claim sequence: {err}"
+                matches!(err, StandbyError::ReservationLost),
+                "the runner reports the absent selected parent: {err}"
             );
         }
 
