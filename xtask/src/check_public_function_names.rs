@@ -99,12 +99,6 @@ const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
         "admit_plan_for_boot_configured_ingress_with_verified_runtime",
     ),
     (
-        "crates/mvm-client/src/boot.rs",
-        "module",
-        "start_prepared_custodied",
-        "start_prepared_custodied_with_verified_runtime",
-    ),
-    (
         "crates/mvm-hostd/src/plan_admission/start.rs",
         "module",
         "admit_and_start",

@@ -732,17 +732,13 @@ fn restore(id: &str, json: bool) -> Result<()> {
             meta.vm_name
         );
     }
-    let restorer = mvm_client::checkpoint::vm_full_restorer_for(&meta)?;
     let anchor = SignedChainAnchor::load()
         .context("loading the signed audit chain to verify the restore source")?;
-    mvm_client::checkpoint::restore_checkpoint(
+    mvm_client::checkpoint::restore_vm_full_checkpoint(
         &store,
-        mvm_client::checkpoint::RestoreParams {
-            checkpoint: id.clone(),
-            target_vm: meta.vm_name.clone(),
-            tenant,
-        },
-        restorer.as_ref(),
+        id.clone(),
+        &meta.vm_name,
+        tenant,
         &anchor,
     )
     .with_context(|| format!("restoring checkpoint {}", id.as_str()))?;
