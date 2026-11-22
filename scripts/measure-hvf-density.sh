@@ -538,10 +538,11 @@ trap cleanup_active_pids INT TERM EXIT
 refuse_busy_host
 
 prime_name="${RUN_ID}-prime"
+# No egress here even when serving: the egress backend check runs before this
+# first launch has fetched Firecracker into the fresh home, so it would refuse.
 if ! "${run_env[@]}" "MVM_RESIDENCY=cold" "${MVMCTL_BIN}" machine run \
   --name "${prime_name}" --hypervisor "${BACKEND}" --image "${IMAGE_REF}" \
-  --memory "${MEMORY}" --cpus "${CPUS}" \
-  "${egress_args[@]+"${egress_args[@]}"}" -- sleep 1 \
+  --memory "${MEMORY}" --cpus "${CPUS}" -- sleep 1 \
   >"${OUT_DIR}/prime.stdout" 2>"${OUT_DIR}/prime.stderr"; then
   echo "refusing: first-use preparation failed; see ${OUT_DIR}/prime.stderr" >&2
   exit 71

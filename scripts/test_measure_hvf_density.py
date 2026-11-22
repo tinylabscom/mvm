@@ -199,11 +199,11 @@ if args[:2] == ["machine", "run"]:
                     for line in (base / "out-serving/commands.jsonl").read_text().splitlines()
                     if json.loads(line)[0][:2] == ["machine", "run"]
                 ]
-                self.assertEqual(len(runs), 2)  # the prime and the one measured launch
-                for args in runs:
-                    at = args.index("--allow-host")
-                    self.assertEqual(args[at + 1], "192.0.2.1:443")
-                    self.assertLess(at, args.index("--"))
+                prime, measured = runs  # the unmeasured prime, then the one launch
+                self.assertNotIn("--allow-host", prime)
+                at = measured.index("--allow-host")
+                self.assertEqual(measured[at + 1], "192.0.2.1:443")
+                self.assertLess(at, measured.index("--"))
                 self.assertIn(
                     "endpoint_form\tserving\n",
                     (base / "out-serving/summary.tsv").read_text(),
