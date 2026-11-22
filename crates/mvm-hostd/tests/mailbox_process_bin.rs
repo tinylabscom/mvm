@@ -287,6 +287,57 @@ fn actor_helper_assembles_current_plan_and_reader_before_ready() {
     );
 }
 
+/// Stopping a VM signals its helper; the helper has to leave through its own
+/// exit path, not die where it stands.
+#[test]
+fn a_serving_helper_ends_its_loop_on_sigterm_instead_of_dying() {
+    use std::io::Read as _;
+    use std::time::{Duration, Instant};
+
+    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let fixture = actor_fixture(home.path());
+    let coordinator = Coordinator::start(&fixture.home);
+    let mut config = actor_process_config(&fixture.home, &fixture.plan, 44);
+    config.coordinator = Some(coordinator.socket.clone());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mvm-mailbox"))
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&config).unwrap())
+        .unwrap();
+    let mut ready = [0; 6];
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_exact(&mut ready)
+        .expect("the helper reports ready");
+    // SAFETY: signals the child this test spawned and still owns.
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the helper outlived the grace a VM stop gives it");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(0), "{status}");
+}
+
 #[test]
 fn a_production_actor_helper_without_a_coordinator_refuses_to_serve() {
     let home = tempfile::tempdir_in("/tmp").unwrap();

@@ -860,7 +860,14 @@ helper is parked on the guest, with nothing due, ends it with the retention
 pass and a permission-denied exit. A second test quarantines with a message
 already past expiry: the helper reads the ledger again after its wait on the
 guest and before its ordinary maintenance, so the pass expires the message and
-the destination's tip advances. Records whose retention ends
+the destination's tip advances. Stopping a VM sends its helper SIGTERM; the
+helper ends its loop on that signal and, when the workload is quarantined, runs
+the same pass before it exits, so a quarantine followed by a stop still expires
+what is due. The stop kills the helper two seconds after the signal, and a pass
+cut off there leaves the remainder unexpired; the pass is bounded in rounds,
+not in time. A third test stops a parked helper after a quarantine and sees the
+overdue message expired, and a test of the helper binary sees it exit with
+status zero on the signal. Records whose retention ends
 later, a helper whose ordinary maintenance commit raced the quarantine between
 that read and the commit, an already-exited helper,
 and actor journals are not covered, and their ciphertext can outlive its
