@@ -692,7 +692,7 @@ mod published {
             DOCUMENT,
             BUNDLE,
             &official,
-            inside_window(),
+            inside_window().try_into().unwrap(),
             None,
         )
         .expect_err("an image-set revocation signature is not the registry-pack authority");
@@ -709,7 +709,7 @@ mod published {
             DOCUMENT,
             BUNDLE,
             &revocation_keyless_trust(),
-            inside_window(),
+            inside_window().try_into().unwrap(),
             None,
         )
         .expect_err("an image-set revocation signature is not a registry-pack one");

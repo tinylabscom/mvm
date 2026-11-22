@@ -11,7 +11,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::registry_pack_revocation::RegistryPackRevocationError;
 use mvm_core::registry_pack_revocation_store::RegistryPackRevocationStoreError;
 use mvm_core::registry_pack_store::RegistryPackStoreError;
@@ -70,8 +70,15 @@ impl From<RegistryPackStoreError> for UpdateRefused {
     }
 }
 
-fn needs_refresh(valid_until: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
-    valid_until.is_none_or(|end| end - chrono::Duration::hours(REFRESH_WITHIN_HOURS) < now)
+fn utc_now() -> UtcTimestamp {
+    UtcTimestamp::try_from(chrono::Utc::now()).expect("host clock within years 0000..=9999")
+}
+
+fn needs_refresh(valid_until: Option<UtcTimestamp>, now: UtcTimestamp) -> bool {
+    valid_until.is_none_or(|end| {
+        now.checked_add_secs(REFRESH_WITHIN_HOURS * 3600)
+            .is_none_or(|horizon| end < horizon)
+    })
 }
 
 fn fetch_pair(fetcher: &dyn FeedFetcher, total: Duration) -> Result<(Vec<u8>, Vec<u8>)> {
@@ -88,8 +95,8 @@ fn fetch_pair(fetcher: &dyn FeedFetcher, total: Duration) -> Result<(Vec<u8>, Ve
 
 fn refresh_with(
     fetcher: &dyn FeedFetcher,
-    valid_until: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
+    valid_until: Option<UtcTimestamp>,
+    now: UtcTimestamp,
     total: Duration,
     mut update: impl FnMut(&[u8], &[u8]) -> Result<(), UpdateRefused>,
 ) -> Result<bool> {
@@ -112,8 +119,8 @@ fn refresh_with(
 fn ensure_with(
     fetcher: &dyn FeedFetcher,
     builtin_policy: bool,
-    valid_until: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
+    valid_until: Option<UtcTimestamp>,
+    now: UtcTimestamp,
     total: Duration,
     update: impl FnMut(&[u8], &[u8]) -> Result<(), UpdateRefused>,
 ) -> Result<bool> {
@@ -127,7 +134,7 @@ fn ensure_with(
 /// Refresh the official feed when it is due. A failure is reported and
 /// otherwise ignored: the revocation check that follows fails closed on its own.
 pub(crate) fn ensure_official_feed_fresh() {
-    let now = Utc::now();
+    let now = utc_now();
     let valid_until =
         mvm_core::registry_pack_store::official_registry_pack_revocation_valid_until();
     let builtin_policy = mvm_core::registry_pack_store::load_publisher_policy_or_official_default(
@@ -190,8 +197,8 @@ mod tests {
         }
     }
 
-    fn at(hours: i64) -> Option<DateTime<Utc>> {
-        Some(Utc::now() + chrono::Duration::hours(hours))
+    fn at(hours: i64) -> Option<UtcTimestamp> {
+        utc_now().checked_add_secs(hours * 3600)
     }
 
     fn ok(_: &[u8], _: &[u8]) -> Result<(), UpdateRefused> {
@@ -209,7 +216,7 @@ mod tests {
     fn a_feed_with_plenty_of_validity_left_touches_no_network() {
         for hours in [13, 30] {
             let fetcher = fake(false);
-            assert!(!refresh_with(&fetcher, at(hours), Utc::now(), TOTAL, ok).unwrap());
+            assert!(!refresh_with(&fetcher, at(hours), utc_now(), TOTAL, ok).unwrap());
             assert!(fetcher.calls.borrow().is_empty());
         }
     }
@@ -223,7 +230,7 @@ mod tests {
                 refresh_with(
                     &fetcher,
                     valid_until,
-                    Utc::now(),
+                    utc_now(),
                     TOTAL,
                     |document, bundle| {
                         assert!(String::from_utf8_lossy(document).ends_with("/revocations.json"));
@@ -243,7 +250,7 @@ mod tests {
     #[test]
     fn a_network_error_is_not_retried() {
         let fetcher = fake(true);
-        assert!(refresh_with(&fetcher, None, Utc::now(), TOTAL, ok).is_err());
+        assert!(refresh_with(&fetcher, None, utc_now(), TOTAL, ok).is_err());
         assert_eq!(fetcher.calls.borrow().len(), 1);
     }
 
@@ -251,7 +258,7 @@ mod tests {
     fn only_a_pair_mismatch_is_retried_and_only_once() {
         let attempts = Cell::new(0);
         assert!(
-            refresh_with(&fake(false), None, Utc::now(), TOTAL, |_, _| {
+            refresh_with(&fake(false), None, utc_now(), TOTAL, |_, _| {
                 attempts.set(attempts.get() + 1);
                 if attempts.get() == 1 {
                     Err(refused(true))
@@ -264,7 +271,7 @@ mod tests {
         assert_eq!(attempts.get(), 2);
         let attempts = Cell::new(0);
         assert!(
-            refresh_with(&fake(false), None, Utc::now(), TOTAL, |_, _| {
+            refresh_with(&fake(false), None, utc_now(), TOTAL, |_, _| {
                 attempts.set(attempts.get() + 1);
                 Err(refused(true))
             })
@@ -273,7 +280,7 @@ mod tests {
         assert_eq!(attempts.get(), 2);
         // Any other refusal (wrong identity, rollback, expiry) is final.
         let attempts = Cell::new(0);
-        let error = refresh_with(&fake(false), None, Utc::now(), TOTAL, |_, _| {
+        let error = refresh_with(&fake(false), None, utc_now(), TOTAL, |_, _| {
             attempts.set(attempts.get() + 1);
             Err(refused(false))
         })
@@ -292,7 +299,7 @@ mod tests {
             calls: RefCell::new(Vec::new()),
         };
         let started = Instant::now();
-        let error = refresh_with(&fetcher, None, Utc::now(), TOTAL, ok).unwrap_err();
+        let error = refresh_with(&fetcher, None, utc_now(), TOTAL, ok).unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(error.to_string().contains("deadline"));
         let calls = fetcher.calls.borrow();
@@ -303,9 +310,9 @@ mod tests {
     #[test]
     fn an_operator_publisher_policy_makes_no_network_attempt() {
         let fetcher = fake(false);
-        assert!(!ensure_with(&fetcher, false, None, Utc::now(), TOTAL, ok).unwrap());
+        assert!(!ensure_with(&fetcher, false, None, utc_now(), TOTAL, ok).unwrap());
         assert!(fetcher.calls.borrow().is_empty());
-        assert!(ensure_with(&fetcher, true, None, Utc::now(), TOTAL, ok).unwrap());
+        assert!(ensure_with(&fetcher, true, None, utc_now(), TOTAL, ok).unwrap());
         assert_eq!(fetcher.calls.borrow().len(), 2);
     }
 
@@ -313,7 +320,7 @@ mod tests {
     fn an_older_feed_is_refused_without_a_retry_and_the_error_reaches_the_caller() {
         use mvm_core::registry_pack_revocation::RegistryPackRevocationError as E;
         let attempts = Cell::new(0);
-        let error = ensure_with(&fake(false), true, at(-1), Utc::now(), TOTAL, |_, _| {
+        let error = ensure_with(&fake(false), true, at(-1), utc_now(), TOTAL, |_, _| {
             attempts.set(attempts.get() + 1);
             Err(UpdateRefused::from(
                 RegistryPackStoreError::RevocationStore(

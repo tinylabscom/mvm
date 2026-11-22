@@ -4,8 +4,8 @@
 //! feed still passes the canonical parser, time/checkpoint checks and sealed
 //! subject check. This is not a Sigstore or public-registry positive witness.
 
-use chrono::{Duration, Utc};
 use ed25519_dalek::{Signer, SigningKey};
+use mvm_contract::timestamp::UtcTimestamp;
 
 use super::{RegistryPackStoreError, check_application_revocations_with};
 use crate::packs::KeylessTrust;
@@ -32,13 +32,13 @@ pub(crate) fn configure() {
 pub(crate) fn check(
     application: &VerifiedRegistryApplication,
 ) -> Result<(), RegistryPackStoreError> {
-    let now = Utc::now();
+    let now = UtcTimestamp::try_from(chrono::Utc::now()).unwrap();
     let key = SigningKey::from_bytes(&[73; 32]);
     let document = serde_json::to_vec(&serde_json::json!({
         "schema_version": 1,
         "sequence": 1,
-        "issued_at": now - Duration::minutes(1),
-        "not_after": now + Duration::hours(1),
+        "issued_at": now.checked_add_secs(-60).unwrap(),
+        "not_after": now.checked_add_secs(3600).unwrap(),
         "revoked_identities": [],
         "revoked_manifests": [],
     }))

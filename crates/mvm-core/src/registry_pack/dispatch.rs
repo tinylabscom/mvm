@@ -296,7 +296,7 @@ pub(super) fn adopt_with(
 mod tests {
     use super::*;
     use crate::registry_pack::tests::{accept_signature, publisher_policy, reject_signature};
-    use chrono::Utc;
+    use mvm_contract::timestamp::UtcTimestamp;
 
     const APPLICATION: &[u8] = include_bytes!("application_manifest_v2.json");
 
@@ -327,7 +327,8 @@ mod tests {
         let VerifiedRegistryManifest::Application(app) = verified else {
             panic!("expected application")
         };
-        let now = Utc::now();
+        let now = UtcTimestamp::try_from(chrono::Utc::now()).unwrap();
+        let plus = |secs| now.checked_add_secs(secs).unwrap();
         let trust = KeylessTrust {
             issuer: "independent issuer".to_string(),
             accepted_identities: vec!["independent release identity".to_string()],
@@ -340,8 +341,8 @@ mod tests {
             let document = serde_json::json!({
                 "schema_version": 1,
                 "sequence": 1,
-                "issued_at": now - chrono::Duration::hours(1),
-                "not_after": now + chrono::Duration::hours(1),
+                "issued_at": plus(-3600),
+                "not_after": plus(3600),
                 "revoked_identities": identities,
                 "revoked_manifests": manifests,
             });
@@ -367,10 +368,7 @@ mod tests {
                 )),
                 _ => unreachable!(),
             }
-            assert!(
-                feed.check_verified_pack_at(&app, now + chrono::Duration::hours(2))
-                    .is_err()
-            );
+            assert!(feed.check_verified_pack_at(&app, plus(7200)).is_err());
         }
     }
 

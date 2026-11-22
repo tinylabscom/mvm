@@ -175,8 +175,8 @@ pub(super) fn prepare(
             max_queue_contribution_bytes: 4096,
             max_storage_bytes: 8 * MIB,
             policy_epoch: 1,
-            not_before_unix_ms: parent.valid_from.timestamp_millis(),
-            expires_at_unix_ms: parent.valid_until.timestamp_millis(),
+            not_before_unix_ms: parent.valid_from.unix_millis(),
+            expires_at_unix_ms: parent.valid_until.unix_millis(),
         },
     };
     parent.workflow = Some(WorkflowBinding {
@@ -200,9 +200,9 @@ pub(super) fn prepare(
                     LifecycleOperation::ObserveChild,
                     LifecycleOperation::ReleaseChild,
                 ],
-                not_before_unix_ms: parent.valid_from.timestamp_millis(),
-                expires_at_unix_ms: parent.valid_until.timestamp_millis(),
-                workflow_deadline_unix_ms: parent.valid_until.timestamp_millis(),
+                not_before_unix_ms: parent.valid_from.unix_millis(),
+                expires_at_unix_ms: parent.valid_until.unix_millis(),
+                workflow_deadline_unix_ms: parent.valid_until.unix_millis(),
             },
         },
     });
@@ -282,7 +282,7 @@ fn plan(
     )?;
     plan.sdk_uses_sidecar = false;
     plan.image.entrypoint_present = true;
-    plan.valid_until = plan.valid_from + chrono::Duration::seconds(240);
+    plan.valid_until = plan.valid_from.checked_add_secs(240).expect("in range");
     Ok(plan)
 }
 

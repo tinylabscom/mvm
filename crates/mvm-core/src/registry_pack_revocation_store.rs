@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use thiserror::Error;
 
 use crate::packs::{KeylessTrust, Sha256Hex};
@@ -98,7 +98,7 @@ impl RegistryPackRevocationStore {
         document: &[u8],
         bundle: &[u8],
         release_trust: &KeylessTrust,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<RegistryPackRevocationCheckpoint, RegistryPackRevocationStoreError> {
         self.update_with(document, bundle, now, |bytes, signature, at, previous| {
             verify_registry_pack_revocations_for_validity(
@@ -118,7 +118,7 @@ impl RegistryPackRevocationStore {
     pub fn load(
         &self,
         release_trust: &KeylessTrust,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<VerifiedRegistryPackRevocations, RegistryPackRevocationStoreError> {
         self.load_with(now, |bytes, signature, at, checkpoint| {
             let verified = verify_registry_pack_revocations_for_validity(
@@ -140,14 +140,14 @@ impl RegistryPackRevocationStore {
         &self,
         document: &[u8],
         bundle: &[u8],
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         verify: F,
     ) -> Result<RegistryPackRevocationCheckpoint, RegistryPackRevocationStoreError>
     where
         F: FnOnce(
             &[u8],
             &[u8],
-            DateTime<Utc>,
+            UtcTimestamp,
             Option<&RegistryPackRevocationCheckpoint>,
         ) -> Result<RegistryPackRevocationCheckpoint, RegistryPackRevocationError>,
     {
@@ -160,14 +160,14 @@ impl RegistryPackRevocationStore {
 
     fn load_with<T, F>(
         &self,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         verify: F,
     ) -> Result<T, RegistryPackRevocationStoreError>
     where
         F: FnOnce(
             &[u8],
             &[u8],
-            DateTime<Utc>,
+            UtcTimestamp,
             &RegistryPackRevocationCheckpoint,
         ) -> Result<T, RegistryPackRevocationStoreError>,
     {
@@ -191,16 +191,14 @@ mod tests {
     use std::fs;
 
     use base64::Engine as _;
-    use chrono::TimeZone;
 
     use super::*;
     use crate::util::atomic_io::write_private;
 
     type StoredFeed = crate::signed_feed_store::StoredFeed<RegistryPackRevocationCheckpoint>;
 
-    fn at(day: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, day, 0, 0, 0)
-            .single()
+    fn at(day: u32) -> UtcTimestamp {
+        UtcTimestamp::from_unix(1_790_812_800 + (i64::from(day) - 1) * 86_400, 0)
             .expect("valid test date")
     }
 
@@ -225,7 +223,7 @@ mod tests {
     fn signed(
         bytes: &[u8],
         signature: &[u8],
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         previous: Option<&RegistryPackRevocationCheckpoint>,
     ) -> Result<RegistryPackRevocationCheckpoint, RegistryPackRevocationError> {
         if signature != b"signed" {
@@ -238,7 +236,7 @@ mod tests {
         let sequence = json["sequence"]
             .as_u64()
             .ok_or(RegistryPackRevocationError::InvalidSequence)?;
-        let expiry: DateTime<Utc> = serde_json::from_value(json["not_after"].clone())
+        let expiry: UtcTimestamp = serde_json::from_value(json["not_after"].clone())
             .map_err(|error| RegistryPackRevocationError::Parse(error.to_string()))?;
         if now >= expiry {
             return Err(RegistryPackRevocationError::Expired);
@@ -263,7 +261,7 @@ mod tests {
 
     fn load_test(
         store: &RegistryPackRevocationStore,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<RegistryPackRevocationCheckpoint, RegistryPackRevocationStoreError> {
         store.load_with(now, |bytes, bundle, at, checkpoint| {
             let verified = signed(bytes, bundle, at, None)?;
