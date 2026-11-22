@@ -432,7 +432,7 @@ fn trust_status_lines(official: bool, revocation_required: bool) -> [&'static st
 fn application_trust_lines(
     mvm_namespace: bool,
     built_in_signer: bool,
-    feed_valid_until: Option<chrono::DateTime<chrono::Utc>>,
+    feed_valid_until: Option<mvm_contract::timestamp::UtcTimestamp>,
 ) -> Vec<String> {
     if mvm_namespace || !built_in_signer {
         return trust_status_lines(mvm_namespace, false)
@@ -442,7 +442,8 @@ fn application_trust_lines(
     let scope = match feed_valid_until {
         Some(end) => format!(
             "Revocation scope: official signed feed (verified cache valid until {})",
-            end.to_rfc3339()
+            // Keeps the `+00:00` form this line has always printed.
+            chrono::DateTime::<chrono::Utc>::from(end).to_rfc3339()
         ),
         None => "Revocation scope: official signed feed required; no current verified copy is cached (`mvmctl pull` refreshes it)".to_owned(),
     };

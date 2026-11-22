@@ -35,7 +35,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use mvm_core::plan::PlanId;
@@ -76,8 +76,8 @@ struct BucketState {
     /// returned `Decision::Emit` is *not* counted here — only
     /// the suppressed retries.
     suppressed: u32,
-    first_seen: DateTime<Utc>,
-    last_seen: DateTime<Utc>,
+    first_seen: UtcTimestamp,
+    last_seen: UtcTimestamp,
 }
 
 /// Summary record produced by `flush()` for a bucket that saw
@@ -87,8 +87,14 @@ struct BucketState {
 pub struct RetryStormSummary {
     pub key: DedupKey,
     pub count: u32,
-    pub first_seen: DateTime<Utc>,
-    pub last_seen: DateTime<Utc>,
+    pub first_seen: UtcTimestamp,
+    pub last_seen: UtcTimestamp,
+}
+
+/// Whether `last_seen` is at least `window` before `now`.
+fn aged(now: UtcTimestamp, last_seen: UtcTimestamp, window: Duration) -> bool {
+    now.duration_since(last_seen)
+        .is_some_and(|elapsed| elapsed >= window)
 }
 
 /// Per-`(plan_id, event, bucket)` dedup window with a configurable
@@ -115,10 +121,7 @@ impl RetryStormSuppressor {
 
     /// Record an observation. Returns whether the caller should
     /// emit a normal audit entry or drop it.
-    pub fn observe(&mut self, key: DedupKey, now: DateTime<Utc>) -> Decision {
-        let window_chrono =
-            chrono::TimeDelta::from_std(self.window).unwrap_or(chrono::TimeDelta::zero());
-
+    pub fn observe(&mut self, key: DedupKey, now: UtcTimestamp) -> Decision {
         match self.seen.get_mut(&key) {
             None => {
                 // First time we've seen this bucket.
@@ -132,7 +135,7 @@ impl RetryStormSuppressor {
                 );
                 Decision::Emit
             }
-            Some(state) if now.signed_duration_since(state.last_seen) >= window_chrono => {
+            Some(state) if aged(now, state.last_seen, self.window) => {
                 // Last observation was outside the dedup window.
                 // Restart the bucket: emit normally and reset the
                 // counter. Any pending summary should have been
@@ -157,13 +160,11 @@ impl RetryStormSuppressor {
     /// count is non-zero. After flushing, those buckets are
     /// removed from internal state — a fresh observation later
     /// will re-emit (`Decision::Emit`) and reopen the bucket.
-    pub fn flush(&mut self, now: DateTime<Utc>) -> Vec<RetryStormSummary> {
-        let window_chrono =
-            chrono::TimeDelta::from_std(self.window).unwrap_or(chrono::TimeDelta::zero());
+    pub fn flush(&mut self, now: UtcTimestamp) -> Vec<RetryStormSummary> {
+        let window = self.window;
         let mut out = Vec::new();
         self.seen.retain(|key, state| {
-            let aged = now.signed_duration_since(state.last_seen) >= window_chrono;
-            if aged {
+            if aged(now, state.last_seen, window) {
                 if state.suppressed > 0 {
                     out.push(RetryStormSummary {
                         key: key.clone(),
@@ -205,7 +206,6 @@ impl RetryStormSuppressor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     fn key(event: &str, bucket: &str) -> DedupKey {
         DedupKey {
@@ -215,8 +215,8 @@ mod tests {
         }
     }
 
-    fn t(s: i64) -> DateTime<Utc> {
-        Utc.timestamp_opt(1_777_372_800 + s, 0).unwrap()
+    fn t(s: i64) -> UtcTimestamp {
+        UtcTimestamp::from_unix(1_777_372_800 + s, 0).unwrap()
     }
 
     #[test]
@@ -369,6 +369,22 @@ mod tests {
         let json = serde_json::to_string(&summ).unwrap();
         let parsed: RetryStormSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, summ);
+    }
+
+    /// The summary's bytes are what chrono wrote: whole seconds bare, a
+    /// fraction in 3, 6 or 9 digits.
+    #[test]
+    fn retry_storm_summary_bytes_are_the_ones_chrono_wrote() {
+        let summ = RetryStormSummary {
+            key: key("e", "b"),
+            count: 2,
+            first_seen: t(0),
+            last_seen: UtcTimestamp::from_unix(1_777_372_860, 123_000_000).unwrap(),
+        };
+        assert_eq!(
+            serde_json::to_string(&summ).unwrap(),
+            r#"{"key":{"plan_id":"test-plan","event":"e","bucket":"b"},"count":2,"first_seen":"2026-04-28T10:40:00Z","last_seen":"2026-04-28T10:41:00.123Z"}"#
+        );
     }
 
     #[test]
