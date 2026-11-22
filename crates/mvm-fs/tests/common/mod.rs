@@ -306,6 +306,20 @@ impl HermeticRegistry {
         bytes: &[u8],
         token: &str,
     ) -> String {
+        self.register_redirected_bearer_blob_with_status(repository, media_type, bytes, token, 307)
+            .await
+    }
+
+    /// [`Self::register_redirected_bearer_blob`] answering the blob GET with
+    /// `status` instead of 307.
+    pub(crate) async fn register_redirected_bearer_blob_with_status(
+        &self,
+        repository: &str,
+        media_type: &str,
+        bytes: &[u8],
+        token: &str,
+        status: u16,
+    ) -> String {
         let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
         let redirected_path = format!("/redirected/blobs/{digest}");
         self.server.register(
@@ -313,7 +327,7 @@ impl HermeticRegistry {
                 "GET",
                 format!("/v2/{repository}/blobs/{digest}"),
                 Responder::Static(
-                    TestResponse::builder(307)
+                    TestResponse::builder(status)
                         .header("Location", redirected_path.clone())
                         .build(),
                 ),

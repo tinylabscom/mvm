@@ -158,6 +158,17 @@ const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
         "start",
         "start_with_verified_runtime",
     ),
+    // The hermetic OCI registry fixture keeps its `_with_status` sibling
+    // because the base form pins the 307 hop production always answered,
+    // while the variant names the exact redirect status (301, 302 or 303)
+    // a test needs the blob GET to return; conflating the names would hide
+    // which redirect class a test actually exercises.
+    (
+        "crates/mvm-fs/tests/common/mod.rs",
+        "impl HermeticRegistry",
+        "register_redirected_bearer_blob",
+        "register_redirected_bearer_blob_with_status",
+    ),
 ];
 const EXPECTED_UNEXPLAINED_PAIRS: usize = 0;
 
