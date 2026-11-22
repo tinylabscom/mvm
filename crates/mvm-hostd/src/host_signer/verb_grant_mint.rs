@@ -1,6 +1,5 @@
 use crate::host_signer::keystore::Keystore;
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use mvm_contract::grants::{ApplicationTerminalBinding, DriveGrant};
 use mvm_core::plan::{Nonce, VerbGrant, VerbId};
 
@@ -17,7 +16,7 @@ pub fn mint_verb_grant(
     signer: &Keystore,
     session_id: &str,
     plan_nonce: &Nonce,
-    not_after: DateTime<Utc>,
+    not_after: mvm_contract::timestamp::UtcTimestamp,
     verbs: Vec<VerbId>,
     authority: VerbGrantAuthority,
 ) -> Result<VerbGrant> {
@@ -42,20 +41,19 @@ pub fn mint_verb_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, Utc};
     use ed25519_dalek::VerifyingKey;
     use mvm_core::plan::{Nonce, VerbId};
 
     #[test]
     fn minted_grant_verifies_under_signer_key() {
         let signer = Keystore::generate();
-        let now = Utc::now();
+        let now = mvm_agentd::vsock::utc_now();
         let nonce = Nonce::from_bytes([3u8; 16]);
         let grant = mint_verb_grant(
             &signer,
             "sess-Z",
             &nonce,
-            now + Duration::minutes(5),
+            now.checked_add_secs(300).unwrap(),
             vec![VerbId::new("run-entrypoint").unwrap()],
             VerbGrantAuthority::default(),
         )

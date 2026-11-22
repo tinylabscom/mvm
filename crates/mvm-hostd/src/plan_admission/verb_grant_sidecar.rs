@@ -36,7 +36,7 @@ pub(super) fn mint_verb_grant_sidecar(
     // The grant expires with the plan's validity window. Minting one that is
     // already dead guarantees the guest refuses activation, and the guest can
     // only say `VerbNotAuthorized`; refusing here says what actually expired.
-    refuse_expired_plan(&plan, chrono::Utc::now())?;
+    refuse_expired_plan(&plan, mvm_agentd::vsock::utc_now())?;
     let drive = plan.grants.as_ref().and_then(|grants| grants.drive.clone());
     let application_terminal = plan
         .grants
@@ -57,7 +57,7 @@ pub(super) fn mint_verb_grant_sidecar(
         &keystore,
         vm_name,
         &plan.nonce,
-        plan.valid_until.into(),
+        plan.valid_until,
         verbs,
         crate::host_signer::VerbGrantAuthority {
             drive,
@@ -102,8 +102,10 @@ fn granted_verbs(plan: &ExecutionPlan, other_authority: bool) -> Option<Vec<Verb
 }
 
 /// Refuse to mint a grant from a plan whose validity window has closed.
-fn refuse_expired_plan(plan: &ExecutionPlan, now: chrono::DateTime<chrono::Utc>) -> Result<()> {
-    let now = mvm_contract::timestamp::UtcTimestamp::try_from(now)?;
+fn refuse_expired_plan(
+    plan: &ExecutionPlan,
+    now: mvm_contract::timestamp::UtcTimestamp,
+) -> Result<()> {
     if now < plan.valid_until {
         return Ok(());
     }
@@ -125,10 +127,9 @@ mod tests {
 
     fn plan_valid(from_secs_ago: i64, window_secs: i64) -> ExecutionPlan {
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
-        plan.valid_from = mvm_contract::timestamp::UtcTimestamp::try_from(
-            chrono::Utc::now() - chrono::Duration::seconds(from_secs_ago),
-        )
-        .unwrap();
+        plan.valid_from = mvm_agentd::vsock::utc_now()
+            .checked_add_secs(-from_secs_ago)
+            .unwrap();
         plan.valid_until = plan.valid_from.checked_add_secs(window_secs).unwrap();
         plan
     }
@@ -136,7 +137,7 @@ mod tests {
     #[test]
     fn a_plan_whose_window_closed_is_refused_with_both_times() {
         let plan = plan_valid(700, 600);
-        let err = refuse_expired_plan(&plan, chrono::Utc::now())
+        let err = refuse_expired_plan(&plan, mvm_agentd::vsock::utc_now())
             .unwrap_err()
             .to_string();
         assert!(err.contains("validity window closed"), "{err}");
@@ -146,7 +147,7 @@ mod tests {
 
     #[test]
     fn a_plan_still_in_its_window_mints() {
-        assert!(refuse_expired_plan(&plan_valid(5, 600), chrono::Utc::now()).is_ok());
+        assert!(refuse_expired_plan(&plan_valid(5, 600), mvm_agentd::vsock::utc_now()).is_ok());
     }
 
     #[test]
@@ -183,7 +184,7 @@ mod tests {
                 &key.verifying,
                 "empty-verbs",
                 &plan.nonce,
-                chrono::Utc::now(),
+                mvm_agentd::vsock::utc_now(),
             )
             .expect("empty grant is signed and bound to the plan");
     }
@@ -306,7 +307,7 @@ mod tests {
                     &key.verifying,
                     "terminal-guest",
                     &plan.nonce,
-                    chrono::Utc::now()
+                    mvm_agentd::vsock::utc_now()
                 )
                 .is_ok()
         );

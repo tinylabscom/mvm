@@ -101,7 +101,7 @@ pub(crate) fn issue_child_grant(
     if envelope.grant.plan_nonce != plan.nonce {
         return Err(ChildGrantError::GrantNonceMismatch);
     }
-    if envelope.grant.not_after != chrono::DateTime::from(plan.valid_until) {
+    if envelope.grant.not_after != plan.valid_until {
         return Err(ChildGrantError::ExpiryMismatch);
     }
     if envelope.grant.verbs.as_slice() != plan.agent_verbs.as_deref().unwrap_or_default() {
@@ -180,7 +180,7 @@ mod tests {
             grant: VerbGrant {
                 session_id: child.to_string(),
                 plan_nonce: plan.nonce.clone(),
-                not_after: plan.valid_until.into(),
+                not_after: plan.valid_until,
                 verbs: plan.agent_verbs.clone().unwrap(),
                 drive: plan.grants.as_ref().and_then(|grants| grants.drive.clone()),
                 application_terminal: plan
@@ -281,7 +281,7 @@ mod tests {
         ));
 
         let mut wrong_expiry = matching_envelope(&plan, &config.name);
-        wrong_expiry.grant.not_after += chrono::Duration::seconds(1);
+        wrong_expiry.grant.not_after = wrong_expiry.grant.not_after.checked_add_secs(1).unwrap();
         let issuer = FixedIssuer::returning(Some(wrong_expiry));
         assert!(matches!(
             issue_child_grant(&plan, &config, Some(&issuer)),
@@ -357,7 +357,7 @@ mod tests {
         let mut envelope = matching_envelope(&plan_with_verbs(), &config.name);
         envelope.grant.plan_nonce = plan.nonce.clone();
         envelope.plan_nonce_hex = plan.nonce.as_hex().to_string();
-        envelope.grant.not_after = plan.valid_until.into();
+        envelope.grant.not_after = plan.valid_until;
         let issuer = FixedIssuer::returning(Some(envelope));
 
         assert!(matches!(

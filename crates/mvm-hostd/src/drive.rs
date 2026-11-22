@@ -92,7 +92,12 @@ impl DriveAuthority {
             crate::audit::host_keypair::load_or_init().map_err(DriveSessionError::Authority)?;
         envelope
             .grant
-            .verify(&signer.verifying, vm, &plan.nonce, chrono::Utc::now())
+            .verify(
+                &signer.verifying,
+                vm,
+                &plan.nonce,
+                mvm_agentd::vsock::utc_now(),
+            )
             .map_err(|error| {
                 DriveSessionError::Authority(anyhow::anyhow!(
                     "host-signed drive grant verification failed: {error}"
@@ -443,7 +448,7 @@ mod tests {
             &keystore,
             vm,
             &plan.nonce,
-            plan.valid_until.into(),
+            plan.valid_until,
             Vec::new(),
             crate::host_signer::VerbGrantAuthority {
                 drive: plan.grants.as_ref().and_then(|grants| grants.drive.clone()),

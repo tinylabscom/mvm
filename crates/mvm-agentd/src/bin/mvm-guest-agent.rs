@@ -960,7 +960,7 @@ fn main() {
     let pinned_verb_grant = load_pinned_verb_grant(
         std::path::Path::new("/run/mvm/verb-grant.json"),
         std::path::Path::new(HOST_SIGNER_PUBKEY_PATH),
-        chrono::Utc::now(),
+        mvm_agentd::vsock::utc_now(),
     );
     // Resolve the host-signer trust anchor once at boot and hold it for the
     // agent's lifetime. PostRestore re-pin verifies incoming envelopes against

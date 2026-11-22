@@ -109,9 +109,10 @@ fn a_slow_preparation_cannot_spend_the_grant_window() {
         valid_from >= prepared_at,
         "the plan's window must open after preparation, not before it"
     );
-    assert_eq!(envelope.grant.not_after, valid_until);
+    let not_after = chrono::DateTime::<chrono::Utc>::from(envelope.grant.not_after);
+    assert_eq!(not_after, valid_until);
     assert!(
-        envelope.grant.not_after >= prepared_at + window,
+        not_after >= prepared_at + window,
         "a grant expiring at {} leaves less than the {window} window after a preparation that \
          ended at {prepared_at}",
         envelope.grant.not_after
@@ -135,7 +136,8 @@ fn admitting_before_preparation_loses_the_preparation_time() {
     let valid_from = chrono::DateTime::<chrono::Utc>::from(plan.valid_from);
     let valid_until = chrono::DateTime::<chrono::Utc>::from(plan.valid_until);
     let window = valid_until - valid_from;
-    let lost = prepared_at.unwrap() + window - envelope.grant.not_after;
+    let lost = prepared_at.unwrap() + window
+        - chrono::DateTime::<chrono::Utc>::from(envelope.grant.not_after);
     assert!(
         lost >= chrono::Duration::from_std(SLOW_PREPARATION).unwrap(),
         "admitting first should have cost the preparation time, lost only {lost}"

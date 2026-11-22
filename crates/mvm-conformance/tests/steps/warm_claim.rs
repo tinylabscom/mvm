@@ -407,7 +407,7 @@ fn when_claim_parent(world: &mut CliWorld) {
                     .collect(),
                 post_restore_grant_verifies_under_host_key: grant
                     .grant
-                    .verify(&host_key, &child.0, &plan.nonce, plan.valid_from.into())
+                    .verify(&host_key, &child.0, &plan.nonce, plan.valid_from)
                     .is_ok(),
             })
         }
