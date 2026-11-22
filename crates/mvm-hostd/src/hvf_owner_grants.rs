@@ -351,6 +351,12 @@ pub enum OwnerGrantStoreError {
 
 type Commit = dyn Fn(&Path, &[u8]) -> io::Result<()> + Send + Sync;
 
+#[derive(Clone, Copy)]
+enum LockPolicy {
+    Create,
+    Existing,
+}
+
 /// Trusted time source owned by the protected provider.
 pub trait OwnerGrantClock: Send + Sync {
     /// Current Unix seconds.
@@ -380,6 +386,7 @@ pub struct OwnerGrantStore {
     provider_id: [u8; 32],
     clock: Arc<dyn OwnerGrantClock>,
     commit: Arc<Commit>,
+    lock_policy: LockPolicy,
 }
 
 impl std::fmt::Debug for OwnerGrantStore {
@@ -447,6 +454,28 @@ impl OwnerGrantStore {
         Ok(store)
     }
 
+    /// Open an existing journal using an existing lock inode only.
+    ///
+    /// Unlike [`Self::open`], this never creates or repairs the sidecar lock.
+    /// The returned store can perform normal authorized mutations, but every
+    /// operation continues to require that same named lock to exist. Protected
+    /// ancestry, stable lock naming and provider-account custody are deployment
+    /// prerequisites established outside this file-level API.
+    ///
+    /// # Errors
+    /// Refuses missing or unsafe lock/journal objects and invalid journal state.
+    pub fn attach_existing(
+        path: impl AsRef<Path>,
+        provider_id: [u8; 32],
+        clock: Arc<dyn OwnerGrantClock>,
+    ) -> Result<Self, OwnerGrantStoreError> {
+        let mut store = Self::at(path, provider_id, clock);
+        store.lock_policy = LockPolicy::Existing;
+        let _lock = store.lock()?;
+        store.read()?;
+        Ok(store)
+    }
+
     fn at(path: impl AsRef<Path>, provider_id: [u8; 32], clock: Arc<dyn OwnerGrantClock>) -> Self {
         Self {
             path: path.as_ref().to_owned(),
@@ -455,6 +484,7 @@ impl OwnerGrantStore {
             commit: Arc::new(|path, bytes| {
                 atomic_io::write_private(path, bytes).map_err(io::Error::other)
             }),
+            lock_policy: LockPolicy::Create,
         }
     }
 
@@ -995,8 +1025,12 @@ impl OwnerGrantStore {
     }
 
     fn lock(&self) -> Result<atomic_io::FileLock, OwnerGrantStoreError> {
-        crate::admission_budget::acquire_lock(&self.path.with_extension("lock"))
-            .map_err(OwnerGrantStoreError::Storage)
+        let path = self.path.with_extension("lock");
+        match self.lock_policy {
+            LockPolicy::Create => crate::admission_budget::acquire_lock(&path),
+            LockPolicy::Existing => crate::admission_budget::acquire_existing_lock(&path),
+        }
+        .map_err(OwnerGrantStoreError::Storage)
     }
 
     fn now_secs(&self) -> Result<u64, OwnerGrantStoreError> {
@@ -1162,6 +1196,7 @@ impl OwnerGrantStore {
             provider_id: self.provider_id,
             clock: Arc::clone(&self.clock),
             commit: Arc::new(commit),
+            lock_policy: self.lock_policy,
         }
     }
 }
