@@ -88,6 +88,16 @@ impl TryFrom<chrono::DateTime<chrono::Utc>> for UtcTimestamp {
     }
 }
 
+#[cfg(feature = "protocol")]
+/// Temporary bridge to the chrono grant expiry (`VerbGrant.not_after`, whose
+/// signed bytes stay chrono's); it goes with chrono. Every in-range instant is
+/// representable.
+impl From<UtcTimestamp> for chrono::DateTime<chrono::Utc> {
+    fn from(t: UtcTimestamp) -> Self {
+        Self::from_timestamp(t.secs, t.nanos).expect("years 0000..=9999 fit chrono")
+    }
+}
+
 /// Hinnant's days-from-civil; `month` is 1..=12.
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let y = year - i64::from(month <= 2);

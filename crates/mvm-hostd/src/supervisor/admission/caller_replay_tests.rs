@@ -13,9 +13,10 @@ fn isolate() -> (TestEnv, tempfile::TempDir) {
 
 fn challenge(expires: u64) -> RegistrationChallenge {
     let mut plan = PlanFixture::new().build();
-    plan.valid_from = chrono::DateTime::from_timestamp(1, 0).unwrap();
+    plan.valid_from = mvm_contract::timestamp::UtcTimestamp::from_unix(1, 0).unwrap();
     plan.valid_until =
-        chrono::DateTime::from_timestamp(i64::try_from(expires).unwrap(), 0).unwrap();
+        mvm_contract::timestamp::UtcTimestamp::from_unix(i64::try_from(expires).unwrap(), 0)
+            .unwrap();
     let installation = serde_json::from_str("\"bdf189ab-9a9a-440b-a266-e95b19e58a5e\"").unwrap();
     CallerRegistration::challenge_for_plan(
         "replay-ledger",

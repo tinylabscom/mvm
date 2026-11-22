@@ -90,8 +90,12 @@ fn rejects_plan_outside_validity_window() {
     // the check (synthesize_plan can't make a stale plan because
     // it uses Utc::now()).
     let mut plan = synthesize_plan(&fixture_input("vm1")).unwrap();
-    plan.valid_from = Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap();
-    plan.valid_until = Utc.with_ymd_and_hms(2000, 1, 1, 0, 10, 0).unwrap();
+    plan.valid_from = mvm_core::plan::test_support::utc_timestamp(
+        Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap(),
+    );
+    plan.valid_until = mvm_core::plan::test_support::utc_timestamp(
+        Utc.with_ymd_and_hms(2000, 1, 1, 0, 10, 0).unwrap(),
+    );
     let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
     let signed = sign_plan(&plan, &signer.signing, &host_signer_id());
     let verified = verify_plan(&signed, &[(&host_signer_id(), &signer.verifying)]).unwrap();

@@ -50,9 +50,9 @@ impl CallerRegistration {
                 run: Uuid::new_v4(),
                 producer: Uuid::new_v4(),
                 session: Uuid::new_v4(),
-                not_before: u64::try_from(plan.valid_from.timestamp())
+                not_before: u64::try_from(plan.valid_from.unix_secs())
                     .context("invalid registration validity start")?,
-                not_after: u64::try_from(plan.valid_until.timestamp())
+                not_after: u64::try_from(plan.valid_until.unix_secs())
                     .context("invalid registration validity end")?,
             },
             identity,
@@ -76,8 +76,8 @@ impl CallerRegistration {
                 && binding.tenant == plan.tenant.0
                 && binding.plan_id == plan.plan_id.0
                 && binding.plan_nonce == plan.nonce
-                && binding.not_before == u64::try_from(plan.valid_from.timestamp())?
-                && binding.not_after == u64::try_from(plan.valid_until.timestamp())?,
+                && binding.not_before == u64::try_from(plan.valid_from.unix_secs())?
+                && binding.not_after == u64::try_from(plan.valid_until.unix_secs())?,
             "caller registration context mismatch"
         );
         self.proof.verify(&self.expected, now).map_err(Into::into)

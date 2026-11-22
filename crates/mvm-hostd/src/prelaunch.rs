@@ -114,8 +114,8 @@ mod tests {
 
     fn plan_around(now: chrono::DateTime<Utc>) -> ExecutionPlan {
         let mut p = sample_plan();
-        p.valid_from = now - Duration::minutes(5);
-        p.valid_until = now + Duration::minutes(5);
+        p.valid_from = mvm_core::plan::test_support::utc_timestamp(now - Duration::minutes(5));
+        p.valid_until = mvm_core::plan::test_support::utc_timestamp(now + Duration::minutes(5));
         p
     }
 

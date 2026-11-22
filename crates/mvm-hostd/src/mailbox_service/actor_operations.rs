@@ -1336,7 +1336,7 @@ mod tests {
         body: &[u8],
     ) -> Result<ConversationResponse> {
         let content_type = ContentType::parse("application/vnd.mvm.actor-test", 1).unwrap();
-        let deadline = store.config.plan.valid_until.timestamp_millis() - 1000;
+        let deadline = store.config.plan.valid_until.unix_millis() - 1000;
         store.queue_call(
             store.config.binding.reader.boot,
             CallRequest {

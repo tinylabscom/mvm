@@ -52,8 +52,9 @@ use crate::plan::{
     WorkloadIntent,
 };
 use anyhow::Result;
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use mvm_contract::builder::BuilderError;
+use mvm_contract::timestamp::UtcTimestamp;
 use rand::Rng;
 use std::collections::BTreeMap;
 
@@ -772,7 +773,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         );
     }
     let nonce = fresh_nonce();
-    let now = Utc::now();
+    let now = UtcTimestamp::try_from(Utc::now())?;
 
     let tenant_str = input.tenant.unwrap_or(DEFAULT_TENANT);
     if tenant_str.is_empty() {
@@ -891,7 +892,9 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
             idle_secs: 0,
         },
         valid_from: now,
-        valid_until: now + Duration::minutes(VALIDITY_WINDOW_MINUTES),
+        valid_until: now
+            .checked_add_secs(VALIDITY_WINDOW_MINUTES * 60)
+            .ok_or_else(|| anyhow::anyhow!("validity window leaves years 0000..=9999"))?,
         nonce,
         agent_verbs: input.agent_verbs.clone(),
         bundle: input.bundle_pin.clone(),
@@ -1424,8 +1427,8 @@ mod tests {
     #[test]
     fn validity_window_is_default_10_minutes() {
         let plan = synthesize_plan(&input("myvm")).unwrap();
-        let elapsed = plan.valid_until - plan.valid_from;
-        assert_eq!(elapsed.num_minutes(), VALIDITY_WINDOW_MINUTES);
+        let elapsed = plan.valid_until.whole_secs_since(plan.valid_from);
+        assert_eq!(elapsed, VALIDITY_WINDOW_MINUTES * 60);
     }
 
     #[test]

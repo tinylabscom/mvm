@@ -757,7 +757,8 @@ fn activation_checks_exact_registration_deadline_and_rejects_clock_rollback() {
             .workload(&vm)
             .nonce([case + 1; 16])
             .build();
-        plan.valid_until = chrono::DateTime::from_timestamp(deadline, 500_000_000).unwrap();
+        plan.valid_until =
+            mvm_contract::timestamp::UtcTimestamp::from_unix(deadline, 500_000_000).unwrap();
         let admitted = admit_fixture_plan(plan);
         let registration = registration_fixture(&admitted, &vm, 1);
         assert_eq!(
@@ -1069,8 +1070,12 @@ fn signed_but_expired_plan_is_rejected_before_consumption() {
     let admitted = admit_fixture("expired-cold", 1);
     let registration = registration_fixture(&admitted, "expired-cold", 1);
     let mut plan = admitted.plan().clone();
-    plan.valid_from = chrono::Utc::now() - chrono::Duration::seconds(20);
-    plan.valid_until = chrono::Utc::now() - chrono::Duration::seconds(10);
+    plan.valid_from = mvm_core::plan::test_support::utc_timestamp(
+        chrono::Utc::now() - chrono::Duration::seconds(20),
+    );
+    plan.valid_until = mvm_core::plan::test_support::utc_timestamp(
+        chrono::Utc::now() - chrono::Duration::seconds(10),
+    );
     plan.plan_id = mvm_core::plan::content_id::compute_plan_id(&plan);
     let signer = host_keypair::load_or_init().unwrap();
     let signed = mvm_core::plan::sign_plan(&plan, &signer.signing, &host_keypair::host_signer_id());

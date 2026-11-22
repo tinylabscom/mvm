@@ -21,6 +21,11 @@ use crate::plan::types::{
 };
 use mvm_contract::protocol::broker::ServiceId;
 
+/// A fixture instant as the plan's validity type.
+pub fn utc_timestamp(t: DateTime<Utc>) -> mvm_contract::timestamp::UtcTimestamp {
+    t.try_into().expect("fixture time within years 0000..=9999")
+}
+
 /// Builder for a minimal, valid local [`ExecutionPlan`]. Defaults match the
 /// shape the audit/admission tests need; override only what a test pins.
 pub struct PlanFixture {
@@ -227,8 +232,8 @@ impl PlanFixture {
                 snapshot_on_idle: false,
                 idle_secs: 0,
             },
-            valid_from: self.valid_from.unwrap_or(now),
-            valid_until: self.valid_until.unwrap_or(now + Duration::minutes(10)),
+            valid_from: utc_timestamp(self.valid_from.unwrap_or(now)),
+            valid_until: utc_timestamp(self.valid_until.unwrap_or(now + Duration::minutes(10))),
             nonce: Nonce::from_bytes(self.nonce),
             agent_verbs: None,
             bundle: None,
@@ -291,8 +296,8 @@ mod tests {
         assert_eq!(plan.workload.0, "w-1");
         assert_eq!(plan.runtime_profile.0, "hvf");
         assert_eq!(plan.nonce, Nonce::from_bytes([7u8; 16]));
-        assert_eq!(plan.valid_from, from);
-        assert_eq!(plan.valid_until, until);
+        assert_eq!(plan.valid_from, utc_timestamp(from));
+        assert_eq!(plan.valid_until, utc_timestamp(until));
     }
 
     #[test]

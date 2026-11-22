@@ -424,7 +424,7 @@ fn serve_actor(
         .capability
         .grant
         .expires_at_unix_ms
-        .min(plan.valid_until.timestamp_millis())
+        .min(plan.valid_until.unix_millis())
         .saturating_sub(crate::mailbox_launch::actor_template::current_time_ms()?);
     let remaining = Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(0));
     let started = std::time::Instant::now();

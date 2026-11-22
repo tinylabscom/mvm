@@ -278,7 +278,7 @@ fn actor_response_survives_helper_process_crash_before_signed_ack() {
             destination: child_guest.binding.address,
             message_id: call,
             correlation_id: correlation,
-            deadline_unix_ms: fixture.plan.valid_until.timestamp_millis() - 1000,
+            deadline_unix_ms: fixture.plan.valid_until.unix_millis() - 1000,
             content_type: content_type.clone(),
             payload: b"durable-call".to_vec(),
         }),

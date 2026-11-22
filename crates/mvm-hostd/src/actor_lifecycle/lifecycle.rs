@@ -238,8 +238,8 @@ impl ActorLifecycle {
             .parent
             .grant()
             .map_err(|_| ActorRefusalCode::NotBound)?;
-        if now < plan.valid_from.timestamp_millis()
-            || now >= plan.valid_until.timestamp_millis()
+        if now < plan.valid_from.unix_millis()
+            || now >= plan.valid_until.unix_millis()
             || now < grant.not_before_unix_ms
             || now >= grant.expires_at_unix_ms
         {
@@ -488,7 +488,7 @@ impl ActorLifecycle {
         let grant_expiry =
             chrono::DateTime::from_timestamp_millis(self.host.parent.grant()?.expires_at_unix_ms)
                 .ok_or_else(|| anyhow::anyhow!("invalid actor grant expiry"))?;
-        child.valid_until = child.valid_until.min(grant_expiry);
+        child.valid_until = child.valid_until.min(grant_expiry.try_into()?);
         let mut workflow = self
             .host
             .parent
@@ -696,8 +696,7 @@ impl ActorLifecycle {
                 )],
             )?;
             let plan = started.admitted.plan();
-            let mut timeout = plan
-                .valid_until
+            let mut timeout = chrono::DateTime::<Utc>::from(plan.valid_until)
                 .signed_duration_since(Utc::now())
                 .to_std()?;
             if plan.resources.timeouts.exec_secs != 0 {

@@ -57,7 +57,7 @@ pub(super) fn mint_verb_grant_sidecar(
         &keystore,
         vm_name,
         &plan.nonce,
-        plan.valid_until,
+        plan.valid_until.into(),
         verbs,
         crate::host_signer::VerbGrantAuthority {
             drive,
@@ -103,11 +103,12 @@ fn granted_verbs(plan: &ExecutionPlan, other_authority: bool) -> Option<Vec<Verb
 
 /// Refuse to mint a grant from a plan whose validity window has closed.
 fn refuse_expired_plan(plan: &ExecutionPlan, now: chrono::DateTime<chrono::Utc>) -> Result<()> {
+    let now = mvm_contract::timestamp::UtcTimestamp::try_from(now)?;
     if now < plan.valid_until {
         return Ok(());
     }
-    let window = (plan.valid_until - plan.valid_from).num_seconds();
-    let since_admission = (now - plan.valid_from).num_seconds();
+    let window = plan.valid_until.whole_secs_since(plan.valid_from);
+    let since_admission = now.whole_secs_since(plan.valid_from);
     anyhow::bail!(
         "the admitted plan's validity window closed at {} ({window}s after admission at {}), \
          {since_admission}s ago counting from admission; a verb grant minted from it would \
@@ -124,8 +125,11 @@ mod tests {
 
     fn plan_valid(from_secs_ago: i64, window_secs: i64) -> ExecutionPlan {
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
-        plan.valid_from = chrono::Utc::now() - chrono::Duration::seconds(from_secs_ago);
-        plan.valid_until = plan.valid_from + chrono::Duration::seconds(window_secs);
+        plan.valid_from = mvm_contract::timestamp::UtcTimestamp::try_from(
+            chrono::Utc::now() - chrono::Duration::seconds(from_secs_ago),
+        )
+        .unwrap();
+        plan.valid_until = plan.valid_from.checked_add_secs(window_secs).unwrap();
         plan
     }
 

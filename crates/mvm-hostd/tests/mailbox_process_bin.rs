@@ -105,9 +105,9 @@ fn actor_fixture(home: &std::path::Path) -> ActorFixture {
                     digest: Sha256Digest::from_bytes(&[6; 32]),
                 }],
                 operations: vec![LifecycleOperation::Launch],
-                not_before_unix_ms: plan.valid_from.timestamp_millis(),
-                expires_at_unix_ms: plan.valid_until.timestamp_millis(),
-                workflow_deadline_unix_ms: plan.valid_until.timestamp_millis(),
+                not_before_unix_ms: plan.valid_from.unix_millis(),
+                expires_at_unix_ms: plan.valid_until.unix_millis(),
+                workflow_deadline_unix_ms: plan.valid_until.unix_millis(),
             },
         },
     });
@@ -132,8 +132,8 @@ fn actor_fixture(home: &std::path::Path) -> ActorFixture {
             max_storage_bytes: 8 * 1024 * 1024,
             max_send_attempts: 8,
             policy_epoch: 1,
-            not_before_unix_ms: plan.valid_from.timestamp_millis(),
-            expires_at_unix_ms: plan.valid_until.timestamp_millis(),
+            not_before_unix_ms: plan.valid_from.unix_millis(),
+            expires_at_unix_ms: plan.valid_until.unix_millis(),
         },
         [5; 32],
     )

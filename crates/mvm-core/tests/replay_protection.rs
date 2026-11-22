@@ -14,8 +14,12 @@ use mvm_core::plan::types::{
 use mvm_core::plan::validity::{NonceStore, PlanValidityError, check_window};
 use mvm_core::plan::{ExecutionPlan, SCHEMA_VERSION};
 
-fn at(dt: chrono::DateTime<Utc>) -> mvm_contract::timestamp::UtcTimestamp {
-    dt.try_into().unwrap()
+fn at<T>(t: T) -> mvm_contract::timestamp::UtcTimestamp
+where
+    T: TryInto<mvm_contract::timestamp::UtcTimestamp>,
+    T::Error: std::fmt::Debug,
+{
+    t.try_into().unwrap()
 }
 
 fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
@@ -79,8 +83,8 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
             snapshot_on_idle: false,
             idle_secs: 0,
         },
-        valid_from: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
-        valid_until: Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
+        valid_from: at(Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap()),
+        valid_until: at(Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap()),
         nonce: Nonce::from_bytes(nonce),
         agent_verbs: None,
         bundle: None,
@@ -133,7 +137,7 @@ fn check_window_rejects_after_valid_until() {
 #[test]
 fn check_window_rejects_inverted_window() {
     let mut plan = fixture_plan([0xaa; 16]);
-    plan.valid_until = plan.valid_from - chrono::TimeDelta::seconds(1);
+    plan.valid_until = plan.valid_from.checked_add_secs(-1).unwrap();
     let now = plan.valid_from;
     let err = check_window(&plan, at(now)).unwrap_err();
     assert!(matches!(err, PlanValidityError::InvertedWindow { .. }));
@@ -199,7 +203,7 @@ fn nonce_store_gc_drops_expired() {
     let mut store = NonceStore::new();
     store.check_and_insert("signer-a", &plan).unwrap();
     assert_eq!(store.len(), 1);
-    let after_window = plan.valid_until + chrono::TimeDelta::seconds(1);
+    let after_window = plan.valid_until.checked_add_secs(1).unwrap();
     store.gc(at(after_window));
     assert!(store.is_empty(), "expired nonce should have been dropped");
 }
@@ -209,7 +213,7 @@ fn nonce_store_gc_preserves_unexpired() {
     let plan = fixture_plan([0x55; 16]);
     let mut store = NonceStore::new();
     store.check_and_insert("signer-a", &plan).unwrap();
-    let inside_window = plan.valid_from + chrono::TimeDelta::seconds(1);
+    let inside_window = plan.valid_from.checked_add_secs(1).unwrap();
     store.gc(at(inside_window));
     assert_eq!(store.len(), 1, "unexpired nonce should remain");
 }

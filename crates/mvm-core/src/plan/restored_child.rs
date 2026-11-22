@@ -6,6 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
+use mvm_contract::timestamp::UtcTimestamp;
 
 use super::{ExecutionPlan, SignedExecutionPlan, verify_plan, verify_plan_id};
 
@@ -50,8 +51,9 @@ pub fn verify_restored_child_plan(
             "restored child plan pins a different image than the one restored"
         );
     }
+    let now = UtcTimestamp::try_from(binding.now)?;
     anyhow::ensure!(
-        plan.valid_from <= binding.now && binding.now < plan.valid_until,
+        plan.valid_from <= now && now < plan.valid_until,
         "restored child plan is outside its validity window"
     );
     Ok(plan)

@@ -128,12 +128,11 @@ impl LocalActorMailboxes {
         capability.max_outstanding_calls = policy.max_outstanding_calls;
         capability.max_queue_contribution_bytes = policy.max_queue_contribution_bytes;
         capability.policy_epoch = policy.policy_epoch;
-        capability.not_before_unix_ms = policy
-            .not_before_unix_ms
-            .max(plan.valid_from.timestamp_millis());
+        capability.not_before_unix_ms =
+            policy.not_before_unix_ms.max(plan.valid_from.unix_millis());
         capability.expires_at_unix_ms = policy
             .expires_at_unix_ms
-            .min(plan.valid_until.timestamp_millis());
+            .min(plan.valid_until.unix_millis());
         capability.delegation_depth = 0;
         capability.validate_bounds()?;
         let header = &mut template.header;
@@ -371,8 +370,8 @@ pub(crate) mod tests {
             max_storage_bytes: 2 * 1024 * 1024,
             max_send_attempts: 8,
             policy_epoch: 1,
-            not_before_unix_ms: parent.valid_from.timestamp_millis(),
-            expires_at_unix_ms: parent.valid_until.timestamp_millis(),
+            not_before_unix_ms: parent.valid_from.unix_millis(),
+            expires_at_unix_ms: parent.valid_until.unix_millis(),
         };
         parent.workflow = Some(WorkflowBinding {
             version: ActorProtocolVersion::V1,
