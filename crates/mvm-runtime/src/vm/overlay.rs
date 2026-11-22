@@ -1068,6 +1068,31 @@ mod tests {
     }
 
     #[test]
+    fn destruction_receipt_json_bytes_are_pinned() {
+        // The compact JSON is what `cert_fingerprint` hashes and what lands on
+        // disk, so a whole-second and a fractional instant must keep their bytes.
+        let mut receipt = sample_receipt();
+        assert_eq!(
+            serde_json::to_string(&receipt).unwrap(),
+            r#"{"tenant":"acme","workload":"build-runner","destroyed_at":"2023-11-14T22:13:20.123456789Z","files_wiped":42,"bytes_wiped":1048576}"#
+        );
+        receipt.destroyed_at = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        assert_eq!(
+            serde_json::to_string(&receipt).unwrap(),
+            r#"{"tenant":"acme","workload":"build-runner","destroyed_at":"2023-11-14T22:13:20Z","files_wiped":42,"bytes_wiped":1048576}"#
+        );
+        assert_eq!(
+            String::from_utf8(receipt.signature_payload()).unwrap(),
+            "destruction|v1|acme|build-runner|1700000000000000000|42|1048576"
+        );
+        let old: DestructionReceipt = serde_json::from_str(
+            r#"{"tenant":"acme","workload":"w","destroyed_at":"2023-11-14T23:13:20+01:00","files_wiped":1,"bytes_wiped":2}"#,
+        )
+        .unwrap();
+        assert_eq!(old.destroyed_at.timestamp(), 1_700_000_000);
+    }
+
+    #[test]
     fn sign_then_verify_round_trip() {
         let key = {
             let mut __ed_seed = [0u8; 32];

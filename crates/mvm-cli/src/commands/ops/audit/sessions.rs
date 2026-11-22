@@ -437,6 +437,16 @@ mod tests {
             at("2026-09-01T08:30:00Z")
         );
         assert_eq!(
+            parse_time_bound_at("2026-09-01T10:30:00+02:00", now).unwrap(),
+            at("2026-09-01T08:30:00Z")
+        );
+        assert_eq!(
+            parse_time_bound_at("2026-09-01T08:30:00.250Z", now)
+                .unwrap()
+                .timestamp_millis(),
+            at("2026-09-01T08:30:00Z").timestamp_millis() + 250
+        );
+        assert_eq!(
             parse_time_bound_at("2026-09-01", now).unwrap(),
             at("2026-09-01T00:00:00Z")
         );
