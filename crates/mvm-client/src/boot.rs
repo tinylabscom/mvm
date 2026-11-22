@@ -554,6 +554,40 @@ mod backend_select_tests {
         assert!(msg.contains("backend hvf is unavailable on this host"));
     }
 
+    #[test]
+    fn validate_backend_for_egress_admits_firecracker_before_its_binary_is_fetched() {
+        let _guard = mvm_runtime::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().expect("tempdir");
+        env.set("MVM_HOME", home.path());
+        env.remove("MVM_FIRECRACKER_BIN");
+        let policy = NetworkPolicy::allow_list(vec![mvm_core::network_policy::HostPort::new(
+            "example.com",
+            443,
+        )]);
+        let verdict = validate_backend_for_egress(
+            "firecracker",
+            true,
+            &policy,
+            "OCI --image runs with outbound egress enabled",
+        );
+        // Nothing is fetched into this home, so the verdict turns on the host
+        // alone: one that can open /dev/kvm is admitted and fetches at launch.
+        let can_open_kvm = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/kvm")
+            .is_ok();
+        if can_open_kvm {
+            verdict.expect("an absent Firecracker is fetched at launch, not a refusal");
+        } else {
+            let msg = verdict.expect_err("no KVM must refuse").to_string();
+            assert!(msg.contains("backend firecracker is unavailable on this host"));
+        }
+    }
+
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn select_backend_name_for_egress_picks_hvf_when_proxy_support_is_available() {
