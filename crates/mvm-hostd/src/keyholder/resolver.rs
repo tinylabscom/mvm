@@ -13,10 +13,11 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use chrono::{Duration, Utc};
 use mvm_contract::ir::SecretRef;
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::crypto::secret_binding::BindingStore;
 use mvm_core::crypto::secret_store::SecretStore;
+use mvm_core::util::time::utc_timestamp_now;
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -24,7 +25,7 @@ use zeroize::Zeroizing;
 /// How close to expiry a stored token set may be before resolution refuses
 /// it. The proactive refresher (`keyholder::oauth`) acts one lead-time
 /// earlier than this so a running VM never reaches the refusal.
-pub(crate) const OAUTH_REFRESH_SKEW: Duration = Duration::seconds(60);
+pub(crate) const OAUTH_REFRESH_SKEW_SECS: i64 = 60;
 
 /// OAuth token set stored in the encrypted secret store for an OAuth binding.
 #[derive(Clone, Default)]
@@ -88,7 +89,7 @@ pub struct OAuthTokenSet {
     /// other direction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<OAuthSecretString>,
-    pub expires_at: chrono::DateTime<Utc>,
+    pub expires_at: UtcTimestamp,
     /// The grant the host renews this set with. Recorded rather than inferred
     /// from which credentials happen to be present: a set minted by a human's
     /// consent must never be renewed by the client-credentials grant, which
@@ -133,7 +134,7 @@ impl std::fmt::Debug for OAuthTokenSet {
 pub struct CapturedOAuthToken {
     pub access_token: OAuthSecretString,
     pub refresh_token: Option<OAuthSecretString>,
-    pub expires_at: Option<chrono::DateTime<Utc>>,
+    pub expires_at: Option<UtcTimestamp>,
 }
 
 impl std::fmt::Debug for CapturedOAuthToken {
@@ -169,7 +170,7 @@ pub enum ResolveError {
     #[error("secret `{name}` requires OAuth refresh before use (expires_at={expires_at})")]
     OAuthRefreshRequired {
         name: String,
-        expires_at: chrono::DateTime<Utc>,
+        expires_at: UtcTimestamp,
     },
 }
 
@@ -257,8 +258,10 @@ impl SecretResolver for LocalResolver {
                         source: anyhow::Error::new(source)
                             .context("parsing oauth token set from secret value"),
                     })?;
-                let refresh_deadline = Utc::now() + OAUTH_REFRESH_SKEW;
-                if token_set.expires_at <= refresh_deadline {
+                let fresh = utc_timestamp_now()
+                    .checked_add_secs(OAUTH_REFRESH_SKEW_SECS)
+                    .is_some_and(|deadline| token_set.expires_at > deadline);
+                if !fresh {
                     return Err(ResolveError::OAuthRefreshRequired {
                         name: r.name.clone(),
                         expires_at: token_set.expires_at,
@@ -312,6 +315,14 @@ impl SecretResolver for LocalResolver {
         serde_json::from_str(stored.expose_secret())
             .with_context(|| format!("parsing oauth token set for `{name}`"))
     }
+}
+
+/// An instant `secs` from now, for fixtures.
+#[cfg(test)]
+pub(crate) fn expiry_in(secs: i64) -> UtcTimestamp {
+    utc_timestamp_now()
+        .checked_add_secs(secs)
+        .expect("a fixture expiry is within years 0000..=9999")
 }
 
 #[cfg(test)]
@@ -448,7 +459,7 @@ mod tests {
             access_token: OAuthSecretString::from(String::from("oauth-access-token")),
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
             client_secret: None,
-            expires_at: Utc::now() + Duration::minutes(5),
+            expires_at: expiry_in(300),
             grant: OAuthGrant::default(),
         };
         store_oauth_token_set(&store, "local", "oauth-secret", &token_set);
@@ -471,7 +482,7 @@ mod tests {
             access_token: OAuthSecretString::from(String::from("oauth-access-token")),
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
             client_secret: None,
-            expires_at: Utc::now() + Duration::seconds(30),
+            expires_at: expiry_in(30),
             grant: OAuthGrant::default(),
         };
         store_oauth_token_set(&store, "local", "oauth-secret", &token_set);
@@ -492,7 +503,7 @@ mod tests {
             access_token: OAuthSecretString::from(String::from("oauth-access-token")),
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
             client_secret: None,
-            expires_at: Utc::now() + Duration::minutes(5),
+            expires_at: expiry_in(300),
             grant: OAuthGrant::default(),
         };
         let rendered = format!("{token_set:?}");
@@ -505,7 +516,7 @@ mod tests {
     fn storing_a_captured_oauth_token_updates_the_persisted_token_set() {
         let dir = tempdir().unwrap();
         let store = FileSecretStore::with_dir(dir.path().join("secrets"));
-        let original_expiry = Utc::now() + Duration::minutes(5);
+        let original_expiry = expiry_in(300);
         let token_set = OAuthTokenSet {
             access_token: OAuthSecretString::from(String::from("oauth-access-token")),
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
@@ -521,7 +532,7 @@ mod tests {
                 CapturedOAuthToken {
                     access_token: OAuthSecretString::from(String::from("fresh-access-token")),
                     refresh_token: None,
-                    expires_at: Some(Utc::now() + Duration::minutes(30)),
+                    expires_at: Some(expiry_in(1800)),
                 },
             )
             .unwrap();
@@ -553,7 +564,7 @@ mod tests {
             access_token: OAuthSecretString::from(String::from("oauth-access-token")),
             refresh_token: None,
             client_secret: Some(OAuthSecretString::from(String::from("oauth-client-secret"))),
-            expires_at: Utc::now() + Duration::minutes(5),
+            expires_at: expiry_in(300),
             grant: OAuthGrant::default(),
         };
         store_oauth_token_set(&store, "local", "oauth-secret", &token_set);
@@ -592,7 +603,7 @@ mod tests {
             access_token: OAuthSecretString::from(String::from("oauth-access-token")),
             refresh_token: None,
             client_secret: Some(OAuthSecretString::from(String::from("oauth-client-secret"))),
-            expires_at: Utc::now() + Duration::minutes(5),
+            expires_at: expiry_in(300),
             grant: OAuthGrant::default(),
         };
         let rendered = format!("{token_set:?}");

@@ -862,7 +862,6 @@ mod server_tests {
     };
     use crate::supervisor::inspection::redactor::STREAM_TRANSFORM_OVERLAP;
     use async_trait::async_trait;
-    use chrono::{Duration, Utc};
     use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
     use mvm_core::crypto::secret_binding::{BindingStore, OAuthBindingMeta};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
@@ -897,7 +896,7 @@ mod server_tests {
             access_token: OAuthSecretString::from(access_token.to_owned()),
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
             client_secret: None,
-            expires_at: Utc::now() + Duration::minutes(5),
+            expires_at: crate::keyholder::resolver::expiry_in(300),
             grant: Default::default(),
         }
     }
@@ -1303,7 +1302,7 @@ mod server_tests {
             stored.refresh_token.as_ref().unwrap().expose_secret(),
             "fresh-refresh-token"
         );
-        assert!(stored.expires_at > Utc::now());
+        assert!(stored.expires_at > mvm_core::util::time::utc_timestamp_now());
     }
 
     #[tokio::test]

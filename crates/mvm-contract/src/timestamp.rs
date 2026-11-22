@@ -41,6 +41,9 @@ impl fmt::Display for ParseTimestampError {
 impl core::error::Error for ParseTimestampError {}
 
 impl UtcTimestamp {
+    /// 1970-01-01T00:00:00Z.
+    pub const UNIX_EPOCH: Self = Self { secs: 0, nanos: 0 };
+
     /// `None` when `nanos` is a full second or more, or the instant is outside
     /// years 0000..=9999.
     pub fn from_unix(secs: i64, nanos: u32) -> Option<Self> {

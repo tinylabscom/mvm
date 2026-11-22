@@ -295,3 +295,12 @@ fn the_chrono_grant_bridge_round_trips_at_the_range_edges() {
         assert_eq!(UtcTimestamp::try_from(dt), Ok(t));
     }
 }
+
+#[test]
+fn the_epoch_constant_is_the_chrono_epoch() {
+    assert_eq!(
+        serde_json::to_string(&UtcTimestamp::UNIX_EPOCH).unwrap(),
+        serde_json::to_string(&DateTime::<Utc>::UNIX_EPOCH).unwrap()
+    );
+    assert_eq!(UtcTimestamp::UNIX_EPOCH, ours(0, 0));
+}

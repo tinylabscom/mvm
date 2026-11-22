@@ -36,15 +36,16 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use anyhow::Context;
-use chrono::{DateTime, Duration, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::crypto::secret_binding::{BindingStore, OAuthBindingMeta};
 use mvm_core::plan::{SecretBinding, SecretSource};
+use mvm_core::util::time::utc_timestamp_now;
 use mvm_http::resolve::Resolve;
 use tracing::{info, warn};
 
 use super::oauth_consent::AuthorizationCodeGrant;
 use super::resolver::{
-    CapturedOAuthToken, OAUTH_REFRESH_SKEW, OAuthGrant, OAuthSecretString, OAuthTokenSet,
+    CapturedOAuthToken, OAUTH_REFRESH_SKEW_SECS, OAuthGrant, OAuthSecretString, OAuthTokenSet,
     SecretResolver,
 };
 
@@ -55,7 +56,7 @@ const DEFAULT_ACCESS_TOKEN_POINTER: &str = "/access_token";
 /// How far ahead of the resolver's refusal skew the proactive exchange fires,
 /// leaving room for the retry budget below to run before resolution would
 /// start refusing.
-const REFRESH_LEAD: Duration = Duration::seconds(60);
+const REFRESH_LEAD_SECS: i64 = 60;
 
 /// Ceiling for one token-endpoint round trip.
 pub(crate) const EXCHANGE_TIMEOUT: StdDuration = StdDuration::from_secs(15);
@@ -81,7 +82,7 @@ pub fn initial_token_set(client_secret: &str) -> OAuthTokenSet {
         access_token: OAuthSecretString::from(String::new()),
         refresh_token: None,
         client_secret: Some(OAuthSecretString::from(client_secret.to_owned())),
-        expires_at: DateTime::UNIX_EPOCH,
+        expires_at: UtcTimestamp::UNIX_EPOCH,
         grant: OAuthGrant::ClientCredentials,
     }
 }
@@ -96,7 +97,7 @@ pub fn awaiting_consent_token_set(client_secret: Option<&str>) -> OAuthTokenSet 
         access_token: OAuthSecretString::from(String::new()),
         refresh_token: None,
         client_secret: client_secret.map(|secret| OAuthSecretString::from(secret.to_owned())),
-        expires_at: DateTime::UNIX_EPOCH,
+        expires_at: UtcTimestamp::UNIX_EPOCH,
         grant: OAuthGrant::AuthorizationCode,
     }
 }
@@ -110,7 +111,7 @@ pub fn consented_token_set(
     captured: CapturedOAuthToken,
     client_secret: Option<OAuthSecretString>,
 ) -> anyhow::Result<OAuthTokenSet> {
-    let expires_at = require_schedulable_expiry(captured.expires_at, Utc::now())?;
+    let expires_at = require_schedulable_expiry(captured.expires_at, utc_timestamp_now())?;
     Ok(OAuthTokenSet {
         access_token: captured.access_token,
         refresh_token: captured.refresh_token,
@@ -174,13 +175,11 @@ pub(crate) fn parse_token_response(
     let expires_at = json
         .pointer("/expires_at")
         .and_then(serde_json::Value::as_str)
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc))
+        .and_then(|value| value.parse::<UtcTimestamp>().ok())
         .or_else(|| {
             json.pointer("/expires_in")
                 .and_then(serde_json::Value::as_i64)
-                .and_then(Duration::try_seconds)
-                .map(|ttl| Utc::now() + ttl)
+                .and_then(|ttl| utc_timestamp_now().checked_add_secs(ttl))
         });
     Some(CapturedOAuthToken {
         access_token: super::resolver::OAuthSecretString::from(access_token.to_owned()),
@@ -287,9 +286,12 @@ fn token_endpoint_host(token_url: &str) -> String {
 }
 
 /// How long to wait before proactively refreshing a token set with this
-/// expiry. Zero or negative means the exchange is already due.
-pub(crate) fn refresh_in(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> Duration {
-    expires_at - OAUTH_REFRESH_SKEW - REFRESH_LEAD - now
+/// expiry, or `None` when the exchange is already due.
+pub(crate) fn refresh_in(expires_at: UtcTimestamp, now: UtcTimestamp) -> Option<StdDuration> {
+    expires_at
+        .checked_add_secs(-(OAUTH_REFRESH_SKEW_SECS + REFRESH_LEAD_SECS))?
+        .duration_since(now)
+        .filter(|wait| !wait.is_zero())
 }
 
 /// The token endpoint's destination failed the injected destination check, so
@@ -602,7 +604,7 @@ pub async fn refresh_once(
             client_secret,
         } => exchange_refresh_token(client, meta, refresh_token, client_secret).await?,
     };
-    require_schedulable_expiry(captured.expires_at, Utc::now())?;
+    require_schedulable_expiry(captured.expires_at, utc_timestamp_now())?;
     resolver
         .store_captured_oauth_token(name, captured)
         .with_context(|| format!("persisting refreshed oauth token set for `{name}`"))
@@ -616,16 +618,16 @@ pub async fn refresh_once(
 /// it. Either way resolution would go on refusing the stored set while the
 /// loop exchanged again at once, so the token is not stored.
 fn require_schedulable_expiry(
-    expires_at: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
-) -> anyhow::Result<DateTime<Utc>> {
+    expires_at: Option<UtcTimestamp>,
+    now: UtcTimestamp,
+) -> anyhow::Result<UtcTimestamp> {
     let Some(expires_at) = expires_at else {
         anyhow::bail!("token endpoint response carried no expiry (`expires_in` or `expires_at`)");
     };
-    if refresh_in(expires_at, now) <= Duration::zero() {
+    if refresh_in(expires_at, now).is_none() {
         anyhow::bail!(
             "token endpoint issued a token whose expiry {expires_at} leaves no time to refresh it ahead of the {}s refusal skew",
-            OAUTH_REFRESH_SKEW.num_seconds()
+            OAUTH_REFRESH_SKEW_SECS
         );
     }
     Ok(expires_at)
@@ -781,10 +783,7 @@ async fn refresh_loop(settings: RefreshSettings, binding: OAuthRefreshBinding) {
             settings.stopped(&binding.name, &destination, reason).await;
             return;
         }
-        let wait = refresh_in(token_set.expires_at, Utc::now());
-        if wait > Duration::zero()
-            && let Ok(wait) = wait.to_std()
-        {
+        if let Some(wait) = refresh_in(token_set.expires_at, utc_timestamp_now()) {
             tokio::time::sleep(wait).await;
         }
         // An expired set is due, not lost: neither grant needs the access
@@ -855,10 +854,8 @@ mod tests {
     use std::thread;
     use tempfile::tempdir;
 
-    use chrono::Datelike as _;
-
     use crate::keyholder::resolver::{
-        LocalResolver, OAuthSecretString, OAuthTokenSet, ResolveError, SecretResolver,
+        LocalResolver, OAuthSecretString, OAuthTokenSet, ResolveError, SecretResolver, expiry_in,
     };
     use crate::supervisor::audit::audit_recorder::Recorder;
     use crate::supervisor::audit::signer::CapturingAuditSigner;
@@ -903,7 +900,7 @@ mod tests {
             access_token: OAuthSecretString::from(access_token.to_owned()),
             refresh_token: Some(OAuthSecretString::from(String::from("old-refresh-token"))),
             client_secret: client_secret.map(|value| OAuthSecretString::from(value.to_owned())),
-            expires_at: Utc::now() + Duration::seconds(30),
+            expires_at: expiry_in(30),
             grant: OAuthGrant::ClientCredentials,
         }
     }
@@ -914,7 +911,7 @@ mod tests {
             access_token: OAuthSecretString::from(String::from("stale-access-token")),
             refresh_token: Some(OAuthSecretString::from(refresh_token.to_owned())),
             client_secret: client_secret.map(|value| OAuthSecretString::from(value.to_owned())),
-            expires_at: Utc::now() + Duration::seconds(30),
+            expires_at: expiry_in(30),
             grant: OAuthGrant::AuthorizationCode,
         }
     }
@@ -1169,7 +1166,7 @@ mod tests {
         assert!(set.refresh_token.is_none());
         // An expiry in the past: resolution refuses, the refresher treats
         // the set as due, and any captured merge only moves it forward.
-        assert!(set.expires_at < Utc::now());
+        assert!(set.expires_at < utc_timestamp_now());
     }
 
     #[test]
@@ -1215,7 +1212,7 @@ mod tests {
             CapturedOAuthToken {
                 access_token: OAuthSecretString::from("a".to_owned()),
                 refresh_token: None,
-                expires_at: Some(Utc::now() + Duration::hours(1)),
+                expires_at: Some(expiry_in(3600)),
             },
             Some(OAuthSecretString::from("the-client-secret".to_owned())),
         )
@@ -1237,7 +1234,7 @@ mod tests {
 
     #[test]
     fn a_consented_set_needs_a_schedulable_expiry() {
-        for expires_at in [None, Some(Utc::now() + Duration::seconds(30))] {
+        for expires_at in [None, Some(expiry_in(30))] {
             let err = consented_token_set(
                 CapturedOAuthToken {
                     access_token: OAuthSecretString::from("a".to_owned()),
@@ -1260,23 +1257,27 @@ mod tests {
             set.client_secret.as_ref().unwrap().expose_secret(),
             "the-client-secret"
         );
-        assert!(set.expires_at < Utc::now());
+        assert!(set.expires_at < utc_timestamp_now());
         assert!(renewal(&set).is_err());
         assert!(awaiting_consent_token_set(None).client_secret.is_none());
     }
 
     #[test]
     fn refresh_in_leads_the_resolver_skew() {
-        let now = Utc::now();
-        let expires_at = now + Duration::minutes(10);
-        let wait = refresh_in(expires_at, now);
+        let now = utc_timestamp_now();
+        let at = |secs| now.checked_add_secs(secs).unwrap();
         // 10 minutes to expiry minus the 60 s skew and 60 s lead.
-        assert!(wait <= Duration::seconds(480));
-        assert!(wait > Duration::seconds(470));
-        // Within the lead window the exchange is already due.
-        assert!(refresh_in(now + Duration::seconds(90), now) <= Duration::zero());
-        // A past expiry is due immediately, not a negative-duration panic.
-        assert!(refresh_in(now - Duration::seconds(5), now) <= Duration::zero());
+        assert_eq!(refresh_in(at(600), now), Some(StdDuration::from_secs(480)));
+        // Within the lead window the exchange is already due, exactly at it too.
+        assert_eq!(refresh_in(at(90), now), None);
+        assert_eq!(refresh_in(at(120), now), None);
+        // A past expiry is due immediately.
+        assert_eq!(refresh_in(at(-5), now), None);
+        // An expiry too early to subtract the lead from is due, not a panic.
+        assert_eq!(
+            refresh_in(UtcTimestamp::from_unix(-62_167_219_200, 0).unwrap(), now),
+            None
+        );
     }
 
     #[test]
@@ -1293,9 +1294,11 @@ mod tests {
             token.refresh_token.as_ref().unwrap().expose_secret(),
             "refresh-1"
         );
-        let ttl = token.expires_at.unwrap() - Utc::now();
-        assert!(ttl <= Duration::seconds(300));
-        assert!(ttl > Duration::seconds(290));
+        let ttl = token
+            .expires_at
+            .unwrap()
+            .whole_secs_since(utc_timestamp_now());
+        assert!((290..=300).contains(&ttl), "{ttl}");
 
         let custom = parse_token_response(Some("/nested/token"), &json).unwrap();
         assert_eq!(custom.access_token.expose_secret(), "access-1");
@@ -1312,7 +1315,10 @@ mod tests {
             "expires_at": "2999-01-01T00:00:00Z",
         });
         let token = parse_token_response(None, &json).unwrap();
-        assert!(token.expires_at.unwrap().year() > 2500);
+        assert_eq!(
+            token.expires_at,
+            Some("2999-01-01T00:00:00Z".parse().unwrap())
+        );
     }
 
     #[test]
@@ -1506,9 +1512,8 @@ mod tests {
             stored.client_secret.unwrap().expose_secret(),
             "the-client-secret"
         );
-        let ttl = stored.expires_at - Utc::now();
-        assert!(ttl <= Duration::seconds(3600));
-        assert!(ttl > Duration::seconds(3500));
+        let ttl = stored.expires_at.whole_secs_since(utc_timestamp_now());
+        assert!((3500..=3600).contains(&ttl), "{ttl}");
     }
 
     #[tokio::test]
