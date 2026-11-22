@@ -169,6 +169,21 @@ mod tests {
         assert_eq!(recovered, list);
     }
 
+    /// The serialized form is what a publisher signs and a host persists; it
+    /// must not move when the timestamp representation does.
+    #[test]
+    fn list_serialization_bytes_are_pinned() {
+        let whole = r#"{"schema_version":1,"revocations":[],"issued_at":"2026-01-01T00:00:00Z","not_after":"2026-12-31T00:00:00Z"}"#;
+        let list: PackRevocationList = serde_json::from_str(whole).expect("whole");
+        assert_eq!(serde_json::to_string(&list).expect("ser"), whole);
+        let fractional = r#"{"schema_version":1,"revocations":[],"issued_at":"2026-01-01T00:00:00.123Z","not_after":"2026-12-31T00:00:00.500Z"}"#;
+        let list: PackRevocationList = serde_json::from_str(fractional).expect("fractional");
+        assert_eq!(serde_json::to_string(&list).expect("ser"), fractional);
+        let offset = whole.replace("T00:00:00Z", "T00:00:00+00:00");
+        let list: PackRevocationList = serde_json::from_str(&offset).expect("offset");
+        assert_eq!(serde_json::to_string(&list).expect("ser"), whole);
+    }
+
     #[test]
     fn unknown_field_is_rejected() {
         let mut value = serde_json::to_value(sample_list()).expect("to_value");

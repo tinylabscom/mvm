@@ -753,3 +753,13 @@ mod published {
         );
     }
 }
+
+#[test]
+fn checkpoint_serialization_bytes_are_pinned() {
+    let digest = "a".repeat(64);
+    for issued in ["2026-10-01T00:00:00Z", "2026-10-01T00:00:00.123Z"] {
+        let json = format!(r#"{{"publication":7,"issued_at":"{issued}","sha256":"{digest}"}}"#);
+        let checkpoint: ImageSetRevocationCheckpoint = serde_json::from_str(&json).expect("parse");
+        assert_eq!(serde_json::to_string(&checkpoint).expect("ser"), json);
+    }
+}
