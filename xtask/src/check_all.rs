@@ -151,8 +151,8 @@ pub(crate) const GATES: &[Gate] = &[
         crate::check_single_exec_secs_writer::run,
     ),
     (
-        "check-template-restore-boundary",
-        crate::check_template_restore_boundary::run,
+        "check-workload-dispatch",
+        crate::check_workload_dispatch::run,
     ),
     ("check-seal-gate", crate::check_seal_gate::run),
     (

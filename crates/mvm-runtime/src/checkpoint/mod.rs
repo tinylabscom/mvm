@@ -261,6 +261,31 @@ impl<F: Fn(&RestoredChild<'_>) -> Result<()>> ForkRestorer for F {
     }
 }
 
+impl ForkRestorer for mvm_backends::fc::FcForkRestorer {
+    fn restore(&self, child: &RestoredChild<'_>) -> Result<()> {
+        let required_blob_sha = |name: &str| {
+            child
+                .content
+                .iter()
+                .find(|blob| blob.name == name)
+                .map(|blob| blob.sha256.as_str())
+                .with_context(|| {
+                    format!("Firecracker checkpoint has no authenticated {name} evidence")
+                })
+        };
+        self.restore_fork(
+            child.vm_name,
+            child.state_dir,
+            child.cpu_grant,
+            &mvm_backends::fc::ForkRuntimeEvidence {
+                observation_sha256: required_blob_sha("runtime-artifacts.json")?,
+                anchors_sha256: required_blob_sha("device-anchors.json")?,
+                reseeded_identity_sha256: child.reseeded_identity_sha256,
+            },
+        )
+    }
+}
+
 /// The restorer [`fork_vm_full`] takes.
 pub type ForkRestore<'a> = dyn ForkRestorer + 'a;
 
@@ -1067,7 +1092,8 @@ pub fn vm_full_restorer_for(meta: &CheckpointMeta) -> Result<Box<dyn VmFullResto
     }
 }
 
-pub struct RestoreParams {
+#[cfg(test)]
+pub(crate) struct RestoreParams {
     pub checkpoint: CheckpointId,
     /// Name of the VM to restore into (must match the supervisor-config shape).
     pub target_vm: String,
@@ -1076,26 +1102,61 @@ pub struct RestoreParams {
     pub tenant: String,
 }
 
-/// Resume a VM from a vm_full checkpoint (same identity). Verifies the manifest
-/// AND the record's content-address against the signed audit chain, then hands
-/// the blob paths to the restore seam. Refusing fs_quick here is deliberate:
-/// fs_quick has no memory state, so `fork_checkpoint` is the right verb.
+/// Resume a VM under the identity and backend authenticated by its checkpoint.
 ///
-/// The chain check is the same fail-closed gate `fork_checkpoint` and
-/// [`fork_vm_full`] run, for the same reason: bringing a machine back to life is
-/// at least as consequential as branching from it, so a record edited after it
-/// was audited must not be restorable either.
-pub fn restore_checkpoint(
+/// One owned metadata value supplies the target identity, backend restorer,
+/// content manifest, runtime binding, and chain check. Replacing the catalog
+/// entry during the transaction cannot mix those fields across generations.
+/// `expected_vm_name` only proves the caller locked that authenticated identity;
+/// the checkpoint metadata remains the source of the actual restore target.
+pub fn restore_same_identity_checkpoint(
+    store: &CheckpointStore,
+    checkpoint: CheckpointId,
+    expected_vm_name: &str,
+    tenant: String,
+    anchor: &dyn CheckpointChainAnchor,
+) -> Result<()> {
+    let _activation_barrier =
+        mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
+    let meta = store.read_meta(&checkpoint)?;
+    require_vm_full_restore(&meta)?;
+    verify_checkpoint_against_chain(anchor, &meta)?;
+    anyhow::ensure!(
+        meta.vm_name == expected_vm_name,
+        "same-identity restore target '{}' differs from authenticated checkpoint identity '{}'",
+        expected_vm_name,
+        meta.vm_name
+    );
+    let restore = vm_full_restorer_for(&meta)?;
+    verify_restore_source(store, &meta, &tenant, restore.as_ref(), anchor)?;
+    let target_vm = meta.vm_name.clone();
+    restore_authenticated_checkpoint(store, &meta, &target_vm, restore.as_ref())
+}
+
+/// Test seam for the authenticated transaction with an injected restorer.
+#[cfg(test)]
+pub(crate) fn restore_checkpoint(
     store: &CheckpointStore,
     params: RestoreParams,
     restore: &dyn VmFullRestore,
     anchor: &dyn CheckpointChainAnchor,
 ) -> Result<()> {
-    // The CLI also checks the generation-bearing plan, but callers of this
-    // library seam must not restore while activation is publishing.
     let _activation_barrier =
         mvm_core::host_interface::activation_barrier::ActivationBarrier::shared()?;
     let meta = store.read_meta(&params.checkpoint)?;
+    require_vm_full_restore(&meta)?;
+    verify_checkpoint_against_chain(anchor, &meta)?;
+    anyhow::ensure!(
+        params.target_vm == meta.vm_name,
+        "same-identity restore target '{}' differs from authenticated checkpoint identity '{}'",
+        params.target_vm,
+        meta.vm_name
+    );
+    verify_restore_source(store, &meta, &params.tenant, restore, anchor)?;
+    restore_authenticated_checkpoint(store, &meta, &params.target_vm, restore)
+}
+
+fn require_vm_full_restore(meta: &CheckpointMeta) -> Result<()> {
     if meta.class != CheckpointClass::VmFull {
         anyhow::bail!(
             "checkpoint '{}' is class fs_quick; restore applies to vm_full checkpoints \
@@ -1103,14 +1164,28 @@ pub fn restore_checkpoint(
             meta.id
         );
     }
-    // The record names the blobs, so it is authenticated before anything it
-    // names is read: an edited or unaudited record is refused without hashing
-    // a multi-gigabyte memory image, and for that reason rather than for
-    // whatever its blobs happen to look like.
-    verify_checkpoint_against_chain(anchor, &meta)?;
-    verify_content_except(store, &meta, restore.verifies_on_load())?;
-    verify_checkpoint_runtime(store, &meta)?;
-    ensure_same_tenant(anchor, &meta, &params.tenant)?;
+    Ok(())
+}
+
+fn verify_restore_source(
+    store: &CheckpointStore,
+    meta: &CheckpointMeta,
+    tenant: &str,
+    restore: &dyn VmFullRestore,
+    anchor: &dyn CheckpointChainAnchor,
+) -> Result<()> {
+    verify_content_except(store, meta, restore.verifies_on_load())?;
+    verify_checkpoint_runtime(store, meta)?;
+    ensure_same_tenant(anchor, meta, tenant)?;
+    Ok(())
+}
+
+fn restore_authenticated_checkpoint(
+    store: &CheckpointStore,
+    meta: &CheckpointMeta,
+    target_vm: &str,
+    restore: &dyn VmFullRestore,
+) -> Result<()> {
     // A restore killed before it returned left its plaintext behind.
     staging::reclaim_abandoned_restores(store.root());
     let materialized =
@@ -1124,16 +1199,10 @@ pub fn restore_checkpoint(
         })
     };
     if meta.protection.is_sealed() {
-        return protection::restore_protected(
-            store,
-            &meta,
-            &params.target_vm,
-            restore,
-            materialized.path(),
-        );
+        return protection::restore_protected(store, meta, target_vm, restore, materialized.path());
     }
-    let rootfs = materialized_source(store, &meta, "rootfs.ext4", materialized.path())?;
-    let memory = materialized_source(store, &meta, "memory.bin", materialized.path())?;
+    let rootfs = materialized_source(store, meta, "rootfs.ext4", materialized.path())?;
+    let memory = materialized_source(store, meta, "memory.bin", materialized.path())?;
     let dir = store.content_dir(&meta.id);
 
     // The checkpoint carries the launch config (for checkpoints captured after
@@ -1145,7 +1214,7 @@ pub fn restore_checkpoint(
 
     let content = content_with_load_memory_digest(&meta.content, &memory)?;
     restore.restore(
-        &params.target_vm,
+        target_vm,
         &rootfs,
         &memory,
         &dir.join("machine-id"),
@@ -2385,6 +2454,121 @@ mod tests {
             restore.config_seen.borrow().clone(),
             Some(cdir.join("supervisor-config.json"))
         );
+    }
+
+    #[test]
+    fn restore_checkpoint_refuses_a_target_other_than_authenticated_identity_before_effects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let ckpt = seed_vm_full_checkpoint(&store, tmp.path(), "target-binding");
+        let restore = MockRestore {
+            seen: RefCell::new(None),
+            payloads_seen: RefCell::new(None),
+            config_seen: RefCell::new(None),
+        };
+        let error = restore_checkpoint(
+            &store,
+            RestoreParams {
+                checkpoint: ckpt.id,
+                target_vm: "other-vm".into(),
+                tenant: "local".into(),
+            },
+            &restore,
+            &AgreeingAnchor,
+        )
+        .expect_err("caller-selected target must refuse");
+        assert!(
+            error
+                .to_string()
+                .contains("authenticated checkpoint identity"),
+            "{error:#}"
+        );
+        assert!(restore.seen.borrow().is_none());
+    }
+
+    #[test]
+    fn same_identity_transaction_refuses_a_different_locked_target_before_effects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let ckpt = seed_vm_full_checkpoint(&store, tmp.path(), "locked-target-binding");
+
+        let error = restore_same_identity_checkpoint(
+            &store,
+            ckpt.id,
+            "other-vm",
+            "local".into(),
+            &AgreeingAnchor,
+        )
+        .expect_err("the authenticated target must match the caller's lifecycle lock");
+        assert!(
+            error
+                .to_string()
+                .contains("authenticated checkpoint identity"),
+            "{error:#}"
+        );
+        assert_eq!(
+            staging::abandoned_restores(store.root()),
+            0,
+            "target mismatch must refuse before creating restore staging"
+        );
+    }
+
+    struct SwappingAnchor<'a> {
+        store: &'a CheckpointStore,
+        replacement: RefCell<Option<CheckpointMeta>>,
+    }
+
+    impl CheckpointChainAnchor for SwappingAnchor<'_> {
+        fn recorded_creation_digest(
+            &self,
+            meta: &CheckpointMeta,
+        ) -> Result<Option<CheckpointDigest>> {
+            if let Some(replacement) = self.replacement.borrow_mut().take() {
+                self.store.write_meta(&replacement)?;
+            }
+            Ok(Some(meta.meta_digest.clone()))
+        }
+
+        fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> Result<Option<String>> {
+            Ok(Some("local".into()))
+        }
+    }
+
+    #[test]
+    fn restore_transaction_keeps_target_bound_when_catalog_metadata_is_swapped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let ckpt = seed_vm_full_checkpoint(&store, tmp.path(), "metadata-swap");
+        let mut replacement = ckpt.clone();
+        replacement.vm_name = "swapped-target".into();
+        replacement.meta_digest = replacement.compute_meta_digest();
+        let anchor = SwappingAnchor {
+            store: &store,
+            replacement: RefCell::new(Some(replacement)),
+        };
+        let restore = MockRestore {
+            seen: RefCell::new(None),
+            payloads_seen: RefCell::new(None),
+            config_seen: RefCell::new(None),
+        };
+
+        restore_checkpoint(
+            &store,
+            RestoreParams {
+                checkpoint: ckpt.id.clone(),
+                target_vm: ckpt.vm_name.clone(),
+                tenant: "local".into(),
+            },
+            &restore,
+            &anchor,
+        )
+        .expect("owned authenticated metadata remains the transaction source");
+
+        assert_eq!(
+            restore.seen.borrow().as_ref().expect("restore invoked").0,
+            "origin"
+        );
+        assert_eq!(store.read_meta(&ckpt.id).unwrap().vm_name, "swapped-target");
     }
 
     #[test]
