@@ -39,7 +39,7 @@ pub fn verify_restored_plan(
         &RestoredChildBinding {
             vm_name,
             image: ImageBinding::NotChecked,
-            now: chrono::Utc::now(),
+            now: mvm_core::util::time::utc_timestamp_now(),
         },
     )
 }
@@ -148,12 +148,12 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let key = dir.path().join("host-signer.ed25519");
         let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
-        let now = chrono::Utc::now();
+        let now = mvm_core::util::time::utc_timestamp_now();
         let mut plan = PlanFixture::new()
             .workload("child")
             .validity(
-                now - chrono::Duration::minutes(9),
-                now + chrono::Duration::minutes(5),
+                now.checked_add_secs(-540).unwrap(),
+                now.checked_add_secs(300).unwrap(),
             )
             .build();
         plan.resources.timeouts.exec_secs = 1;

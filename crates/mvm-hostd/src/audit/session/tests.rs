@@ -590,8 +590,8 @@ fn time_ranges_select_overlapping_sessions() {
     let chain = Chain::new();
     chain.run_and_seal(&plan("sha256:aaaa1111"), 0);
     let lines = chain.lines();
-    let past = "2000-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
-    let future = "2999-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let past = "2000-01-01T00:00:00Z".parse::<UtcTimestamp>().unwrap();
+    let future = "2999-01-01T00:00:00Z".parse::<UtcTimestamp>().unwrap();
 
     let count = |range: TimeRange| list_sessions(&lines, range).unwrap().0.len();
     assert_eq!(count(TimeRange::default()), 1);
@@ -648,7 +648,7 @@ fn show_filters_events_by_kind_glob_and_time() {
         }),
         [SESSION_SEALED_EVENT]
     );
-    let future = "2999-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let future = "2999-01-01T00:00:00Z".parse::<UtcTimestamp>().unwrap();
     assert!(
         events(EventFilter {
             kind: None,

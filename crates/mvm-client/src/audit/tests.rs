@@ -590,8 +590,8 @@ fn time_window_filter_bounds_the_read() {
         .reader()
         .read(
             &AuditReadRequest::builder()
-                .since(ts(8, 30))
-                .until(ts(9, 30))
+                .since(ts(8, 30).try_into().unwrap())
+                .until(ts(9, 30).try_into().unwrap())
                 .build(),
         )
         .unwrap();

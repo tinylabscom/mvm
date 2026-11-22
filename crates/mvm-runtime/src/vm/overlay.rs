@@ -58,7 +58,8 @@
 use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
+use mvm_core::util::time::utc_timestamp_now;
 use thiserror::Error;
 
 /// Maximum length of a tenant id or workload id, in bytes. Keeps
@@ -131,7 +132,7 @@ pub struct OverlayHandle {
     /// measurement should re-open or use the future
     /// `OverlayManager::current_size` method.
     pub size_bytes: u64,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
     /// `false` for [`FsOverlayManager`]; `true` once LUKS lands.
     pub encrypted: bool,
 }
@@ -145,7 +146,7 @@ pub struct OverlayHandle {
 pub struct DestructionReceipt {
     pub tenant: String,
     pub workload: String,
-    pub destroyed_at: DateTime<Utc>,
+    pub destroyed_at: UtcTimestamp,
     /// Count of regular files overwritten + unlinked. Excludes
     /// directories (which are removed without zero-fill since they
     /// hold no data of their own).
@@ -170,10 +171,8 @@ impl DestructionReceipt {
     /// pins the format; bumping it (e.g. to v2 if we add a field)
     /// invalidates prior signatures by design.
     pub fn signature_payload(&self) -> Vec<u8> {
-        let ts_nanos = self
-            .destroyed_at
-            .timestamp_nanos_opt()
-            .unwrap_or_else(|| self.destroyed_at.timestamp() * 1_000_000_000);
+        let ts_nanos = i128::from(self.destroyed_at.unix_secs()) * 1_000_000_000
+            + i128::from(self.destroyed_at.subsec_nanos());
         format!(
             "destruction|v1|{tenant}|{workload}|{ts}|{files}|{bytes}",
             tenant = self.tenant,
@@ -468,7 +467,7 @@ impl OverlayManager for FsOverlayManager {
             workload: workload.to_string(),
             root: dir,
             size_bytes: 0,
-            created_at: Utc::now(),
+            created_at: utc_timestamp_now(),
             encrypted: false,
         })
     }
@@ -502,8 +501,8 @@ impl OverlayManager for FsOverlayManager {
                 .created()
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .and_then(|d| DateTime::<Utc>::from_timestamp(d.as_secs() as i64, d.subsec_nanos()))
-                .unwrap_or_else(Utc::now),
+                .and_then(|d| UtcTimestamp::from_unix(d.as_secs() as i64, d.subsec_nanos()))
+                .unwrap_or_else(utc_timestamp_now),
             encrypted: false,
         })
     }
@@ -522,7 +521,7 @@ impl OverlayManager for FsOverlayManager {
         Ok(DestructionReceipt {
             tenant: tenant.to_string(),
             workload: workload.to_string(),
-            destroyed_at: Utc::now(),
+            destroyed_at: utc_timestamp_now(),
             files_wiped,
             bytes_wiped,
         })
@@ -1047,7 +1046,7 @@ mod tests {
         DestructionReceipt {
             tenant: "acme".to_string(),
             workload: "build-runner".to_string(),
-            destroyed_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 123_456_789).unwrap(),
+            destroyed_at: UtcTimestamp::from_unix(1_700_000_000, 123_456_789).unwrap(),
             files_wiped: 42,
             bytes_wiped: 1_048_576,
         }
@@ -1076,7 +1075,7 @@ mod tests {
             serde_json::to_string(&receipt).unwrap(),
             r#"{"tenant":"acme","workload":"build-runner","destroyed_at":"2023-11-14T22:13:20.123456789Z","files_wiped":42,"bytes_wiped":1048576}"#
         );
-        receipt.destroyed_at = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        receipt.destroyed_at = UtcTimestamp::from_unix(1_700_000_000, 0).unwrap();
         assert_eq!(
             serde_json::to_string(&receipt).unwrap(),
             r#"{"tenant":"acme","workload":"build-runner","destroyed_at":"2023-11-14T22:13:20Z","files_wiped":42,"bytes_wiped":1048576}"#
@@ -1089,7 +1088,7 @@ mod tests {
             r#"{"tenant":"acme","workload":"w","destroyed_at":"2023-11-14T23:13:20+01:00","files_wiped":1,"bytes_wiped":2}"#,
         )
         .unwrap();
-        assert_eq!(old.destroyed_at.timestamp(), 1_700_000_000);
+        assert_eq!(old.destroyed_at.unix_secs(), 1_700_000_000);
     }
 
     #[test]
@@ -1175,7 +1174,7 @@ mod tests {
             SigningKey::from_bytes(&__ed_seed)
         };
         let mut signed = sign_destruction_receipt(&sample_receipt(), &key);
-        signed.receipt.destroyed_at += chrono::Duration::seconds(1);
+        signed.receipt.destroyed_at = signed.receipt.destroyed_at.checked_add_secs(1).unwrap();
         let err = verify_destruction_receipt(&signed, None).unwrap_err();
         assert!(matches!(err, DestructionVerifyError::SignatureInvalid));
     }

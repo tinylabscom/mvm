@@ -3,7 +3,7 @@
 //! log. The logic lives in `mvm_client::audit::chain::session`; this is rendering.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, NaiveDate, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use serde::Serialize;
 
 use mvm_client::audit::chain::session::{
@@ -37,10 +37,10 @@ pub(in crate::commands) struct SessionsArgs {
     /// Only sessions active at or after this time: RFC 3339, YYYY-MM-DD, or a
     /// duration back from now (30m, 12h, 7d).
     #[arg(long, value_parser = parse_time_bound)]
-    pub since: Option<DateTime<Utc>>,
+    pub since: Option<UtcTimestamp>,
     /// Only sessions active at or before this time (same forms as --since).
     #[arg(long, value_parser = parse_time_bound)]
-    pub until: Option<DateTime<Utc>>,
+    pub until: Option<UtcTimestamp>,
     /// Emit the sessions and the ledger check as JSON.
     #[arg(long)]
     pub json: bool,
@@ -75,10 +75,10 @@ pub(in crate::commands) struct ShowArgs {
     /// Only entries at or after this time: RFC 3339, YYYY-MM-DD, or a
     /// duration back from now (30m, 12h, 7d).
     #[arg(long, value_parser = parse_time_bound)]
-    pub since: Option<DateTime<Utc>>,
+    pub since: Option<UtcTimestamp>,
     /// Only entries at or before this time (same forms as --since).
     #[arg(long, value_parser = parse_time_bound)]
-    pub until: Option<DateTime<Utc>>,
+    pub until: Option<UtcTimestamp>,
     /// Emit matching entries as a JSON array to stdout.
     #[arg(long)]
     pub json: bool,
@@ -86,20 +86,20 @@ pub(in crate::commands) struct ShowArgs {
 
 /// Parse a `--since` / `--until` bound: an RFC 3339 timestamp, a calendar
 /// date (midnight UTC), or a duration back from now (`30m`, `12h`, `7d`).
-pub(in crate::commands) fn parse_time_bound(raw: &str) -> Result<DateTime<Utc>, String> {
-    parse_time_bound_at(raw, Utc::now())
+pub(in crate::commands) fn parse_time_bound(raw: &str) -> Result<UtcTimestamp, String> {
+    parse_time_bound_at(raw, mvm_core::util::time::utc_timestamp_now())
 }
 
-fn parse_time_bound_at(raw: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
+fn parse_time_bound_at(raw: &str, now: UtcTimestamp) -> Result<UtcTimestamp, String> {
     let raw = raw.trim();
-    if let Some(at) = mvm_core::util::time::parse_iso8601(raw) {
+    if let Ok(at) = raw.parse() {
         return Ok(at);
     }
-    if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
-        return date
-            .and_hms_opt(0, 0, 0)
-            .map(|midnight| midnight.and_utc())
-            .ok_or_else(|| format!("{raw:?} has no midnight"));
+    // A date is midnight UTC; the strict parser rejects a date that does not exist.
+    if raw.len() == 10
+        && let Ok(midnight) = format!("{raw}T00:00:00Z").parse()
+    {
+        return Ok(midnight);
     }
     let ago = mvm_core::crypto::policy::parse_ttl(raw).map_err(|_| {
         format!(
@@ -107,11 +107,12 @@ fn parse_time_bound_at(raw: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, S
              duration back from now such as 30m, 12h or 7d"
         )
     })?;
-    let ago = chrono::Duration::from_std(ago).map_err(|e| e.to_string())?;
-    Ok(now - ago)
+    let ago = i64::try_from(ago.as_secs()).map_err(|e| e.to_string())?;
+    now.checked_add_secs(-ago)
+        .ok_or_else(|| format!("{raw:?} reaches back before the year 0"))
 }
 
-fn range(since: Option<DateTime<Utc>>, until: Option<DateTime<Utc>>) -> TimeRange {
+fn range(since: Option<UtcTimestamp>, until: Option<UtcTimestamp>) -> TimeRange {
     TimeRange { since, until }
 }
 
@@ -425,7 +426,7 @@ fn reason_name(reason: mvm_client::audit::chain::session::MismatchReason) -> &'s
 mod tests {
     use super::*;
 
-    fn at(s: &str) -> DateTime<Utc> {
+    fn at(s: &str) -> UtcTimestamp {
         s.parse().unwrap()
     }
 
@@ -443,8 +444,8 @@ mod tests {
         assert_eq!(
             parse_time_bound_at("2026-09-01T08:30:00.250Z", now)
                 .unwrap()
-                .timestamp_millis(),
-            at("2026-09-01T08:30:00Z").timestamp_millis() + 250
+                .unix_millis(),
+            at("2026-09-01T08:30:00Z").unix_millis() + 250
         );
         assert_eq!(
             parse_time_bound_at("2026-09-01", now).unwrap(),

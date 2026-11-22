@@ -408,7 +408,7 @@ fn verify_child_plan(
         &mvm_core::plan::RestoredChildBinding {
             vm_name: child_name,
             image: mvm_core::plan::ImageBinding::Pinned(image_sha256),
-            now: chrono::Utc::now(),
+            now: mvm_core::util::time::utc_timestamp_now(),
         },
     )
     .context("the admitted child plan does not bind the restore")

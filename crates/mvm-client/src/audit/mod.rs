@@ -53,7 +53,6 @@ pub use sanitize::{MAX_DETAIL_LEN, MAX_FIELD_LEN, REDACTED_PATH, sanitize_free_t
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
 use thiserror::Error;
 
@@ -453,21 +452,17 @@ fn event_matches(request: &AuditReadRequest, event: &VerifiedAuditEvent) -> bool
     if request.since.is_some() || request.until.is_some() {
         let ts = parse_ts_millis(&event.timestamp);
         if let Some(since) = request.since
-            && ts < instant_millis(since)
+            && ts < since.unix_millis()
         {
             return false;
         }
         if let Some(until) = request.until
-            && ts > instant_millis(until)
+            && ts > until.unix_millis()
         {
             return false;
         }
     }
     true
-}
-
-fn instant_millis(instant: DateTime<Utc>) -> i64 {
-    instant.timestamp_millis()
 }
 
 #[cfg(test)]
