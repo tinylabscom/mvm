@@ -552,6 +552,21 @@ mod tests {
         }
     }
 
+    /// The validity pair's wire text is signed evidence: whole-second and
+    /// sub-second instants must serialize and round-trip exactly as pinned.
+    #[test]
+    fn validity_pair_wire_text_is_pinned() {
+        let mut json = serde_json::to_value(minimal_plan()).expect("plan json");
+        assert_eq!(json["valid_from"], "2026-07-16T12:00:00Z");
+        assert_eq!(json["valid_until"], "2026-07-16T12:10:00Z");
+        json["valid_from"] = "2026-07-16T12:00:00.123456789Z".into();
+        json["valid_until"] = "2026-07-16T12:10:00.5Z".into();
+        let plan: ExecutionPlan = serde_json::from_value(json.clone()).expect("plan");
+        let again = serde_json::to_value(&plan).expect("plan json");
+        assert_eq!(again["valid_from"], "2026-07-16T12:00:00.123456789Z");
+        assert_eq!(again["valid_until"], "2026-07-16T12:10:00.500Z");
+    }
+
     #[test]
     fn runtime_identity_is_optional_and_independent_of_kernel() {
         let mut plan = minimal_plan();
