@@ -532,6 +532,33 @@ pub fn liveness_period(topology: &Topology, unit: &WorkloadId) -> Option<std::nu
         .and_then(|u| u.liveness_period_ms)
 }
 
+/// Refuse to bring `unit` back under its own identity while the tenant's
+/// admitted topology declares a liveness period for it.
+///
+/// A machine restored from a checkpoint under its own name starts a
+/// supervisor that is handed no plan, so no process would hold the unit's
+/// deadline: its epoch would stay current however long the unit is silent.
+///
+/// # Errors
+///
+/// The unit declares a period, or the admitted topology cannot be read.
+pub fn refuse_unwatched_resume(
+    tenant: &TenantId,
+    unit: &WorkloadId,
+    host_signer_keys_dir: Option<&Path>,
+) -> Result<()> {
+    let home = mvm_core::config::mvm_home_strict().context("resolving the mvm home")?;
+    let topology =
+        crate::topology_admission::last_admitted_topology(&home, tenant, host_signer_keys_dir)?;
+    if let Some(period_ms) = topology.as_ref().and_then(|t| liveness_period(t, unit)) {
+        anyhow::bail!(
+            "unit {} declares a {period_ms} ms liveness period, and a machine restored under              its own identity has no process holding that deadline; launch the unit from its              plan instead",
+            unit.0
+        );
+    }
+    Ok(())
+}
+
 /// Keep only deadlines of units `topology` still declares a period for, so
 /// the file never holds more than the admitted topology allows.
 fn retain_declared(deadlines: &mut Deadlines, topology: &Topology) {
@@ -586,3 +613,6 @@ fn store(path: &Path, deadlines: &Deadlines) -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lateness_tests;

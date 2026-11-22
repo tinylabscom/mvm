@@ -74,6 +74,7 @@ mod fs_quick;
 mod grant_validation;
 mod host_gates;
 mod launch_substrate;
+mod liveness_owner;
 mod mailbox_posture;
 mod nonce_ledger;
 mod placement;
@@ -108,6 +109,7 @@ pub use launch_substrate::{
     persists_plan_before_start, populate_audit_substrate, stash_plan_and_mint_verb_grant,
     stash_plan_for_bridge, thread_cpu_grant, thread_tenant_id,
 };
+pub use liveness_owner::LivenessOwnerRefusal;
 pub use mailbox_posture::{MailboxLaunchPosture, MailboxPostureHandoff};
 pub use mvm_core::time::{Clock, SystemClock};
 pub use nonce_ledger::InMemoryNonceLedger;
@@ -134,7 +136,7 @@ pub(crate) use start::{
     LaunchSource, admit_synthesized_with_verified_release, prepare_launch,
     start_admitted_with_verified_release,
 };
-pub use topology_binding::{CORE_PLACEMENT_STAGE, TOPOLOGY_BINDING_STAGE};
+pub use topology_binding::{CORE_PLACEMENT_STAGE, LIVENESS_OWNER_STAGE, TOPOLOGY_BINDING_STAGE};
 
 /// Result of a successful admission. Carries everything the caller
 /// needs to hand to the backend (the plan + its id), to the audit

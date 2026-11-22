@@ -26,9 +26,18 @@ use crate::protocol::resource_controls::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MeasuredFailoverMs(pub NonZeroU32);
 
-/// The shortest liveness period the host's deadline store holds. Below it an
-/// expiry pass would be racing ordinary scheduling delay rather than a hang.
-pub const MIN_LIVENESS_PERIOD_MS: u32 = 100;
+/// The shortest liveness period the host's deadline store holds.
+///
+/// An expiry is not instant: the pass that fences a unit makes the fence
+/// durable before any gate refuses the epoch, so the fence lands some time
+/// after the deadline, and that time is set by the host's storage, not by the
+/// period. Measured from the deadline to the committed fence, the worse of
+/// two runs on each host is 104 ms at the 99th percentile on Apple Silicon
+/// flash and 318 ms on x86_64 Linux with ext4 on a rotational disk. The floor
+/// is the round figure at which the slower of those is under a quarter of the
+/// period, so that a declared period says roughly when a silent unit is
+/// fenced. `liveness::lateness_tests` in `mvm-hostd` reproduces the figures.
+pub const MIN_LIVENESS_PERIOD_MS: u32 = 1_500;
 
 /// The longest liveness period the host's deadline store holds. A unit silent
 /// for longer is a matter for its wall-clock bound, not a hang detector.

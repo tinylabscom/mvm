@@ -46,7 +46,7 @@ impl CaptureRoute {
                             };
                             match result {
                                 Ok(bounds) => {
-                                    _bounds = bounds;
+                                    _bounds = Some(bounds);
                                     if request.sealed.try_send(true).is_err() {
                                         stop.store(true, Ordering::Release);
                                         break;
@@ -102,7 +102,7 @@ fn transfer(
     owner: &mut Option<CaptureOwner>,
     request: &CapturePreparation,
     pid_file: &std::path::Path,
-) -> Result<Option<crate::supervisor::lifecycle::wall_clock::WallClockGuard>> {
+) -> Result<super::claimed_child::ClaimedChildBounds> {
     let json = request
         .child
         .admitted_plan

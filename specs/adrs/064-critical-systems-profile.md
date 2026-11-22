@@ -252,13 +252,17 @@ The rules that keep this safe:
   failed host is the fleet's job, through the host lease.
 - The period is part of the sealed topology and cannot change after
   admission.
-- The deadline runs on a monotonic clock. A host that can suspend refuses a
-  liveness period, because every deadline would expire at once on resume.
-  As built, the deadline is still held on the wall clock so it survives a
-  restart, and no real backend offers a period. The supervisor's wait detects
-  a suspend (the wall clock running more than two seconds ahead of the
-  monotonic one) and records it on the expiry entry; it does not extend the
-  deadline.
+- The deadline is an absolute time on the wall clock, kept on disk, so it
+  survives a restart of the process that holds it. A host that can suspend
+  does not refuse a liveness period, and a suspend does not extend one: a
+  deadline that passed while the host slept fences as soon as the supervisor
+  runs again, which fails in the safe direction, as an early expiry does. The
+  supervisor's wait detects the suspend (the wall clock running more than two
+  seconds ahead of the monotonic one) and records its length on the expiry
+  entry as `host_suspended_ms`, so an operator can tell a unit fenced on wake
+  from one that hung. Every unit with a deadline on a host that slept past it
+  is fenced on wake; a deployment that cannot accept that keeps the host
+  awake.
 - An early expiry on a loaded host fails in the safe direction: the old epoch
   is fenced before the standby is promoted, so there are never two writers.
 - Expiry and promotion are audited. Individual liveness signals are not.
@@ -272,6 +276,65 @@ is the application's concern. On the microcontroller tier the deadline maps to
 the hardware or task watchdog, and on a third-party partition hypervisor to
 its health monitor. This is separate from the host interface's per-node
 heartbeat.
+
+As built, a liveness period is admitted where the unit's guest has a per-VM
+supervisor of ours for its whole life, because that process holds the
+deadline and fences the unit when it passes:
+
+| Backend | Liveness period | Why |
+| --- | --- | --- |
+| libkrun | Admitted | `mvm-libkrun-supervisor` runs the unit timer |
+| HVF, and the `apple-container` runner over it | Admitted | `mvm-hvf-supervisor` runs the unit timer |
+| Firecracker, QEMU | Refused | The VMM detaches from the launch, so no process of ours stays beside the guest |
+| Wasm, browser-hosted | Refused | No unit timer exists on the tier |
+
+The backend is checked twice. Topology admission checks the one it is asked
+about. The sealed topology names no backend, so plan admission checks the one
+the launch boots on, and refuses a unit with a period on a backend that does
+not hold one, or on a launch admitted before its backend is known, as stage
+`liveness_owner` and before the plan's nonce is spent.
+
+Every way a unit comes to run either starts the timer under the launching
+plan's unit and epoch or is refused:
+
+- A cold boot on libkrun or HVF: the supervisor starts it before the guest
+  runs, and refuses to boot a unit whose expiry it could not record.
+- A checkpoint fork on HVF: the child has its own admitted plan and its own
+  supervisor, which starts it from that plan after verifying it.
+- A warm claim of a resident HVF standby: the standby's supervisor, which
+  booted with no plan, starts it from the claiming plan carried in the signed
+  handoff, before the claim commits; a timer it cannot start fails the claim.
+- A same-identity restore of a checkpoint: refused for a unit with a period,
+  because the restored supervisor is handed no plan.
+- A pause on HVF leaves the supervisor running, so a paused unit that misses
+  its deadline is fenced like any other silent unit.
+
+Expiry fences and reports, and that is all it does. The expired epoch is
+replaced in the workload ledger, every gate refuses it from then on, and one
+`liveness.epoch_replaced` entry is written. The fenced guest is left running
+with nothing it sends accepted. No standby is promoted and no successor is
+started: failover does not exist yet.
+
+The admitted period is 1.5 seconds to one hour, for at most 64 units of a
+topology. The floor is measured, not chosen. The pass that fences a unit makes
+the fence durable before any gate refuses the epoch, so the fence lands after
+the deadline by a time the host's storage sets, whatever the period:
+
+| Host | From the deadline to the fence, p50 / p95 / p99 / max | To the audit entry, p99 |
+| --- | --- | --- |
+| Apple Silicon, internal flash | 52 / 83 / 104 / 128 ms | 130 ms |
+| x86_64 Linux, ext4 on a rotational disk | 154 / 268 / 318 / 377 ms | 420 ms |
+
+Each row is the worse of two runs. The other run's p99 was 90 ms on the Mac,
+taken with the machine nearly idle where the first was under heavy build
+load, and 209 ms on the Linux host. Waking the timer thread is the small
+part: a bare 100 ms wait returns 0.09 ms late at p99 on the Linux host and 10
+to 21 ms late on macOS. The rest is the durable writes of the fence, which is
+why load moves the figure little and the disk moves it a lot. The floor is
+the round figure at which the slower host's p99 is under a quarter of the
+period. A shorter period needs a cheaper fence or a figure measured on the
+host at admission, as a recovery bound needs a measured failover.
+`liveness::lateness_tests` in `mvm-hostd` reproduces the figures.
 
 Failover is one host-applied sequence, each step a host-witnessed event:
 
@@ -533,9 +596,11 @@ establishment, then hybrid signatures on long-lived artifacts. This ADR adds:
 - Whether a promoted standby inherits its unit's mailbox quota or starts with
   a fresh one, and whether a call ended by a failover gets its own audit
   entry. Both follow from ADR-057's open decisions.
-- The shortest liveness period each backend can hold without false failovers
-  under load. It needs the failover measurements; until then a period is
-  refused wherever no measured figure exists.
+- Whether the liveness floor becomes a figure each host measures for itself.
+  It is one constant today, 1.5 seconds, set by the slowest host measured
+  (section 5), and a host with faster storage could hold a shorter period.
+  The shortest period that causes no false failover under load is a separate
+  question and needs the failover measurements.
 - The partition driver's contract with a third-party hypervisor, which needs a
   concrete target before it can be written.
 - When, if ever, the CNSA 2.0 suite may run without the classical algorithm.

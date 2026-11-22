@@ -128,10 +128,17 @@ impl AuditedRefusal {
         stage: CORE_PLACEMENT_STAGE,
         headline: "plan refused: it cannot be placed on this host's cores",
     };
+    pub(super) const LIVENESS_OWNER: Self = Self {
+        stage: LIVENESS_OWNER_STAGE,
+        headline: "plan refused: nothing on this launch holds its unit's liveness deadline",
+    };
 }
 
 /// The `stage` label a core placement refusal carries.
 pub const CORE_PLACEMENT_STAGE: &str = "core_placement";
+
+/// The `stage` label a liveness owner refusal carries.
+pub const LIVENESS_OWNER_STAGE: &str = "liveness_owner";
 
 pub(super) fn audit_refusal(
     home: &Path,
