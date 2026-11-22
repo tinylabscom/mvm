@@ -23,8 +23,10 @@
 //! Refusals of authority (an unknown cell, a unit without the role, an epoch
 //! the gate refuses) are written to the tenant's chain. A stale version or an
 //! oversized value is the writer's own error and is not. Accepted writes are
-//! not audited here one by one.
+//! not audited here one by one; the writer's owner digests them periodically
+//! ([`digest`]).
 
+pub mod digest;
 mod slots;
 
 use std::path::{Path, PathBuf};
@@ -436,6 +438,12 @@ pub(crate) fn remove_undeclared(home: &Path, topology: &Topology) -> Result<()> 
         }
         let _lock = FileLock::acquire(&path)?;
         std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        let marker = digest::marker_path(&path);
+        if let Err(e) = std::fs::remove_file(&marker)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(e).with_context(|| format!("removing {}", marker.display()));
+        }
     }
     atomic_io::sync_dir(&dir)
 }
