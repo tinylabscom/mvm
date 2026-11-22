@@ -41,7 +41,19 @@ use mvm_vmm::host::restore_image::{PrivateCopy, VerifiedRestoreFile, inherit_des
 
 use crate::driver::hvf_process::{PID_FILE_NAME, resolve_supervisor_path_verified};
 
-/// A materialized HVF checkpoint about to be booted under a fresh identity.
+/// The identity and plan binding an HVF restore must boot under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HvfRestoreMode<'a> {
+    /// Resume the captured VM under the same identity and authority.
+    SameIdentity,
+    /// Fork into a fresh identity admitted under this new child plan.
+    FreshChild {
+        /// The child's admitted, signed plan.
+        plan_json: &'a str,
+    },
+}
+
+/// A materialized HVF checkpoint about to be restored.
 ///
 /// `state_dir` must already hold the checkpoint's cloned content — the saved
 /// memory image, the HVF frame, the launch config, the device anchors and the
@@ -60,11 +72,9 @@ pub struct HvfRestoreRequest<'a> {
     /// bytes the supervisor loads, which is why the checkpoint layer does not
     /// hash those two blobs itself.
     pub content: &'a [ContentBlob],
-    /// The child's own admitted, signed plan, already verified by admission.
-    /// The supervisor takes its capture authority, wall-clock bound and audit
-    /// identity from it. `None` for a same-identity resume, which admits no
-    /// plan of its own.
-    pub plan_json: Option<&'a str>,
+    /// Whether this restore preserves the captured identity and binding or
+    /// replaces both with a newly admitted child identity and plan.
+    pub mode: HvfRestoreMode<'a>,
 }
 
 /// The blobs [`restore_hvf_vm`] verifies itself, on the bytes it loads.
@@ -248,12 +258,36 @@ pub fn hvf_child_restore_config(
         .map(|disk| remap_disk(disk, anchors, req.state_dir))
         .collect::<Result<Vec<_>>>()?;
 
-    let binding = match req.plan_json {
-        Some(json) => Some(
-            mvm_vmm::host::spec_map::plan_binding_for(json)
-                .ok_or_else(|| anyhow!("the restored child's plan is not valid JSON"))?,
-        ),
-        None => None,
+    let binding = match req.mode {
+        HvfRestoreMode::SameIdentity => {
+            let mut missing = Vec::new();
+            if parent.plan.is_none() {
+                missing.push("plan");
+            }
+            if parent.audit_dir.is_none() {
+                missing.push("audit directory");
+            }
+            if parent.signing_key_path.is_none() {
+                missing.push("signing key path");
+            }
+            if !missing.is_empty() {
+                bail!(
+                    "same-identity HVF restore requires the captured parent plan binding; \
+                     checkpoint is missing {}",
+                    missing.join(", ")
+                );
+            }
+            mvm_vmm::driver::spec::PlanBinding {
+                plan_json: parent.plan.clone().expect("checked above"),
+                caller_registration: None,
+                audit_dir: parent.audit_dir.clone().expect("checked above"),
+                signing_key_path: parent.signing_key_path.clone().expect("checked above"),
+            }
+        }
+        HvfRestoreMode::FreshChild { plan_json } => {
+            mvm_vmm::host::spec_map::plan_binding_for(plan_json)
+                .ok_or_else(|| anyhow!("the restored child's plan is not valid JSON"))?
+        }
     };
 
     Ok(HvfSupervisorConfig {
@@ -292,12 +326,13 @@ pub fn hvf_child_restore_config(
         restore_frame: Some(restore_frame),
         restore_fds: None,
         timeout_secs: parent.timeout_secs,
-        // The child's OWN admitted plan, never the parent's: inheriting the
-        // parent's would audit the child's kill against the parent's identity.
-        plan: binding.as_ref().map(|b| b.plan_json.clone()),
+        // Same-identity resumes retain the captured binding; fresh children
+        // replace it with their own admitted plan. The restoring supervisor
+        // re-verifies either signed envelope before using its authority.
+        plan: Some(binding.plan_json),
         caller_registration: None,
-        audit_dir: binding.as_ref().map(|b| b.audit_dir.clone()),
-        signing_key_path: binding.as_ref().map(|b| b.signing_key_path.clone()),
+        audit_dir: Some(binding.audit_dir),
+        signing_key_path: Some(binding.signing_key_path),
         agent_socket: Some(mvm_core::config::vm_hvf_agent_socket_at(req.state_dir)),
         // Authority-bearing relays never survive a restore: the child reaches
         // the network, the broker and an interactive console only through
@@ -710,26 +745,75 @@ mod tests {
             state_dir: dir,
             cpu_grant: None,
             content: &[],
-            plan_json: None,
+            mode: HvfRestoreMode::FreshChild {
+                plan_json: r#"{"child":"plan"}"#,
+            },
         }
     }
 
     #[test]
-    fn a_restored_child_carries_its_own_plan_and_never_the_parents() {
+    fn same_identity_restore_preserves_the_captured_parent_binding() {
         let dir = tempfile::tempdir().unwrap();
         let anchors = materialized(dir.path());
         let mut parent = parent_config(dir.path(), vec![]);
         parent.plan = Some(serde_json::json!({"parent": "plan"}));
+        parent.audit_dir = Some(PathBuf::from("/captured/audit"));
+        parent.signing_key_path = Some(PathBuf::from("/captured/keys/host-signer.ed25519"));
+        let mut req = request("parent", dir.path());
+        req.mode = HvfRestoreMode::SameIdentity;
+
+        let cfg = hvf_child_restore_config(&parent, &anchors, &req).unwrap();
+
+        assert_eq!(cfg.plan, parent.plan);
+        assert_eq!(cfg.audit_dir, parent.audit_dir);
+        assert_eq!(cfg.signing_key_path, parent.signing_key_path);
+    }
+
+    #[test]
+    fn fresh_child_restore_replaces_the_captured_parent_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let anchors = materialized(dir.path());
+        let mut parent = parent_config(dir.path(), vec![]);
+        parent.plan = Some(serde_json::json!({"parent": "plan"}));
+        parent.audit_dir = Some(PathBuf::from("/parent/audit"));
+        parent.signing_key_path = Some(PathBuf::from("/parent/keys/host-signer.ed25519"));
         let child_plan = r#"{"child":"plan"}"#;
         let mut req = request("child", dir.path());
-        req.plan_json = Some(child_plan);
-        let cfg = hvf_child_restore_config(&parent, &anchors, &req).unwrap();
-        assert_eq!(cfg.plan, Some(serde_json::json!({"child": "plan"})));
-        assert!(cfg.audit_dir.is_some() && cfg.signing_key_path.is_some());
+        req.mode = HvfRestoreMode::FreshChild {
+            plan_json: child_plan,
+        };
 
-        let planless =
-            hvf_child_restore_config(&parent, &anchors, &request("child", dir.path())).unwrap();
-        assert!(planless.plan.is_none() && planless.audit_dir.is_none());
+        let cfg = hvf_child_restore_config(&parent, &anchors, &req).unwrap();
+
+        assert_eq!(cfg.plan, Some(serde_json::json!({"child": "plan"})));
+        assert_ne!(cfg.audit_dir, parent.audit_dir);
+        assert_ne!(cfg.signing_key_path, parent.signing_key_path);
+    }
+
+    #[test]
+    fn same_identity_restore_refuses_an_incomplete_captured_binding_before_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        restorable(dir.path());
+        let content = matching_content();
+        let mut req = restore_request(dir.path(), &content);
+        req.mode = HvfRestoreMode::SameIdentity;
+        let spawner = ScriptedSupervisor::new("exit 99");
+
+        let error =
+            restore_hvf_vm_with(&req, &spawner, std::time::Duration::from_millis(50)).unwrap_err();
+
+        assert!(
+            error.to_string().contains(
+                "same-identity HVF restore requires the captured parent plan binding; \
+                 checkpoint is missing plan, audit directory, signing key path"
+            ),
+            "{error:#}"
+        );
+        assert_eq!(
+            spawner.spawned.get(),
+            0,
+            "an incomplete captured binding must be refused before supervisor spawn"
+        );
     }
 
     #[test]
@@ -1101,7 +1185,9 @@ mod tests {
                 state_dir: &state,
                 cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
                 content: &[],
-                plan_json: None,
+                mode: HvfRestoreMode::FreshChild {
+                    plan_json: r#"{"child":"plan"}"#,
+                },
             },
             1024,
             &[],
@@ -1145,7 +1231,9 @@ mod tests {
                 state_dir: &state,
                 cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
                 content: &[],
-                plan_json: None,
+                mode: HvfRestoreMode::FreshChild {
+                    plan_json: r#"{"child":"plan"}"#,
+                },
             },
             1024,
             &[],
@@ -1189,7 +1277,9 @@ mod tests {
                 state_dir: &state,
                 cpu_grant: None,
                 content: &[],
-                plan_json: None,
+                mode: HvfRestoreMode::FreshChild {
+                    plan_json: r#"{"child":"plan"}"#,
+                },
             },
             1024,
             &[],
@@ -1221,7 +1311,9 @@ mod tests {
             state_dir: &state,
             cpu_grant: None,
             content: &[],
-            plan_json: None,
+            mode: HvfRestoreMode::FreshChild {
+                plan_json: r#"{"child":"plan"}"#,
+            },
         };
         let supervisor = Path::new("/usr/bin/mvm-hvf-supervisor");
 
@@ -1347,7 +1439,9 @@ mod tests {
             state_dir: dir,
             cpu_grant: None,
             content,
-            plan_json: None,
+            mode: HvfRestoreMode::FreshChild {
+                plan_json: r#"{"child":"plan"}"#,
+            },
         }
     }
 
