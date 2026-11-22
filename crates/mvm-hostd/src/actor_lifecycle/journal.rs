@@ -487,11 +487,11 @@ mod tests {
         };
         store.write(&records).unwrap();
 
-        let now = chrono::Utc::now();
+        let now = mvm_core::util::time::utc_timestamp_now();
         let mut plan = mvm_core::plan::test_support::PlanFixture::new()
             .validity(
-                now - chrono::Duration::hours(2),
-                now - chrono::Duration::hours(1),
+                now.checked_add_secs(-7_200).unwrap(),
+                now.checked_add_secs(-3_600).unwrap(),
             )
             .build();
         plan.plan_id = mvm_core::plan::compute_plan_id(&plan);

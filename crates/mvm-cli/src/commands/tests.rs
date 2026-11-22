@@ -3158,7 +3158,7 @@ fn test_audit_show_filters_parse() {
                 }),
         }) => {
             assert_eq!(kind.as_deref(), Some("plan.*"));
-            assert_eq!(since.unwrap().to_rfc3339(), "2026-09-01T00:00:00+00:00");
+            assert_eq!(since.unwrap().to_string(), "2026-09-01T00:00:00Z");
             assert!(until.is_some());
         }
         _ => panic!("Expected Audit::Show"),

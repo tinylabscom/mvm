@@ -576,7 +576,7 @@ fn validate_child_fork_plan(
         plan.tenant.0,
         tenant_id
     );
-    let now = mvm_contract::timestamp::UtcTimestamp::try_from(chrono::Utc::now())?;
+    let now = mvm_core::util::time::utc_timestamp_now();
     anyhow::ensure!(
         plan.valid_from <= now && now < plan.valid_until,
         "admitted child plan is outside its validity window"
@@ -1278,7 +1278,6 @@ mod tests {
         AgreeingAnchor, DisagreeingAnchor, TenantAnchor, UnauditedAnchor, unrelated_digest,
     };
     use super::*;
-    use chrono::{Duration, Utc};
     use mvm_core::checkpoint::{
         ApprovalHead, CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta, ContentBlob,
         SessionBinding,
@@ -3428,12 +3427,13 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("does not match"));
 
+        let now = mvm_core::util::time::utc_timestamp_now();
         let expired = mvm_core::plan::test_support::PlanFixture::new()
             .tenant("local")
             .workload("expired-child")
             .validity(
-                Utc::now() - Duration::minutes(2),
-                Utc::now() - Duration::minutes(1),
+                now.checked_add_secs(-120).unwrap(),
+                now.checked_add_secs(-60).unwrap(),
             )
             .build();
         let signer = ed25519_dalek::SigningKey::from_bytes(&[92u8; 32]);

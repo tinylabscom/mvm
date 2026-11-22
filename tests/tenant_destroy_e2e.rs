@@ -205,7 +205,7 @@ fn signature_payload_format_pinned_at_v1() {
     let receipt = mvm_runtime::vm::overlay::DestructionReceipt {
         tenant: "acme".to_string(),
         workload: "wkl".to_string(),
-        destroyed_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
+        destroyed_at: mvm_contract::timestamp::UtcTimestamp::from_unix(1_700_000_000, 0).unwrap(),
         files_wiped: 5,
         bytes_wiped: 1024,
     };

@@ -340,13 +340,16 @@ mod tests {
     // proves the plan admission path is not forked off a second copy.
     #[test]
     fn execution_plan_flows_through_generic_freshness() {
-        let now = Utc::now();
+        let now = crate::util::time::utc_timestamp_now();
         let plan = PlanFixture::new()
             .nonce([9u8; 16])
-            .validity(now - Duration::seconds(1), now + Duration::minutes(5))
+            .validity(
+                now.checked_add_secs(-1).unwrap(),
+                now.checked_add_secs(300).unwrap(),
+            )
             .build();
 
-        check_window(&plan, at(now)).expect("plan window covers now");
+        check_window(&plan, now).expect("plan window covers now");
         let mut store = NonceStore::new();
         store
             .check_and_insert("host-signer", &plan)
