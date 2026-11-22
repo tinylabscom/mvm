@@ -1472,8 +1472,10 @@ fn macos_release_build_carries_isolated_libkrun_tier() {
         "the native kernel build must select GNU-compatible archive and text tools"
     );
     assert!(
-        build.contains("mvm-hvf-supervisor mvm-libkrun-supervisor"),
-        "the macOS archive must package both native backend supervisors"
+        build.contains("mvm-hvf-supervisor")
+            && build.contains("mvm-hvf-run-owner")
+            && build.contains("mvm-libkrun-supervisor"),
+        "the macOS archive must package both native supervisors and the refusal-only owner"
     );
     assert!(
         build.contains("lib/libkrunfw.dylib"),

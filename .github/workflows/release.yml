@@ -350,8 +350,9 @@ jobs:
           path: ~/.cache/mvm/embed
           key: ${{ steps.embed_cache.outputs.cache-primary-key }}
 
-      # The per-VM host processes mvmctl spawns at runtime (one process per
-      # guest). They are SEPARATE bin targets in `mvm-hostd` — the root
+      # The per-VM host processes shipped beside mvmctl. Most are spawned by
+      # mvmctl; the refusal-only HVF owner is packaged before its caller is
+      # enabled. They are SEPARATE bin targets in workspace packages — the root
       # `cargo build` above only produces `mvmctl` — so they are built here and
       # ship next to `mvmctl` in the tarball, where the backend's
       # adjacent-to-exe resolver finds them on a downloaded install. On a
@@ -388,6 +389,8 @@ jobs:
           if [[ "${BUILD_TARGET}" == *apple-darwin ]]; then
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
               --bin mvm-hvf-supervisor
+            cargo build --release --target "${BUILD_TARGET}" -p mvm-client \
+              --bin mvm-hvf-run-owner
           fi
 
           # Ships on every target — see the note above.
@@ -609,7 +612,7 @@ jobs:
           # surface much later as a spawn failure on a user's machine.
           REQUIRED_HOSTBINS="mvm-host-agent mvm-policy-coordinator mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer mvm-mailbox mvm-actor-holder mvm-actor-controller mvm-gpu-endpoint"
           if [[ "${TARGET}" == *apple-darwin ]]; then
-            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-libkrun-supervisor"
+            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-hvf-run-owner mvm-libkrun-supervisor"
           fi
           for hostbin in ${REQUIRED_HOSTBINS}; do
             src="target/${BUILD_TARGET}/release/${hostbin}"
@@ -734,6 +737,22 @@ jobs:
           path: ${{ runner.temp }}/macos-notarization.json
           if-no-files-found: warn
 
+      - name: Bind final HVF owner bytes into the signed archive
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        env:
+          BUILD_TARGET: ${{ matrix.build_target }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')"
+          python3 scripts/release/owner_component_manifest.py \
+            --binary staging/mvmctl-aarch64-apple-darwin/mvm-hvf-run-owner \
+            --output staging/mvmctl-aarch64-apple-darwin/owner-component.json \
+            --version "${VERSION}" \
+            --target "${BUILD_TARGET}" \
+            --source-commit "${SOURCE_COMMIT}"
+
       - name: Package binary and generate checksums
         env:
           TARGET: ${{ matrix.target }}
@@ -759,12 +778,18 @@ jobs:
 
       - name: Inspect final macOS package bytes
         if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        env:
+          BUILD_TARGET: ${{ matrix.build_target }}
+          SOURCE_COMMIT: ${{ github.sha }}
         shell: bash
         run: |
           set -euo pipefail
+          VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')"
           cmd=(python3 scripts/release/verify_macos_package.py
             --archive staging/mvmctl-aarch64-apple-darwin.tar.gz
             --envelope mvmctl-aarch64-apple-darwin --require-cli-inventory
+            --owner-version "${VERSION}" --owner-target "${BUILD_TARGET}"
+            --owner-source-commit "${SOURCE_COMMIT}"
             --producer-report "${RUNNER_TEMP}/macos-producer-signing.json"
             --report "${RUNNER_TEMP}/macos-final-package.json")
           if [[ "${GITHUB_REF_TYPE}" == tag ]]; then

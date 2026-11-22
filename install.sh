@@ -652,6 +652,12 @@ sign_release() {
   command -v codesign >/dev/null 2>&1 || die "codesign is required on macOS"
   for name in $(release_entries "$STAGE"); do
     [ -f "$STAGE/$name" ] || continue
+    if [ "$name" = "mvm-hvf-run-owner" ]; then
+      codesign --verify --strict "$STAGE/$name" >/dev/null 2>&1 \
+        || die "mvm-hvf-run-owner must retain its verified release signature"
+      say "Preserved release signature: $name"
+      continue
+    fi
     if codesign --verify --strict "$STAGE/$name" >/dev/null 2>&1 \
         && codesign -dvv "$STAGE/$name" 2>&1 | grep -q '^Authority=Developer ID Application:'; then
       if entitlement_required "$name" \
