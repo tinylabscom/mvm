@@ -484,7 +484,8 @@ fn render_threads(out: &mut String, s: &Section) {
     }
 }
 
-/// Why each unmeasured latency has no number. The dash alone cannot say.
+/// Why each unmeasured latency has no number, when the run said. The dash
+/// alone cannot, and a bare "not measured" would only repeat it.
 fn render_latency_reasons(out: &mut String, l: &Latencies) {
     let rows = [
         ("cold launch (plan admitted to dispatch)", &l.cold_launch_ms),
@@ -498,7 +499,9 @@ fn render_latency_reasons(out: &mut String, l: &Latencies) {
         ("state-cell update", &l.state_cell_update_ms),
     ];
     for (name, figure) in rows {
-        if let Figure::Unmeasured { reason } = figure {
+        if let Figure::Unmeasured { reason } = figure
+            && reason != NOT_MEASURED_REASON
+        {
             out.push_str(&format!("\nNot measured, {name}: {reason}.\n"));
         }
     }
@@ -690,6 +693,37 @@ mod tests {
         assert!(md.contains("12.50 m"));
         assert!(md.contains("777 B"));
         assert!(md.contains("| warm launch (plan admitted to dispatch) | 2 |"));
+    }
+
+    #[test]
+    fn a_percentile_needs_one_over_one_minus_p_samples() {
+        assert_eq!([50, 95, 99].map(min_samples_for_percentile), [2, 20, 100]);
+        let at = |n: usize| {
+            let samples: Vec<f64> = (1..=n).map(|i| i as f64).collect();
+            supported(SpanStats::from_samples(&samples))
+        };
+        let one = at(1);
+        assert_eq!((one.samples, one.p50, one.max), (1, None, Some(1.0)));
+        assert!(at(2).p50.is_some() && at(2).p95.is_none());
+        assert!(at(19).p95.is_none());
+        assert!(at(20).p95.is_some() && at(20).p99.is_none());
+        assert!(at(99).p99.is_none());
+        assert!(at(100).p99.is_some());
+    }
+
+    #[test]
+    fn too_few_samples_render_the_count_they_need_not_a_number() {
+        let mut section = empty_section();
+        let samples: Vec<f64> = (1..=5).map(f64::from).collect();
+        section.latencies.cold_launch_startup_ms =
+            Figure::measured(supported(SpanStats::from_samples(&samples)));
+        section.latencies.cold_launch_boot_ms = Figure::unmeasured("unavailable:no_kvm");
+        let md = render_markdown(&report_with(section));
+        assert!(md.contains(
+            "| cold launch, invocation to reachable guest | 5 | 3.0 | n<20 | n<100 | 5.0 |"
+        ));
+        assert!(md.contains("Not measured, resolve, admit and boot: unavailable:no_kvm."));
+        assert!(!md.contains("Not measured, warm launch"));
     }
 
     #[test]
