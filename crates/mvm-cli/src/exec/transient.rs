@@ -1,10 +1,9 @@
 //! Boot, restore and tear down one transient microVM.
 //!
 //! The lifecycle `run_inner` drives between resolving a launch and running a
-//! command in the guest: claim a warm standby or cold-boot, optionally restore
-//! from a template snapshot instead, and reap the VM and its state dir on the
-//! way out — including on Ctrl-C, which is why the teardown flag is installed
-//! here rather than at the call site.
+//! command in the guest: claim a warm standby or cold-boot, and reap the VM and
+//! its state dir on the way out — including on Ctrl-C, which is why the teardown
+//! flag is installed here rather than at the call site.
 
 use super::*;
 use std::io::Write as _;
@@ -143,7 +142,7 @@ impl RuntimeRunCustody {
 }
 
 /// Everything [`boot_transient_vm`] needs beyond the caller-varying
-/// `vm_name` / `use_snapshot`.
+/// `vm_name` / template acceleration classification.
 pub(super) struct BootAttempt<'a> {
     pub(super) backend: &'a AnyBackend,
     pub(super) start_config: &'a VmStartConfig,
@@ -152,7 +151,6 @@ pub(super) struct BootAttempt<'a> {
     pub(super) admission:
         Option<&'a std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>>,
     pub(super) mailbox_posture: Option<&'a mvm_hostd::plan_admission::MailboxLaunchPosture>,
-    pub(super) resolved: &'a ResolvedImage,
     /// The caller named this VM. A named run has an identity a shared standby
     /// cannot take on, so it keeps its cold path instead of requiring a claim.
     pub(super) user_named: bool,
@@ -219,19 +217,19 @@ pub(super) fn check_admitted_projection(
         .check_legacy_projection(start_config)
 }
 
-/// Boot the transient VM: try to claim a warm standby first, then a
-/// snapshot restore (when eligible), then fall back to a cold boot from
-/// `attempt.start_config`. Reaps expired standbys first — best-effort TTL
+/// Boot the transient VM: try to claim a warm standby first, then cold-boot
+/// from `attempt.start_config`. Template acceleration remains explicitly
+/// unavailable until its authenticated capability contract is implemented.
+/// Reaps expired standbys first — best-effort TTL
 /// housekeeping since there is no daemon to do it between invocations.
 ///
 /// Returns the booted VM — a claimed standby runs under its own standby id,
 /// not `vm_name` — and, for a cold boot, the reason no standby served it. A
-/// failed snapshot restore is not fatal: the launch warns, drops the partial
-/// restore state, and boots cold. A cold-boot failure returns the error after
-/// the normal transient state cleanup path.
+/// A cold-boot failure returns the error after the normal transient state
+/// cleanup path.
 pub(super) fn boot_transient_vm(
     vm_name: String,
-    use_snapshot: bool,
+    template_acceleration: TemplateAcceleration,
     attempt: &mut BootAttempt<'_>,
     mut warm_claim_marks: Option<&mut crate::commands::vm::phase_timing::WarmClaimMarks>,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
@@ -246,7 +244,11 @@ pub(super) fn boot_transient_vm(
             .as_ref()
             .is_some_and(|o| o.allowed_cpus().is_some())
     });
-    let use_snapshot = use_snapshot && !placed;
+    let template_acceleration = if placed {
+        TemplateAcceleration::PlacedRestoreDisabled
+    } else {
+        template_acceleration
+    };
     let phase_timing = warm_claim_marks.is_some();
     let boot_started = phase_timing.then(std::time::Instant::now);
     if let Some(marks) = warm_claim_marks.as_mut() {
@@ -315,45 +317,13 @@ pub(super) fn boot_transient_vm(
     let warm_claimed = cold_reason.is_none();
     report_phase("warm_claim");
 
-    let booted = warm_claimed
-        || if use_snapshot {
-            let tmpl = attempt
-                .resolved
-                .template_id
-                .as_deref()
-                .context("snapshot launch without a template id")?;
-            let snap = attempt
-                .resolved
-                .snap_info
-                .as_ref()
-                .context("snapshot launch without snapshot info")?;
-            ui::info(&format!(
-                "Restoring transient VM '{vm_name}' from template '{tmpl}' snapshot..."
-            ));
-            // A restored guest resumes already running; there is no activation
-            // left to hold it behind the admission's sync.
-            attempt.start_config.wait_for_admission_durability()?;
-            match restore_via_snapshot(&vm_name, tmpl, snap, attempt.start_config) {
-                Ok(()) => true,
-                Err(e) => {
-                    // A snapshot is a boot accelerator, never a requirement:
-                    // a missing, corrupt, or incompatible one degrades to the
-                    // cold boot below rather than failing the launch. The
-                    // attempt may have left partial state behind (a reserved
-                    // slot's run-info.json), which the cold boot would
-                    // otherwise inherit.
-                    ui::warn(&format!(
-                        "Snapshot restore failed ({e:#}) — booting '{vm_name}' cold instead."
-                    ));
-                    remove_transient_state_dir(
-                        &mvm_core::config::vm_state_dir(&vm_name).to_string_lossy(),
-                    );
-                    false
-                }
-            }
-        } else {
-            false
-        };
+    if !warm_claimed && template_acceleration == TemplateAcceleration::Disabled {
+        ui::notice(
+            "Template snapshot acceleration is disabled until its authenticated restore \
+             contract is implemented; booting cold instead.",
+        );
+    }
+    let booted = warm_claimed;
 
     if !booted {
         let admitted_cold =
@@ -813,68 +783,6 @@ pub(super) fn remove_transient_state_dirs(effective_dir: &Path, requested_dir: &
     }
 }
 
-/// Restore a transient microVM from a template snapshot instead of cold-booting.
-///
-/// Mirrors the snapshot path in `cmd_run`: allocate a slot, build a
-/// `FlakeRunConfig` matching the snapshot's recorded layout, then call
-/// `microvm::restore_from_template_snapshot`. The caller is responsible for
-/// ensuring the request is `snapshot_eligible` first (no directory shares,
-/// template image source).
-pub(super) fn restore_via_snapshot(
-    vm_name: &str,
-    template_id: &str,
-    snap_info: &mvm_core::template::SnapshotInfo,
-    start_config: &VmStartConfig,
-) -> Result<()> {
-    let slot = mvm_runtime::microvm::allocate_slot(vm_name)?;
-    let run_config = mvm_runtime::microvm::FlakeRunConfig {
-        name: vm_name.to_string(),
-        slot,
-        vmlinux_path: start_config.kernel_path.clone().unwrap_or_default(),
-        initrd_path: start_config.initrd_path.clone(),
-        rootfs_path: start_config.rootfs_path.clone(),
-        verity_path: start_config.verity_path.clone(),
-        roothash: start_config.roothash.clone(),
-        runtime_overlay_path: start_config.runtime_overlay_path.clone(),
-        runtime_overlay_verity_path: start_config.runtime_overlay_verity_path.clone(),
-        runtime_overlay_roothash: start_config.runtime_overlay_roothash.clone(),
-        revision_hash: start_config.revision_hash.clone(),
-        flake_ref: start_config.flake_ref.clone(),
-        profile: start_config.profile.clone(),
-        cpus: start_config.cpus,
-        memory: start_config.memory_mib,
-        // Inherit the balloon decision from the start_config. The
-        // snapshot path is rare for balloon-enabled workloads (FC
-        // snapshots don't checkpoint balloon state cleanly), but
-        // we preserve the field so a future fix doesn't have to
-        // re-thread it.
-        mem_initial: start_config.mem_initial_mib,
-        // Snapshot-eligible callers have no extra volumes; if that ever
-        // changes the snapshot layout will mismatch and Firecracker will
-        // refuse to load — `snapshot_eligible` enforces this.
-        volumes: Vec::new(),
-        config_files: Vec::new(),
-        secret_files: Vec::new(),
-        ports: Vec::new(),
-    };
-    let rev = if mvm_core::manifest::is_slot_hash_dirname(template_id) {
-        mvm_runtime::vm::template::lifecycle::current_revision_id_for_slot(template_id)?
-    } else {
-        mvm_runtime::vm::template::lifecycle::current_revision_id(template_id)?
-    };
-    let snap_dir = if mvm_core::manifest::is_slot_hash_dirname(template_id) {
-        mvm_core::manifest::slot_snapshot_dir(template_id, &rev)
-    } else {
-        mvm_core::template::template_snapshot_dir(template_id, &rev)
-    };
-    mvm_runtime::microvm::restore_from_template_snapshot(
-        template_id,
-        &run_config,
-        &snap_dir,
-        snap_info,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -919,7 +827,6 @@ mod tests {
                 name: format!("planless-{selector}"),
                 ..Default::default()
             };
-            let resolved = resolved_image();
             let mut images = Vec::new();
             let mut attempt = BootAttempt {
                 backend: &backend,
@@ -927,14 +834,19 @@ mod tests {
                 verified_release: None,
                 admission: None,
                 mailbox_posture: None,
-                resolved: &resolved,
                 user_named: true,
                 writable_images: &mut images,
             };
             let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(false);
-            let error = boot_transient_vm(config.name.clone(), false, &mut attempt, None, &mut sub)
-                .err()
-                .expect("planless workload cold boot must refuse");
+            let error = boot_transient_vm(
+                config.name.clone(),
+                TemplateAcceleration::Ineligible,
+                &mut attempt,
+                None,
+                &mut sub,
+            )
+            .err()
+            .expect("planless workload cold boot must refuse");
             assert!(
                 format!("{error:#}").contains("workload cold boot requires signed CLI admission"),
                 "{selector}: {error:#}"
@@ -1068,7 +980,6 @@ mod tests {
             let admitted = std::cell::RefCell::new(Some(owner));
             let backend =
                 AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_required_bridge_plan());
-            let resolved = resolved_image();
             let writable = home.path().join(format!("{name}.img"));
             let sidecar = home.path().join(format!("{name}.lock"));
             std::fs::write(&writable, b"writable mock image").expect("writable image");
@@ -1082,12 +993,17 @@ mod tests {
                 verified_release: None,
                 admission: Some(&admitted),
                 mailbox_posture: None,
-                resolved: &resolved,
                 user_named: true,
                 writable_images: &mut images,
             };
             let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(false);
-            let booted = boot_transient_vm(name.into(), false, &mut attempt, None, &mut sub);
+            let booted = boot_transient_vm(
+                name.into(),
+                TemplateAcceleration::AdmittedRestoreDisabled,
+                &mut attempt,
+                None,
+                &mut sub,
+            );
             let status = backend.status(&VmId(name.into())).expect("mock status");
             let state = mvm_core::config::vm_state_dir(name);
             if gate_refusal {
@@ -1514,37 +1430,6 @@ mod tests {
         assert!(error.to_string().contains("workload failed"), "{error:#}");
     }
 
-    fn resolved_image() -> ResolvedImage {
-        ResolvedImage {
-            vmlinux: "/k/vmlinux".into(),
-            initrd: None,
-            rootfs: "/vol/rootfs.ext4".into(),
-            revision: "rev".into(),
-            flake_ref: "image".into(),
-            profile: None,
-            snap_info: None,
-            template_id: None,
-        }
-    }
-
-    /// A resolved template image carrying snapshot metadata, as
-    /// `snapshot_eligible` requires before the restore path runs.
-    fn snapshot_resolved_image() -> ResolvedImage {
-        ResolvedImage {
-            template_id: Some("tmpl".into()),
-            snap_info: Some(mvm_core::template::SnapshotInfo {
-                created_at: "2026-01-01T00:00:00Z".into(),
-                vmstate_size_bytes: 1,
-                mem_size_bytes: 1,
-                boot_args: String::new(),
-                vcpus: 2,
-                mem_mib: 1024,
-                compatibility: None,
-            }),
-            ..resolved_image()
-        }
-    }
-
     /// A shape the pool could serve, on a host holding no standbys.
     fn claimable_config_without_a_pool() -> VmStartConfig {
         VmStartConfig {
@@ -1585,7 +1470,6 @@ mod tests {
                 ..claimable_config_without_a_pool()
             };
             let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new());
-            let resolved = resolved_image();
             let mut images = Vec::new();
             let mut attempt = BootAttempt {
                 backend: &backend,
@@ -1593,12 +1477,17 @@ mod tests {
                 verified_release: None,
                 admission: None,
                 mailbox_posture: None,
-                resolved: &resolved,
                 user_named: true,
                 writable_images: &mut images,
             };
             let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(false);
-            boot_transient_vm("mailbox-launch".into(), false, &mut attempt, None, &mut sub)
+            boot_transient_vm(
+                "mailbox-launch".into(),
+                TemplateAcceleration::Ineligible,
+                &mut attempt,
+                None,
+                &mut sub,
+            )
         };
         let granted = MailboxGrant {
             mailbox: MailboxId::from_bytes([1; 32]),
@@ -1657,7 +1546,6 @@ mod tests {
     fn a_named_transient_run_keeps_its_cold_path_without_a_standby() {
         let backend = AnyBackend::from_hypervisor("firecracker");
         let start_config = claimable_config_without_a_pool();
-        let resolved = resolved_image();
         let mut images = Vec::new();
         let mut attempt = BootAttempt {
             backend: &backend,
@@ -1665,7 +1553,6 @@ mod tests {
             verified_release: None,
             admission: None,
             mailbox_posture: None,
-            resolved: &resolved,
             user_named: true,
             writable_images: &mut images,
         };
@@ -1700,7 +1587,6 @@ mod tests {
             rootfs_path: rootfs.display().to_string(),
             ..claimable_config_without_a_pool()
         };
-        let resolved = resolved_image();
         let mut images = Vec::new();
         let mut attempt = BootAttempt {
             backend: &backend,
@@ -1708,7 +1594,6 @@ mod tests {
             verified_release: None,
             admission: None,
             mailbox_posture: None,
-            resolved: &resolved,
             user_named: false,
             writable_images: &mut images,
         };
@@ -1724,7 +1609,6 @@ mod tests {
     fn a_host_keeping_no_standbys_boots_cold_without_looking() {
         let backend = AnyBackend::from_hypervisor("firecracker");
         let start_config = claimable_config_without_a_pool();
-        let resolved = resolved_image();
         let mut images = Vec::new();
         let mut attempt = BootAttempt {
             backend: &backend,
@@ -1732,7 +1616,6 @@ mod tests {
             verified_release: None,
             admission: None,
             mailbox_posture: None,
-            resolved: &resolved,
             user_named: false,
             writable_images: &mut images,
         };
@@ -1796,29 +1679,23 @@ mod tests {
         );
     }
 
-    /// A snapshot restore that cannot complete — here the shell-backed slot
-    /// allocation has no Linux environment behind it — warns and boots cold
-    /// instead of failing the launch, dropping the partial state the attempt
-    /// reserved so the cold boot does not inherit it.
+    /// A mechanically eligible template source selects cold without touching
+    /// the raw snapshot assembler, slot allocator, or transient state.
     #[test]
-    fn a_failed_snapshot_restore_falls_back_to_a_cold_boot() {
+    fn an_eligible_template_accelerator_selects_cold_without_restore_or_slot_allocation() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("isolated home");
+        env.isolate_mvm_home(home.path());
         env.remove("MVM_RESIDENCY");
         env.remove("MVM_HVF_WARM_REQUIRE_CLAIM");
-        // Every shell op answers empty output: `allocate_slot` finds no slot
-        // index in it, so the restore fails before reaching the snapshot load.
-        let _shell = mvm_vmm::host::shell::mock::install_handler(|_| {
+        let shell_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_shell_calls = std::sync::Arc::clone(&shell_calls);
+        let _shell = mvm_vmm::host::shell::mock::install_handler(move |_| {
+            let _ = observed_shell_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             mvm_vmm::host::shell::mock::MockResponse::empty()
         });
-        // The partial state a failed attempt leaves behind: the reserved
-        // slot's run-info.json under the VM's state dir.
         let state_dir = mvm_core::config::vm_state_dir("vm-snap");
-        std::fs::create_dir_all(&state_dir).expect("create state dir");
-        std::fs::write(
-            state_dir.join("run-info.json"),
-            br#"{"slot_reserved":true}"#,
-        )
-        .expect("write slot reservation");
+        assert!(!state_dir.exists(), "test starts without transient state");
 
         let mock = mvm_runtime::MockBackend::new();
         let backend = AnyBackend::Mock(mock.clone());
@@ -1826,7 +1703,6 @@ mod tests {
             name: "vm-snap".into(),
             ..claimable_config_without_a_pool()
         };
-        let resolved = snapshot_resolved_image();
         let mut images = Vec::new();
         let mut attempt = BootAttempt {
             backend: &backend,
@@ -1834,13 +1710,18 @@ mod tests {
             verified_release: None,
             admission: None,
             mailbox_posture: None,
-            resolved: &resolved,
             user_named: false,
             writable_images: &mut images,
         };
         let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::default();
-        let booted = boot_transient_vm("vm-snap".to_string(), true, &mut attempt, None, &mut sub)
-            .expect("a failed restore must degrade to a cold boot, not fail the launch");
+        let booted = boot_transient_vm(
+            "vm-snap".to_string(),
+            TemplateAcceleration::Disabled,
+            &mut attempt,
+            None,
+            &mut sub,
+        )
+        .expect("an unavailable accelerator must select the normal cold path");
 
         assert_eq!(booted.name, "vm-snap");
         assert_eq!(
@@ -1848,9 +1729,21 @@ mod tests {
             crate::commands::vm::phase_timing::LaunchMode::Cold
         );
         assert_eq!(mock.count(), 1, "the cold path must boot the VM");
+        assert_eq!(
+            shell_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "cold selection must not invoke the shell-backed slot allocator"
+        );
         assert!(
             !state_dir.exists(),
-            "the partial restore state must be removed before the cold boot"
+            "no partial restore state may be assembled"
+        );
+        assert_eq!(
+            start_mode(booted.cold_reason),
+            mvm_client::admission::StartMode::Cold {
+                reason: "standbys_disabled"
+            },
+            "the existing cold fallback audit outcome is preserved"
         );
     }
 }

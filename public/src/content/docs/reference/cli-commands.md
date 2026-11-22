@@ -2530,24 +2530,18 @@ Launch-plan env is checked like `--env`: a key must be a plain shell name
 password-manager session variable refuses the run unless `--allow-env NAME`
 re-admits it by exact name.
 
-### Snapshot restore
+### Template acceleration
 
-When the request boots a registered template (`--manifest <name>`) and
-that template has a compatible recovery artifact, `mvmctl run` uses the
-selected backend's advertised recovery tier instead of cold-booting.
+A registered template (`--manifest <name>`) can still claim a compatible
+authenticated warm parent. After a warm-pool miss, raw template snapshot
+acceleration remains disabled until an authenticated restore capability binds
+HMAC, signature, epoch, runtime identity, and a paused no-NIC check. The CLI
+selects cold boot directly for that fallback; it does not allocate a restore
+slot, assemble snapshot paths, or report a failed restore attempt.
 
-The snapshot path activates only when _all_ of the following hold:
-
-- the image source is a **registered template** (the bundled default
-  image has no template snapshot to restore from);
-- there are **no** live directory shares (extra drives would mismatch the
-  snapshot's recorded drive layout);
-- the active backend reports snapshot support.
-
-Recovery tiers are not interchangeable. Unsupported live-memory,
-machine-state, disk-only, or standby requests fail with an actionable error;
-the CLI does not silently fall back to a weaker tier. See the [Sandboxed
-Exec](/guides/exec/) guide for the full background.
+Same-identity checkpoint resume and `vm_full` fork/restore are separate,
+authenticated machine operations and retain their backend-specific capability
+checks. See the [Sandboxed Exec](/guides/exec/) guide for the full background.
 
 ## Volumes
 

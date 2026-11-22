@@ -83,14 +83,13 @@ impl RunPhaseTimingReport {
     }
 }
 
-/// Whether the backend satisfied the launch from a warm standby or performed
-/// a normal boot/restore path.
+/// Whether the backend satisfied the launch from a warm standby or cold-booted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchMode {
     /// A claimed standby child resumed from captured memory.
     Warm,
-    /// A cold boot or template snapshot restore supplied the VM.
+    /// A cold boot supplied the VM.
     Cold,
 }
 

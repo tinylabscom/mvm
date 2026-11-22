@@ -7,7 +7,6 @@
 pub(crate) mod activation;
 mod boot_config;
 mod flake_run;
-mod snapshot;
 
 pub use activation::{activate_over_stream, activate_workload, read_verb_grant_envelope};
 pub use boot_config::resolved_runtime_overlay;
@@ -34,7 +33,6 @@ pub use mvm_backends::fc::snapshot::{
     RestoredDeviceModel, assert_vsock_only_device_model, create_snapshot_files,
     warm_restore_instance, warm_restore_instance_from_path,
 };
-pub use snapshot::restore_from_template_snapshot;
 
 // The per-VM path layout moved to mvm-backends::fc with the Firecracker
 // mechanics that read it. Re-exported so `crate::microvm::<name>` and the

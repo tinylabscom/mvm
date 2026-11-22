@@ -483,9 +483,9 @@ pub fn try_lock_resume_in(
 
 /// Verify + load one VM's own instance snapshot (`~/.mvm/instances/<vm-name>/snapshot/`).
 /// Thin wrapper around [`verify_and_resume_from_dir`] for the common case
-/// where the sealed envelope lives at the canonical per-VM path; the fork and
-/// template-restore paths hold their sealed envelope elsewhere and call
-/// [`verify_and_resume_from_dir`] directly.
+/// where the sealed envelope lives at the canonical per-VM path. Tests and
+/// conformance witnesses can call [`verify_and_resume_from_dir`] with an
+/// isolated sealed directory.
 ///
 /// Returns the verified sidecar so the caller can audit it before
 /// resuming Firecracker.
