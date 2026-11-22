@@ -30,7 +30,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
+use mvm_core::util::time::utc_timestamp_now;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -102,7 +103,7 @@ pub struct AuditFields {
     /// blocked on the host string).
     pub resolved_ip: Option<IpAddr>,
     pub duration_ms: u32,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: UtcTimestamp,
 }
 
 #[derive(Debug, Clone)]
@@ -496,7 +497,7 @@ impl L7EgressProxy {
                 reason: Some(reason),
                 resolved_ip,
                 duration_ms: elapsed_ms(started),
-                timestamp: Utc::now(),
+                timestamp: utc_timestamp_now(),
             },
         }
     }
@@ -529,7 +530,7 @@ impl L7EgressProxy {
                 reason: None,
                 resolved_ip,
                 duration_ms: elapsed_ms(started),
-                timestamp: Utc::now(),
+                timestamp: utc_timestamp_now(),
             },
         }
     }

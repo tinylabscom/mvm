@@ -126,7 +126,7 @@ pub enum SecretServiceError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct OAuthLoginOutcome {
     /// When the stored access token expires.
-    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: mvm_contract::timestamp::UtcTimestamp,
     /// Whether the token endpoint issued a refresh token, so the host can
     /// renew the set without another consent.
     pub renewable: bool,

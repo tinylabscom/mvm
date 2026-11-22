@@ -619,7 +619,7 @@ fn cmd_login(service: &SecretService, tenant: &str, name: &str, ui: ConsentUi) -
     let options = OAuthLoginOptions::default().with_timeout(ui.timeout);
     let present = |url: &str| present_authorization_url(url, ui.open_browser);
     let outcome = service.oauth_login(tenant, name, &options, &present)?;
-    let expires_at = outcome.expires_at.to_rfc3339();
+    let expires_at = outcome.expires_at;
     if outcome.renewable {
         eprintln!(
             "Stored the consented token set for '{name}'. The access token expires at {expires_at}; the host renews it with the refresh token."
@@ -1951,7 +1951,7 @@ mod tests {
             "the-client-secret"
         );
         assert!(stored.access_token.expose_secret().is_empty());
-        assert!(stored.expires_at < chrono::Utc::now());
+        assert!(stored.expires_at < mvm_core::util::time::utc_timestamp_now());
     }
 
     #[test]
