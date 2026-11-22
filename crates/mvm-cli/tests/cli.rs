@@ -200,6 +200,8 @@ fn bench_report_takes_a_density_dir_and_the_lane_form_still_parses() {
             "a.json",
             "--launch-report",
             "b.json",
+            "--state-cell-latency",
+            "cells.json",
             "--json",
             "--out",
             "r.json",
@@ -222,7 +224,11 @@ fn bench_report_takes_a_density_dir_and_the_lane_form_still_parses() {
     let help =
         mvm_cli::commands::help_text_for(&["bench".into(), "report".into(), "--help".into()])
             .expect("bench report --help renders");
-    assert!(help.contains("--density-dir") && help.contains("--launch-report"));
+    assert!(
+        help.contains("--density-dir")
+            && help.contains("--launch-report")
+            && help.contains("--state-cell-latency")
+    );
     cli_command()
         .try_get_matches_from([
             "mvmctl",

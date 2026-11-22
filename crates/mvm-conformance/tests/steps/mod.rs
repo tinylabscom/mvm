@@ -13,6 +13,7 @@ mod cold_launch;
 pub(crate) mod cve_containment;
 mod doc_examples;
 mod gpu_e2e;
+mod host_cell;
 mod hvf_save_restore;
 mod initramfs;
 mod installer;

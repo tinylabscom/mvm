@@ -450,3 +450,6 @@ pub(crate) fn remove_undeclared(home: &Path, topology: &Topology) -> Result<()> 
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod latency_tests;
