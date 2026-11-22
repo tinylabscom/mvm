@@ -52,6 +52,8 @@ pub mod drive;
 pub mod egress_broker;
 pub mod extension_admission;
 pub mod extension_controller;
+/// How a thread following a file blocks until it may have changed.
+pub mod file_wait;
 /// Shared length-prefixed framing for same-UID host control channels.
 pub use mvm_core::framing;
 /// Host->guest healthcheck probe: run a workload's healthcheck command via

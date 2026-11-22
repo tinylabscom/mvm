@@ -1,10 +1,12 @@
-//! How the console follower idles between reads.
+//! How a thread following a file idles between reads.
 //!
-//! On Linux the follower blocks on inotify: a watch on the capture file
-//! (writes, truncation, rename, unlink) and one on its directory (the file
-//! appearing, or a new file renamed over it), plus an eventfd that a stop
-//! writes to. A file nobody writes to costs the follower no wakeup at all,
-//! which is what an idle workload's console is.
+//! Two followers share this: the console capture's and the audit chain's.
+//!
+//! On Linux the follower blocks on inotify: a watch on the file (writes,
+//! truncation, rename, unlink) and one on its directory (the file appearing,
+//! or a new file renamed over it), plus an eventfd that a stop writes to. A
+//! file nobody writes to costs the follower no wakeup at all, which is what an
+//! idle workload's console and an idle unit's audit chain are.
 //!
 //! Every other host, and a Linux host that refuses inotify, re-checks the file
 //! on a fixed interval. Watches only decide when the follower looks; the read
@@ -15,10 +17,10 @@ use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 /// How often the timed fallback re-checks the file.
-pub(super) const POLL_INTERVAL: Duration = Duration::from_millis(200);
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// What the follower blocks on between reads.
-pub(super) trait ConsoleWait: Send + Sync {
+pub trait FileWait: Send + Sync {
     /// Start noticing changes to `path`. Called before every read, so a write
     /// that lands between the read and [`wait`](Self::wait) still ends the
     /// wait instead of being missed.
@@ -33,13 +35,13 @@ pub(super) trait ConsoleWait: Send + Sync {
 }
 
 /// The quietest waiter this host supports.
-pub(super) fn for_console() -> Box<dyn ConsoleWait> {
+pub fn for_file() -> Box<dyn FileWait> {
     #[cfg(target_os = "linux")]
     {
         match inotify::FileEvents::new() {
             Ok(events) => return Box::new(events),
             Err(error) => {
-                tracing::debug!(%error, "inotify unavailable; the console follower polls");
+                tracing::debug!(%error, "inotify unavailable; file followers poll");
             }
         }
     }
@@ -48,12 +50,12 @@ pub(super) fn for_console() -> Box<dyn ConsoleWait> {
 
 /// Re-check every [`POLL_INTERVAL`], returning at once after an interrupt.
 #[derive(Default)]
-pub(super) struct Timed {
+struct Timed {
     interrupted: Mutex<bool>,
     wake: Condvar,
 }
 
-impl ConsoleWait for Timed {
+impl FileWait for Timed {
     fn arm(&self, _path: &Path) {}
 
     fn wait(&self) {
@@ -86,9 +88,9 @@ mod inotify {
     use rustix::event::{EventfdFlags, PollFd, PollFlags, Timespec, eventfd, poll};
     use rustix::fs::inotify::{self, CreateFlags, WatchFlags};
 
-    use super::{ConsoleWait, POLL_INTERVAL};
+    use super::{FileWait, POLL_INTERVAL};
 
-    /// Changes to the capture file's own inode.
+    /// Changes to the followed file's own inode.
     const FILE_EVENTS: WatchFlags = WatchFlags::MODIFY
         .union(WatchFlags::ATTRIB)
         .union(WatchFlags::CLOSE_WRITE)
@@ -100,7 +102,7 @@ mod inotify {
         .union(WatchFlags::MOVED_TO)
         .union(WatchFlags::ONLYDIR);
 
-    pub(in crate::stream) struct FileEvents {
+    pub(super) struct FileEvents {
         inotify: OwnedFd,
         interrupt: OwnedFd,
         watches: Mutex<Watches>,
@@ -113,7 +115,7 @@ mod inotify {
     }
 
     impl FileEvents {
-        pub(in crate::stream) fn new() -> io::Result<Self> {
+        pub(super) fn new() -> io::Result<Self> {
             Ok(Self {
                 inotify: inotify::init(CreateFlags::CLOEXEC | CreateFlags::NONBLOCK)?,
                 interrupt: eventfd(0, EventfdFlags::CLOEXEC | EventfdFlags::NONBLOCK)?,
@@ -132,7 +134,7 @@ mod inotify {
         }
     }
 
-    impl ConsoleWait for FileEvents {
+    impl FileWait for FileEvents {
         fn arm(&self, path: &Path) {
             let mut watches = self.watches();
             if watches.directory.is_none() {
