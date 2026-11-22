@@ -306,7 +306,7 @@ pub fn session_for_stop(raw_id: &str) -> Result<SessionRecord> {
 /// Best-effort throughout: one session's failure never stops the sweep.
 #[must_use]
 pub fn reap_expired_sessions() -> Vec<SessionId> {
-    let now = chrono::Utc::now();
+    let now = mvm_core::util::time::utc_timestamp_now();
     let candidates = match session::list_expired_session_ids(now) {
         Ok(ids) => ids,
         Err(e) => {
@@ -624,8 +624,10 @@ mod tests {
         let _home = isolated();
         let mut stale = SessionRecord::new_running("vm-stale", "wl", SessionMode::Prod);
         stale.idle_timeout_secs = 60;
-        stale.started_at = (chrono::Utc::now() - chrono::Duration::seconds(900))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        stale.started_at = mvm_core::util::time::utc_timestamp_now()
+            .checked_add_secs(-900)
+            .unwrap()
+            .to_string();
         session::write_session(&stale).expect("write");
         let fresh = running("vm-fresh", SessionMode::Prod);
 
@@ -651,8 +653,10 @@ mod tests {
 
         let mut stale = SessionRecord::new_running("vm-sealed", "wl", SessionMode::Prod);
         stale.idle_timeout_secs = 60;
-        stale.started_at = (chrono::Utc::now() - chrono::Duration::seconds(900))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        stale.started_at = mvm_core::util::time::utc_timestamp_now()
+            .checked_add_secs(-900)
+            .unwrap()
+            .to_string();
         session::write_session(&stale).expect("write");
         mvm_hostd::audit::plan_persist::write_plan("vm-sealed", &plan).expect("persist plan");
 
@@ -890,8 +894,10 @@ mod tests {
 
         let mut stale = SessionRecord::new_running("vm-sealed-reap", "wl", SessionMode::Prod);
         stale.idle_timeout_secs = 60;
-        stale.started_at = (chrono::Utc::now() - chrono::Duration::seconds(900))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        stale.started_at = mvm_core::util::time::utc_timestamp_now()
+            .checked_add_secs(-900)
+            .unwrap()
+            .to_string();
         session::write_session(&stale).expect("write");
         assert_eq!(reap_expired_sessions(), vec![stale.id.clone()]);
         assert_eq!(sealed_refusals(), 0);

@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_runtime::vm::name_registry::{VmNameRegistry, VmRegistration};
 use rand::RngExt;
 
@@ -116,10 +116,9 @@ pub fn resolve_idle_timeout(reg: &VmRegistration, default: Option<Duration>) -> 
 /// falling back to `registered_at` when never touched (so a freshly
 /// registered VM isn't instantly idle). `None` if neither timestamp
 /// parses or the timestamp is in the future (clock skew).
-pub fn idle_elapsed(reg: &VmRegistration, now: DateTime<Utc>) -> Option<Duration> {
+pub fn idle_elapsed(reg: &VmRegistration, now: UtcTimestamp) -> Option<Duration> {
     let raw = reg.last_active.as_deref().unwrap_or(&reg.registered_at);
-    let since = mvm_core::util::time::parse_iso8601(raw)?;
-    (now - since).to_std().ok()
+    now.duration_since(raw.parse::<UtcTimestamp>().ok()?)
 }
 
 pub struct Reaper {
@@ -151,7 +150,7 @@ impl Reaper {
     /// Run a single sweep. Returns the per-VM outcomes; persists the
     /// updated registry to disk only if something actually changed (a
     /// record was reaped, or an idle VM was slept and marked paused).
-    pub fn tick(&self, now: DateTime<Utc>) -> Vec<ReapOutcome> {
+    pub fn tick(&self, now: UtcTimestamp) -> Vec<ReapOutcome> {
         let mut registry = match VmNameRegistry::load(&self.registry_path) {
             Ok(r) => r,
             // I/O failure is treated as "no registry" — we don't want a
@@ -184,7 +183,7 @@ impl Reaper {
 /// wins over idle — a VM whose TTL has elapsed is reaped, not slept.
 fn sweep(
     registry: &mut VmNameRegistry,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     teardown: &TeardownFn,
     idle: Option<&IdleConfig>,
 ) -> Vec<ReapOutcome> {
@@ -202,7 +201,7 @@ fn sweep(
     for (name, reg) in snapshot {
         // ── TTL (terminal, wins over idle) ──────────────────────────
         if let Some(raw) = reg.expires_at.as_deref() {
-            let Some(expires) = mvm_core::util::time::parse_iso8601(raw) else {
+            let Ok(expires) = raw.parse::<UtcTimestamp>() else {
                 outcomes.push(ReapOutcome::MalformedExpiry {
                     name: name.clone(),
                     raw: raw.to_string(),
@@ -279,6 +278,10 @@ pub fn deregister_only_teardown() -> TeardownFn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plus(t: UtcTimestamp, secs: i64) -> UtcTimestamp {
+        t.checked_add_secs(secs).unwrap()
+    }
     use mvm_runtime::vm::name_registry::RegisterParams;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -304,7 +307,7 @@ mod tests {
     #[test]
     fn sweep_skips_no_ttl() {
         let mut reg = registry_with_one(None);
-        let now = Utc::now();
+        let now = mvm_core::util::time::utc_timestamp_now();
         let teardown = deregister_only_teardown();
         let outcomes = sweep(&mut reg, now, &teardown, None);
         assert_eq!(outcomes, vec![ReapOutcome::Skipped]);
@@ -313,9 +316,9 @@ mod tests {
 
     #[test]
     fn sweep_skips_future_ttl() {
-        let now = Utc::now();
-        let future = now + chrono::Duration::seconds(60);
-        let raw = future.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let now = mvm_core::util::time::utc_timestamp_now();
+        let future = plus(now, 60);
+        let raw = future.to_string();
         let mut reg = registry_with_one(Some(&raw));
         let teardown = deregister_only_teardown();
         let outcomes = sweep(&mut reg, now, &teardown, None);
@@ -325,9 +328,9 @@ mod tests {
 
     #[test]
     fn sweep_reaps_past_ttl() {
-        let now = Utc::now();
-        let past = now - chrono::Duration::seconds(60);
-        let raw = past.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let now = mvm_core::util::time::utc_timestamp_now();
+        let past = plus(now, -60);
+        let raw = past.to_string();
         let mut reg = registry_with_one(Some(&raw));
         let teardown = deregister_only_teardown();
         let outcomes = sweep(&mut reg, now, &teardown, None);
@@ -343,7 +346,7 @@ mod tests {
     #[test]
     fn sweep_reports_malformed_expiry_without_removing() {
         let mut reg = registry_with_one(Some("not a real timestamp"));
-        let now = Utc::now();
+        let now = mvm_core::util::time::utc_timestamp_now();
         let teardown = deregister_only_teardown();
         let outcomes = sweep(&mut reg, now, &teardown, None);
         assert_eq!(
@@ -360,9 +363,9 @@ mod tests {
 
     #[test]
     fn sweep_keeps_record_when_teardown_fails() {
-        let now = Utc::now();
-        let past = now - chrono::Duration::seconds(60);
-        let raw = past.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let now = mvm_core::util::time::utc_timestamp_now();
+        let past = plus(now, -60);
+        let raw = past.to_string();
         let mut reg = registry_with_one(Some(&raw));
         let teardown: TeardownFn = Box::new(|_, _| Err("backend down".to_string()));
         let outcomes = sweep(&mut reg, now, &teardown, None);
@@ -376,9 +379,9 @@ mod tests {
 
     #[test]
     fn sweep_invokes_teardown_with_registration() {
-        let now = Utc::now();
-        let past = now - chrono::Duration::seconds(60);
-        let raw = past.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let now = mvm_core::util::time::utc_timestamp_now();
+        let past = plus(now, -60);
+        let raw = past.to_string();
         let mut reg = registry_with_one(Some(&raw));
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = Arc::clone(&calls);
@@ -425,9 +428,9 @@ mod tests {
     fn reaper_persists_registry_after_reap() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vm-names.json");
-        let now = Utc::now();
-        let past = now - chrono::Duration::seconds(60);
-        let raw = past.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let now = mvm_core::util::time::utc_timestamp_now();
+        let past = plus(now, -60);
+        let raw = past.to_string();
         let reg = registry_with_one(Some(&raw));
         reg.save(&path).unwrap();
 
@@ -452,7 +455,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
 
         let reaper = Reaper::new(path.clone(), deregister_only_teardown());
-        let _ = reaper.tick(Utc::now());
+        let _ = reaper.tick(mvm_core::util::time::utc_timestamp_now());
 
         let mtime_after = std::fs::metadata(&path).unwrap().modified().unwrap();
         assert_eq!(
@@ -465,7 +468,11 @@ mod tests {
     fn reaper_with_missing_registry_returns_empty() {
         let path = PathBuf::from("/definitely/does/not/exist/vm-names.json");
         let reaper = Reaper::new(path, deregister_only_teardown());
-        assert!(reaper.tick(Utc::now()).is_empty());
+        assert!(
+            reaper
+                .tick(mvm_core::util::time::utc_timestamp_now())
+                .is_empty()
+        );
     }
 
     // -------- Idle-sleep --------
@@ -476,8 +483,8 @@ mod tests {
         auto_resume: bool,
         paused: bool,
         tag: Option<&str>,
-    ) -> (VmNameRegistry, DateTime<Utc>) {
-        let now = Utc::now();
+    ) -> (VmNameRegistry, UtcTimestamp) {
+        let now = mvm_core::util::time::utc_timestamp_now();
         let mut tags = BTreeMap::new();
         if let Some(t) = tag {
             tags.insert(IDLE_TIMEOUT_TAG.to_string(), t.to_string());
@@ -494,9 +501,7 @@ mod tests {
             auto_resume,
         })
         .unwrap();
-        let la = (now - chrono::Duration::seconds(last_active_secs_ago))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let la = plus(now, -last_active_secs_ago).to_string();
         reg.touch_last_active("vm1", la).unwrap();
         if paused {
             reg.set_paused("vm1", true).unwrap();
@@ -526,10 +531,8 @@ mod tests {
     #[test]
     fn idle_elapsed_reports_none_for_a_future_timestamp() {
         let mut reg = registry_with_one(None);
-        let now = Utc::now();
-        let ahead = (now + chrono::Duration::seconds(30))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let now = mvm_core::util::time::utc_timestamp_now();
+        let ahead = plus(now, 30).to_string();
         reg.touch_last_active("vm1", ahead).unwrap();
 
         assert!(
@@ -546,19 +549,17 @@ mod tests {
         // only ever moves it earlier — which makes `now >= registered_at` hold
         // by construction once `now` is taken later in real time.
         //
-        // Sampling `now` first instead let the two `Utc::now()` calls straddle
+        // Sampling `now` first instead let the two `mvm_core::util::time::utc_timestamp_now()` calls straddle
         // a second boundary: `registered_at` then truncated to the *next*
         // second, `idle_elapsed` saw a future timestamp, returned `None` per
         // its clock-skew contract, and the unwrap below panicked. Same-second
         // truncation hid it on almost every run.
-        let now = Utc::now();
+        let now = mvm_core::util::time::utc_timestamp_now();
         // No last_active → falls back to registered_at (~now) → tiny elapsed.
         let e = idle_elapsed(reg.lookup("vm1").unwrap(), now).unwrap();
         assert!(e < Duration::from_secs(5));
         // With last_active 120s ago → ~120s elapsed.
-        let la = (now - chrono::Duration::seconds(120))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let la = plus(now, -120).to_string();
         reg.touch_last_active("vm1", la).unwrap();
         let e = idle_elapsed(reg.lookup("vm1").unwrap(), now).unwrap();
         assert!(
@@ -668,14 +669,10 @@ mod tests {
     #[test]
     fn sweep_ttl_wins_over_idle() {
         // VM is both expired (TTL) and idle — TTL reaps, idle is not invoked.
-        let now = Utc::now();
-        let past = (now - chrono::Duration::seconds(60))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let now = mvm_core::util::time::utc_timestamp_now();
+        let past = plus(now, -60).to_string();
         let mut reg = registry_with_one(Some(&past));
-        let la = (now - chrono::Duration::seconds(120))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let la = plus(now, -120).to_string();
         reg.touch_last_active("vm1", la).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let cfg = idle_cfg(counting_sleep(Arc::clone(&calls)), Some(60));

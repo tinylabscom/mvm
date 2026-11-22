@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 
 /// Shared wall-clock seam for code that needs deterministic time in tests.
 ///
@@ -65,6 +66,19 @@ fn unix_secs_floor(at: std::time::SystemTime) -> i64 {
 /// Return the current UTC timestamp in ISO 8601 format.
 pub fn utc_now() -> String {
     rfc3339_from_system_time(std::time::SystemTime::now())
+}
+
+/// The current instant as a [`UtcTimestamp`], nanosecond precision. Saturates
+/// at the epoch if the system clock is before 1970.
+pub fn utc_timestamp_now() -> UtcTimestamp {
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    UtcTimestamp::from_unix(
+        i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX),
+        since_epoch.subsec_nanos(),
+    )
+    .expect("the current time is within years 0000..=9999")
 }
 
 /// Render a `SystemTime` as the same ISO 8601 / RFC 3339 shape [`utc_now`]
@@ -200,6 +214,12 @@ mod tests {
             x ^= x << 17;
             check((x % 253_402_300_800) as i64 - 62_135_596_800);
         }
+    }
+
+    #[test]
+    fn utc_timestamp_now_matches_chrono_now_within_a_second() {
+        let ours = chrono::DateTime::<Utc>::from(utc_timestamp_now());
+        assert!((Utc::now() - ours).num_seconds().abs() <= 1);
     }
 
     #[test]

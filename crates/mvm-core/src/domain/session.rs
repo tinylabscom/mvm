@@ -25,6 +25,7 @@
 //! field names are part of the cross-repo contract.
 
 use anyhow::{Result, bail};
+use mvm_contract::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 /// Default idle timeout for newly-created sessions (5 minutes).
@@ -257,9 +258,9 @@ impl SessionRecord {
     /// call, else from `started_at`. A record whose timestamp does not parse
     /// is never expired: a corrupt record must not get a live VM torn down.
     #[must_use]
-    pub fn idle_expired_at(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+    pub fn idle_expired_at(&self, now: UtcTimestamp) -> bool {
         let last = self.last_invoke_at.as_deref().unwrap_or(&self.started_at);
-        let Ok(last) = chrono::DateTime::parse_from_rfc3339(last) else {
+        let Ok(last) = last.parse::<UtcTimestamp>() else {
             tracing::warn!(
                 session = %self.id,
                 ts = %last,
@@ -267,16 +268,13 @@ impl SessionRecord {
             );
             return false;
         };
-        let elapsed = now
-            .signed_duration_since(last.with_timezone(&chrono::Utc))
-            .num_seconds();
-        u64::try_from(elapsed).is_ok_and(|elapsed| elapsed > self.idle_timeout_secs)
+        u64::try_from(now.whole_secs_since(last))
+            .is_ok_and(|elapsed| elapsed > self.idle_timeout_secs)
     }
 }
 
 fn now_rfc3339() -> String {
-    use chrono::SecondsFormat;
-    chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+    crate::util::time::utc_now()
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +404,7 @@ where
 /// Return the IDs of `Running` sessions whose idle timeout has elapsed
 /// as of `now` (see [`SessionRecord::idle_expired_at`]). Pure: does not
 /// perform any teardown.
-pub fn list_expired_session_ids(now: chrono::DateTime<chrono::Utc>) -> Result<Vec<SessionId>> {
+pub fn list_expired_session_ids(now: UtcTimestamp) -> Result<Vec<SessionId>> {
     Ok(list_sessions()?
         .into_iter()
         .filter(|record| record.state == SessionState::Running && record.idle_expired_at(now))
@@ -467,6 +465,7 @@ fn is_base32_alphabet(c: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::time::utc_timestamp_now;
 
     #[test]
     fn session_id_new_is_26_chars_base32() {
@@ -723,16 +722,13 @@ mod tests {
             stamp.ends_with('Z') && stamp.as_bytes()[10] == b'T',
             "{stamp}"
         );
-        assert!(chrono::DateTime::parse_from_rfc3339(stamp).is_ok());
+        assert!(stamp.parse::<UtcTimestamp>().is_ok());
     }
 
     #[test]
     fn idle_expiry_counts_from_the_last_call_and_is_strict_at_the_timeout() {
-        let now = chrono::Utc::now();
-        let ago = |secs: i64| {
-            (now - chrono::Duration::seconds(secs))
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-        };
+        let now = utc_timestamp_now();
+        let ago = |secs: i64| now.checked_add_secs(-secs).unwrap().to_string();
         let mut record = SessionRecord::new_running("vm", "x", SessionMode::Prod);
         record.idle_timeout_secs = 60;
         record.started_at = ago(600);
@@ -760,35 +756,54 @@ mod tests {
         );
     }
 
+    /// Records written before this form was fixed carry offsets or fractions;
+    /// they must still age out.
+    #[test]
+    fn idle_expiry_reads_offset_and_fractional_stamps() {
+        let now: UtcTimestamp = "2026-05-06T01:00:00Z".parse().unwrap();
+        let mut record = SessionRecord::new_running("vm", "x", SessionMode::Prod);
+        record.idle_timeout_secs = 60;
+        for old in [
+            "2026-05-06T00:00:00+00:00",
+            "2026-05-06T02:00:00+02:00",
+            "2026-05-06T00:00:00.123456Z",
+        ] {
+            record.started_at = old.to_string();
+            assert!(record.idle_expired_at(now), "{old}");
+        }
+        record.started_at = "2026-05-06T00:59:30.5Z".to_string();
+        assert!(!record.idle_expired_at(now));
+    }
+
     #[cfg(unix)]
     #[test]
     fn list_expired_session_ids_picks_only_idle_running_records() {
         let _guard = isolated_runtime_dir();
-        let now = chrono::Utc::now();
-        let stale = now - chrono::Duration::seconds(900);
-        let recent = now - chrono::Duration::seconds(60);
+        let now = utc_timestamp_now();
+        let stale = now.checked_add_secs(-900).unwrap().to_string();
+        let recent = now.checked_add_secs(-60).unwrap().to_string();
 
         // Idle, running, past timeout → reapable.
         let mut a = SessionRecord::new_running("vm-a", "x", SessionMode::Prod);
         a.idle_timeout_secs = 300;
-        a.started_at = stale.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        a.last_invoke_at = Some(stale.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        a.started_at = stale.clone();
+        a.last_invoke_at = Some(stale.clone());
 
         // Idle but recent — within timeout, not reapable.
         let mut b = SessionRecord::new_running("vm-b", "x", SessionMode::Prod);
         b.idle_timeout_secs = 300;
-        b.last_invoke_at = Some(recent.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        b.last_invoke_at = Some(recent.clone());
 
         // Idle and stale, but already Killed — skip.
         let mut c = SessionRecord::new_running("vm-c", "x", SessionMode::Prod);
         c.state = SessionState::Killed;
         c.idle_timeout_secs = 300;
-        c.last_invoke_at = Some(stale.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        c.last_invoke_at = Some(stale.clone());
 
         // Stale but never invoked — falls back to started_at.
         let mut d = SessionRecord::new_running("vm-d", "x", SessionMode::Prod);
         d.idle_timeout_secs = 300;
-        d.started_at = stale.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        d.started_at = stale.clone();
         d.last_invoke_at = None;
 
         for r in [&a, &b, &c, &d] {
@@ -811,7 +826,7 @@ mod tests {
     #[test]
     fn list_expired_skips_unparseable_timestamps() {
         let _guard = isolated_runtime_dir();
-        let now = chrono::Utc::now();
+        let now = utc_timestamp_now();
         let mut a = SessionRecord::new_running("vm-a", "x", SessionMode::Prod);
         a.idle_timeout_secs = 0;
         a.started_at = "not-an-rfc3339-date".into();
