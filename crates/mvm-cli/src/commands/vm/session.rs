@@ -317,7 +317,9 @@ const LONG_LIVED_DEV_THRESHOLD_SECS: i64 = 3600;
 /// skipped silently. The classification is read-only — no record
 /// mutation, no VM teardown.
 fn emit_stale_warnings(sessions: &[mvm_core::session::SessionRecord]) {
-    let now = mvm_core::util::time::utc_timestamp_now();
+    let Ok(now) = mvm_core::util::time::try_utc_timestamp_now() else {
+        return;
+    };
     let mut stale_running: Vec<&mvm_core::session::SessionRecord> = Vec::new();
     let mut long_lived_dev: Vec<&mvm_core::session::SessionRecord> = Vec::new();
 

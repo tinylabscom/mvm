@@ -47,7 +47,7 @@ mod tests {
     #[test]
     fn minted_grant_verifies_under_signer_key() {
         let signer = Keystore::generate();
-        let now = mvm_agentd::vsock::utc_now();
+        let now = mvm_core::util::time::utc_timestamp_now();
         let nonce = Nonce::from_bytes([3u8; 16]);
         let grant = mint_verb_grant(
             &signer,

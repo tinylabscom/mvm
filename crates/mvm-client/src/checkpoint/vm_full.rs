@@ -401,6 +401,8 @@ fn verify_child_plan(
     child_name: &str,
     image_sha256: &str,
 ) -> Result<()> {
+    let now = mvm_core::util::time::try_utc_timestamp_now()
+        .context("the host clock is unusable, so the child plan's validity cannot be checked")?;
     let trusted = crate::host_keypair::load_or_init()?.verifying_key();
     mvm_core::plan::verify_restored_child_plan(
         admission.admitted.signed(),
@@ -408,7 +410,7 @@ fn verify_child_plan(
         &mvm_core::plan::RestoredChildBinding {
             vm_name: child_name,
             image: mvm_core::plan::ImageBinding::Pinned(image_sha256),
-            now: mvm_core::util::time::utc_timestamp_now(),
+            now,
         },
     )
     .context("the admitted child plan does not bind the restore")

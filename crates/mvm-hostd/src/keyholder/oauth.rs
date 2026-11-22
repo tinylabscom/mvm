@@ -39,6 +39,8 @@ use anyhow::Context;
 use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::crypto::secret_binding::{BindingStore, OAuthBindingMeta};
 use mvm_core::plan::{SecretBinding, SecretSource};
+use mvm_core::util::time::try_utc_timestamp_now;
+#[cfg(test)]
 use mvm_core::util::time::utc_timestamp_now;
 use mvm_http::resolve::Resolve;
 use tracing::{info, warn};
@@ -111,7 +113,7 @@ pub fn consented_token_set(
     captured: CapturedOAuthToken,
     client_secret: Option<OAuthSecretString>,
 ) -> anyhow::Result<OAuthTokenSet> {
-    let expires_at = require_schedulable_expiry(captured.expires_at, utc_timestamp_now())?;
+    let expires_at = require_schedulable_expiry(captured.expires_at, try_utc_timestamp_now()?)?;
     Ok(OAuthTokenSet {
         access_token: captured.access_token,
         refresh_token: captured.refresh_token,
@@ -179,7 +181,7 @@ pub(crate) fn parse_token_response(
         .or_else(|| {
             json.pointer("/expires_in")
                 .and_then(serde_json::Value::as_i64)
-                .and_then(|ttl| utc_timestamp_now().checked_add_secs(ttl))
+                .and_then(|ttl| try_utc_timestamp_now().ok()?.checked_add_secs(ttl))
         });
     Some(CapturedOAuthToken {
         access_token: super::resolver::OAuthSecretString::from(access_token.to_owned()),
@@ -604,7 +606,7 @@ pub async fn refresh_once(
             client_secret,
         } => exchange_refresh_token(client, meta, refresh_token, client_secret).await?,
     };
-    require_schedulable_expiry(captured.expires_at, utc_timestamp_now())?;
+    require_schedulable_expiry(captured.expires_at, try_utc_timestamp_now()?)?;
     resolver
         .store_captured_oauth_token(name, captured)
         .with_context(|| format!("persisting refreshed oauth token set for `{name}`"))
@@ -783,7 +785,12 @@ async fn refresh_loop(settings: RefreshSettings, binding: OAuthRefreshBinding) {
             settings.stopped(&binding.name, &destination, reason).await;
             return;
         }
-        if let Some(wait) = refresh_in(token_set.expires_at, utc_timestamp_now()) {
+        let Ok(now) = try_utc_timestamp_now() else {
+            warn!(secret = %binding.name, "host clock unusable; not refreshing");
+            tokio::time::sleep(settings.retry_interval).await;
+            continue;
+        };
+        if let Some(wait) = refresh_in(token_set.expires_at, now) {
             tokio::time::sleep(wait).await;
         }
         // An expired set is due, not lost: neither grant needs the access

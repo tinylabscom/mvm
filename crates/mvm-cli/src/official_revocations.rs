@@ -70,10 +70,6 @@ impl From<RegistryPackStoreError> for UpdateRefused {
     }
 }
 
-fn utc_now() -> UtcTimestamp {
-    UtcTimestamp::try_from(chrono::Utc::now()).expect("host clock within years 0000..=9999")
-}
-
 fn needs_refresh(valid_until: Option<UtcTimestamp>, now: UtcTimestamp) -> bool {
     valid_until.is_none_or(|end| {
         now.checked_add_secs(REFRESH_WITHIN_HOURS * 3600)
@@ -134,7 +130,15 @@ fn ensure_with(
 /// Refresh the official feed when it is due. A failure is reported and
 /// otherwise ignored: the revocation check that follows fails closed on its own.
 pub(crate) fn ensure_official_feed_fresh() {
-    let now = utc_now();
+    let now = match mvm_core::util::time::try_utc_timestamp_now() {
+        Ok(now) => now,
+        Err(error) => {
+            crate::ui::warn(&format!(
+                "could not refresh the official revocation feed: the host clock is unusable ({error})"
+            ));
+            return;
+        }
+    };
     let valid_until =
         mvm_core::registry_pack_store::official_registry_pack_revocation_valid_until();
     let builtin_policy = mvm_core::registry_pack_store::load_publisher_policy_or_official_default(
@@ -170,6 +174,7 @@ pub(crate) fn ensure_official_feed_fresh() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::time::utc_timestamp_now as utc_now;
     use std::cell::{Cell, RefCell};
 
     const TOTAL: Duration = Duration::from_millis(200);

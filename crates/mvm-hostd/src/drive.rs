@@ -96,7 +96,9 @@ impl DriveAuthority {
                 &signer.verifying,
                 vm,
                 &plan.nonce,
-                mvm_agentd::vsock::utc_now(),
+                mvm_core::util::time::try_utc_timestamp_now().map_err(|error| {
+                    DriveSessionError::Authority(anyhow::anyhow!("host clock unusable: {error}"))
+                })?,
             )
             .map_err(|error| {
                 DriveSessionError::Authority(anyhow::anyhow!(

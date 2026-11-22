@@ -408,7 +408,7 @@ fn stash_plan_for_bridge_writes_verb_grant_when_agent_verbs_present() {
             &vk,
             "vm-verb-grant",
             &admitted.plan().nonce,
-            mvm_agentd::vsock::utc_now(),
+            mvm_core::util::time::utc_timestamp_now(),
         )
         .expect("grant must verify under the signer key");
 }

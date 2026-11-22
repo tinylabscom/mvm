@@ -32,6 +32,8 @@ use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::audit::{LocalAuditKind, emit as audit_emit};
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::session::{self, SessionId, SessionRecord, SessionState};
+use mvm_core::util::time::try_utc_timestamp_now;
+#[cfg(test)]
 use mvm_core::util::time::utc_timestamp_now;
 
 use super::wall_clock::{
@@ -177,8 +179,12 @@ impl SessionExpiryWatcher {
     pub fn run(mut self, poll: Duration) {
         loop {
             std::thread::sleep(poll);
-            if !self.step(utc_timestamp_now()) {
-                return;
+            match try_utc_timestamp_now() {
+                Ok(now) if !self.step(now) => return,
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(err = %e, "session expiry: host clock unusable; skipping this poll")
+                }
             }
         }
     }
@@ -300,7 +306,11 @@ pub fn arm_for_supervisor(
         );
         return false;
     };
-    let mut watcher = SessionExpiryWatcher::new(vm_name, utc_timestamp_now(), killer);
+    let Ok(booted) = try_utc_timestamp_now() else {
+        tracing::warn!(vm = %vm_name, "session expiry: host clock unusable; not watching");
+        return false;
+    };
+    let mut watcher = SessionExpiryWatcher::new(vm_name, booted, killer);
     match decode_admitted_plan(plan_json).and_then(|plan| Ok((plan, supervisor_emitter(inputs)?))) {
         Ok((plan, emitter)) => watcher = watcher.sealing_under(plan, emitter),
         Err(e) => tracing::warn!(

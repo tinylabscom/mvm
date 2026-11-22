@@ -576,7 +576,9 @@ fn validate_child_fork_plan(
         plan.tenant.0,
         tenant_id
     );
-    let now = mvm_core::util::time::utc_timestamp_now();
+    let now = mvm_core::util::time::try_utc_timestamp_now().context(
+        "the host clock is unusable, so the admitted child plan's validity cannot be checked",
+    )?;
     anyhow::ensure!(
         plan.valid_from <= now && now < plan.valid_until,
         "admitted child plan is outside its validity window"

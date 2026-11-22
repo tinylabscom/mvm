@@ -17,6 +17,8 @@ use mvm_contract::ir::SecretRef;
 use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::crypto::secret_binding::BindingStore;
 use mvm_core::crypto::secret_store::SecretStore;
+use mvm_core::util::time::try_utc_timestamp_now;
+#[cfg(test)]
 use mvm_core::util::time::utc_timestamp_now;
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
@@ -258,7 +260,11 @@ impl SecretResolver for LocalResolver {
                         source: anyhow::Error::new(source)
                             .context("parsing oauth token set from secret value"),
                     })?;
-                let fresh = utc_timestamp_now()
+                let now = try_utc_timestamp_now().map_err(|source| ResolveError::Backend {
+                    name: r.name.clone(),
+                    source: anyhow::Error::new(source).context("host clock unusable"),
+                })?;
+                let fresh = now
                     .checked_add_secs(OAUTH_REFRESH_SKEW_SECS)
                     .is_some_and(|deadline| token_set.expires_at > deadline);
                 if !fresh {

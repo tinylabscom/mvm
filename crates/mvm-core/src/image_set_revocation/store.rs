@@ -44,6 +44,8 @@ pub enum ImageSetRevocationStoreError {
     Verification(#[from] ImageSetRevocationError),
     #[error("image-set revocation storage failed: {0}")]
     Storage(String),
+    #[error("the host clock is outside the representable years: {0}")]
+    Clock(#[from] mvm_contract::timestamp::ParseTimestampError),
 }
 
 impl From<FeedStoreFault> for ImageSetRevocationStoreError {
@@ -204,7 +206,7 @@ pub fn update_image_set_revocations(
     let checkpoint = ImageSetRevocationStore::in_mvm_home().update(
         document,
         bundle,
-        crate::util::time::utc_timestamp_now(),
+        crate::util::time::try_utc_timestamp_now()?,
     )?;
     crate::policy::audit::event(crate::policy::audit::LocalAuditKind::ImageSetRevocationUpdate)
         .detail(format!(
@@ -220,5 +222,5 @@ pub fn update_image_set_revocations(
 /// Load the host's applied image-set revocation list for an admission now.
 pub fn load_image_set_revocations()
 -> Result<VerifiedImageSetRevocations, ImageSetRevocationStoreError> {
-    ImageSetRevocationStore::in_mvm_home().load(crate::util::time::utc_timestamp_now())
+    ImageSetRevocationStore::in_mvm_home().load(crate::util::time::try_utc_timestamp_now()?)
 }
