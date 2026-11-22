@@ -70,6 +70,17 @@ impl UtcTimestamp {
         ((nanos(self) - nanos(earlier)) / 1_000_000_000) as i64
     }
 
+    /// Time from `earlier` to `self`; `None` when `earlier` is later.
+    pub fn duration_since(self, earlier: Self) -> Option<core::time::Duration> {
+        let nanos = |t: Self| i128::from(t.secs) * 1_000_000_000 + i128::from(t.nanos);
+        let diff = u128::try_from(nanos(self) - nanos(earlier)).ok()?;
+        // At most 10_000 years, so the seconds fit a u64.
+        Some(core::time::Duration::new(
+            (diff / 1_000_000_000) as u64,
+            (diff % 1_000_000_000) as u32,
+        ))
+    }
+
     /// `None` when the result leaves years 0000..=9999.
     pub fn checked_add_secs(self, secs: i64) -> Option<Self> {
         Self::from_unix(self.secs.checked_add(secs)?, self.nanos)
