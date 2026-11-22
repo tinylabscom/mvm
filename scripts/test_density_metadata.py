@@ -26,8 +26,8 @@ class DensityMetadataTests(unittest.TestCase):
     def test_unavailable_metadata_and_fixture_runs_cannot_claim_live_success(self, _probe):
         with tempfile.TemporaryDirectory() as directory:
             summary = dict.fromkeys((
-                "run_id", "image", "backend", "launch_mode", "standby_form", "waves", "memory",
-                "cpus", "settle_seconds", "idle_sample_seconds", "custom_workload",
+                "run_id", "image", "backend", "launch_mode", "standby_form", "endpoint_form",
+                "waves", "memory", "cpus", "settle_seconds", "idle_sample_seconds", "custom_workload",
                 "build_profile",
             ), "fixture")
             summary.update({
@@ -50,6 +50,7 @@ class DensityMetadataTests(unittest.TestCase):
             self.assertNotIn("must-not-appear", str(report))
             self.assertEqual(report["configuration"]["build_profile"], "fixture")
             self.assertEqual(report["configuration"]["standby_form"], "fixture")
+            self.assertEqual(report["configuration"]["endpoint_form"], "fixture")
             native = density_metadata.collect(Path(directory), summary, {})
             self.assertEqual(native["evidence"]["classification"], "native_requested")
             self.assertEqual(native["status"], "metadata_only")

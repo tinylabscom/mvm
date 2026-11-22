@@ -805,6 +805,59 @@ mod tests {
         );
     }
 
+    /// What the density harness counts as this thread's wakeups.
+    #[cfg(target_os = "linux")]
+    fn this_threads_voluntary_switches() -> u64 {
+        std::fs::read_to_string("/proc/thread-self/status")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("voluntary_ctxt_switches:"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_backing_off_worker_wakes_once_per_wait_not_on_a_timer() {
+        let state = tempfile::tempdir().unwrap();
+        let (guest_key, anchor_key) = keys();
+        register(state.path(), "vm-w", &guest_key);
+        // The connector runs on the worker thread, so it reads that thread's
+        // counter at every attempt; each attempt fails and backs off.
+        let (count_tx, count_rx) = sync_channel::<(Instant, u64)>(16);
+        let connector = move || -> std::io::Result<UnixStream> {
+            let _ = count_tx.try_send((Instant::now(), this_threads_voluntary_switches()));
+            Err(std::io::Error::other("no guest"))
+        };
+        let (sink_tx, _sink_rx) = sync_channel(1);
+        let handle = spawn_collector(
+            CollectorConfig::new(
+                state.path().to_path_buf(),
+                "vm-w",
+                anchor_key.verifying_key(),
+                connector,
+                direct_signer(anchor_key.clone()),
+            ),
+            ChannelSink(sink_tx),
+        )
+        .unwrap();
+        // Four waits of 100, 200, 400 and 800 ms: a 25 ms slice timer would
+        // wake 60 times in them.
+        let attempts: Vec<(Instant, u64)> = (0..5)
+            .map(|_| count_rx.recv_timeout(Duration::from_secs(10)).unwrap())
+            .collect();
+        handle.stop();
+        let woken = attempts[4].1 - attempts[0].1;
+        let waited = attempts[4].0 - attempts[0].0;
+        eprintln!("backing-off worker: {woken} wakeups across four waits ({waited:?})");
+        assert!(
+            woken <= 8,
+            "{woken} wakeups across four backoff waits ({waited:?})"
+        );
+    }
+
     #[test]
     fn a_stop_signal_wait_is_one_blocking_wait_that_a_stop_ends_at_once() {
         let signal = Arc::new(StopSignal::default());

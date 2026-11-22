@@ -113,6 +113,36 @@ impl MemoryQuantity {
     }
 }
 
+/// What each unit's network endpoint process was doing during the run. A
+/// launch with no admitted egress gets a collector-only endpoint; one egress
+/// destination makes it a serving endpoint with more threads, so the two
+/// per-unit figures are never comparable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointForm {
+    /// Telemetry collector only. Every report written before the label
+    /// existed measured this form.
+    #[default]
+    CollectorOnly,
+    /// Serving one admitted egress destination, idle.
+    Serving,
+}
+
+impl EndpointForm {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CollectorOnly => "telemetry collector only, no egress admitted",
+            Self::Serving => "serving one admitted egress destination, idle",
+        }
+    }
+
+    #[must_use]
+    pub fn is_collector_only(&self) -> bool {
+        *self == Self::CollectorOnly
+    }
+}
+
 /// A wakeup rate together with the quantity it counts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -267,6 +297,10 @@ pub struct Section {
     /// The quantity every memory figure in this section measures.
     #[serde(default)]
     pub memory_quantity: MemoryQuantity,
+    /// Omitted for the collector-only form, which is also what a report
+    /// written before the field existed measured.
+    #[serde(default, skip_serializing_if = "EndpointForm::is_collector_only")]
+    pub endpoint_form: EndpointForm,
     pub fixed_host_cost: FixedHostCost,
     pub by_residency: ResidencyCosts,
     pub by_standby: StandbyCosts,
@@ -291,6 +325,7 @@ impl Section {
             backend: backend.into(),
             architecture: architecture.into(),
             memory_quantity: MemoryQuantity::default(),
+            endpoint_form: EndpointForm::default(),
             fixed_host_cost: FixedHostCost::unmeasured(wakeups),
             by_residency: ResidencyCosts::unmeasured(wakeups),
             by_standby: StandbyCosts::unmeasured(wakeups),
@@ -425,8 +460,9 @@ fn render_section(out: &mut String, s: &Section) {
     ));
 
     out.push_str(&format!(
-        "Per-unit cost (memory is {}):\n\n",
-        s.memory_quantity.label()
+        "Per-unit cost (memory is {}; endpoint is {}):\n\n",
+        s.memory_quantity.label(),
+        s.endpoint_form.label()
     ));
     out.push_str(
         "| State | Memory | CPU | Wakeups per second | Disk |\n| --- | --- | --- | --- | --- |\n",
@@ -623,6 +659,29 @@ mod tests {
         assert!(footprint.contains("physical footprint"));
         assert!(pss.contains("proportional set size"));
         assert!(!pss.contains("physical footprint"));
+    }
+
+    #[test]
+    fn endpoint_forms_are_labelled_and_an_older_report_reads_as_collector_only() {
+        let mut section = empty_section();
+        let value = serde_json::to_value(&section).unwrap();
+        assert!(value.get("endpoint_form").is_none(), "{value}");
+        assert_eq!(
+            serde_json::from_value::<Section>(value)
+                .unwrap()
+                .endpoint_form,
+            EndpointForm::CollectorOnly
+        );
+        assert!(render_markdown(&report_with(section.clone())).contains("collector only"));
+        section.endpoint_form = EndpointForm::Serving;
+        let value = serde_json::to_value(&section).unwrap();
+        assert_eq!(value["endpoint_form"], "serving");
+        assert_eq!(serde_json::from_value::<Section>(value).unwrap(), section);
+        let md = render_markdown(&report_with(section));
+        assert!(
+            md.contains("serving one admitted egress destination")
+                && !md.contains("collector only")
+        );
     }
 
     #[test]

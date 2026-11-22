@@ -140,6 +140,8 @@ if args[:2] == ["machine", "run"]:
                 self.assertEqual(launch[1]["MVM_PHASE_TIMING"], "1")
                 self.assertTrue(launch[1]["MVM_LAUNCH_SAMPLE_JSON"].endswith(".sample.json"))
                 self.assertEqual("--name" in launch[0], mode == "cold")
+                self.assertNotIn("--allow-host", prime + launch[0])
+                self.assertEqual(metadata["configuration"]["endpoint_form"], "collector_only")
                 if mode == "cold":
                     self.assertRegex(
                         launch[0][launch[0].index("--name") + 1], r"^[a-z0-9-]+$"
@@ -179,6 +181,44 @@ if args[:2] == ["machine", "run"]:
                 self.assertEqual(failed.returncode, 71, failed.stderr)
                 self.assertIn("first-use preparation failed", failed.stderr)
                 self.assertFalse((base / "out-fail/wave-1").exists())
+                env.pop("MVM_FAKE_PRIME_FAIL")
+                env["MVM_HVF_DENSITY_SERVING_ENDPOINT"] = "1"
+                env["MVM_HVF_DENSITY_OUT_DIR"] = str(base / "out-serving")
+                serving = subprocess.run(
+                    ["/bin/bash" if platform.system() == "Darwin" else "bash",
+                     str(ROOT / "scripts/measure-hvf-density.sh")],
+                    env=env, capture_output=True, text=True, timeout=20,
+                )
+                if mode == "warm":
+                    self.assertEqual(serving.returncode, 70, serving.stderr)
+                    self.assertIn("cold launches only", serving.stderr)
+                    continue
+                self.assertEqual(serving.returncode, 0, serving.stderr)
+                runs = [
+                    json.loads(line)[0]
+                    for line in (base / "out-serving/commands.jsonl").read_text().splitlines()
+                    if json.loads(line)[0][:2] == ["machine", "run"]
+                ]
+                prime, measured = runs  # the unmeasured prime, then the one launch
+                self.assertNotIn("--allow-host", prime)
+                at = measured.index("--allow-host")
+                self.assertEqual(measured[at + 1], "192.0.2.1:443")
+                self.assertLess(at, measured.index("--"))
+                self.assertIn(
+                    "endpoint_form\tserving\n",
+                    (base / "out-serving/summary.tsv").read_text(),
+                )
+                metadata = json.loads((base / "out-serving/metadata.json").read_text())
+                self.assertEqual(metadata["configuration"]["endpoint_form"], "serving")
+                env["MVM_HVF_DENSITY_SERVING_ENDPOINT"] = "yes"
+                env["MVM_HVF_DENSITY_OUT_DIR"] = str(base / "out-bad")
+                bad = subprocess.run(
+                    ["/bin/bash" if platform.system() == "Darwin" else "bash",
+                     str(ROOT / "scripts/measure-hvf-density.sh")],
+                    env=env, capture_output=True, text=True, timeout=20,
+                )
+                self.assertEqual(bad.returncode, 70, bad.stderr)
+                self.assertIn("must be 0 or 1", bad.stderr)
 
 
 class StandbyHoldTests(unittest.TestCase):
