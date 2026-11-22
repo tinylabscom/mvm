@@ -712,6 +712,20 @@ mod tests {
         assert_eq!(mode, 0o700);
     }
 
+    /// The stamp a new record is written with: whole seconds, `Z` suffix,
+    /// never a fraction or `+00:00`, because the record persists as a string.
+    #[test]
+    fn a_new_record_is_stamped_in_whole_second_z_form() {
+        let record = SessionRecord::new_running("vm", "x", SessionMode::Prod);
+        let stamp = &record.started_at;
+        assert_eq!(stamp.len(), 20, "{stamp}");
+        assert!(
+            stamp.ends_with('Z') && stamp.as_bytes()[10] == b'T',
+            "{stamp}"
+        );
+        assert!(chrono::DateTime::parse_from_rfc3339(stamp).is_ok());
+    }
+
     #[test]
     fn idle_expiry_counts_from_the_last_call_and_is_strict_at_the_timeout() {
         let now = chrono::Utc::now();
