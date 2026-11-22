@@ -331,13 +331,13 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
         &timer_inputs,
         Box::new(timer_inputs.exit_killer()),
     );
-    // The unit's liveness deadline, when its topology declares one.
+    // The unit's liveness deadline and cell digest, if its topology has them.
     let _liveness = match mvm_hostd::supervisor::lifecycle::liveness_expiry::arm_for_supervisor(
         &timer_inputs,
     ) {
         Ok(guard) => guard,
         Err(e) => {
-            eprintln!("supervisor: refusing to boot a unit whose liveness it cannot watch: {e:#}");
+            eprintln!("supervisor: refusing to boot a unit whose timer it cannot arm: {e:#}");
             return ExitCode::from(7);
         }
     };

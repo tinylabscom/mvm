@@ -510,11 +510,31 @@ fn admission_refuses_a_period_no_backend_deadline_or_host_range_serves() {
     ));
 }
 
+mod cell_digest;
+
+/// A monotonic clock the test moves by hand.
+#[derive(Default)]
+struct TestMonotonic(Mutex<std::time::Duration>);
+
+impl TestMonotonic {
+    fn advance(&self, by: std::time::Duration) {
+        *self.0.lock().unwrap() += by;
+    }
+}
+
+impl crate::supervisor::lifecycle::liveness_expiry::Monotonic for TestMonotonic {
+    fn elapsed(&self) -> std::time::Duration {
+        *self.0.lock().unwrap()
+    }
+}
+
 mod owner {
     use std::time::Duration as StdDuration;
 
     use super::*;
-    use crate::supervisor::lifecycle::liveness_expiry::{LivenessWatch, arm_for_supervisor};
+    use crate::supervisor::lifecycle::liveness_expiry::{
+        LivenessWatch, SUSPEND_TOLERANCE, UnitTimer, arm_for_supervisor,
+    };
     use crate::supervisor::lifecycle::wall_clock::SupervisorTimerInputs;
 
     const PERIOD: StdDuration = StdDuration::from_millis(PERIOD_MS as u64);
@@ -561,14 +581,32 @@ mod owner {
         }
     }
 
-    /// Run `watch` with a wait that moves the test clock instead of sleeping,
+    /// Run `watch` with a wait that moves the test clocks instead of sleeping,
     /// for at most `waits` waits. Returns the pauses it asked for.
-    fn run(host: &Host, watch: &LivenessWatch, waits: usize) -> Vec<StdDuration> {
+    fn run(host: &Host, watch: LivenessWatch, waits: usize) -> Vec<StdDuration> {
+        run_sleeping(host, watch, waits, StdDuration::ZERO)
+    }
+
+    /// As [`run`], with the wall clock moving `slept` further than the
+    /// monotonic one across each wait, as across a host suspend.
+    fn run_sleeping(
+        host: &Host,
+        watch: LivenessWatch,
+        waits: usize,
+        slept: StdDuration,
+    ) -> Vec<StdDuration> {
+        let monotonic = Arc::new(TestMonotonic::default());
+        let timer = UnitTimer {
+            liveness: Some(watch),
+            digest: None,
+            monotonic: monotonic.clone(),
+        };
         let mut pauses = Vec::new();
-        watch.run(|pause| {
+        timer.run(|pause| {
             pauses.push(pause);
+            monotonic.advance(pause);
             host.clock
-                .advance_ms(i64::try_from(pause.as_millis()).unwrap());
+                .advance_ms(i64::try_from((pause + slept).as_millis()).unwrap());
             pauses.len() < waits
         });
         pauses
@@ -578,11 +616,47 @@ mod owner {
     fn the_owner_sleeps_to_the_deadline_then_fences_once_and_stops() {
         let host = Host::admitted();
         host.signal("controller", 1).unwrap();
-        let pauses = run(&host, &watch(&host, 1), 5);
+        let pauses = run(&host, watch(&host, 1), 5);
         assert_eq!(pauses, vec![PERIOD], "one wake, at the deadline");
         assert_eq!(host.current("controller"), epoch(2));
         assert_eq!(host.events(LIVENESS_EPOCH_REPLACED_EVENT).len(), 1);
         assert_eq!(host.current("reader"), epoch(1));
+    }
+
+    #[test]
+    fn an_expiry_without_a_suspend_records_none() {
+        let host = Host::admitted();
+        host.signal("controller", 1).unwrap();
+        run(&host, watch(&host, 1), 5);
+        let events = host.events(LIVENESS_EPOCH_REPLACED_EVENT);
+        assert_eq!(events.len(), 1);
+        assert!(events[0]["labels"][HOST_SUSPENDED_MS_LABEL].is_null());
+    }
+
+    #[test]
+    fn a_suspend_across_the_wait_still_fences_and_is_recorded() {
+        let host = Host::admitted();
+        host.signal("controller", 1).unwrap();
+        let hour = StdDuration::from_secs(3600);
+        let pauses = run_sleeping(&host, watch(&host, 1), 5, hour);
+        assert_eq!(pauses, vec![PERIOD], "the deadline is not extended");
+        assert_eq!(host.current("controller"), epoch(2));
+        let events = host.events(LIVENESS_EPOCH_REPLACED_EVENT);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0]["labels"][HOST_SUSPENDED_MS_LABEL],
+            hour.as_millis().to_string()
+        );
+    }
+
+    #[test]
+    fn a_small_wall_clock_step_is_not_taken_for_a_suspend() {
+        let host = Host::admitted();
+        host.signal("controller", 1).unwrap();
+        run_sleeping(&host, watch(&host, 1), 5, SUSPEND_TOLERANCE);
+        let events = host.events(LIVENESS_EPOCH_REPLACED_EVENT);
+        assert_eq!(events.len(), 1);
+        assert!(events[0]["labels"][HOST_SUSPENDED_MS_LABEL].is_null());
     }
 
     #[test]
@@ -619,7 +693,7 @@ mod owner {
         let host = Host::admitted();
         host.signal("controller", 1).unwrap();
         host.clock.advance_ms(i64::from(PERIOD_MS) * 5);
-        assert!(run(&host, &watch(&host, 1), 5).is_empty());
+        assert!(run(&host, watch(&host, 1), 5).is_empty());
         assert_eq!(host.current("controller"), epoch(2));
         assert_eq!(host.events(LIVENESS_EPOCH_REPLACED_EVENT).len(), 1);
     }
@@ -696,7 +770,10 @@ mod owner {
             topology: Sha256Digest::from_bytes(&[1; 32]),
             unit: id("reader"),
         });
-        assert!(arm(&serde_json::to_value(&plan).unwrap()), "no period");
+        assert!(
+            arm(&serde_json::to_value(&plan).unwrap()),
+            "no period and no written cell"
+        );
         assert!(!host.path().exists(), "nothing was read or armed");
     }
 }

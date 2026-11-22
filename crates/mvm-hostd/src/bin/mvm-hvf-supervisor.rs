@@ -985,14 +985,14 @@ fn run() -> anyhow::Result<()> {
                 &timer_inputs,
                 Box::new(timer_inputs.preserving_exit_killer()),
             );
-            // The unit's liveness deadline, when its topology declares one.
+            // The unit's liveness deadline and cell digest, if its topology has them.
             match mvm_hostd::supervisor::lifecycle::liveness_expiry::arm_for_supervisor(
                 &timer_inputs,
             ) {
                 Ok(liveness) => (guard, liveness),
                 Err(e) => {
                     eprintln!(
-                        "supervisor: refusing to boot a unit whose liveness it cannot watch: {e:#}"
+                        "supervisor: refusing to boot a unit whose timer it cannot arm: {e:#}"
                     );
                     std::process::exit(7);
                 }

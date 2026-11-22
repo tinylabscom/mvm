@@ -254,6 +254,11 @@ The rules that keep this safe:
   admission.
 - The deadline runs on a monotonic clock. A host that can suspend refuses a
   liveness period, because every deadline would expire at once on resume.
+  As built, the deadline is still held on the wall clock so it survives a
+  restart, and no real backend offers a period. The supervisor's wait detects
+  a suspend (the wall clock running more than two seconds ahead of the
+  monotonic one) and records it on the expiry entry; it does not extend the
+  deadline.
 - An early expiry on a loaded host fails in the safe direction: the old epoch
   is fenced before the standby is promoted, so there are never two writers.
 - Expiry and promotion are audited. Individual liveness signals are not.
@@ -330,6 +335,16 @@ The default is a periodic signed digest of the cell. A topology may ask for an
 entry per write, and admission refuses it when the declared write rate exceeds
 what the host's measured audit budget sustains. A cell costs one copy per
 update, and its update latency is part of the published report (section 9).
+
+As built, the per-VM supervisor that owns a writer unit digests that unit's
+cells once a minute, on the same thread as its liveness deadline: one
+`state_cell.digest` entry per cell that changed since its last digest, with
+the version before and after and a SHA-256 of the value, never the value. An
+unchanged cell writes nothing. What was last digested is kept beside the cell,
+so a restarted supervisor neither repeats nor skips a change. A topology that
+asks for an entry per write is still refused on every backend, because no host
+has a measured audit budget yet. Firecracker has no per-VM supervisor, so its
+cells are not digested.
 
 This uses the host-service broker, so claim 12's rule applies unchanged: a
 cell is reachable only through a binding in the signed plan. Three things are

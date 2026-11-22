@@ -21,7 +21,8 @@
 //!
 //! The deadline is compared with the injected wall clock, so it can be kept
 //! across a restart. A forward step or a suspend expires early, which fences
-//! in the safe direction. A clock found behind the last signal counts as
+//! in the safe direction; an owner that saw the host suspended records it in
+//! the expiry entry ([`LivenessDeadlines::expire_unit_noting`]). A clock found behind the last signal counts as
 //! expired, so a backward step delays an expiry by less than one period.
 //!
 //! Every signal and every pass holds the tenant's lock from before it asks the
@@ -57,6 +58,10 @@ use crate::containment::WorkloadAuthority;
 
 /// Chain event for a deadline that passed and fenced its epoch.
 pub const LIVENESS_EPOCH_REPLACED_EVENT: &str = "liveness.epoch_replaced";
+/// Label on a `liveness.epoch_replaced` entry whose owner saw the wall clock
+/// run ahead of the monotonic clock while it waited: how far, in
+/// milliseconds. A host suspend, or a forward step of the wall clock.
+pub const HOST_SUSPENDED_MS_LABEL: &str = "host_suspended_ms";
 /// Chain event for a refused liveness signal.
 pub const LIVENESS_SIGNAL_REFUSED_EVENT: &str = LifecycleEvent::LivenessSignalRefused.as_str();
 
@@ -209,7 +214,9 @@ impl LivenessDeadlines<'_> {
                 continue;
             };
             let tenant = TenantId(tenant.to_string());
-            if let Err(e) = self.expire_tenant(&home, &tenant, None, authority, &mut pass.expired) {
+            if let Err(e) =
+                self.expire_tenant(&home, &tenant, None, authority, &mut pass.expired, None)
+            {
                 pass.failures.push((tenant, e));
             }
         }
@@ -229,6 +236,24 @@ impl LivenessDeadlines<'_> {
         caller: &LivenessCaller<'_>,
         authority: &dyn WorkloadAuthority,
     ) -> Result<UnitPass> {
+        self.expire_unit_noting(caller, authority, None)
+    }
+
+    /// As [`Self::expire_unit`], for an owner that saw the host suspended for
+    /// `suspended` since its last pass. An expiry this pass commits records
+    /// it, so an operator can tell a deadline that passed while the host
+    /// slept from a unit that hung. The deadline itself is not moved: it
+    /// fences in the safe direction either way.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::expire_unit`].
+    pub fn expire_unit_noting(
+        &self,
+        caller: &LivenessCaller<'_>,
+        authority: &dyn WorkloadAuthority,
+        suspended: Option<std::time::Duration>,
+    ) -> Result<UnitPass> {
         let home = mvm_core::config::mvm_home_strict().context("resolving the mvm home")?;
         let mut expired = Vec::new();
         let (topology, deadlines) = self.expire_tenant(
@@ -237,6 +262,7 @@ impl LivenessDeadlines<'_> {
             Some(&caller.unit.0),
             authority,
             &mut expired,
+            suspended,
         )?;
         let expired = expired.pop();
         let Some(period) = topology
@@ -278,6 +304,7 @@ impl LivenessDeadlines<'_> {
         only: Option<&str>,
         authority: &dyn WorkloadAuthority,
         expired: &mut Vec<Expiry>,
+        suspended: Option<std::time::Duration>,
     ) -> Result<(Option<Topology>, Deadlines)> {
         let topology = crate::topology_admission::last_admitted_topology(
             home,
@@ -343,7 +370,7 @@ impl LivenessDeadlines<'_> {
                 fenced: watched.epoch,
                 current,
             };
-            self.audit_expiry(&expiry, &watched)?;
+            self.audit_expiry(&expiry, &watched, suspended)?;
             deadlines.remove(&unit);
             store(&path, &deadlines)?;
             expired.push(expiry);
@@ -351,18 +378,27 @@ impl LivenessDeadlines<'_> {
         Ok((topology, deadlines))
     }
 
-    fn audit_expiry(&self, expiry: &Expiry, watched: &Deadline) -> Result<()> {
-        self.emitter.emit_topology_decision(
-            &expiry.tenant,
-            LIVENESS_EPOCH_REPLACED_EVENT,
-            [
-                ("unit".to_string(), expiry.unit.0.clone()),
-                ("fenced_epoch".to_string(), expiry.fenced.get().to_string()),
-                ("epoch".to_string(), expiry.current.get().to_string()),
-                ("last_signal".to_string(), watched.last_signal.to_rfc3339()),
-                ("deadline".to_string(), watched.deadline.to_rfc3339()),
-            ],
-        )
+    fn audit_expiry(
+        &self,
+        expiry: &Expiry,
+        watched: &Deadline,
+        suspended: Option<std::time::Duration>,
+    ) -> Result<()> {
+        let mut labels = vec![
+            ("unit".to_string(), expiry.unit.0.clone()),
+            ("fenced_epoch".to_string(), expiry.fenced.get().to_string()),
+            ("epoch".to_string(), expiry.current.get().to_string()),
+            ("last_signal".to_string(), watched.last_signal.to_rfc3339()),
+            ("deadline".to_string(), watched.deadline.to_rfc3339()),
+        ];
+        if let Some(suspended) = suspended {
+            labels.push((
+                HOST_SUSPENDED_MS_LABEL.to_string(),
+                suspended.as_millis().to_string(),
+            ));
+        }
+        self.emitter
+            .emit_topology_decision(&expiry.tenant, LIVENESS_EPOCH_REPLACED_EVENT, labels)
     }
 }
 
