@@ -85,24 +85,22 @@ fn topology(writer: &str, reader: &str, recipe: &Sha256Digest) -> Topology {
 /// The recipe a plan for the prepared image carries: the digest of the root
 /// filesystem the launch boots.
 ///
-/// shortcut: takes the only root filesystem under the home's OCI cache, so
-/// the home must hold one prepared image; resolve the image reference to its
-/// root filesystem if a scenario ever prepares two.
+/// shortcut: takes the newest root filesystem under the home's OCI cache,
+/// which is the one the preceding `image pull` prepared for the current guest
+/// runtime, so the home must hold one prepared image; resolve the image
+/// reference through the image cache if a scenario ever prepares two.
 fn image_recipe(home: &Path) -> Sha256Digest {
     let root = mvm_core::config::mvm_cache_dir_at(home).join("oci/rootfs");
-    let rootfs: Vec<_> = std::fs::read_dir(&root)
+    let rootfs = std::fs::read_dir(&root)
         .unwrap_or_else(|error| panic!("read {}: {error}", root.display()))
-        .filter_map(|entry| Some(entry.ok()?.path().join("rootfs.ext4")))
-        .filter(|path| path.is_file())
-        .collect();
-    let [rootfs] = rootfs.as_slice() else {
-        panic!(
-            "expected one prepared root filesystem under {}, found {}",
-            root.display(),
-            rootfs.len()
-        );
-    };
-    let hex = mvm_core::crypto::image_verify::sha256_file(rootfs)
+        .filter_map(|entry| {
+            let path = entry.ok()?.path().join("rootfs.ext4");
+            Some((path.metadata().ok()?.modified().ok()?, path))
+        })
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, path)| path)
+        .unwrap_or_else(|| panic!("no prepared root filesystem under {}", root.display()));
+    let hex = mvm_core::crypto::image_verify::sha256_file(&rootfs)
         .unwrap_or_else(|error| panic!("hash {}: {error}", rootfs.display()));
     Sha256Digest::parse(format!("sha256:{hex}")).expect("sha256_file returns a hex digest")
 }
