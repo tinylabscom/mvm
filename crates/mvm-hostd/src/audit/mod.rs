@@ -26,6 +26,8 @@ pub mod output_audit;
 pub mod plan_persist;
 #[cfg(unix)]
 pub(crate) mod prune_pins;
+/// Where a refused cell operation or liveness signal is recorded.
+pub mod refusal;
 #[cfg(unix)]
 pub use prune_pins::validate_tenant as validate_prune_tenant;
 /// Writer for `.mvmev` evidence archives over the chain-signed audit log.

@@ -564,6 +564,7 @@ impl BrokerRegistrar for ActorBroker {
             tenant_id: tenant,
             vm_name: req.vm_name,
             state_dir: req.state_dir,
+            epoch: req.epoch,
         })?;
         let helper = capture_spawned_helper(
             "audit-signer",

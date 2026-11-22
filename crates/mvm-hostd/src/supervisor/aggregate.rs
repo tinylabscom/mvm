@@ -20,7 +20,7 @@ use ed25519_dalek::VerifyingKey;
 use mvm_core::deps_audit::{VolumeError, verify_sealed_volume};
 use mvm_core::plan::{
     DepsVolumeBinding, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, TenantId,
-    WorkloadId, check_window,
+    WorkloadId, check_window_chrono,
 };
 use mvm_core::time::{Clock, SystemClock};
 use thiserror::Error;
@@ -352,7 +352,7 @@ impl Supervisor {
         // indefinitely. Both checks must pass before the backend is
         // asked to do any work, so a replayed plan never reaches the
         // resource-allocating path.
-        if let Err(e) = check_window(&plan, self.clock.now()) {
+        if let Err(e) = check_window_chrono(&plan, self.clock.now()) {
             self.emit_audit_then_fail(&plan, "plan.rejected.validity_window", &e.to_string())
                 .await?;
             return Err(SupervisorError::from(e));

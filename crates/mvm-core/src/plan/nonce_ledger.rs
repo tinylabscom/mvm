@@ -15,7 +15,7 @@
 //! so pruning never re-admits a replay.
 
 use super::validity::Freshness;
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use std::collections::HashSet;
 use std::io::{self, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -77,7 +77,7 @@ impl FileNonceLedger {
         &self,
         signer: &str,
         item: &F,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<(), NonceLedgerError> {
         if signer.is_empty() || signer.contains(['\t', '\n', '\r']) {
             return Err(NonceLedgerError::Unavailable(format!(
@@ -92,7 +92,12 @@ impl FileNonceLedger {
                 signer: signer.to_string(),
             });
         }
-        live.push((key.0, key.1, item.valid_until()));
+        live.push((
+            key.0,
+            key.1,
+            item.valid_until()
+                .map_err(|e| unavailable("reading the plan window", e))?,
+        ));
         self.publish(&live)
     }
 
@@ -111,8 +116,8 @@ impl FileNonceLedger {
 
     fn read_live(
         &self,
-        now: DateTime<Utc>,
-    ) -> Result<Vec<(String, String, DateTime<Utc>)>, NonceLedgerError> {
+        now: UtcTimestamp,
+    ) -> Result<Vec<(String, String, UtcTimestamp)>, NonceLedgerError> {
         let text = match std::fs::read_to_string(self.dir.join(LEDGER_FILE)) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
@@ -129,9 +134,9 @@ impl FileNonceLedger {
                     "malformed ledger line {line:?}"
                 )));
             };
-            let until = DateTime::parse_from_rfc3339(until)
-                .map_err(|e| unavailable("parsing a ledger expiry", e))?
-                .with_timezone(&Utc);
+            let until = until
+                .parse::<UtcTimestamp>()
+                .map_err(|e| unavailable("parsing a ledger expiry", e))?;
             if until > now && seen.insert((signer.to_string(), nonce.to_string())) {
                 live.push((signer.to_string(), nonce.to_string(), until));
             }
@@ -139,10 +144,10 @@ impl FileNonceLedger {
         Ok(live)
     }
 
-    fn publish(&self, live: &[(String, String, DateTime<Utc>)]) -> Result<(), NonceLedgerError> {
+    fn publish(&self, live: &[(String, String, UtcTimestamp)]) -> Result<(), NonceLedgerError> {
         let mut text = String::new();
         for (signer, nonce, until) in live {
-            text.push_str(&format!("{signer}\t{nonce}\t{}\n", until.to_rfc3339()));
+            text.push_str(&format!("{signer}\t{nonce}\t{}\n", until));
         }
         let tmp = self.dir.join(LEDGER_TMP);
         let mut file = std::fs::OpenOptions::new()
@@ -170,13 +175,16 @@ mod tests {
     use super::super::types::Nonce;
     use super::super::validity::{FreshnessClaims, checked};
     use super::*;
-    use chrono::Duration;
     use std::os::unix::fs::PermissionsExt as _;
 
-    fn claims(seed: u8, now: DateTime<Utc>, ttl: Duration) -> FreshnessClaims {
+    fn now() -> UtcTimestamp {
+        chrono::Utc::now().try_into().unwrap()
+    }
+
+    fn claims(seed: u8, now: UtcTimestamp, ttl_secs: i64) -> FreshnessClaims {
         FreshnessClaims::new(
-            now - Duration::seconds(1),
-            now + ttl,
+            now.checked_add_secs(-1).unwrap(),
+            now.checked_add_secs(ttl_secs).unwrap(),
             Nonce::from_bytes([seed; 16]),
         )
     }
@@ -188,8 +196,8 @@ mod tests {
     #[test]
     fn a_nonce_spent_once_is_refused_by_a_second_ledger_on_the_same_directory() {
         let root = tempfile::tempdir().unwrap();
-        let now = Utc::now();
-        let plan = checked(&claims(1, now, Duration::minutes(5))).unwrap();
+        let now = now();
+        let plan = checked(&claims(1, now, 300)).unwrap();
         // Two separate openings stand in for two `mvmctl` processes.
         ledger(root.path())
             .check_and_insert("signer-a", &plan, now)
@@ -203,8 +211,8 @@ mod tests {
     #[test]
     fn the_same_nonce_from_another_signer_is_independent() {
         let root = tempfile::tempdir().unwrap();
-        let now = Utc::now();
-        let plan = checked(&claims(2, now, Duration::minutes(5))).unwrap();
+        let now = now();
+        let plan = checked(&claims(2, now, 300)).unwrap();
         let ledger = ledger(root.path());
         ledger.check_and_insert("signer-a", &plan, now).unwrap();
         ledger.check_and_insert("signer-b", &plan, now).unwrap();
@@ -213,12 +221,12 @@ mod tests {
     #[test]
     fn an_expired_entry_is_pruned_from_the_file() {
         let root = tempfile::tempdir().unwrap();
-        let now = Utc::now();
-        let short = checked(&claims(3, now, Duration::seconds(10))).unwrap();
-        let other = checked(&claims(4, now, Duration::minutes(5))).unwrap();
+        let now = now();
+        let short = checked(&claims(3, now, 10)).unwrap();
+        let other = checked(&claims(4, now, 300)).unwrap();
         let ledger = ledger(root.path());
         ledger.check_and_insert("signer-a", &short, now).unwrap();
-        let later = now + Duration::seconds(30);
+        let later = now.checked_add_secs(30).unwrap();
         ledger.check_and_insert("signer-a", &other, later).unwrap();
         let text = std::fs::read_to_string(ledger.dir().join(LEDGER_FILE)).unwrap();
         assert_eq!(
@@ -232,8 +240,8 @@ mod tests {
     #[test]
     fn the_ledger_files_are_private() {
         let root = tempfile::tempdir().unwrap();
-        let now = Utc::now();
-        let plan = checked(&claims(5, now, Duration::minutes(5))).unwrap();
+        let now = now();
+        let plan = checked(&claims(5, now, 300)).unwrap();
         let ledger = ledger(root.path());
         ledger.check_and_insert("signer-a", &plan, now).unwrap();
         for name in [LEDGER_FILE, LOCK_FILE] {
@@ -255,8 +263,8 @@ mod tests {
     #[test]
     fn a_corrupt_ledger_refuses_instead_of_forgetting_nonces() {
         let root = tempfile::tempdir().unwrap();
-        let now = Utc::now();
-        let plan = checked(&claims(6, now, Duration::minutes(5))).unwrap();
+        let now = now();
+        let plan = checked(&claims(6, now, 300)).unwrap();
         let ledger = ledger(root.path());
         std::fs::write(ledger.dir().join(LEDGER_FILE), "not a ledger line\n").unwrap();
         let err = ledger.check_and_insert("signer-a", &plan, now).unwrap_err();
@@ -266,8 +274,8 @@ mod tests {
     #[test]
     fn a_signer_id_that_would_break_the_format_is_refused() {
         let root = tempfile::tempdir().unwrap();
-        let now = Utc::now();
-        let plan = checked(&claims(7, now, Duration::minutes(5))).unwrap();
+        let now = now();
+        let plan = checked(&claims(7, now, 300)).unwrap();
         let ledger = ledger(root.path());
         for bad in ["", "a\tb", "a\nb"] {
             assert!(ledger.check_and_insert(bad, &plan, now).is_err(), "{bad:?}");
@@ -278,13 +286,13 @@ mod tests {
     fn racing_spends_of_one_nonce_admit_exactly_one() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("plan-nonces");
-        let now = Utc::now();
+        let now = now();
         let winners = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|scope| {
             for _ in 0..8 {
                 scope.spawn(|| {
                     let ledger = FileNonceLedger::open(&dir).unwrap();
-                    let plan = checked(&claims(9, now, Duration::minutes(5))).unwrap();
+                    let plan = checked(&claims(9, now, 300)).unwrap();
                     if ledger.check_and_insert("signer-a", &plan, now).is_ok() {
                         winners.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }

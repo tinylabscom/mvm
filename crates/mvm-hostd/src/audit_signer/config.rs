@@ -29,6 +29,25 @@ pub struct SubprocessConfig {
     /// If absent, the subprocess generates a fresh in-memory key at boot.
     #[serde(default)]
     pub software_chain_key_path: Option<PathBuf>,
+    /// The admitted plan's unit, which lifecycle entries for this VM are
+    /// recorded under. Set together with `execution_epoch`, or neither.
+    #[serde(default)]
+    pub workload: Option<String>,
+    /// The admitted plan's execution epoch.
+    #[serde(default)]
+    pub execution_epoch: Option<mvm_contract::protocol::mailbox::ExecutionEpoch>,
+}
+
+impl SubprocessConfig {
+    /// The unit lifecycle entries are recorded under, when the config names
+    /// both halves of it.
+    #[must_use]
+    pub fn registered_unit(&self) -> Option<mvm_core::protocol::audit_signer::RegisteredUnit> {
+        Some(mvm_core::protocol::audit_signer::RegisteredUnit {
+            unit: self.workload.clone().filter(|u| !u.is_empty())?,
+            epoch: self.execution_epoch?,
+        })
+    }
 }
 
 pub fn parse(bytes: &[u8]) -> Result<SubprocessConfig, serde_json::Error> {
@@ -69,9 +88,17 @@ mod tests {
             audit_jsonl_path: PathBuf::from("/tmp/test/audit.jsonl"),
             chain_head_secondary_path: PathBuf::from("/tmp/test/HEAD"),
             software_chain_key_path: None,
+            workload: Some("unit".into()),
+            execution_epoch: mvm_contract::protocol::mailbox::ExecutionEpoch::new(3).ok(),
         };
         let bytes = serde_json::to_vec(&cfg).unwrap();
         assert_eq!(parse(&bytes).unwrap(), cfg);
+        assert_eq!(cfg.registered_unit().unwrap().unit, "unit");
+        let half = SubprocessConfig {
+            execution_epoch: None,
+            ..cfg
+        };
+        assert!(half.registered_unit().is_none(), "both halves or neither");
     }
 
     #[test]

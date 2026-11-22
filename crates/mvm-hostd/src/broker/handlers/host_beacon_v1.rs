@@ -148,10 +148,11 @@ impl HostBeaconV1Handler {
             mvm_core::protocol::audit_signer::AppendEntryResponse::Ok { chain_head, .. } => {
                 Ok(chain_head)
             }
-            mvm_core::protocol::audit_signer::AppendEntryResponse::Pong { .. } => {
+            mvm_core::protocol::audit_signer::AppendEntryResponse::Pong { .. }
+            | mvm_core::protocol::audit_signer::AppendEntryResponse::LifecycleAppended { .. } => {
                 Err(ServiceError::new(
                     ServiceErrorCode::InternalError,
-                    "audit-signer responded Pong to AppendEntry",
+                    "audit-signer answered AppendEntry with another verb's response",
                 ))
             }
             mvm_core::protocol::audit_signer::AppendEntryResponse::Err { code, .. } => {

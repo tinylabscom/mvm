@@ -66,6 +66,9 @@ pub struct AuditSignerSpawnParams<'a> {
     pub vm_name: &'a str,
     /// Per-VM state dir; holds the audit-signer UDS + PID + secondary-head files.
     pub state_dir: &'a Path,
+    /// The admitted plan's workload and execution epoch, which the signer
+    /// records this VM's lifecycle entries under. Unset, it refuses them.
+    pub epoch: Option<&'a mvm_core::protocol::handler::CallEpoch>,
 }
 
 impl<'a> AuditSignerSpawnParams<'a> {
@@ -85,6 +88,7 @@ pub struct AuditSignerSpawnParamsBuilder<'a> {
     tenant_id: Option<&'a str>,
     vm_name: Option<&'a str>,
     state_dir: Option<&'a Path>,
+    epoch: Option<&'a mvm_core::protocol::handler::CallEpoch>,
 }
 
 impl<'a> AuditSignerSpawnParamsBuilder<'a> {
@@ -96,6 +100,7 @@ impl<'a> AuditSignerSpawnParamsBuilder<'a> {
             tenant_id: None,
             vm_name: None,
             state_dir: None,
+            epoch: None,
         }
     }
 
@@ -127,6 +132,13 @@ impl<'a> AuditSignerSpawnParamsBuilder<'a> {
         self
     }
 
+    /// Set the admitted plan's workload and execution epoch.
+    #[must_use]
+    pub fn epoch(mut self, epoch: &'a mvm_core::protocol::handler::CallEpoch) -> Self {
+        self.epoch = Some(epoch);
+        self
+    }
+
     /// Finish, or name the first required field left unset.
     pub fn build(self) -> Result<AuditSignerSpawnParams<'a>, BuilderError> {
         Ok(AuditSignerSpawnParams {
@@ -143,6 +155,7 @@ impl<'a> AuditSignerSpawnParamsBuilder<'a> {
             state_dir: self
                 .state_dir
                 .ok_or(BuilderError::missing("AuditSignerSpawnParams", "state_dir"))?,
+            epoch: self.epoch,
         })
     }
 }
@@ -182,6 +195,7 @@ fn spawn_audit_signer_with_timeout(
         tenant_id,
         vm_name,
         state_dir,
+        epoch,
     } = params;
 
     let bin = resolve_subprocess_bin_to_spawn(&AuxBin::new(
@@ -208,6 +222,8 @@ fn spawn_audit_signer_with_timeout(
         "audit_jsonl_path": mvm_core::config::workload_audit_path(tenant_id, vm_name),
         "chain_head_secondary_path": state_dir.join(AUDIT_SIGNER_HEAD_FILE),
         "software_chain_key_path": mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_KEY),
+        "workload": epoch.map(|epoch| &epoch.unit),
+        "execution_epoch": epoch.map(|epoch| epoch.epoch),
     });
 
     let child = spawn_detached_with_config(&bin, &cfg, "mvm-audit-signer")?;
@@ -878,6 +894,7 @@ pub fn spawn_broker_services_if_admitted(
         tenant_id,
         vm_name,
         state_dir,
+        epoch,
     })?;
     spawn_broker(BrokerSpawnParams {
         workload_id,
@@ -983,6 +1000,7 @@ mod tests {
             tenant_id: "tenant-x",
             vm_name: "vm-1",
             state_dir: &state_dir,
+            epoch: None,
         });
 
         let handle = res.expect("spawn with stub audit-signer should succeed");
@@ -1044,6 +1062,7 @@ mod tests {
                 tenant_id: "t",
                 vm_name: "vm",
                 state_dir: &state_dir,
+                epoch: None,
             },
             Duration::from_millis(200),
         );
@@ -1079,6 +1098,7 @@ mod tests {
             tenant_id: "tenant",
             vm_name: "actor",
             state_dir: &state,
+            epoch: None,
         }) {
             Ok(_) => panic!("PID path directory must refuse startup"),
             Err(error) => error,
@@ -1103,6 +1123,7 @@ mod tests {
             tenant_id: "t",
             vm_name: "vm",
             state_dir: &dir,
+            epoch: None,
         });
 
         let err = res.expect_err("a missing bin override must error");

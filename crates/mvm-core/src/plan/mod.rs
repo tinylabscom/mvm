@@ -86,6 +86,7 @@ pub use types::{
 };
 pub use validity::{
     CheckedFreshness, Freshness, FreshnessClaims, NonceStore, PlanValidityError, check_window,
+    check_window_chrono,
 };
 pub use verb::{VerbId, VerbIdError};
 pub use verb_grant::{VERB_GRANT_BASELINE, VerbGrant, VerbGrantError};

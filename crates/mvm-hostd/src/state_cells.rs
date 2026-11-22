@@ -36,16 +36,28 @@ use mvm_core::atomic_io::{self, FileLock, NewFile, write_private_new};
 use mvm_core::host_interface::Denial;
 use mvm_core::host_interface::epoch_gate::CommandGate;
 use mvm_core::plan::{TenantId, WorkloadId};
+use mvm_core::protocol::lifecycle_audit::{LifecycleEvent, LifecycleLabel, LifecycleLabels};
 use sha2::{Digest as _, Sha256};
 
-use crate::audit::emitter::AuditEmitter;
+use crate::audit::refusal::RefusalAudit;
 
 /// Chain event for a refused cell operation.
-pub const STATE_CELL_REFUSED_EVENT: &str = "state_cell.refused";
+pub const STATE_CELL_REFUSED_EVENT: &str = LifecycleEvent::StateCellRefused.as_str();
 
 /// The largest cell this host reserves. A cell is a small piece of control
-/// state copied whole on every update, not a volume.
-pub const MAX_CELL_BYTES: u64 = 1024 * 1024;
+/// state copied whole on every update, not a volume, and its whole value has
+/// to cross the broker in one frame.
+pub const MAX_CELL_BYTES: u64 = 32 * 1024;
+
+/// What a broker frame carries besides a cell value: the call or response
+/// envelope, a cell name of the longest accepted length and the version.
+const BROKER_FRAME_HEADROOM: usize = 8 * 1024;
+
+// A full cell, base64-encoded as the service carries it, fits one broker frame.
+const _: () = assert!(
+    (MAX_CELL_BYTES as usize).div_ceil(3) * 4 + BROKER_FRAME_HEADROOM
+        <= mvm_core::framing::DEFAULT_MAX_FRAME_BYTES
+);
 
 /// The most cells one topology may declare.
 pub const MAX_CELLS_PER_TOPOLOGY: usize = 64;
@@ -53,7 +65,7 @@ pub const MAX_CELLS_PER_TOPOLOGY: usize = 64;
 /// The most disk one tenant's cells may take, both slots of every cell
 /// counted. The store keeps only the cells of the tenant's admitted
 /// generation, so this bounds the tenant's whole directory, lock files aside.
-pub const MAX_RESERVED_BYTES_PER_TENANT: u64 = 16 * 1024 * 1024;
+pub const MAX_RESERVED_BYTES_PER_TENANT: u64 = 2 * 1024 * 1024;
 
 /// A topology whose cells exceed what this host reserves.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -86,7 +98,7 @@ fn check_limits(topology: &Topology) -> Result<(), ReservationLimit> {
                 size,
             });
         }
-        // At most 64 cells of at most 1 MiB each: no overflow.
+        // At most 64 cells of at most MAX_CELL_BYTES each: no overflow.
         bytes += slots::file_len(size);
     }
     if bytes > MAX_RESERVED_BYTES_PER_TENANT {
@@ -124,6 +136,18 @@ impl CellRefusal {
             self,
             Self::VersionNotIncreasing { .. } | Self::TooLarge { .. }
         )
+    }
+
+    /// The refusal's variant, without its fields.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::UnknownCell { .. } => "unknown_cell",
+            Self::NotWriter { .. } => "not_writer",
+            Self::NotReader { .. } => "not_reader",
+            Self::Epoch { .. } => "epoch",
+            Self::VersionNotIncreasing { .. } => "version_not_increasing",
+            Self::TooLarge { .. } => "too_large",
+        }
     }
 }
 
@@ -164,7 +188,8 @@ impl Operation {
 pub struct StateCells<'a> {
     /// Where the host signer lives; `None` for the default keys directory.
     pub host_signer_keys_dir: Option<&'a Path>,
-    pub emitter: &'a AuditEmitter,
+    /// Where refusals are recorded.
+    pub audit: &'a dyn RefusalAudit,
 }
 
 impl StateCells<'_> {
@@ -290,16 +315,17 @@ impl StateCells<'_> {
         if !refusal.is_authority() {
             return refusal.into();
         }
-        let audit = self.emitter.emit_topology_decision(
+        let audit = self.audit.record_refusal(
             caller.tenant,
-            STATE_CELL_REFUSED_EVENT,
-            [
-                ("operation".to_string(), op.as_str().to_string()),
-                ("cell".to_string(), caller.cell.to_string()),
-                ("unit".to_string(), caller.unit.0.clone()),
-                ("epoch".to_string(), caller.epoch.get().to_string()),
-                ("reason".to_string(), refusal.to_string()),
-            ],
+            LifecycleEvent::StateCellRefused,
+            refusal.kind(),
+            LifecycleLabels::from([
+                (LifecycleLabel::Operation, op.as_str().to_string()),
+                (LifecycleLabel::Cell, caller.cell.to_string()),
+                (LifecycleLabel::Unit, caller.unit.0.clone()),
+                (LifecycleLabel::Epoch, caller.epoch.get().to_string()),
+                (LifecycleLabel::Reason, refusal.to_string()),
+            ]),
         );
         match audit {
             Ok(()) => refusal.into(),

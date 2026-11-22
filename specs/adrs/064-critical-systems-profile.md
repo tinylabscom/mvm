@@ -477,7 +477,9 @@ establishment, then hybrid signatures on long-lived artifacts. This ADR adds:
 - The resource-controls matrix gains a core-placement answer for every
   backend, and the gate that requires an explicit answer applies to it.
 - The host-service broker gains a cell service. The vsock-only rule and its
-  build gates are unchanged.
+  build gates are unchanged. The broker holds no key, so it records the
+  service's refusals on the tenant's chain through the signer it already
+  uses, which accepts only those refusal events.
 - Under this profile, balloon-based reclaim is unavailable, so a critical unit
   is charged its configured memory for its whole life. Density comes from the
   floating units that share the remaining cores.

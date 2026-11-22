@@ -13,6 +13,7 @@ use mvm_core::time::Clock;
 use mvm_core::util::test_env::TestEnv;
 
 use super::*;
+use crate::audit::emitter::AuditEmitter;
 use crate::audit::host_keypair::HostSigner;
 use crate::topology_admission::{
     HostCpus, RefusalStage, TopologyAdmission, TopologyAdmissionRequest, TopologyRefused,
@@ -134,7 +135,7 @@ impl Host {
     fn cells(&self) -> StateCells<'_> {
         StateCells {
             host_signer_keys_dir: None,
-            emitter: &self.emitter,
+            audit: &self.emitter,
         }
     }
 
@@ -241,7 +242,7 @@ fn the_writer_writes_and_the_writer_and_readers_read_it_back_after_a_restart() {
     let emitter = AuditEmitter::with_dir(signer.signing, &host.home.path().join("audit")).unwrap();
     let restarted = StateCells {
         host_signer_keys_dir: None,
-        emitter: &emitter,
+        audit: &emitter,
     };
     for unit in [&controller, &reader] {
         assert_eq!(
@@ -578,13 +579,13 @@ fn a_topology_over_the_cell_count_or_byte_ceiling_is_refused_by_name() {
     );
 
     let mut large = topology(1, 16);
-    large.cells = (0..8)
-        .map(|n| named_cell(&format!("c{n}"), MAX_CELL_BYTES))
+    large.cells = (0..32)
+        .map(|n| named_cell(&format!("c{n:02}"), MAX_CELL_BYTES))
         .collect();
     assert_eq!(
         check_limits(&large),
         Err(ReservationLimit::TooManyBytes {
-            bytes: 8 * slots::file_len(MAX_CELL_BYTES)
+            bytes: 32 * slots::file_len(MAX_CELL_BYTES)
         })
     );
     assert_eq!(

@@ -47,16 +47,18 @@ use mvm_core::host_interface::Denial;
 use mvm_core::host_interface::epoch_gate::CommandGate;
 use mvm_core::host_interface::workload::WorkloadChange;
 use mvm_core::plan::{TenantId, WorkloadId};
+use mvm_core::protocol::lifecycle_audit::{LifecycleEvent, LifecycleLabel, LifecycleLabels};
 use mvm_core::time::Clock;
 use serde::{Deserialize, Serialize};
 
 use crate::audit::emitter::AuditEmitter;
+use crate::audit::refusal::RefusalAudit;
 use crate::containment::WorkloadAuthority;
 
 /// Chain event for a deadline that passed and fenced its epoch.
 pub const LIVENESS_EPOCH_REPLACED_EVENT: &str = "liveness.epoch_replaced";
 /// Chain event for a refused liveness signal.
-pub const LIVENESS_SIGNAL_REFUSED_EVENT: &str = "liveness.signal_refused";
+pub const LIVENESS_SIGNAL_REFUSED_EVENT: &str = LifecycleEvent::LivenessSignalRefused.as_str();
 
 /// The largest deadline file this host reads: [`MAX_LIVENESS_UNITS`] records
 /// with room for long unit names.
@@ -157,7 +159,7 @@ impl LivenessDeadlines<'_> {
     /// gate refuses, or a deadline that has already passed; otherwise any
     /// failure to read the topology, the gate's record or the deadlines.
     pub fn signal(&self, caller: &LivenessCaller<'_>) -> Result<()> {
-        self.reset(caller, true)
+        self.signals().signal(caller)
     }
 
     /// Reset the caller's deadline after the host accepted a cell write from
@@ -168,73 +170,15 @@ impl LivenessDeadlines<'_> {
     ///
     /// As [`Self::signal`], without [`LivenessRefusal::NoPeriod`].
     pub fn reset_after_write(&self, caller: &LivenessCaller<'_>) -> Result<()> {
-        self.reset(caller, false)
+        self.signals().reset_after_write(caller)
     }
 
-    fn reset(&self, caller: &LivenessCaller<'_>, explicit: bool) -> Result<()> {
-        let home = mvm_core::config::mvm_home_strict().context("resolving the mvm home")?;
-        let topology = crate::topology_admission::last_admitted_topology(
-            &home,
-            caller.tenant,
-            self.host_signer_keys_dir,
-        )?;
-        let Some(period) = topology
-            .as_ref()
-            .and_then(|t| liveness_period(t, caller.unit))
-        else {
-            if !explicit {
-                return Ok(());
-            }
-            return Err(self.refuse(
-                caller,
-                LivenessRefusal::NoPeriod {
-                    unit: caller.unit.clone(),
-                },
-            ));
-        };
-        let path = tenant_path(&home, caller.tenant);
-        let _lock = lock(&path)?;
-        let gate = CommandGate::load_at(&home).context("loading the epoch gate's record")?;
-        if let Err(denial) = gate.admit(&caller.unit.0, caller.epoch) {
-            return Err(self.refuse(
-                caller,
-                LivenessRefusal::Epoch {
-                    unit: caller.unit.clone(),
-                    denial,
-                },
-            ));
+    fn signals(&self) -> LivenessSignals<'_> {
+        LivenessSignals {
+            host_signer_keys_dir: self.host_signer_keys_dir,
+            audit: self.emitter,
+            clock: self.clock,
         }
-        let now = self.clock.now();
-        let mut deadlines = load(&path)?;
-        // A deadline the gate still admits watches the caller's own epoch; one
-        // it refuses belongs to an epoch already replaced.
-        let passed = deadlines
-            .get(&caller.unit.0)
-            .is_some_and(|d| gate.admit(&caller.unit.0, d.epoch).is_ok() && d.has_passed(now));
-        if passed {
-            return Err(self.refuse(
-                caller,
-                LivenessRefusal::DeadlinePassed {
-                    unit: caller.unit.clone(),
-                },
-            ));
-        }
-        let deadline = now
-            .checked_add_signed(chrono::Duration::milliseconds(i64::from(period.get())))
-            .context("the liveness deadline overflows the clock")?;
-        if let Some(topology) = &topology {
-            retain_declared(&mut deadlines, topology);
-        }
-        deadlines.insert(
-            caller.unit.0.clone(),
-            Deadline {
-                epoch: caller.epoch,
-                last_signal: now,
-                deadline,
-                state: State::Watching,
-            },
-        );
-        store(&path, &deadlines)
     }
 
     /// Fence every unit whose deadline has passed, in every tenant.
@@ -420,16 +364,118 @@ impl LivenessDeadlines<'_> {
             ],
         )
     }
+}
+
+/// The signal side of the deadlines, for a process that resets them but never
+/// expires them, such as a keyless broker. It records refusals through any
+/// [`RefusalAudit`].
+pub struct LivenessSignals<'a> {
+    /// Where the host signer lives; `None` for the default keys directory.
+    pub host_signer_keys_dir: Option<&'a Path>,
+    pub audit: &'a dyn RefusalAudit,
+    pub clock: &'a dyn Clock,
+}
+
+impl LivenessSignals<'_> {
+    /// As [`LivenessDeadlines::signal`].
+    ///
+    /// # Errors
+    ///
+    /// As [`LivenessDeadlines::signal`].
+    pub fn signal(&self, caller: &LivenessCaller<'_>) -> Result<()> {
+        self.reset(caller, true)
+    }
+
+    /// As [`LivenessDeadlines::reset_after_write`].
+    ///
+    /// # Errors
+    ///
+    /// As [`LivenessDeadlines::reset_after_write`].
+    pub fn reset_after_write(&self, caller: &LivenessCaller<'_>) -> Result<()> {
+        self.reset(caller, false)
+    }
+
+    fn reset(&self, caller: &LivenessCaller<'_>, explicit: bool) -> Result<()> {
+        let home = mvm_core::config::mvm_home_strict().context("resolving the mvm home")?;
+        let topology = crate::topology_admission::last_admitted_topology(
+            &home,
+            caller.tenant,
+            self.host_signer_keys_dir,
+        )?;
+        let Some(period) = topology
+            .as_ref()
+            .and_then(|t| liveness_period(t, caller.unit))
+        else {
+            if !explicit {
+                return Ok(());
+            }
+            return Err(self.refuse(
+                caller,
+                LivenessRefusal::NoPeriod {
+                    unit: caller.unit.clone(),
+                },
+            ));
+        };
+        let path = tenant_path(&home, caller.tenant);
+        let _lock = lock(&path)?;
+        let gate = CommandGate::load_at(&home).context("loading the epoch gate's record")?;
+        if let Err(denial) = gate.admit(&caller.unit.0, caller.epoch) {
+            return Err(self.refuse(
+                caller,
+                LivenessRefusal::Epoch {
+                    unit: caller.unit.clone(),
+                    denial,
+                },
+            ));
+        }
+        let now = self.clock.now();
+        let mut deadlines = load(&path)?;
+        // A deadline the gate still admits watches the caller's own epoch; one
+        // it refuses belongs to an epoch already replaced.
+        let passed = deadlines
+            .get(&caller.unit.0)
+            .is_some_and(|d| gate.admit(&caller.unit.0, d.epoch).is_ok() && d.has_passed(now));
+        if passed {
+            return Err(self.refuse(
+                caller,
+                LivenessRefusal::DeadlinePassed {
+                    unit: caller.unit.clone(),
+                },
+            ));
+        }
+        let deadline = now
+            .checked_add_signed(chrono::Duration::milliseconds(i64::from(period.get())))
+            .context("the liveness deadline overflows the clock")?;
+        if let Some(topology) = &topology {
+            retain_declared(&mut deadlines, topology);
+        }
+        deadlines.insert(
+            caller.unit.0.clone(),
+            Deadline {
+                epoch: caller.epoch,
+                last_signal: now,
+                deadline,
+                state: State::Watching,
+            },
+        );
+        store(&path, &deadlines)
+    }
 
     fn refuse(&self, caller: &LivenessCaller<'_>, refusal: LivenessRefusal) -> anyhow::Error {
-        let audit = self.emitter.emit_topology_decision(
+        let kind = match refusal {
+            LivenessRefusal::NoPeriod { .. } => "no_period",
+            LivenessRefusal::Epoch { .. } => "epoch",
+            LivenessRefusal::DeadlinePassed { .. } => "deadline_passed",
+        };
+        let audit = self.audit.record_refusal(
             caller.tenant,
-            LIVENESS_SIGNAL_REFUSED_EVENT,
-            [
-                ("unit".to_string(), caller.unit.0.clone()),
-                ("epoch".to_string(), caller.epoch.get().to_string()),
-                ("reason".to_string(), refusal.to_string()),
-            ],
+            LifecycleEvent::LivenessSignalRefused,
+            kind,
+            LifecycleLabels::from([
+                (LifecycleLabel::Unit, caller.unit.0.clone()),
+                (LifecycleLabel::Epoch, caller.epoch.get().to_string()),
+                (LifecycleLabel::Reason, refusal.to_string()),
+            ]),
         );
         match audit {
             Ok(()) => refusal.into(),

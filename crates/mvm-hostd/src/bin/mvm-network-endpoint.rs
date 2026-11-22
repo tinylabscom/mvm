@@ -202,8 +202,8 @@ fn main() -> Result<()> {
 
     // A flow opened before the ledger stops admitting this plan's epoch is
     // not decided again while it relays, so a workload endpoint asks the
-    // ledger on a fixed interval while it serves. On a refusal it records the
-    // revocation once and exits: process exit closes every flow, the session
+    // ledger on a fixed interval while it serves. On a denial, or a ledger
+    // unreadable for the whole grace, it records the revocation once and exits: process exit closes every flow, the session
     // and the listeners at once, reused HTTP connections and UDP associations
     // included, and the endpoint cannot come back if the ledger later admits
     // the epoch again. Started after confinement, so the thread inherits it.
@@ -213,6 +213,7 @@ fn main() -> Result<()> {
         epoch_admission::watch_config(
             &cfg,
             epoch_admission::REVOCATION_CHECK_INTERVAL,
+            epoch_admission::UNREADABLE_LEDGER_GRACE,
             move |gate, refusal| {
                 gate.record_revocation(recorder.as_deref(), &runtime, &refusal);
                 std::process::exit(EXIT_EPOCH_REVOKED);

@@ -139,7 +139,7 @@ impl AuditSignerProxy {
                 code,
                 message,
             }),
-            AppendEntryResponse::Pong { .. } => {
+            AppendEntryResponse::Pong { .. } | AppendEntryResponse::LifecycleAppended { .. } => {
                 return Err(ProxyError::Decode {
                     path: self.uds_path.clone(),
                     source: serde::de::Error::custom("expected Ok/Err for append_entry, got Pong"),

@@ -98,7 +98,7 @@ fn rejects_plan_outside_validity_window() {
     let _clock = FixedClock(now_plus_30);
     // Inline the window check (admit_for_run does it after
     // synthesis; we're proving the underlying assert).
-    assert!(check_window(&verified, now_plus_30).is_err());
+    assert!(check_window_chrono(&verified, now_plus_30).is_err());
 }
 
 #[test]

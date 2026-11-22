@@ -3,9 +3,8 @@
 //! `check_window`, `NonceStore`, and the fail-closed `checked` conversion)
 //! live in `mvm-core::plan::validity`.
 
-use chrono::{DateTime, Utc};
-
 use crate::plan::types::Nonce;
+use crate::timestamp::UtcTimestamp;
 
 /// Freshness block embedded inside a signed payload (e.g. a signed plan or
 /// a signed reconcile request). It lives inside the signed bytes, so
@@ -18,15 +17,15 @@ use crate::plan::types::Nonce;
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FreshnessClaims {
     #[serde(default)]
-    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_from: Option<UtcTimestamp>,
     #[serde(default)]
-    pub valid_until: Option<DateTime<Utc>>,
+    pub valid_until: Option<UtcTimestamp>,
     #[serde(default)]
     pub nonce: Option<Nonce>,
 }
 
 impl FreshnessClaims {
-    pub fn new(valid_from: DateTime<Utc>, valid_until: DateTime<Utc>, nonce: Nonce) -> Self {
+    pub fn new(valid_from: UtcTimestamp, valid_until: UtcTimestamp, nonce: Nonce) -> Self {
         Self {
             valid_from: Some(valid_from),
             valid_until: Some(valid_until),
@@ -37,9 +36,13 @@ impl FreshnessClaims {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Utc};
 
     use super::*;
+
+    fn ts(secs: i64) -> UtcTimestamp {
+        UtcTimestamp::from_unix(secs, 0).unwrap()
+    }
 
     /// Locks the byte-identity assumption the whole DTO split rests on:
     /// `DateTime<Utc>` must serialize the same RFC-3339 bytes under the
@@ -57,11 +60,30 @@ mod tests {
 
     #[test]
     fn freshness_claims_serde_roundtrips() {
-        let dt = Utc.with_ymd_and_hms(2026, 7, 16, 12, 34, 56).unwrap();
+        let dt = ts(1_784_205_296);
         let claims = FreshnessClaims::new(dt, dt, Nonce::from_bytes([7u8; 16]));
         let json = serde_json::to_string(&claims).unwrap();
         let back: FreshnessClaims = serde_json::from_str(&json).unwrap();
         assert_eq!(claims, back);
+    }
+
+    // Pinned on chrono and unchanged by the move to `UtcTimestamp`: the
+    // freshness block sits inside signed bytes.
+    #[test]
+    fn freshness_claims_serialize_to_pinned_json() {
+        let nonce = Nonce::from_bytes([7u8; 16]);
+        for (from, until) in [
+            ("2026-07-16T12:34:56Z", "2026-07-16T12:44:56Z"),
+            ("2026-07-16T12:34:56.500Z", "2026-07-16T12:44:56.123456Z"),
+            ("2026-07-16T12:34:56.000000001Z", "2026-07-16T12:44:56.250Z"),
+        ] {
+            let json = alloc::format!(
+                r#"{{"valid_from":"{from}","valid_until":"{until}","nonce":{}}}"#,
+                serde_json::to_string(&nonce).unwrap()
+            );
+            let claims: FreshnessClaims = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&claims).unwrap(), json);
+        }
     }
 
     #[test]

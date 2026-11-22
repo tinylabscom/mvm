@@ -173,6 +173,48 @@ mod tests {
         assert_ne!(base, compute_plan_id(&p), "plan_version");
     }
 
+    /// The signed bytes and content address of a plan whose validity
+    /// timestamps are given as wire text, built through the wire form so the
+    /// test does not name the timestamp type.
+    fn plan_with_validity(from: &str, until: &str) -> ExecutionPlan {
+        let mut value = serde_json::to_value(plan()).unwrap();
+        value["valid_from"] = from.into();
+        value["valid_until"] = until.into();
+        serde_json::from_value(value).unwrap()
+    }
+
+    // Pinned on the chrono-typed fields and unchanged by the move to
+    // `UtcTimestamp`: the validity text a signature and the content address
+    // cover must not move.
+    #[test]
+    fn validity_timestamps_pin_the_signed_bytes_and_address() {
+        let cases = [
+            (
+                "2026-07-16T12:00:00Z",
+                "2026-07-16T12:10:00Z",
+                "sha256:ea35585e25e2959db688169dfdd2342dafccf33ff499e4cfd77c7252d1b2927c",
+            ),
+            (
+                "2026-07-16T12:00:00.500Z",
+                "2026-07-16T12:10:00.123456Z",
+                "sha256:ee16897e543f8c8302b3ce43d5b9a576fa40ca808a34ddb8e33bc577413e600a",
+            ),
+            (
+                "2026-07-16T12:00:00.000000001Z",
+                "2026-07-16T12:10:00.250Z",
+                "sha256:46a2efef60bffeceea11f9c5245a0b4cb5e69d21ae882e93a649006a2173a4c8",
+            ),
+        ];
+        for (from, until, address) in cases {
+            let p = plan_with_validity(from, until);
+            let json: serde_json::Value =
+                serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+            assert_eq!(json["valid_from"], from);
+            assert_eq!(json["valid_until"], until);
+            assert_eq!(compute_plan_id(&p).0, address, "{from} .. {until}");
+        }
+    }
+
     #[test]
     fn caller_commitment_is_load_bearing() {
         let base_plan = plan();

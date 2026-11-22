@@ -4,7 +4,6 @@
 //! frames are persisted first and drained by the transport outside that lock.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Instant;
 
 use hmac::{Hmac, KeyInit, Mac};
@@ -44,7 +43,7 @@ use crate::mailbox_launch::actor_template::{
 
 mod guest_requests;
 mod scope;
-use crate::mailbox_commit::{ActorJournal, ActorOrdering, actor_destination_id, require_reached};
+use crate::mailbox_commit::{ActorJournal, JournalOrder, actor_destination_id, require_reached};
 use guest_requests::{AckRequest, ReplyRequest};
 use scope::{ScopedHistory, address, key, reader_scope, storage};
 
@@ -149,9 +148,7 @@ pub struct ActorConversationEndpoint {
     started: Instant,
     clock_origin_ms: i64,
     poisoned: bool,
-    /// Orders every journal's commits through the workload ledger; absent for
-    /// a development launch.
-    ordering: Option<Arc<ActorOrdering>>,
+    ordering: JournalOrder,
     /// Asked before each new peer acceptance; absent in unit tests that bind
     /// no ledger.
     unit_gate: Option<super::UnitGate>,
@@ -159,7 +156,14 @@ pub struct ActorConversationEndpoint {
 }
 
 impl ActorConversationEndpoint {
-    pub fn open(config: ActorOperationConfig, material: ActorEndpointMaterial) -> Result<Self> {
+    pub(crate) fn open<F>(
+        config: ActorOperationConfig,
+        material: ActorEndpointMaterial,
+        ordering: F,
+    ) -> Result<Self>
+    where
+        F: FnOnce(&std::path::Path) -> Result<JournalOrder>,
+    {
         material.verify_plan(&config.plan).map_err(storage)?;
         config
             .binding
@@ -257,7 +261,7 @@ impl ActorConversationEndpoint {
             started: Instant::now(),
             clock_origin_ms,
             poisoned: false,
-            ordering: None,
+            ordering: JournalOrder::Unordered,
             unit_gate: None,
             _lock: lock,
         };
@@ -265,14 +269,10 @@ impl ActorConversationEndpoint {
             owner.commit(owner.state.clone())?;
         }
         owner.check_quota(&owner.state)?;
+        // Persist initial state before minting the ordering key, so an interrupted
+        // open can safely resume instead of leaving a key-only directory.
+        owner.ordering = ordering(&owner.config.directory)?;
         Ok(owner)
-    }
-
-    /// Order every journal this endpoint opens through the workload ledger.
-    #[must_use]
-    pub(crate) fn with_ordering(mut self, ordering: Arc<ActorOrdering>) -> Self {
-        self.ordering = Some(ordering);
-        self
     }
 
     /// Ask the unit's epoch gate before accepting each peer frame, so a
@@ -319,7 +319,7 @@ impl ActorConversationEndpoint {
         journal: ActorJournal,
         id: MessageId,
     ) -> Result<(FileJournalAnchor, Option<DestinationTip>)> {
-        let Some(ordering) = &self.ordering else {
+        let JournalOrder::Ledger(ordering) = &self.ordering else {
             return Ok((anchor, None));
         };
         let destination =
@@ -1232,6 +1232,7 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use mvm_contract::protocol::mailbox::ExecutionEpoch;
     use mvm_core::mailbox::reader::MailboxReaderBootBinding;
+    use std::sync::Arc;
 
     struct Pair {
         directory: tempfile::TempDir,
@@ -1290,6 +1291,7 @@ mod tests {
                 current_epoch,
             },
             material,
+            |_| Ok(JournalOrder::Unordered),
         )
     }
 
@@ -2041,7 +2043,8 @@ mod tests {
                     now_unix_ms: actor_template::current_time_ms().unwrap(),
                     current_epoch: mvm_contract::protocol::mailbox::ExecutionEpoch::new(1).unwrap(),
                 },
-                material
+                material,
+                |_| Ok(JournalOrder::Unordered),
             )
             .is_err()
         );
@@ -2049,7 +2052,9 @@ mod tests {
 
     mod ordered {
         use super::*;
-        use crate::mailbox_commit::{ActorJournal, OrderingFlags, actor_destination_id};
+        use crate::mailbox_commit::{
+            ActorJournal, ActorOrdering, OrderingFlags, actor_destination_id,
+        };
         use crate::policy_generation::workload_store::OwnedWorkloadStore;
         use mvm_core::host_interface::workload::{
             CanonicalLedger, WorkloadChange, read_ledger_bytes_at,
@@ -2076,7 +2081,7 @@ mod tests {
                 .unwrap(),
                 flags: OrderingFlags::default(),
             });
-            pair.child = pair.child.with_ordering(Arc::clone(&ordering));
+            pair.child.ordering = JournalOrder::Ledger(Arc::clone(&ordering));
             Ordered {
                 pair,
                 store,
