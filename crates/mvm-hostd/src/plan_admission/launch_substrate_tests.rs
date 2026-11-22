@@ -394,7 +394,7 @@ fn stash_plan_for_bridge_writes_verb_grant_when_agent_verbs_present() {
     );
     assert_eq!(
         envelope.grant.not_after,
-        chrono::DateTime::from(admitted.plan().valid_until),
+        admitted.plan().valid_until,
         "a verb grant must not outlive its admitted plan"
     );
     let pub_arr: [u8; 32] = hex::decode(&envelope.pubkey_hex)
@@ -408,7 +408,7 @@ fn stash_plan_for_bridge_writes_verb_grant_when_agent_verbs_present() {
             &vk,
             "vm-verb-grant",
             &admitted.plan().nonce,
-            SystemClock.now(),
+            mvm_agentd::vsock::utc_now(),
         )
         .expect("grant must verify under the signer key");
 }

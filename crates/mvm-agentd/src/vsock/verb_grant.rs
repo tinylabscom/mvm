@@ -267,6 +267,15 @@ pub fn provision_host_signer_anchor_from_cmdline(
     Ok(true)
 }
 
+/// The guest clock as a [`UtcTimestamp`](mvm_contract::timestamp::UtcTimestamp).
+pub fn utc_now() -> mvm_contract::timestamp::UtcTimestamp {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    mvm_contract::timestamp::UtcTimestamp::from_unix(d.as_secs() as i64, d.subsec_nanos())
+        .expect("the clock reads within years 0000..=9999")
+}
+
 /// Decode a single ASCII hex nibble ('0'-'9', 'a'-'f') to its value.
 /// Returns `None` for any other character (including uppercase).
 fn hex_nibble(b: u8) -> Option<u8> {
@@ -289,7 +298,7 @@ pub fn pin_verb_grant(
     host_signer_key: Option<&ed25519_dalek::VerifyingKey>,
     session_id: &str,
     plan_nonce: &mvm_core::plan::Nonce,
-    now: chrono::DateTime<chrono::Utc>,
+    now: mvm_contract::timestamp::UtcTimestamp,
 ) -> anyhow::Result<Option<mvm_core::plan::VerbGrant>> {
     match (grant, host_signer_key) {
         (None, _) => Ok(None),
@@ -318,7 +327,7 @@ pub fn pin_verb_grant(
 fn verify_envelope_with_anchor(
     envelope: &mvm_core::protocol::vm_backend::VerbGrantEnvelope,
     host_signer_key: &ed25519_dalek::VerifyingKey,
-    now: chrono::DateTime<chrono::Utc>,
+    now: mvm_contract::timestamp::UtcTimestamp,
 ) -> Option<mvm_core::plan::VerbGrant> {
     let plan_nonce = match mvm_core::plan::Nonce::from_hex(&envelope.plan_nonce_hex) {
         Ok(n) => n,
@@ -360,7 +369,7 @@ pub fn re_pin_verb_grant(
     envelope: &mvm_core::protocol::vm_backend::VerbGrantEnvelope,
     current_grant: Option<&mvm_core::plan::VerbGrant>,
     host_signer_key: &ed25519_dalek::VerifyingKey,
-    now: chrono::DateTime<chrono::Utc>,
+    now: mvm_contract::timestamp::UtcTimestamp,
 ) -> Option<mvm_core::plan::VerbGrant> {
     if let Some(current) = current_grant {
         let predecessor_session = envelope.predecessor_session_id.as_deref()?;
@@ -389,7 +398,7 @@ pub fn re_pin_verb_grant(
 pub fn load_pinned_verb_grant(
     grant_path: &std::path::Path,
     host_signer_pubkey_path: &std::path::Path,
-    now: chrono::DateTime<chrono::Utc>,
+    now: mvm_contract::timestamp::UtcTimestamp,
 ) -> Option<mvm_core::plan::VerbGrant> {
     // Grant file absent → no grant on this boot.
     let raw = match read_grant_bytes(grant_path) {
@@ -530,7 +539,7 @@ mod tests {
         mvm_core::plan::VerbGrant {
             session_id: "drive-session".into(),
             plan_nonce: mvm_core::plan::Nonce::from_bytes([0u8; 16]),
-            not_after: chrono::Utc::now() + chrono::Duration::minutes(1),
+            not_after: utc_now().checked_add_secs(60).unwrap(),
             verbs: Vec::new(),
             drive: Some(drive_grant()),
             application_terminal: None,
@@ -678,11 +687,11 @@ mod tests {
     #[test]
     fn grant_denies_unlisted_but_allows_listed_and_baseline() {
         use mvm_core::plan::{Nonce, VerbGrant, VerbId};
-        let now = chrono::Utc::now();
+        let now = utc_now();
         let grant = VerbGrant {
             session_id: "s".into(),
             plan_nonce: Nonce::from_bytes([0u8; 16]),
-            not_after: now + chrono::Duration::minutes(1),
+            not_after: now.checked_add_secs(60).unwrap(),
             verbs: vec![VerbId::new("run-entrypoint").unwrap()],
             drive: None,
             application_terminal: None,
@@ -714,7 +723,7 @@ mod tests {
         let grant = VerbGrant {
             session_id: "s".into(),
             plan_nonce: Nonce::from_bytes([0u8; 16]),
-            not_after: chrono::Utc::now() + chrono::Duration::minutes(1),
+            not_after: utc_now().checked_add_secs(60).unwrap(),
             verbs: vec![VerbId::new("readiness-status").unwrap()],
             drive: None,
             application_terminal: None,
@@ -751,7 +760,7 @@ mod tests {
         let grant = VerbGrant {
             session_id: "s".into(),
             plan_nonce: Nonce::from_bytes([0u8; 16]),
-            not_after: chrono::Utc::now() + chrono::Duration::minutes(1),
+            not_after: utc_now().checked_add_secs(60).unwrap(),
             verbs: Vec::new(),
             drive: None,
             application_terminal: None,
@@ -772,7 +781,7 @@ mod tests {
         let grant = VerbGrant {
             session_id: "s".into(),
             plan_nonce: Nonce::from_bytes([0u8; 16]),
-            not_after: chrono::Utc::now() + chrono::Duration::minutes(1),
+            not_after: utc_now().checked_add_secs(60).unwrap(),
             verbs: GuestRequest::prod_safe_verb_names()
                 .iter()
                 .map(|name| VerbId::new(name).expect("the prod-safe catalog contains valid verbs"))
@@ -953,11 +962,11 @@ mod tests {
         let signer = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
         let session = "sess-H";
         let nonce = Nonce::from_bytes([4u8; 16]);
-        let now = chrono::Utc::now();
+        let now = utc_now();
         let mut good = VerbGrant {
             session_id: session.into(),
             plan_nonce: nonce.clone(),
-            not_after: now + chrono::Duration::minutes(1),
+            not_after: now.checked_add_secs(60).unwrap(),
             verbs: vec![VerbId::new("ping").unwrap()],
             drive: None,
             application_terminal: None,
@@ -1012,7 +1021,7 @@ mod tests {
             .is_err()
         );
         // expired -> Err
-        let later = good.not_after + chrono::Duration::seconds(1);
+        let later = good.not_after.checked_add_secs(1).unwrap();
         assert!(
             pin_verb_grant(
                 Some(&good),
@@ -1040,11 +1049,11 @@ mod tests {
     ) -> (std::path::PathBuf, std::path::PathBuf) {
         use mvm_core::plan::{VerbGrant, VerbId};
         use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
-        let now = chrono::Utc::now();
+        let now = utc_now();
         let mut grant = VerbGrant {
             session_id: session.into(),
             plan_nonce: nonce.clone(),
-            not_after: now + chrono::Duration::minutes(valid_minutes),
+            not_after: now.checked_add_secs(valid_minutes * 60).unwrap(),
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
             drive: None,
             application_terminal: None,
@@ -1081,7 +1090,7 @@ mod tests {
         let nonce = mvm_core::plan::Nonce::from_bytes([8u8; 16]);
         let (grant_path, pubkey_path) =
             write_grant_fixture(dir.path(), &signer, "sess-valid", &nonce, &["ping"], 10);
-        let now = chrono::Utc::now();
+        let now = utc_now();
         let result = load_pinned_verb_grant(&grant_path, &pubkey_path, now);
         assert!(
             result.is_some(),
@@ -1099,11 +1108,11 @@ mod tests {
         let nonce = mvm_core::plan::Nonce::from_bytes([11u8; 16]);
         use mvm_core::plan::{VerbGrant, VerbId};
         use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
-        let now = chrono::Utc::now();
+        let now = utc_now();
         let mut grant = VerbGrant {
             session_id: "sess-wrong-key".into(),
             plan_nonce: nonce.clone(),
-            not_after: now + chrono::Duration::minutes(10),
+            not_after: now.checked_add_secs(10 * 60).unwrap(),
             verbs: vec![VerbId::new("ping").unwrap()],
             drive: None,
             application_terminal: None,
@@ -1158,7 +1167,7 @@ mod tests {
             .map(|b| format!("{b:02x}"))
             .collect();
         std::fs::write(&pubkey_path, format!("{attacker_pubkey_hex}\n")).unwrap();
-        let now = chrono::Utc::now();
+        let now = utc_now();
         let result = load_pinned_verb_grant(&grant_path, &pubkey_path, now);
         assert!(
             result.is_none(),
@@ -1180,7 +1189,7 @@ mod tests {
             10,
         );
         std::fs::write(&pubkey_path, "not-valid-hex\n").unwrap();
-        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, chrono::Utc::now());
+        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, utc_now());
         assert!(
             result.is_none(),
             "malformed config-drive pubkey must return None"
@@ -1220,7 +1229,7 @@ mod tests {
             &["update-idle-timeout"],
             10,
         );
-        let now = chrono::Utc::now();
+        let now = utc_now();
 
         // Anchor present ⇒ grant pins, carrying the listed verb.
         let pinned = load_pinned_verb_grant(&grant_path, &pubkey_path, now)
@@ -1279,7 +1288,7 @@ mod tests {
         // Replace the hex fixture pubkey with the raw 32-byte form.
         std::fs::write(&pubkey_path, signer.verifying_key().to_bytes()).unwrap();
         assert_eq!(std::fs::read(&pubkey_path).unwrap().len(), 32);
-        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, chrono::Utc::now());
+        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, utc_now());
         assert!(
             result.is_some(),
             "raw 32-byte host-signer pubkey must pin the grant (not the anchor-absent None path)"
@@ -1468,7 +1477,7 @@ mod tests {
         let pubkey_path = dir.path().join("host-signer.pub");
         std::fs::write(&pubkey_path, "00".repeat(32)).unwrap();
         std::fs::write(&grant_path, b"this is not json").unwrap();
-        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, chrono::Utc::now());
+        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, utc_now());
         assert!(
             result.is_none(),
             "malformed envelope JSON must return None (fail-closed)"
@@ -1480,7 +1489,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing_grant = dir.path().join("no-grant.json");
         let missing_pubkey = dir.path().join("no-host-signer.pub");
-        let result = load_pinned_verb_grant(&missing_grant, &missing_pubkey, chrono::Utc::now());
+        let result = load_pinned_verb_grant(&missing_grant, &missing_pubkey, utc_now());
         assert!(
             result.is_none(),
             "absent grant file must return None (no-op boot)"
@@ -1497,13 +1506,13 @@ mod tests {
         // full listed set comes back.
         let host = ed25519_dalek::SigningKey::from_bytes(&[20u8; 32]);
         let nonce = mvm_core::plan::Nonce::from_bytes([21u8; 16]);
-        let now = chrono::Utc::now();
+        let now = utc_now();
         let envelope = self_signed_envelope(
             &host,
             "sess-repin",
             &nonce,
             &["run-entrypoint", "update-idle-timeout"],
-            now + chrono::Duration::minutes(10),
+            now.checked_add_secs(10 * 60).unwrap(),
         );
         let result = re_pin_verb_grant(&envelope, None, &host.verifying_key(), now);
         let grant = result.expect("valid host-signed envelope must yield Some from re_pin");
@@ -1522,13 +1531,13 @@ mod tests {
         let signer = ed25519_dalek::SigningKey::from_bytes(&[22u8; 32]);
         let anchor = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
         let nonce = mvm_core::plan::Nonce::from_bytes([24u8; 16]);
-        let now = chrono::Utc::now();
+        let now = utc_now();
         let envelope = self_signed_envelope(
             &signer,
             "sess-wrong",
             &nonce,
             &["ping"],
-            now + chrono::Duration::minutes(10),
+            now.checked_add_secs(10 * 60).unwrap(),
         );
         let result = re_pin_verb_grant(&envelope, None, &anchor.verifying_key(), now);
         assert!(
@@ -1688,7 +1697,7 @@ mod tests {
         session: &str,
         nonce: &mvm_core::plan::Nonce,
         verbs: &[&str],
-        not_after: chrono::DateTime<chrono::Utc>,
+        not_after: mvm_contract::timestamp::UtcTimestamp,
     ) -> mvm_core::protocol::vm_backend::VerbGrantEnvelope {
         use ed25519_dalek::Signer;
         use mvm_core::plan::{VerbGrant, VerbId};
@@ -1724,17 +1733,17 @@ mod tests {
     fn re_pin_verb_grant_expired_envelope_returns_none() {
         let signer = ed25519_dalek::SigningKey::from_bytes(&[30u8; 32]);
         let nonce = mvm_core::plan::Nonce::from_bytes([31u8; 16]);
-        let issued = chrono::Utc::now();
+        let issued = utc_now();
         let envelope = self_signed_envelope(
             &signer,
             "sess-stale",
             &nonce,
             &["run-entrypoint"],
-            issued + chrono::Duration::minutes(5),
+            issued.checked_add_secs(5 * 60).unwrap(),
         );
         // Restore happens one minute after expiry. Anchor matches the signer, so
         // the ONLY reason to reject is the elapsed validity window.
-        let later = issued + chrono::Duration::minutes(6);
+        let later = issued.checked_add_secs(6 * 60).unwrap();
         assert!(
             re_pin_verb_grant(&envelope, None, &signer.verifying_key(), later).is_none(),
             "an expired envelope must not re-pin at restore"
@@ -1748,13 +1757,13 @@ mod tests {
         use mvm_core::plan::VerbId;
         let signer = ed25519_dalek::SigningKey::from_bytes(&[32u8; 32]);
         let nonce = mvm_core::plan::Nonce::from_bytes([33u8; 16]);
-        let now = chrono::Utc::now();
+        let now = utc_now();
         let mut envelope = self_signed_envelope(
             &signer,
             "sess-widen",
             &nonce,
             &["update-idle-timeout"],
-            now + chrono::Duration::minutes(10),
+            now.checked_add_secs(10 * 60).unwrap(),
         );
         // Tamper: append a broader verb after the signature was computed.
         envelope
@@ -1782,7 +1791,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let host = ed25519_dalek::SigningKey::from_bytes(&[40u8; 32]);
         let boot_nonce = mvm_core::plan::Nonce::from_bytes([41u8; 16]);
-        let now = chrono::Utc::now();
+        let now = utc_now();
         let (grant_path, pubkey_path) = write_grant_fixture(
             dir.path(),
             &host,
@@ -1807,7 +1816,7 @@ mod tests {
             "attacker",
             &evil_nonce,
             &["run-entrypoint", "update-idle-timeout"],
-            now + chrono::Duration::minutes(10),
+            now.checked_add_secs(10 * 60).unwrap(),
         );
 
         // Verified against the boot-pinned HOST anchor (not the envelope's
@@ -1830,13 +1839,13 @@ mod tests {
         let host = ed25519_dalek::SigningKey::from_bytes(&[44u8; 32]);
         let current_nonce = mvm_core::plan::Nonce::from_bytes([46u8; 16]);
         let other_vm_nonce = mvm_core::plan::Nonce::from_bytes([45u8; 16]);
-        let now = chrono::Utc::now();
+        let now = utc_now();
         let current = self_signed_envelope(
             &host,
             "current-vm-session",
             &current_nonce,
             &["update-idle-timeout"],
-            now + chrono::Duration::minutes(10),
+            now.checked_add_secs(10 * 60).unwrap(),
         )
         .grant;
         // Host-signed, but for some other VM's session/nonce.
@@ -1845,7 +1854,7 @@ mod tests {
             "some-other-vm-session",
             &other_vm_nonce,
             &["run-entrypoint"],
-            now + chrono::Duration::minutes(10),
+            now.checked_add_secs(10 * 60).unwrap(),
         );
         envelope.predecessor_session_id = Some("sibling-vm-session".into());
         envelope.predecessor_plan_nonce_hex = Some(other_vm_nonce.as_hex().to_string());
@@ -1862,13 +1871,13 @@ mod tests {
         let host = ed25519_dalek::SigningKey::from_bytes(&[50u8; 32]);
         let current_nonce = mvm_core::plan::Nonce::from_bytes([51u8; 16]);
         let next_nonce = mvm_core::plan::Nonce::from_bytes([52u8; 16]);
-        let now = chrono::Utc::now();
+        let now = utc_now();
         let current = self_signed_envelope(
             &host,
             "current-session",
             &current_nonce,
             &["update-idle-timeout"],
-            now + chrono::Duration::minutes(10),
+            now.checked_add_secs(10 * 60).unwrap(),
         )
         .grant;
 
@@ -1877,7 +1886,7 @@ mod tests {
             "child-session",
             &next_nonce,
             &["run-entrypoint"],
-            now + chrono::Duration::minutes(10),
+            now.checked_add_secs(10 * 60).unwrap(),
         );
         wrong_session.predecessor_session_id = Some("wrong-session".into());
         wrong_session.predecessor_plan_nonce_hex = Some(current.plan_nonce.as_hex().to_string());
@@ -1890,7 +1899,7 @@ mod tests {
             "child-session",
             &next_nonce,
             &["run-entrypoint"],
-            now + chrono::Duration::minutes(10),
+            now.checked_add_secs(10 * 60).unwrap(),
         );
         wrong_nonce.predecessor_session_id = Some(current.session_id.clone());
         wrong_nonce.predecessor_plan_nonce_hex = Some(next_nonce.as_hex().to_string());
@@ -1904,13 +1913,13 @@ mod tests {
         let host = ed25519_dalek::SigningKey::from_bytes(&[47u8; 32]);
         let current_nonce = mvm_core::plan::Nonce::from_bytes([48u8; 16]);
         let next_nonce = mvm_core::plan::Nonce::from_bytes([49u8; 16]);
-        let now = chrono::Utc::now();
+        let now = utc_now();
         let current = self_signed_envelope(
             &host,
             "parent-vm-session",
             &current_nonce,
             &["update-idle-timeout"],
-            now + chrono::Duration::minutes(10),
+            now.checked_add_secs(10 * 60).unwrap(),
         )
         .grant;
         let mut envelope = self_signed_envelope(
@@ -1918,7 +1927,7 @@ mod tests {
             "child-vm-session",
             &next_nonce,
             &["run-entrypoint", "update-idle-timeout"],
-            now + chrono::Duration::minutes(10),
+            now.checked_add_secs(10 * 60).unwrap(),
         );
         envelope.predecessor_session_id = Some(current.session_id.clone());
         envelope.predecessor_plan_nonce_hex = Some(current.plan_nonce.as_hex().to_string());

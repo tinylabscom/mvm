@@ -1191,7 +1191,7 @@ impl ChildGrantIssuer for TestChildGrantIssuer {
             grant: mvm_core::plan::VerbGrant {
                 session_id: config.name.clone(),
                 plan_nonce: plan.nonce,
-                not_after: plan.valid_until.into(),
+                not_after: plan.valid_until,
                 verbs,
                 drive,
                 application_terminal: None,

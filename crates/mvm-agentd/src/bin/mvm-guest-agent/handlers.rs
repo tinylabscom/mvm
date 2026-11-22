@@ -675,7 +675,7 @@ pub(crate) fn handle_post_restore(
                     env,
                     current_grant.as_ref(),
                     &anchor,
-                    chrono::Utc::now(),
+                    mvm_agentd::vsock::utc_now(),
                 ) {
                     ctx.boot_state.set_verb_grant(g);
                 }

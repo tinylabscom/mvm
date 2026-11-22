@@ -399,7 +399,7 @@ fn spawn_standby_captured_refuses_a_parent_cmdline_the_kernel_would_truncate() {
     let state_dir = mvm_core::config::vm_state_dir("parent-oversized");
     std::fs::create_dir_all(&state_dir).unwrap();
     let nonce = mvm_core::plan::Nonce::from_bytes([3u8; 16]);
-    let not_after = mvm_core::time::parse_iso8601("2099-01-01T00:00:00Z").unwrap();
+    let not_after = "2099-01-01T00:00:00Z".parse().unwrap();
     let envelope = mvm_core::protocol::vm_backend::VerbGrantEnvelope {
         pubkey_hex: "cc".repeat(32),
         plan_nonce_hex: nonce.as_hex().to_string(),

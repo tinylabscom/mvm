@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 
 use crate::plan::types::Nonce;
 use crate::plan::verb::VerbId;
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +39,7 @@ pub const APPLICATION_TERMINAL_VERBS: [&str; 6] = [
 pub struct VerbGrant {
     pub session_id: String,
     pub plan_nonce: Nonce,
-    pub not_after: DateTime<Utc>,
+    pub not_after: UtcTimestamp,
     pub verbs: Vec<VerbId>,
     /// Drive authority copied from the admitted signed plan. It rides inside
     /// this host-signed envelope so the guest can enforce the same roots,
@@ -111,12 +111,23 @@ struct VerbGrantSigned<'a> {
     application_terminal: Option<&'a crate::grants::ApplicationTerminalBinding>,
 }
 
+/// The expiry as the signature has always carried it: chrono's `+00:00`
+/// suffix, where `UtcTimestamp` renders `Z`. Changing it would invalidate every
+/// grant already minted.
+fn signed_expiry(t: UtcTimestamp) -> String {
+    let z = alloc::string::ToString::to_string(&t);
+    alloc::format!(
+        "{}+00:00",
+        z.strip_suffix('Z').expect("UtcTimestamp renders Z")
+    )
+}
+
 impl VerbGrant {
     pub fn signing_bytes(&self) -> Vec<u8> {
         let body = VerbGrantSigned {
             session_id: &self.session_id,
             plan_nonce: self.plan_nonce.as_hex(),
-            not_after: self.not_after.to_rfc3339(),
+            not_after: signed_expiry(self.not_after),
             verbs: self.verbs.iter().map(VerbId::as_str).collect(),
             drive: self.drive.as_ref(),
             application_terminal: self.application_terminal.as_ref(),
@@ -129,7 +140,7 @@ impl VerbGrant {
         key: &VerifyingKey,
         session_id: &str,
         plan_nonce: &Nonce,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<(), VerbGrantError> {
         if self.session_id != session_id {
             return Err(VerbGrantError::SessionMismatch);
@@ -165,22 +176,24 @@ impl VerbGrant {
 mod tests {
     use super::*;
     use alloc::vec;
-    use chrono::Duration;
     use ed25519_dalek::{Signer, SigningKey};
 
     fn key() -> SigningKey {
         SigningKey::from_bytes(&[7u8; 32])
     }
+    fn now() -> UtcTimestamp {
+        UtcTimestamp::from_unix(1_700_000_000, 0).unwrap()
+    }
     fn nonce() -> Nonce {
         Nonce::from_bytes([1u8; 16])
     }
 
-    fn signed(now: DateTime<Utc>, verbs: Vec<&str>) -> (VerbGrant, SigningKey) {
+    fn signed(now: UtcTimestamp, verbs: Vec<&str>) -> (VerbGrant, SigningKey) {
         let k = key();
         let mut g = VerbGrant {
             session_id: "sess-A".into(),
             plan_nonce: nonce(),
-            not_after: now + Duration::minutes(10),
+            not_after: now.checked_add_secs(600).unwrap(),
             verbs: verbs.into_iter().map(|v| VerbId::new(v).unwrap()).collect(),
             drive: None,
             application_terminal: None,
@@ -190,9 +203,56 @@ mod tests {
         (g, k)
     }
 
+    fn pinned(secs: i64, nanos: u32) -> VerbGrant {
+        VerbGrant {
+            session_id: "s".into(),
+            plan_nonce: nonce(),
+            not_after: UtcTimestamp::from_unix(secs, nanos).unwrap(),
+            verbs: vec![VerbId::new("run-entrypoint").unwrap()],
+            drive: None,
+            application_terminal: None,
+            sig: vec![],
+        }
+    }
+
+    /// The signed expiry keeps chrono's `+00:00` form while the wire form is `Z`.
+    #[test]
+    fn expiry_bytes_are_pinned() {
+        let cases = [
+            (
+                1_700_000_000,
+                0,
+                "2023-11-14T22:13:20+00:00",
+                "2023-11-14T22:13:20Z",
+            ),
+            (
+                1_700_000_000,
+                500_000_000,
+                "2023-11-14T22:13:20.500+00:00",
+                "2023-11-14T22:13:20.500Z",
+            ),
+            (
+                1_700_000_000,
+                123_456_789,
+                "2023-11-14T22:13:20.123456789+00:00",
+                "2023-11-14T22:13:20.123456789Z",
+            ),
+        ];
+        for (secs, nanos, signed, wire) in cases {
+            let g = pinned(secs, nanos);
+            let want = format!(
+                r#"{{"session_id":"s","plan_nonce":"{}","not_after":"{signed}","verbs":["run-entrypoint"]}}"#,
+                nonce().as_hex()
+            );
+            assert_eq!(String::from_utf8(g.signing_bytes()).unwrap(), want);
+            let json = serde_json::to_string(&g).unwrap();
+            assert!(json.contains(&format!(r#""not_after":"{wire}""#)), "{json}");
+        }
+    }
+
     #[test]
     fn valid_grant_verifies() {
-        let now = Utc::now();
+        let now = now();
         let (g, k) = signed(now, vec!["run-entrypoint"]);
         assert!(
             g.verify(&k.verifying_key(), "sess-A", &nonce(), now)
@@ -203,7 +263,7 @@ mod tests {
     #[test]
     fn an_application_terminal_binding_is_signed_and_admits_only_console_verbs() {
         use crate::grants::{ApplicationTerminalBinding, ApplicationTerminalGrant};
-        let now = Utc::now();
+        let now = now();
         let (mut grant, signer) = signed(now, vec![]);
         assert!(!grant.permits("console-open"));
         let claude = ApplicationTerminalGrant::new(vec!["/usr/bin/claude".into()]).unwrap();
@@ -239,7 +299,7 @@ mod tests {
 
     #[test]
     fn signed_legacy_tool_mediation_is_refused() {
-        let now = Utc::now();
+        let now = now();
         let (grant, signer) = signed(now, vec!["run-entrypoint"]);
         let mut encoded = serde_json::to_value(&grant).expect("serialize grant");
         encoded["tool_mediation"] = serde_json::json!({"class_gate_only": true});
@@ -255,7 +315,7 @@ mod tests {
 
     #[test]
     fn legacy_grant_omits_tool_mediation() {
-        let now = Utc::now();
+        let now = now();
         let (grant, signer) = signed(now, vec!["run-entrypoint"]);
         let json = serde_json::to_string(&grant).expect("serialize legacy grant");
         assert!(!json.contains("tool_mediation"));
@@ -269,7 +329,7 @@ mod tests {
 
     #[test]
     fn sig_serializes_as_base64_and_still_verifies_after_a_round_trip() {
-        let now = Utc::now();
+        let now = now();
         let (g, k) = signed(now, vec!["run-entrypoint"]);
 
         let json = serde_json::to_string(&g).expect("grant serializes");
@@ -297,7 +357,7 @@ mod tests {
 
     #[test]
     fn sig_rejects_non_base64() {
-        let now = Utc::now();
+        let now = now();
         let (g, _) = signed(now, vec!["ping"]);
         let json = serde_json::to_string(&g).expect("grant serializes");
         let broken = json.replace("\"sig\":\"", "\"sig\":\"!!!");
@@ -309,7 +369,7 @@ mod tests {
 
     #[test]
     fn forged_key_rejected() {
-        let now = Utc::now();
+        let now = now();
         let (g, _) = signed(now, vec!["run-entrypoint"]);
         let attacker = SigningKey::from_bytes(&[9u8; 32]).verifying_key();
         assert!(matches!(
@@ -320,7 +380,7 @@ mod tests {
 
     #[test]
     fn wrong_session_rejected() {
-        let now = Utc::now();
+        let now = now();
         let (g, k) = signed(now, vec!["run-entrypoint"]);
         assert!(matches!(
             g.verify(&k.verifying_key(), "sess-B", &nonce(), now),
@@ -330,7 +390,7 @@ mod tests {
 
     #[test]
     fn wrong_nonce_rejected() {
-        let now = Utc::now();
+        let now = now();
         let (g, k) = signed(now, vec!["run-entrypoint"]);
         let other = Nonce::from_bytes([2u8; 16]);
         assert!(matches!(
@@ -341,9 +401,9 @@ mod tests {
 
     #[test]
     fn expired_rejected() {
-        let now = Utc::now();
+        let now = now();
         let (g, k) = signed(now, vec!["run-entrypoint"]);
-        let later = g.not_after + Duration::seconds(1);
+        let later = g.not_after.checked_add_secs(1).unwrap();
         assert!(matches!(
             g.verify(&k.verifying_key(), "sess-A", &nonce(), later),
             Err(VerbGrantError::Expired)
@@ -352,7 +412,7 @@ mod tests {
 
     #[test]
     fn signing_bytes_are_stable_and_exclude_sig() {
-        let now = Utc::now();
+        let now = now();
         let (mut g, _) = signed(now, vec!["ping"]);
         let a = g.signing_bytes();
         g.sig = vec![0xAA; 64]; // mutate sig only
@@ -370,7 +430,7 @@ mod tests {
 
     #[test]
     fn permits_baseline_verbs_always() {
-        let now = Utc::now();
+        let now = now();
         let (g, _) = signed(now, vec!["run-entrypoint"]);
         assert!(g.permits("protocol-hello"));
         assert!(g.permits("ping"));

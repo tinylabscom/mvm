@@ -83,7 +83,7 @@ pub use verb_grant::{
     host_signer_pub_token, is_verb_trust_baseline, launch_requires_grant,
     load_host_signer_verifying_key, load_pinned_verb_grant, load_verb_trust_policy,
     parse_require_grant_cmdline, pin_verb_grant, provision_host_signer_anchor_from_cmdline,
-    re_pin_verb_grant, trust_decision, verifying_key_from_hex, write_host_signer_anchor,
+    re_pin_verb_grant, trust_decision, utc_now, verifying_key_from_hex, write_host_signer_anchor,
 };
 pub use workload_privilege::{current_uid, workload_privilege_refusal};
 

@@ -2577,7 +2577,7 @@ mod tests {
         let grant = mvm_core::plan::VerbGrant {
             session_id: "test-session".into(),
             plan_nonce: mvm_core::plan::Nonce::from_bytes([1u8; 16]),
-            not_after: chrono::Utc::now() + chrono::Duration::hours(1),
+            not_after: mvm_agentd::vsock::utc_now().checked_add_secs(3600).unwrap(),
             verbs: vec![],
             drive: None,
             application_terminal: None,
@@ -2621,7 +2621,7 @@ mod tests {
             grant: mvm_core::plan::VerbGrant {
                 session_id: "parent-session".into(),
                 plan_nonce: nonce.clone(),
-                not_after: chrono::Utc::now() + chrono::Duration::hours(1),
+                not_after: mvm_agentd::vsock::utc_now().checked_add_secs(3600).unwrap(),
                 verbs: vec![],
                 drive: None,
                 application_terminal: None,
