@@ -14,7 +14,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use ed25519_dalek::{Signer, SigningKey};
+use mvm_core::protocol::broker_control::{ControlRequest, SignedControl};
 use mvm_core::security::SIG_ALG_ED25519;
 
 #[cfg(test)]
@@ -89,6 +91,18 @@ impl Keystore {
             signature: signature.to_bytes().to_vec(),
             pub_key_bytes: self.pub_key_bytes.clone(),
         }
+    }
+
+    pub(crate) fn sign_control(
+        &self,
+        request: ControlRequest,
+    ) -> Result<SignedControl, mvm_core::protocol::broker_control::ControlError> {
+        let bytes = serde_jcs::to_vec(&request)?;
+        let signed = self.sign(&bytes);
+        Ok(SignedControl {
+            request,
+            sig: base64::engine::general_purpose::STANDARD.encode(signed.signature),
+        })
     }
 
     /// Public key bytes (32 for Ed25519). Cheap clone.
