@@ -427,7 +427,7 @@ fn has_extended_acl(_file: &File) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+    use std::os::unix::fs::symlink;
     use std::sync::{Arc, Barrier};
     use std::thread;
 
