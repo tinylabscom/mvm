@@ -90,6 +90,22 @@ class MergeQueueWatchTests(unittest.TestCase):
         watch.watch(api, NOW)
         self.assertEqual(api.writes[0][0], "repos/tinylabscom/mvm/issues")
 
+    def test_active_checks_do_not_alert_at_the_queue_age_threshold(self):
+        api = FakeApi(run={
+            **RUN, "status": "in_progress", "conclusion": None,
+            "created_at": "2026-11-09T18:40:00Z",
+        })
+        watch.watch(api, NOW)
+        self.assertEqual(api.writes, [])
+
+    def test_long_running_checks_still_alert(self):
+        api = FakeApi(run={
+            **RUN, "status": "in_progress", "conclusion": None,
+            "created_at": "2026-11-09T17:59:00Z",
+        })
+        watch.watch(api, NOW)
+        self.assertEqual(api.writes[0][0], "repos/tinylabscom/mvm/issues")
+
     def test_existing_alert_is_updated_only_when_it_changes(self):
         issue = {"number": 17, "title": watch.TITLE, "body": "old"}
         api = FakeApi(run={**RUN, "run_attempt": 2}, issue=issue)
