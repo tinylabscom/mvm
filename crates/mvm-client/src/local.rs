@@ -2638,11 +2638,9 @@ mod tests {
         assert!(log.contains("\"workload_wake\""), "{log}");
     }
 
-    /// Setting or clearing a TTL is recorded by the client, so a TTL set
-    /// through the host library is audited like one set by the CLI; an
-    /// unregistered machine changes nothing and records nothing.
     /// Both refusals come before the policy coordinator would be started.
     #[tokio::test]
+    #[cfg(feature = "test-support")]
     async fn mailbox_expiry_refuses_an_unsafe_name_and_an_unknown_machine() {
         let _data = IsolatedDataDir::new();
         let be = LocalBackend::with_hypervisor("mock");
@@ -2661,6 +2659,9 @@ mod tests {
         assert!(matches!(unknown, MvmError::NotFound { .. }), "{unknown:?}");
     }
 
+    /// Setting or clearing a TTL is recorded by the client, so a TTL set
+    /// through the host library is audited like one set by the CLI; an
+    /// unregistered machine changes nothing and records nothing.
     #[tokio::test]
     #[cfg(feature = "test-support")]
     async fn set_ttl_records_the_expiry_it_set_and_cleared() {
