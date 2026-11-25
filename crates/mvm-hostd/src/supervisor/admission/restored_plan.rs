@@ -7,12 +7,14 @@
 //! key refuses the restore.
 
 use std::path::Path;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use mvm_core::plan::{
     ExecutionPlan, ImageBinding, RestoredChildBinding, SignedExecutionPlan,
     verify_restored_child_plan,
 };
+use mvm_core::util::time::utc_timestamp_at;
 
 use crate::audit::host_keypair::{PUBLIC_FILENAME, SECRET_FILENAME};
 
@@ -23,6 +25,20 @@ pub fn verify_restored_plan(
     vm_name: &str,
     signing_key_path: Option<&Path>,
 ) -> Result<ExecutionPlan> {
+    verify_restored_plan_at(plan, vm_name, signing_key_path, SystemTime::now())
+}
+
+/// [`verify_restored_plan`] at a given instant. A clock the timestamp type
+/// cannot hold refuses the restore before anything is read.
+fn verify_restored_plan_at(
+    plan: &serde_json::Value,
+    vm_name: &str,
+    signing_key_path: Option<&Path>,
+    at: SystemTime,
+) -> Result<ExecutionPlan> {
+    let now = utc_timestamp_at(at).context(
+        "the host clock is unusable, so the restored child's plan validity cannot be checked",
+    )?;
     let keys_dir = signing_key_path
         .and_then(Path::parent)
         .context("a restored child's plan needs the host signing key location")?;
@@ -39,7 +55,7 @@ pub fn verify_restored_plan(
         &RestoredChildBinding {
             vm_name,
             image: ImageBinding::NotChecked,
-            now: mvm_core::util::time::utc_timestamp_now(),
+            now,
         },
     )
 }
@@ -64,6 +80,16 @@ pub fn plan_to_arm(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_host_clock_past_year_9999_refuses_the_restore() {
+        let at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(253_402_300_800);
+        let error = verify_restored_plan_at(&serde_json::json!({}), "child", None, at).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("clock is unusable"),
+            "{error:#}"
+        );
+    }
+
     use super::*;
     use mvm_core::plan::{sign_plan, test_support::PlanFixture};
 

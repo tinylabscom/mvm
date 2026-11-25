@@ -68,6 +68,8 @@ pub enum RegistryPackStoreError {
     RevocationStore(#[from] RegistryPackRevocationStoreError),
     #[error(transparent)]
     Revoked(#[from] RegistryPackRevocationError),
+    #[error("the host clock is outside years 0000-9999: {0}")]
+    Clock(#[from] mvm_contract::timestamp::ParseTimestampError),
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,7 +95,7 @@ pub fn check_registry_pack_revocations_if_configured(
         &trust_path,
         &operator_store,
         &official_store,
-        now(),
+        host_now()?,
     )
 }
 
@@ -118,7 +120,7 @@ pub(crate) fn check_application_revocations(
         verified,
         builtin_policy,
         &crate::config::registry_pack_revocation_trust_path(),
-        now(),
+        host_now()?,
         |trust, at| {
             official_store
                 .load(trust, at)
@@ -132,10 +134,19 @@ pub(crate) fn check_application_revocations(
     )
 }
 
-/// The host clock as a feed timestamp. shortcut: panics on a clock outside
-/// years 0000..=9999, until the host `Clock` returns `UtcTimestamp`.
+/// The host clock as a feed timestamp; a clock outside years 0000..=9999
+/// refuses the revocation check rather than skipping it.
+fn host_now() -> Result<UtcTimestamp, RegistryPackStoreError> {
+    host_now_at(std::time::SystemTime::now())
+}
+
+fn host_now_at(at: std::time::SystemTime) -> Result<UtcTimestamp, RegistryPackStoreError> {
+    Ok(crate::util::time::utc_timestamp_at(at)?)
+}
+
+#[cfg(test)]
 fn now() -> UtcTimestamp {
-    UtcTimestamp::try_from(chrono::Utc::now()).expect("host clock within years 0000..=9999")
+    crate::util::time::utc_timestamp_now()
 }
 
 fn uses_builtin_feed(verified: &impl AuthenticatedRegistryManifest, builtin_policy: bool) -> bool {
@@ -189,7 +200,7 @@ where
 /// rolled back or already expired. Lets a client decide whether to refresh.
 pub fn official_registry_pack_revocation_valid_until() -> Option<UtcTimestamp> {
     official_registry_pack_revocation_store()
-        .load(&official_registry_pack_revocation_trust(), now())
+        .load(&official_registry_pack_revocation_trust(), host_now().ok()?)
         .ok()
         .map(|feed| feed.not_after())
 }
@@ -276,7 +287,7 @@ pub fn update_official_registry_pack_revocations(
         document,
         bundle,
         &official_registry_pack_revocation_trust(),
-        now(),
+        host_now()?,
     )?;
     crate::policy::audit::event(crate::policy::audit::LocalAuditKind::RegistryPackRevocationUpdate)
         .detail(format!(
@@ -297,7 +308,7 @@ pub fn update_registry_pack_revocations(
     let trust_path = crate::config::registry_pack_revocation_trust_path();
     let store = RegistryPackRevocationStore::in_mvm_home();
     let checkpoint =
-        update_registry_pack_revocations_at(document, bundle, &trust_path, &store, now())?;
+        update_registry_pack_revocations_at(document, bundle, &trust_path, &store, host_now()?)?;
     crate::policy::audit::event(crate::policy::audit::LocalAuditKind::RegistryPackRevocationUpdate)
         .detail(format!(
             "sequence={} sha256={}",
@@ -1177,6 +1188,16 @@ pub fn read_pack_policy_document(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_host_clock_past_year_9999_refuses_the_revocation_check() {
+        let at =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(253_402_300_800);
+        assert!(matches!(
+            host_now_at(at),
+            Err(RegistryPackStoreError::Clock(_))
+        ));
+    }
+
     use super::*;
     use crate::packs::Sha256Hex;
     use crate::registry_pack::{

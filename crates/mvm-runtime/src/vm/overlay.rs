@@ -59,7 +59,7 @@ use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
 use mvm_contract::timestamp::UtcTimestamp;
-use mvm_core::util::time::utc_timestamp_now;
+use mvm_core::util::time::try_utc_timestamp_now;
 use thiserror::Error;
 
 /// Maximum length of a tenant id or workload id, in bytes. Keeps
@@ -367,6 +367,9 @@ pub enum OverlayError {
 
     #[error("overlay write would exceed quota: requested {requested} bytes, quota {limit}")]
     QuotaExceeded { requested: u64, limit: u64 },
+
+    #[error("host clock unusable: {0}")]
+    Clock(#[from] mvm_contract::timestamp::ParseTimestampError),
 }
 
 /// Fail-closed default. Substrate placeholder until an operator
@@ -467,7 +470,7 @@ impl OverlayManager for FsOverlayManager {
             workload: workload.to_string(),
             root: dir,
             size_bytes: 0,
-            created_at: utc_timestamp_now(),
+            created_at: try_utc_timestamp_now()?,
             encrypted: false,
         })
     }
@@ -502,7 +505,7 @@ impl OverlayManager for FsOverlayManager {
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .and_then(|d| UtcTimestamp::from_unix(d.as_secs() as i64, d.subsec_nanos()))
-                .unwrap_or_else(utc_timestamp_now),
+                .map_or_else(try_utc_timestamp_now, Ok)?,
             encrypted: false,
         })
     }
@@ -521,7 +524,7 @@ impl OverlayManager for FsOverlayManager {
         Ok(DestructionReceipt {
             tenant: tenant.to_string(),
             workload: workload.to_string(),
-            destroyed_at: utc_timestamp_now(),
+            destroyed_at: try_utc_timestamp_now()?,
             files_wiped,
             bytes_wiped,
         })

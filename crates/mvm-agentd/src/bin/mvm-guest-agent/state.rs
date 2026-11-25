@@ -472,7 +472,9 @@ mod tests {
         let mut g = VerbGrant {
             session_id: "sess-agent".into(),
             plan_nonce: Nonce::from_bytes([56u8; 16]),
-            not_after: mvm_agentd::vsock::utc_now().checked_add_secs(600).unwrap(),
+            not_after: mvm_core::util::time::utc_timestamp_now()
+                .checked_add_secs(600)
+                .unwrap(),
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
             drive: None,
             application_terminal: None,
@@ -656,7 +658,9 @@ mod tests {
         let mut g = VerbGrant {
             session_id: session.into(),
             plan_nonce: nonce.clone(),
-            not_after: mvm_agentd::vsock::utc_now().checked_add_secs(600).unwrap(),
+            not_after: mvm_core::util::time::utc_timestamp_now()
+                .checked_add_secs(600)
+                .unwrap(),
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
             drive: None,
             application_terminal: None,
@@ -725,7 +729,8 @@ mod tests {
             mvm_core::plan::Nonce::from_bytes([62u8; 16]),
             &["run-entrypoint", "update-idle-timeout"],
         );
-        let repinned = apply_post_restore_repin(&bs, &forged, mvm_agentd::vsock::utc_now());
+        let repinned =
+            apply_post_restore_repin(&bs, &forged, mvm_core::util::time::utc_timestamp_now());
         assert!(!repinned, "forged envelope must not re-pin");
 
         let (trust_denied, grant) = bs.grant_state();
@@ -755,7 +760,7 @@ mod tests {
             &["run-entrypoint"],
         );
         assert!(
-            !apply_post_restore_repin(&bs, &env, mvm_agentd::vsock::utc_now()),
+            !apply_post_restore_repin(&bs, &env, mvm_core::util::time::utc_timestamp_now()),
             "re-pin must be refused with no boot anchor"
         );
         let (trust_denied, grant) = bs.grant_state();
@@ -789,7 +794,7 @@ mod tests {
         fork_env.predecessor_session_id = Some(current.session_id.clone());
         fork_env.predecessor_plan_nonce_hex = Some(current.plan_nonce.as_hex().to_string());
         assert!(
-            apply_post_restore_repin(&bs, &fork_env, mvm_agentd::vsock::utc_now()),
+            apply_post_restore_repin(&bs, &fork_env, mvm_core::util::time::utc_timestamp_now()),
             "host-signed fork envelope must re-pin"
         );
         let grant = bs.grant_state().1.expect("grant re-pinned");

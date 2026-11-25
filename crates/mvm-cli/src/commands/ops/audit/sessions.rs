@@ -87,7 +87,9 @@ pub(in crate::commands) struct ShowArgs {
 /// Parse a `--since` / `--until` bound: an RFC 3339 timestamp, a calendar
 /// date (midnight UTC), or a duration back from now (`30m`, `12h`, `7d`).
 pub(in crate::commands) fn parse_time_bound(raw: &str) -> Result<UtcTimestamp, String> {
-    parse_time_bound_at(raw, mvm_core::util::time::utc_timestamp_now())
+    let now = mvm_core::util::time::try_utc_timestamp_now()
+        .map_err(|error| format!("the host clock is unusable: {error}"))?;
+    parse_time_bound_at(raw, now)
 }
 
 fn parse_time_bound_at(raw: &str, now: UtcTimestamp) -> Result<UtcTimestamp, String> {

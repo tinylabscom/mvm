@@ -306,7 +306,13 @@ pub fn session_for_stop(raw_id: &str) -> Result<SessionRecord> {
 /// Best-effort throughout: one session's failure never stops the sweep.
 #[must_use]
 pub fn reap_expired_sessions() -> Vec<SessionId> {
-    let now = mvm_core::util::time::utc_timestamp_now();
+    let now = match mvm_core::util::time::try_utc_timestamp_now() {
+        Ok(now) => now,
+        Err(e) => {
+            tracing::warn!(err = %e, "reap: host clock unusable; skipping the sweep");
+            return Vec::new();
+        }
+    };
     let candidates = match session::list_expired_session_ids(now) {
         Ok(ids) => ids,
         Err(e) => {

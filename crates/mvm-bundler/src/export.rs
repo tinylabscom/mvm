@@ -160,7 +160,11 @@ pub fn stage_bundle_with_signer(
     inputs: &BundleExportInputs<'_>,
     signer: &dyn BundleSigner,
 ) -> Result<StagedBundle> {
-    stage_bundle_at(inputs, signer, mvm_core::util::time::utc_timestamp_now())
+    stage_bundle_at(
+        inputs,
+        signer,
+        mvm_core::util::time::try_utc_timestamp_now()?,
+    )
 }
 
 #[cfg(test)]

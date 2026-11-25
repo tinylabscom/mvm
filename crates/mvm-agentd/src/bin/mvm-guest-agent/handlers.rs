@@ -671,13 +671,20 @@ pub(crate) fn handle_post_restore(
         match ctx.boot_state.host_signer_key() {
             Some(anchor) => {
                 let (_, current_grant) = ctx.boot_state.grant_state();
-                if let Some(g) = mvm_agentd::vsock::re_pin_verb_grant(
-                    env,
-                    current_grant.as_ref(),
-                    &anchor,
-                    mvm_agentd::vsock::utc_now(),
-                ) {
-                    ctx.boot_state.set_verb_grant(g);
+                match mvm_core::util::time::try_utc_timestamp_now() {
+                    Ok(now) => {
+                        if let Some(g) = mvm_agentd::vsock::re_pin_verb_grant(
+                            env,
+                            current_grant.as_ref(),
+                            &anchor,
+                            now,
+                        ) {
+                            ctx.boot_state.set_verb_grant(g);
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "mvm-guest-agent: PostRestore re-pin refused, clock unusable: {e}"
+                    ),
                 }
             }
             None => eprintln!(

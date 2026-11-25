@@ -137,7 +137,9 @@ impl PreparedCanonicalLinux {
         host: &HostProtocolSupport,
     ) -> Result<()> {
         self.check_native_binding(config, backend, host)?;
-        let policy = self.store.load(crate::util::time::utc_timestamp_now())?;
+        let policy = self
+            .store
+            .load(crate::util::time::try_utc_timestamp_now()?)?;
         ensure!(
             select_canonical_kernel(&self.inputs, self.backend, &policy, &self.host_protocols)?
                 == self.declaration,

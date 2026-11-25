@@ -267,15 +267,6 @@ pub fn provision_host_signer_anchor_from_cmdline(
     Ok(true)
 }
 
-/// The guest clock as a [`UtcTimestamp`](mvm_contract::timestamp::UtcTimestamp).
-pub fn utc_now() -> mvm_contract::timestamp::UtcTimestamp {
-    let d = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    mvm_contract::timestamp::UtcTimestamp::from_unix(d.as_secs() as i64, d.subsec_nanos())
-        .expect("the clock reads within years 0000..=9999")
-}
-
 /// Decode a single ASCII hex nibble ('0'-'9', 'a'-'f') to its value.
 /// Returns `None` for any other character (including uppercase).
 fn hex_nibble(b: u8) -> Option<u8> {
@@ -520,6 +511,7 @@ pub fn launch_requires_grant(cmdline: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::time::utc_timestamp_now as utc_now;
 
     fn drive_grant() -> mvm_contract::grants::DriveGrant {
         use mvm_contract::grants::{DriveGrant, DriveProgramId, WorkspaceRoot};

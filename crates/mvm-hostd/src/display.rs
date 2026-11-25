@@ -82,7 +82,9 @@ impl DisplayAuthority {
                         &signer.verifying,
                         vm,
                         &plan.nonce,
-                        mvm_agentd::vsock::utc_now(),
+                        mvm_core::util::time::try_utc_timestamp_now().map_err(|error| {
+                            authority_error(&format!("host clock unusable: {error}"))
+                        })?,
                     )
                     .map_err(|error| {
                         DisplayAuthorityError::Authority(anyhow::anyhow!(

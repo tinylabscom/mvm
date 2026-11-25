@@ -243,7 +243,7 @@ impl BuiltPackBootContract {
             pin,
             host,
             &ImageSetRevocationStore::in_mvm_home(),
-            crate::util::time::utc_timestamp_now(),
+            crate::util::time::try_utc_timestamp_now()?,
         )
     }
 
