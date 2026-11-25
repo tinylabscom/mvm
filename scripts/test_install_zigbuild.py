@@ -42,7 +42,7 @@ case "$name" in
         /bin/rm -rf "$root/work" ;;
     curl)
         while [[ $# -gt 0 && $1 != -o ]]; do shift; done
-        [[ $# -ge 2 && $2 == "$root/work/"* && $2 != *..* ]]
+        [[ $# -ge 2 && $2 == "$root/cache/"* && $2 != *..* ]]
         printf 'mock archive' > "$2"
         if [[ $TEST_FAILURE == download ]]; then exit 7; fi ;;
     shasum|sha256sum)
@@ -50,7 +50,7 @@ case "$name" in
         else [[ "$*" == '-c -' ]]; fi
         archive=${stdin#*  }
         archive=${archive%$'\n'}
-        [[ $archive == "$root/work/"* && $archive != *..* ]]
+        [[ $archive == "$root/cache/"* && $archive != *..* ]]
         [[ $(< "$archive") == 'mock archive' ]]
         if [[ $TEST_FAILURE == checksum ]]; then exit 1; fi ;;
     sudo)
@@ -66,6 +66,14 @@ esac
 
 
 class ZigBootstrapTests(unittest.TestCase):
+    def test_action_restores_the_archive_from_the_default_branch_cache(self):
+        action = ACTION.read_text()
+        self.assertIn("uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25", action)
+        self.assertIn("path: ${{ runner.temp }}/zig-*.tar.xz", action)
+        self.assertIn("key: zig-0.13.0-${{ runner.os }}-${{ runner.arch }}-v1", action)
+        self.assertIn("uses: ./.github/actions/install-zigbuild",
+                      (ROOT / ".github/workflows/cache-warm.yml").read_text())
+
     @classmethod
     def setUpClass(cls):
         # Extract only the literal run block, without adding a YAML dependency.
@@ -75,7 +83,8 @@ class ZigBootstrapTests(unittest.TestCase):
         cls.bash = shutil.which("bash")
         assert cls.bash, "bash is required to run the composite action"
 
-    def run_step(self, system="Linux", arch="x86_64", failure="", fast=False):
+    def run_step(self, system="Linux", arch="x86_64", failure="", fast=False,
+                 cached=False):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             tools = root / "bin"
@@ -88,11 +97,18 @@ class ZigBootstrapTests(unittest.TestCase):
             env = {
                 "PATH": str(tools),
                 "TEST_ROOT": tmp,
+                "RUNNER_TEMP": str(root / "cache"),
                 "TEST_OS": system,
                 "TEST_ARCH": arch,
                 "TEST_FAILURE": failure,
                 "TEST_FAST": "1" if fast else "0",
             }
+            (root / "cache").mkdir()
+            if cached:
+                target = PINS[(system, arch)][0]
+                (root / "cache" / f"zig-{target}-0.13.0.tar.xz").write_text(
+                    "mock archive"
+                )
             result = subprocess.run(
                 [self.bash, "--noprofile", "--norc", "-c", self.script],
                 env=env, capture_output=True, text=True, timeout=10,
@@ -153,6 +169,19 @@ class ZigBootstrapTests(unittest.TestCase):
         result, events = self.run_step(fast=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([event[0] for event in events], ["zig"])
+
+    def test_cached_archive_is_verified_without_network(self):
+        result, events = self.run_step(cached=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        names = [event[0] for event in events]
+        self.assertNotIn("curl", names)
+        self.assertLess(names.index("sha256sum"), names.index("sudo"))
+
+    def test_invalid_cached_archive_never_installs(self):
+        result, events = self.run_step(cached=True, failure="checksum")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("curl", [event[0] for event in events])
+        self.assertNotIn("sudo", [event[0] for event in events])
 
     def test_unsupported_platforms_fail_explicitly(self):
         for system, arch in (("FreeBSD", "x86_64"), ("Linux", "riscv64")):
