@@ -23,6 +23,7 @@ mod host_services;
 pub(crate) mod invoke;
 pub(crate) mod launch_sample;
 pub(super) mod logs;
+pub(super) mod mailbox_expire;
 pub(super) mod managed_secrets;
 mod outputs;
 pub(super) mod pause;

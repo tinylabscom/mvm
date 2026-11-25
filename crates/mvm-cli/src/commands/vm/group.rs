@@ -14,8 +14,8 @@ use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 use super::{
-    checkpoint, cp, diff, display, forward, fs, pause, proc, prompt, rekernel, replay, sandbox,
-    session, set_ttl, snapshot, telemetry, volume, wait, workspace_apply,
+    checkpoint, cp, diff, display, forward, fs, mailbox_expire, pause, proc, prompt, rekernel,
+    replay, sandbox, session, set_ttl, snapshot, telemetry, volume, wait, workspace_apply,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -78,6 +78,9 @@ pub(in crate::commands) enum VmCmd {
     /// Set or clear a sandbox TTL
     #[command(name = "set-ttl", hide = true)]
     SetTtl(set_ttl::Args),
+    /// Expire a quarantined workload's mailbox after its VM is stopped
+    #[command(name = "mailbox-expire", hide = true)]
+    MailboxExpire(mailbox_expire::Args),
     /// Explain how to migrate dynamic forwarding to declared ingress
     #[command(hide = true)]
     Forward(forward::Args),
@@ -145,6 +148,7 @@ impl VmCmd {
             VmCmd::Wait(_) => "wait",
             VmCmd::BootReport(_) => "boot-report",
             VmCmd::SetTtl(_) => "set-ttl",
+            VmCmd::MailboxExpire(_) => "mailbox-expire",
             VmCmd::Forward(_) => "forward",
             VmCmd::Telemetry(_) => "telemetry",
             VmCmd::Sandbox(_) => "sandbox",
@@ -175,6 +179,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         VmCmd::Wait(a) => wait::run_wait(cli, a, cfg),
         VmCmd::BootReport(a) => wait::run_boot_report(cli, a, cfg),
         VmCmd::SetTtl(a) => set_ttl::run(cli, a, cfg),
+        VmCmd::MailboxExpire(a) => mailbox_expire::run(cli, a, cfg),
         VmCmd::Forward(a) => forward::run(cli, a, cfg),
         VmCmd::Telemetry(a) => telemetry::run(cli, a, cfg),
         VmCmd::Sandbox(a) => sandbox::run(cli, a, cfg),

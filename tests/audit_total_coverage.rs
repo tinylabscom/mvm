@@ -416,6 +416,7 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     // Reads the collector's status and sealed records beside the VM.
     ("telemetry", AuditPosture::ReadOnly),
     ("set-ttl", AuditPosture::Emits("VmTtlSet")),
+    ("mailbox-expire", AuditPosture::Emits("MailboxExpired")),
     ("rekernel", AuditPosture::Emits("VmRekernel")),
     ("forward", AuditPosture::ReadOnly),
     ("sandbox", AuditPosture::DelegatesToSub(SANDBOX_SUB)),
@@ -936,6 +937,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "DepsAudit",
         "Kill",
         "MachineReplay",
+        "MailboxExpired",
         "ManifestAliasRemove",
         "ManifestAliasSet",
         "ManifestTagAdd",

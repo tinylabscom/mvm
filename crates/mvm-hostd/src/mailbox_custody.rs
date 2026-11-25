@@ -298,6 +298,23 @@ impl RetainedMailboxKeys {
         address: MailboxAddress,
     ) -> Result<Self> {
         posture.verify(plan, vm_name, current_boot)?;
+        Self::open_bound(keys_dir, plan, vm_name, address)
+    }
+
+    /// [`Self::open_existing`] without a launch posture, for a store whose VM
+    /// is gone. The manifest the host signed at the production launch is the
+    /// authority: it names the plan by id and nonce, and the plan has to hash
+    /// to that id.
+    pub(crate) fn open_bound(
+        keys_dir: &Path,
+        plan: &ExecutionPlan,
+        vm_name: &str,
+        address: MailboxAddress,
+    ) -> Result<Self> {
+        ensure!(
+            plan.plan_id == mvm_core::plan::compute_plan_id(plan),
+            "the stored plan does not hash to its own id"
+        );
         let identity = identity(keys_dir, plan, vm_name, address)?;
         let signer = existing_host_signer(keys_dir)?;
         let (bundle_path, manifest_path) = paths(keys_dir, &identity)?;

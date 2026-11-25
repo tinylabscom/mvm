@@ -185,7 +185,7 @@ const AGREEMENT: &[Entry] = &[
     ),
     (
         "crates/mvm-hostd/src/mailbox_custody.rs",
-        "open_existing",
+        "open_bound",
         2,
         "a signed custody manifest names the identity's epoch",
     ),

@@ -227,6 +227,9 @@ pub enum LocalAuditKind {
     /// `mvmctl vm set-ttl` — changes the TTL deadline on a running
     /// VM. The reaper picks up the new deadline on its next tick.
     VmTtlSet,
+    /// `mvmctl machine mailbox-expire` — expired and compacted what was due
+    /// in a quarantined workload's mailbox store after its VM was gone.
+    MailboxExpired,
     /// `mvmctl vm rekernel` — relaunches a VM on a chosen/updated
     /// workload kernel (a stop + re-boot). Recorded as its own kind so
     /// a kernel swap is distinguishable in the audit trail from an
