@@ -4,7 +4,7 @@ use std::os::fd::FromRawFd;
 use std::os::unix::net::UnixStream;
 
 fn main() -> anyhow::Result<()> {
-    mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-actor-holder");
+    mvm_core::helper_contract::exit_with_probe_answer_if_requested("mvm-actor-holder");
     mvm_hostd::panic_hook::install("actor-holder");
     mvm_hostd::parent_death::exit_when_orphaned();
     for fd in [0, mvm_hostd::actor_holder::CONTROLLER_FD] {

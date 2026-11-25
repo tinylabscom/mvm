@@ -284,7 +284,7 @@ pub(super) fn residency_check() -> Check {
 /// `mvmctl doctor` still exits 0 to avoid breaking CI on hosts that
 /// genuinely don't want a Node toolchain.
 ///
-/// Probe is cheap: at most three `which::which` lookups plus one
+/// Probe is cheap: at most three `PATH` lookups plus one
 /// cwd-relative `is_file` per runner — no subprocesses.
 pub(super) fn ts_runner_check() -> Check {
     // Project-local resolution wins over PATH — see

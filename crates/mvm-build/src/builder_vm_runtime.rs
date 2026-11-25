@@ -979,7 +979,7 @@ fn locate_debugfs() -> Option<PathBuf> {
             return Some(path.to_path_buf());
         }
     }
-    which::which("debugfs").ok()
+    mvm_core::util::which("debugfs")
 }
 
 /// Wall-clock limit and capture cap for one debugfs read. A diagnostic log

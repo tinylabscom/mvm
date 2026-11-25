@@ -31,7 +31,7 @@ fn the_binary_answers_the_host_helper_contract_probe() {
     // `--contract-version`. A stale or foreign binary must fail here, not
     // mid-boot.
     let output = Command::new(env!("CARGO_BIN_EXE_mvm-gpu-endpoint"))
-        .arg(mvm_vmm::host::helper_contract::CONTRACT_PROBE_FLAG)
+        .arg(mvm_core::helper_contract::CONTRACT_PROBE_FLAG)
         .output()
         .expect("run the contract probe");
     assert!(
@@ -41,8 +41,8 @@ fn the_binary_answers_the_host_helper_contract_probe() {
     );
     let stdout = String::from_utf8(output.stdout).expect("probe stdout is utf-8");
     assert_eq!(
-        mvm_vmm::host::helper_contract::parse_probe_version(&stdout),
-        Some(mvm_vmm::host::helper_contract::HOST_HELPER_CONTRACT_VERSION),
+        mvm_core::helper_contract::parse_probe_version(&stdout),
+        Some(mvm_core::helper_contract::HOST_HELPER_CONTRACT_VERSION),
         "endpoint answers a different contract version: {stdout:?}"
     );
 }

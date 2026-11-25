@@ -20,10 +20,11 @@ substrate_server_category = "per-VM host GPU endpoint (guest CUDA/NVML shim RPC 
 
 [dependencies]
 mvm-contract = { workspace = true }
-# For the host-helper contract probe: the workload runner resolves this
-# binary through `mvm_vmm::host::aux_bin::resolve_verified`, which asks for
-# `helper_contract::HOST_HELPER_CONTRACT_VERSION` before spawning.
-mvm-vmm = { workspace = true }
+# For the host-helper contract probe: the workload runner asks this binary
+# for `helper_contract::HOST_HELPER_CONTRACT_VERSION` before spawning it.
+# Taken from `mvm-core` and not the VMM crate, so the package that also
+# builds the guest shims does not resolve an async runtime or a TLS stack.
+mvm-core = { workspace = true }
 libc.workspace = true
 
 [dev-dependencies]

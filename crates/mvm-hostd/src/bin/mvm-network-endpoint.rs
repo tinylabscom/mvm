@@ -47,7 +47,7 @@ use mvm_hostd::supervisor::endpoint::network_endpoint::{
 const EXIT_EPOCH_REVOKED: i32 = 3;
 
 fn main() -> Result<()> {
-    mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-network-endpoint");
+    mvm_core::helper_contract::exit_with_probe_answer_if_requested("mvm-network-endpoint");
     // First statement in the process: a panic before this line would
     // print its payload unredacted.
     mvm_hostd::panic_hook::install("substitution-endpoint");

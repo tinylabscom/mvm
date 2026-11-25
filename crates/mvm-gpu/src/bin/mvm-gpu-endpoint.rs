@@ -24,7 +24,7 @@ fn main() {
     // `mvm_vmm::host::aux_bin::resolve_verified`, which probes the binary
     // for the host-helper contract version before every spawn. Answer
     // before anything else, exactly like the other helpers.
-    mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-gpu-endpoint");
+    mvm_core::helper_contract::exit_with_probe_answer_if_requested("mvm-gpu-endpoint");
 
     let mut listen: Option<String> = None;
     let mut backend_mode = "auto".to_string();

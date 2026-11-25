@@ -1528,12 +1528,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "env_home"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f84e12ccf0a7ddc17a6c41c93326024c42920d7ee630d04950e6926645c0fe"
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3705,7 +3699,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
- "which",
 ]
 
 [[package]]
@@ -3743,7 +3736,6 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
- "which",
  "xattr",
 ]
 
@@ -3797,7 +3789,6 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
- "which",
 ]
 
 [[package]]
@@ -3813,7 +3804,6 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "ext4-view",
- "flate2",
  "hex",
  "libc",
  "libkrun-sys",
@@ -3850,7 +3840,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "which",
  "zeroize",
 ]
 
@@ -3897,7 +3886,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "which",
 ]
 
 [[package]]
@@ -4075,7 +4063,7 @@ version = "0.28.0-rc.11"
 dependencies = [
  "libc",
  "mvm-contract",
- "mvm-vmm",
+ "mvm-core",
  "tempfile",
 ]
 
@@ -4367,7 +4355,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
- "which",
 ]
 
 [[package]]
@@ -7555,18 +7542,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "which"
-version = "7.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24d643ce3fd3e5b54854602a080f34fb10ab75e0b813ee32d00ca2b44fa74762"
-dependencies = [
- "either",
- "env_home",
- "rustix",
- "winsafe",
-]
-
-[[package]]
 name = "widestring"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7822,12 +7797,6 @@ checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
 ]
-
-[[package]]
-name = "winsafe"
-version = "0.0.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 
 [[package]]
 name = "winx"

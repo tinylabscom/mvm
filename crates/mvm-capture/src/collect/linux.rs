@@ -13,7 +13,7 @@ pub(super) fn collect_path_executables(
 ) -> Result<(), CaptureError> {
     let providers = all_providers();
     for tool in ["cargo", "rustc", "cc", "ld", "python3", "node"] {
-        if let Ok(path) = which::which(tool) {
+        if let Some(path) = mvm_core::util::which(tool) {
             inspect_executable(
                 report,
                 &path,

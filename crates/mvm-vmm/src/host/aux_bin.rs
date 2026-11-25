@@ -49,7 +49,7 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::host::codesign::{self, RequiredEntitlement, SignTarget};
 use crate::host::file_memo::{FileStamp, file_stamp, now_ns, stamp_is_settled};
-use crate::host::helper_contract;
+use mvm_core::helper_contract;
 use source_build::{Built, SourceBuild};
 
 mod host_process;

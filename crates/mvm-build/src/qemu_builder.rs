@@ -670,9 +670,9 @@ fn locate_qemu() -> Result<String, BuilderVmError> {
             });
         }
     };
-    which::which(bin)
+    mvm_core::util::which(bin)
         .map(|_| bin.to_string())
-        .map_err(|_| BuilderVmError::VmmUnavailable {
+        .ok_or_else(|| BuilderVmError::VmmUnavailable {
             requested: "qemu".to_string(),
             reason: format!(
                 "`{bin}` not found on $PATH. Install QEMU \

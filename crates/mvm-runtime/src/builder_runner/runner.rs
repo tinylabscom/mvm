@@ -470,9 +470,9 @@ mod tests {
             format!(
                 "#!/bin/sh\nif [ \"$1\" = \"{flag}\" ]; then echo '{answer}'; exit 0; fi\n\
                  cat >/dev/null\necho '{{\"env\":[],\"input_fingerprints\":[]}}'\nsleep 30\n",
-                flag = mvm_vmm::host::helper_contract::CONTRACT_PROBE_FLAG,
-                answer = mvm_vmm::host::helper_contract::probe_response("mvm-network-endpoint")
-                    .trim_end(),
+                flag = mvm_core::helper_contract::CONTRACT_PROBE_FLAG,
+                answer =
+                    mvm_core::helper_contract::probe_response("mvm-network-endpoint").trim_end(),
             ),
         )
         .unwrap();
