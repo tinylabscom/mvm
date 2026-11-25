@@ -1,0 +1,24 @@
+# Manifest for the single-node Kubernetes example.
+#
+# A whole cluster (k3s control plane + containerd) runs as the guest workload
+# of one microVM, rootless under mvm's workload uid. Cluster state lives on a
+# writable ext4 disk volume attached at /data (k3s --data-dir=/data/k3s);
+# the verity-sealed rootfs stays read-only.
+#
+# The guest image itself is built in the mvm-images train
+# (tinylabscom/mvm-images#9); until it is published this manifest is the
+# recipe contract it must satisfy.
+flake = "."
+profile = "dev"
+cpus = 4
+mem = "4G"
+
+# Attach a writable disk for cluster state at boot time (no hot-plug):
+#   mvmctl machine run --mount ./k3s-data:/data:20G:rw ...
+# The data dir is k3s --data-dir=/data/k3s (containerd state included).
+
+[network]
+# No guest NIC: outbound flows leave over the vsock egress plane through the
+# guest loopback proxy (127.0.0.1:1080), deny-by-default. Admit the image
+# registries you pull from and the external services your workloads call.
+allow_hosts = []
