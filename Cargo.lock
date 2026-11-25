@@ -3774,6 +3774,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "ed25519-dalek",
+ "mvm-contract",
  "mvm-core",
  "serde",
  "serde_json",
