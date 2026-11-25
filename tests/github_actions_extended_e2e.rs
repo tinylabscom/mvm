@@ -1384,6 +1384,35 @@ fn the_zig_toolchain_action_runs_without_sudo_or_modern_python_once_provisioned(
     }
 }
 
+/// A cache miss must be the only path that downloads zig, and the pinned
+/// digest must still gate every tarball, cached or fetched.
+#[test]
+fn the_zig_tarball_is_cached_and_still_digest_checked() {
+    let action = fs::read_to_string(".github/actions/install-zigbuild/action.yml")
+        .expect("read install-zigbuild action");
+    let restore = action
+        .find("actions/cache/restore@")
+        .expect("cache restore step");
+    let download = action.find("name: Download zig").expect("download step");
+    let save = action
+        .find("- name: Save zig tarball cache")
+        .expect("cache save step");
+    let install = action.find("- name: Install zig\n").expect("install step");
+    assert!(restore < download && download < save && save < install);
+    let download_step = &action[download..save];
+    assert!(
+        download_step.contains("sha256sum -c -") && download_step.contains("shasum -a 256 -c -")
+    );
+    assert!(
+        download_step.contains("-C -") && download_step.contains("--max-time 120"),
+        "short attempts must resume the partial tarball"
+    );
+    assert!(
+        action[save..install].contains("steps.zig_dl.outputs.fetched == 'true'"),
+        "only a verified download may be cached"
+    );
+}
+
 // Owned gate: e2e-docs.yml SDK codegen driver.
 #[test]
 fn documented_surface_builds_the_sdk_codegen_driver() {

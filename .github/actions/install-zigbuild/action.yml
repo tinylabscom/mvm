@@ -15,7 +15,8 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Install zig
+    - name: Select zig
+      id: zig
       shell: bash
       run: |
         set -euxo pipefail
@@ -25,6 +26,7 @@ runs:
         # operator installs the pinned zig once; every later job finds it here.
         if command -v zig >/dev/null 2>&1 && [ "$(zig version)" = "$ZIG_VERSION" ]; then
           echo "zig $ZIG_VERSION already installed at $(command -v zig)"
+          echo "skip=true" >> "$GITHUB_OUTPUT"
           exit 0
         fi
         OS=$(uname -s)
@@ -53,22 +55,86 @@ runs:
             exit 1
             ;;
         esac
-        TARBALL="zig-${TARGET}-${ZIG_VERSION}.tar.xz"
-        WORK=$(mktemp -d)
-        trap 'rm -rf "$WORK"' EXIT
-        # The pinned aarch64 tarball is large enough to exceed 120s on a slow
-        # hosted runner. Resume partial retries instead of starting from zero;
-        # the SHA-256 check below still refuses any incomplete or altered bytes.
-        curl -fL -C - --retry 3 --retry-all-errors --retry-delay 2 \
-          --connect-timeout 10 --max-time 300 --retry-max-time 900 \
-          -o "$WORK/$TARBALL" "https://ziglang.org/download/${ZIG_VERSION}/${TARBALL}"
-        if [ "$OS" = Darwin ]; then
-          printf '%s  %s\n' "$SHA256" "$WORK/$TARBALL" | shasum -a 256 -c -
-        else
-          printf '%s  %s\n' "$SHA256" "$WORK/$TARBALL" | sha256sum -c -
+        {
+          echo "skip=false"
+          echo "version=$ZIG_VERSION"
+          echo "sha256=$SHA256"
+          echo "tarball=zig-${TARGET}-${ZIG_VERSION}.tar.xz"
+        } >> "$GITHUB_OUTPUT"
+
+    # ziglang.org is slow enough from hosted runners that a 47 MB download
+    # regularly exhausts every retry. Only a cache miss downloads.
+    - name: Restore zig tarball cache
+      id: zig_cache
+      if: steps.zig.outputs.skip != 'true'
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ${{ runner.temp }}/zig-tarball
+        key: zig-tarball-${{ steps.zig.outputs.tarball }}-${{ steps.zig.outputs.sha256 }}
+
+    - name: Download zig
+      id: zig_dl
+      if: steps.zig.outputs.skip != 'true'
+      shell: bash
+      env:
+        VERSION: ${{ steps.zig.outputs.version }}
+        SHA256: ${{ steps.zig.outputs.sha256 }}
+        TARBALL: ${{ steps.zig.outputs.tarball }}
+        DEST: ${{ runner.temp }}/zig-tarball
+      run: |
+        set -euo pipefail
+        mkdir -p "$DEST"
+        FILE="$DEST/$TARBALL"
+        verified() {
+          [ -f "$FILE" ] || return 1
+          if [ "$(uname -s)" = Darwin ]; then
+            printf '%s  %s\n' "$SHA256" "$FILE" | shasum -a 256 -c - >/dev/null
+          else
+            printf '%s  %s\n' "$SHA256" "$FILE" | sha256sum -c - >/dev/null
+          fi
+        }
+        FETCHED=false
+        # Short attempts that resume the kept partial file: a stalled transfer
+        # costs 2 minutes instead of 5, and progress is never discarded. The
+        # SHA-256 check refuses any incomplete or altered bytes, cached or not.
+        for attempt in 1 2 3 4 5 6; do
+          if verified; then
+            echo "fetched=$FETCHED" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "download attempt $attempt"
+          FETCHED=true
+          if curl -fL -C - --connect-timeout 10 --max-time 120 \
+            -o "$FILE" "https://ziglang.org/download/${VERSION}/${TARBALL}"; then
+            # Complete but wrong digest cannot be resumed; start over.
+            verified || rm -f "$FILE"
+          fi
+          sleep 2
+        done
+        if verified; then
+          echo "fetched=true" >> "$GITHUB_OUTPUT"
+          exit 0
         fi
+        echo "::error::zig tarball failed SHA-256 verification" >&2
+        exit 1
+
+    - name: Save zig tarball cache
+      if: steps.zig_dl.outputs.fetched == 'true'
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ${{ runner.temp }}/zig-tarball
+        key: zig-tarball-${{ steps.zig.outputs.tarball }}-${{ steps.zig.outputs.sha256 }}
+
+    - name: Install zig
+      if: steps.zig.outputs.skip != 'true'
+      shell: bash
+      env:
+        TARBALL: ${{ steps.zig.outputs.tarball }}
+        DEST: ${{ runner.temp }}/zig-tarball
+      run: |
+        set -euxo pipefail
         sudo mkdir -p /opt
-        sudo tar -xJf "$WORK/$TARBALL" -C /opt
+        sudo tar -xJf "$DEST/$TARBALL" -C /opt
         DIR="${TARBALL%.tar.xz}"
         sudo ln -sf "/opt/${DIR}/zig" /usr/local/bin/zig
         zig version
