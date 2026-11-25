@@ -1582,6 +1582,20 @@ mod tests {
         assert_eq!(sync_policy_for(""), SyncPolicy::Barrier);
     }
 
+    /// A capture is exposed once its opening is confirmed, and the confirming
+    /// read does not sync the segment again, so the append is the only flush
+    /// the opening gets. Deferring it would expose a producer whose opening a
+    /// power loss can still take.
+    #[test]
+    fn a_transcript_opening_is_never_deferrable() {
+        use mvm_core::transcript::evidence::TRANSCRIPT_OPENED_EVENT;
+        assert!(!DEFERRABLE_EVENTS.contains(&TRANSCRIPT_OPENED_EVENT));
+        assert_eq!(
+            sync_policy_for(TRANSCRIPT_OPENED_EVENT),
+            SyncPolicy::Barrier
+        );
+    }
+
     /// A launch's entries must all be on disk once its terminal entry returns,
     /// even though only two of them synced. `sync_data` is file-wide, so the
     /// barrier carries the deferred writes before it.
