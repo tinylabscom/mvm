@@ -15,7 +15,7 @@ use mvm_core::checkpoint::{
     HVF_FRAME_BLOB, MEMORY_BLOB, ROOTFS_BLOB, SUPERVISOR_CONFIG_BLOB, VmFullOrigin, vm_full_origin,
 };
 use mvm_runtime::checkpoint::{CheckpointChainAnchor, CheckpointStore};
-use mvm_runtime::hvf_restore::{HvfRestoreRequest, hvf_child_restore_config};
+use mvm_runtime::hvf_restore::{HvfRestoreMode, HvfRestoreRequest, hvf_child_restore_config};
 use mvm_vmm::host::hvf_supervisor::{HostDialSocket, HvfDisk, HvfSupervisorConfig};
 
 use crate::world::CliWorld;
@@ -153,7 +153,9 @@ fn rewrite_for_child(world: &mut CliWorld) {
             state_dir: &dir,
             cpu_grant: None,
             content: &[],
-            plan_json: None,
+            mode: HvfRestoreMode::FreshChild {
+                plan_json: r#"{"child":"plan"}"#,
+            },
         },
     )
     .expect("rewrite the captured config for a restored child");

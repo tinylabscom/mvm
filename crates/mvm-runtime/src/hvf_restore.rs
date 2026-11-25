@@ -16,7 +16,7 @@ use mvm_backends::driver::hvf_restore::{VERIFIED_ON_LOAD, restore_hvf_vm};
 use mvm_core::checkpoint::ContentBlob;
 
 pub use mvm_backends::driver::hvf_restore::{
-    HvfRestoreRequest, RestoredHvfVm, hvf_child_restore_config,
+    HvfRestoreMode, HvfRestoreRequest, RestoredHvfVm, hvf_child_restore_config,
 };
 
 /// Boots a forked child from an HVF checkpoint cloned into its state dir.
@@ -36,7 +36,11 @@ impl crate::checkpoint::ForkRestorer for HvfForkRestorer {
             state_dir: child.state_dir,
             cpu_grant: child.cpu_grant,
             content: child.content,
-            plan_json: child.plan_json,
+            mode: HvfRestoreMode::FreshChild {
+                plan_json: child
+                    .plan_json
+                    .context("HVF forked child is missing its admitted plan")?,
+            },
         })
         .with_context(|| format!("HVF warm-restore for forked child '{}'", child.vm_name))?;
         Ok(())
@@ -74,13 +78,12 @@ impl crate::checkpoint::VmFullRestore for HvfVmFullRestore {
         restore_hvf_vm(&HvfRestoreRequest {
             vm_name: target_vm,
             state_dir: &state_dir,
-            // A same-identity resume admits no plan of its own — it is the VM
-            // that was already admitted, coming back — so there is no grant here
-            // to bind. Inventing one from the checkpoint record would be a bound
-            // nobody signed for this run.
+            // A same-identity resume does not mint a new admission or CPU grant.
+            // Its captured supervisor config carries the original signed plan
+            // binding, which the restoring supervisor verifies again before use.
             cpu_grant: None,
             content,
-            plan_json: None,
+            mode: HvfRestoreMode::SameIdentity,
         })
         .with_context(|| format!("HVF restore of '{target_vm}'"))?;
         Ok(())
