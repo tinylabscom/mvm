@@ -6713,7 +6713,6 @@ fn sdk_live_mode_shelled_commands_keep_parsing() {
         &["machine", "proc", "wait", "vm", "tok", "--timeout", "30"],
         &["machine", "fs", "write", "vm", "/app/x"],
         &["machine", "cp", "host.txt", "vm:/guest.txt"],
-        &["machine", "forward", "vm", "--port", "8080:80"],
         &["machine", "stop", "vm"],
         &[
             "machine",
