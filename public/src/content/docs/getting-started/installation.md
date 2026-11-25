@@ -73,10 +73,8 @@ it through a single `current` link:
 ~/.local/bin/mvm-*                -> ~/.local/lib/mvm/current/mvm-*
 ```
 
-The Apple Silicon archive carries both native supervisors. macOS 13–25 keeps
-`mvm-libkrun-supervisor`, `lib/`, the license inventory and exact-source
-directions; macOS 26+ keeps the HVF path and removes that compatibility tier.
-Linux archives do not carry the macOS tier.
+An install stages the HVF supervisor on macOS and the pinned Firecracker on
+Linux with `/dev/kvm`. It never stages libkrun.
 
 Re-running `install.sh` upgrades: it stages and verifies the new release, then
 switches `current` in one rename, so `mvmctl` and the host binaries it spawns
@@ -260,11 +258,11 @@ A source checkout updates the usual way — `git pull && cargo build --release`.
 
 ## Prerequisites
 
-- **macOS 13+ on Apple Silicon** or **Linux with `/dev/kvm`** (x86_64 or aarch64).
-  macOS 13–25 is an explicitly selected libkrun preview; macOS 26+ uses HVF by
-  default.
+- **macOS 26+ on Apple Silicon** or **Linux with `/dev/kvm`** (x86_64 or aarch64).
+  On macOS 25 and older, `install.sh` and `mvmctl` refuse and name the
+  supported hosts.
 - No Homebrew VMM package is required on macOS. HVF ships with the operating
-  system, and the macOS 13–25 libkrun tier ships in the same signed archive.
+  system.
 
 ### Backend Auto-Detection
 
@@ -274,7 +272,6 @@ mvmctl automatically detects your platform at startup and selects the best VM ba
 |----------|---------|-------------|
 | **Linux with `/dev/kvm`** | Firecracker | Runs directly on KVM. Smallest attack surface, fastest cold boot. |
 | **macOS 26+ Apple Silicon** | HVF | Hypervisor.framework, bundled with the OS; vsock-only and no third-party VMM dependency. |
-| **macOS 13–25 Apple Silicon** | libkrun preview | Not auto-selected. The release archive includes the tier; pass `--hypervisor libkrun`. Packaged loading is verified, while the real guest-launch witness remains open. |
 
 There is no Docker or container backend on the runtime path. A `qemu`
 (microvm.nix) backend exists for local dev/test only and is never auto-selected.
@@ -303,7 +300,7 @@ You can force a specific backend with `--hypervisor`:
 ```bash
 mvmctl machine run --flake . --hypervisor firecracker  # Linux KVM
 mvmctl machine run --flake . --hypervisor hvf          # macOS 26+ Apple Silicon (default)
-mvmctl machine run --flake . --hypervisor libkrun      # macOS 13–25 Apple Silicon preview
+mvmctl machine run --flake . --hypervisor libkrun      # source builds only, with libkrun installed
 mvmctl machine run --flake . --hypervisor qemu         # microvm.nix — dev/test only
 ```
 

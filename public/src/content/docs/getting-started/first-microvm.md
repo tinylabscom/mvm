@@ -19,7 +19,6 @@ mvmctl auto-selects the best backend for your platform:
 ```
 Linux (KVM):       mvmctl machine run  -->  Firecracker microVM (direct)
 macOS 26+ (AS):    mvmctl machine run  -->  HVF microVM (Hypervisor.framework, vsock-only)
-macOS 13–25 (AS):  mvmctl machine run --hypervisor libkrun  -->  libkrun preview
 ```
 
 | Layer | Access | Has your project files? |
@@ -34,10 +33,8 @@ MicroVMs are **headless workloads** with no SSH access -- they communicate via v
 On Linux with `/dev/kvm`, workloads boot straight on Firecracker; a `--flake`
 build still routes `nix build` through the headless builder VM. On macOS 26+
 Apple Silicon, workloads run on the native HVF backend with no third-party VMM
-dependency. The signed Apple Silicon release also carries an explicitly
-selected libkrun preview for macOS 13–25; packaged loading is verified, while
-its real guest-launch witness remains open. There is no Docker or container
-runtime path.
+dependency. macOS 25 and older is not supported. There is no Docker or
+container runtime path.
 :::
 
 ## Scaffold a project

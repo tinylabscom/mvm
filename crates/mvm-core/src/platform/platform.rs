@@ -23,6 +23,10 @@ pub const LIBKRUN_LIB_PATHS: &[&str] = &[
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub const LIBKRUN_LIB_PATHS: &[&str] = &[];
 
+/// What an unsupported host is told. `install.sh` prints the same sentence.
+pub const UNSUPPORTED_HOST_MESSAGE: &str = "this host is not supported: mvm runs on Apple Silicon \
+     macOS 26 or later and on Linux with KVM. See https://runmvm.com/reference/platform-support/";
+
 /// The execution environment for running workloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -80,9 +84,7 @@ impl Platform {
     /// default backend (macOS 26+ — the Apple Silicon arch half is
     /// asserted by callers via `cfg!(target_arch = "aarch64")`).
     ///
-    /// Distinct from [`Self::has_macos13_or_later`], which reports the
-    /// older macOS-13 floor libkrun targets. HVF is only the default from
-    /// 26 on, so the selection paths gate on this.
+    /// This is also the only supported macOS tier.
     pub fn is_hvf_default_tier(self) -> bool {
         if !matches!(self, Platform::MacOS) {
             return false;
@@ -90,22 +92,12 @@ impl Platform {
         is_macos_26_or_later()
     }
 
-    /// Whether this host meets the macOS-13 (Ventura) floor libkrun's
-    /// virtio surface needs.
-    ///
-    /// macOS 13 is the floor because the full virtio surface libkrun
-    /// depends on lands there; macOS 11–12 hosts have no supported local
-    /// microVM path. Both architectures are supported (Apple Silicon
-    /// arm64 + Intel x86_64).
-    ///
-    /// This probe reports only the OS-version tier; it does not assert any
-    /// per-VM supervisor binary is installed (`mvmctl doctor` surfaces binary
-    /// presence separately).
-    pub fn has_macos13_or_later(self) -> bool {
-        if !matches!(self, Platform::MacOS) {
-            return false;
-        }
-        is_macos_13_or_later()
+    /// Why `mvmctl` does not run on this host, or `None` when it does: macOS
+    /// is supported only on Apple Silicon at 26 or later. A version that could
+    /// not be read is not evidence of an unsupported host, so it refuses
+    /// nothing.
+    pub fn unsupported_host_message(self) -> Option<&'static str> {
+        unsupported_host_message_for(self, macos_major_version(), cfg!(target_arch = "aarch64"))
     }
 
     /// Whether libkrun is installed on this host.
@@ -163,46 +155,43 @@ fn has_nested_kvm_at(intel_path: &str, amd_path: &str, arm_path: &str) -> bool {
     read_enabled(intel_path) || read_enabled(amd_path) || read_enabled(arm_path)
 }
 
-/// Check whether the current macOS version is 13.0 (Ventura) or later.
-/// libkrun's full virtio surface lands here; macOS 11–12 fall back to
-/// whichever backend is installed.
-fn is_macos_13_or_later() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        macos_major_version() >= 13
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
+/// The refusal for `platform` at this macOS major version and architecture.
+/// Split from the live probe so a macOS 25 host can be simulated.
+fn unsupported_host_message_for(
+    platform: Platform,
+    macos_major: Option<u32>,
+    apple_silicon: bool,
+) -> Option<&'static str> {
+    let unsupported = matches!(platform, Platform::MacOS)
+        && (!apple_silicon || macos_major.is_some_and(|major| major < 26));
+    unsupported.then_some(UNSUPPORTED_HOST_MESSAGE)
 }
 
-/// Check whether the current macOS version is 26.0 or later.
+/// Check whether this is Apple Silicon macOS 26.0 or later.
 fn is_macos_26_or_later() -> bool {
+    cfg!(target_arch = "aarch64") && macos_major_version().is_some_and(|major| major >= 26)
+}
+
+/// The macOS major version from `sw_vers`, probed once per process. `None`
+/// off macOS and when the probe could not run or be parsed.
+fn macos_major_version() -> Option<u32> {
     #[cfg(target_os = "macos")]
     {
-        if cfg!(not(target_arch = "aarch64")) {
-            return false;
-        }
-        macos_major_version() >= 26
+        static MAJOR: OnceLock<Option<u32>> = OnceLock::new();
+        *MAJOR.get_or_init(|| {
+            crate::env_hygiene::helper_command("sw_vers")
+                .arg("-productVersion")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|v| v.trim().split('.').next().map(String::from))
+                .and_then(|major| major.parse::<u32>().ok())
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
-        false
+        None
     }
-}
-
-/// Read the macOS major version number via sysctl.
-#[cfg(target_os = "macos")]
-fn macos_major_version() -> u32 {
-    crate::env_hygiene::helper_command("sw_vers")
-        .arg("-productVersion")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|v| v.trim().split('.').next().map(String::from))
-        .and_then(|major| major.parse::<u32>().ok())
-        .unwrap_or(0)
 }
 
 /// Check if running inside WSL2 by reading /proc/version.
@@ -410,24 +399,43 @@ mod tests {
     }
 
     #[test]
-    fn test_has_macos13_or_later_false_on_non_macos() {
-        assert!(!Platform::LinuxNative.has_macos13_or_later());
-        assert!(!Platform::LinuxNoKvm.has_macos13_or_later());
-        assert!(!Platform::Wsl2.has_macos13_or_later());
-        assert!(!Platform::Windows.has_macos13_or_later());
+    fn macos_below_26_is_refused_and_told_the_supported_hosts() {
+        for major in [0, 13, 15, 25] {
+            let message = unsupported_host_message_for(Platform::MacOS, Some(major), true)
+                .unwrap_or_else(|| panic!("macOS {major} is unsupported"));
+            assert_eq!(message, UNSUPPORTED_HOST_MESSAGE);
+        }
+        assert!(UNSUPPORTED_HOST_MESSAGE.contains("Apple Silicon macOS 26 or later"));
+        assert!(UNSUPPORTED_HOST_MESSAGE.contains("Linux with KVM"));
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
-    fn test_has_macos13_or_later_true_on_macos_13_or_later() {
-        // Whether this reports true on this *contributor host* depends on
-        // the actual macOS version. macOS 13+ → true; 11–12 → false. The
-        // probe is the source of truth — we assert it agrees with the
-        // underlying version check rather than hard-coding a result that
-        // would diverge across CI matrix rows.
-        let plat = Platform::MacOS;
-        let expected = macos_major_version() >= 13;
-        assert_eq!(plat.has_macos13_or_later(), expected);
+    fn intel_macos_is_refused_at_any_version() {
+        assert!(unsupported_host_message_for(Platform::MacOS, Some(27), false).is_some());
+        assert!(unsupported_host_message_for(Platform::MacOS, None, false).is_some());
+    }
+
+    #[test]
+    fn macos_26_linux_and_an_unreadable_version_are_not_refused() {
+        for major in [Some(26), Some(27), None] {
+            assert_eq!(
+                unsupported_host_message_for(Platform::MacOS, major, true),
+                None
+            );
+        }
+        for platform in [
+            Platform::LinuxNative,
+            Platform::LinuxNoKvm,
+            Platform::Wsl2,
+            Platform::Windows,
+        ] {
+            for apple_silicon in [true, false] {
+                assert_eq!(
+                    unsupported_host_message_for(platform, None, apple_silicon),
+                    None
+                );
+            }
+        }
     }
 
     #[test]
@@ -471,7 +479,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn test_macos_major_version_is_reasonable() {
-        let version = macos_major_version();
+        let version = macos_major_version().expect("sw_vers reports a version");
         assert!(version >= 10, "macOS version {version} seems too low");
     }
 }

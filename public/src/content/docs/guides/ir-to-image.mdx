@@ -294,9 +294,7 @@ The orchestrator picks a builder mode (`host` | `vsock` | `auto`) and dispatches
 
 The host never runs `nix` itself. The standard builder VM runs on native HVF on
 supported Apple Silicon macOS hosts and QEMU on native Linux. macOS 26+ neither
-installs nor selects libkrun; the Apple Silicon release retains its bundled
-libkrun preview on macOS 13–25 for explicit selection. The build contract is
-otherwise unchanged.
+installs nor selects libkrun. The build contract is otherwise unchanged.
 
 ### Caching and reuse
 
