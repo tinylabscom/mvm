@@ -105,7 +105,6 @@ pub mod vcpu_quota;
 // re-exported here as a module alias so every existing
 // `crate::lifecycle::X` path keeps resolving unchanged.
 pub use mvm_contract::lifecycle;
-pub mod migration;
 pub mod naming;
 pub mod native_signature;
 pub mod net;
@@ -237,4 +236,4 @@ pub use domain::{agent, instance, node, pool, session, template, tenant, volume}
 pub use platform::linux_env;
 pub use policy::{audit, network_policy, security};
 pub use protocol::{routing, signing, vm_backend};
-pub use util::{atomic_io, idle_metrics, retry, time};
+pub use util::{atomic_io, idle_metrics, time};

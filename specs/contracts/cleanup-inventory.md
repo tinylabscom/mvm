@@ -218,7 +218,7 @@ Visible: machine, build, dev, deploy, deployments, kernel, generate, template, i
 - `commands/vm/checkpoint.rs` `CheckpointCmd` (7): `create`, `restore`, `ls`, `rm`, `fork`, `diff`, `verify`
 - `commands/vm/exec.rs` `ReceiptAction` (1): `verify`
 - `commands/vm/fs.rs` `FsCmd` (7): `read`, `write`, `ls`, `stat`, `mkdir`, `rm`, `mv`
-- `commands/vm/group.rs` `VmCmd` (24): `pause` (hidden), `resume` (hidden), `snapshot` (hidden), `save` (hidden), `checkpoint` (hidden), `cp` (hidden), `fs` (hidden), `proc` (hidden), `prompt`, `diff`, `apply`, `undo`, `redo`, `replay` (hidden), `display`, `wait` (hidden), `boot-report` (hidden), `set-ttl` (hidden), `forward` (hidden), `telemetry`, `sandbox` (hidden), `session` (hidden), `volume` (hidden), `rekernel`
+- `commands/vm/group.rs` `VmCmd` (23): `pause` (hidden), `resume` (hidden), `snapshot` (hidden), `save` (hidden), `checkpoint` (hidden), `cp` (hidden), `fs` (hidden), `proc` (hidden), `prompt`, `diff`, `apply`, `undo`, `redo`, `replay` (hidden), `display`, `wait` (hidden), `boot-report` (hidden), `set-ttl` (hidden), `telemetry`, `sandbox` (hidden), `session` (hidden), `volume` (hidden), `rekernel`
 - `commands/vm/proc.rs` `ProcCmd` (6): `start`, `ls`, `signal`, `kill`, `stdin`, `wait`
 - `commands/vm/sandbox.rs` `SandboxAction` (1): `gc`
 - `commands/vm/session.rs` `Cmd` (10): `ls`, `info`, `kill`, `set-timeout`, `start`, `attach`, `exec`, `run-code`, `console`, `reap`
@@ -545,7 +545,6 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_ALLOW_STALE_SNAPSHOT` | live-read | `crates/mvm-runtime/src/base/snapshot_integrity.rs:107` | 2 | NO | - |
 | `MVM_ALLOW_UNENCRYPTED_SNAPSHOT` | live-read | `crates/mvm-runtime/src/vm/instance_snapshot.rs:73` | 1 | yes | - |
 | `MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE` | live-read | `crates/mvm-core/src/host_storage_encryption.rs:34` | 1 | yes | yes |
-| `MVM_ALLOW_UNSIGNED_RUNTIME` | test-only | `crates/mvm-build/src/guest_runtime.rs:2387` | 0 | NO | - |
 | `MVM_APFS_SNAPSHOT_HELPER_SOCKET` | live-read | `crates/mvm-fs/src/trusted_snapshot.rs:105` | 1 | NO | - |
 | `MVM_API_TOKEN` | test-only | `crates/mvm-hostd/src/workload_env.rs:103` | 0 | NO | - |
 | `MVM_ATTRIBUTION_ANSWER_PID` | test-only | `crates/mvm-agentd/src/tool_attribution.rs:1017` | 0 | NO | - |
@@ -760,7 +759,6 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_NODE` | live-read | `crates/mvm-cli/src/commands/build/sandbox_record.rs:227` | 1 | NO | - |
 | `MVM_NO_AUTO_DEV` | live-read | `crates/mvm-vmm/src/host/linux_env.rs:93` | 1 | NO | - |
 | `MVM_NO_BUILD_CACHE` | live-read | `crates/mvm-build/src/pipeline/dev_build.rs:282` | 1 | NO | - |
-| `MVM_NO_LEGACY_BANNER` | live-read | `crates/mvm-hostd/src/caller_identity/production_fixture/environment.rs:47` | 3 | NO | yes |
 | `MVM_NO_PERSISTENT_BUILDER` | live-read | `crates/mvm-build/src/pipeline/dev_build.rs:509` | 1 | yes | - |
 | `MVM_NO_UPDATE_CHECK` | live-read | `crates/mvm-cli/src/update_notice.rs:27` | 1 | NO | - |
 | `MVM_OCI_BEARER_TOKEN` | live-read | `crates/mvm-cli/src/commands/image/trust.rs:101` | 1 | yes | - |

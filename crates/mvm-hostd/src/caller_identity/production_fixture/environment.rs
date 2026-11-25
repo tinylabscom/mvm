@@ -44,7 +44,6 @@ pub(super) const SAFE_ENV: &[&str] = &[
     "MVM_SUBSTITUTION_ENDPOINT_PATH",
     "MVM_KERNEL_SOURCE",
     "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE",
-    "MVM_NO_LEGACY_BANNER",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -280,10 +279,6 @@ impl Snapshot {
                 "fixture execution mode is not approved"
             );
             normalized.insert(name.into(), expected.into());
-        }
-        if let Some(value) = map.get("MVM_NO_LEGACY_BANNER") {
-            ensure!(value == "1", "invalid fixture banner mode");
-            normalized.insert("MVM_NO_LEGACY_BANNER".into(), value.clone());
         }
         let program = canonical(&text(program)?)?;
         trusted_input(&program)?;

@@ -15,7 +15,6 @@ pub(in crate::commands) mod workspace_apply;
 use mvm_client::admission::entrypoint_resolve;
 pub(super) mod exec;
 pub(in crate::commands) mod explain;
-pub(super) mod forward;
 pub(super) mod fs;
 pub(super) mod group;
 pub(in crate::commands) mod host_notices;

@@ -418,7 +418,6 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("set-ttl", AuditPosture::Emits("VmTtlSet")),
     ("mailbox-expire", AuditPosture::Emits("MailboxExpired")),
     ("rekernel", AuditPosture::Emits("VmRekernel")),
-    ("forward", AuditPosture::ReadOnly),
     ("sandbox", AuditPosture::DelegatesToSub(SANDBOX_SUB)),
     ("session", AuditPosture::DelegatesToSub(SESSION_SUB)),
     ("volume", AuditPosture::DelegatesToSub(VOLUME_SUB)),
