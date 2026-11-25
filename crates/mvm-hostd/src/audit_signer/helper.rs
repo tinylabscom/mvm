@@ -279,8 +279,12 @@ pub async fn serve(
             .context("mvm-signer-helper UDS accept failed")?;
         let helper = helper.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, helper, max_frame_bytes).await {
-                warn!(error = %e, "mvm-signer-helper connection terminated with error");
+            match handle_connection(stream, helper, max_frame_bytes).await {
+                Ok(()) => {}
+                Err(e) if closed_without_a_frame(&e) => {
+                    debug!(error = %e, "mvm-signer-helper peer closed without a request");
+                }
+                Err(e) => warn!(error = %e, "mvm-signer-helper connection terminated with error"),
             }
         });
     }
@@ -292,6 +296,17 @@ pub async fn serve_on_listener(
     max_frame_bytes: usize,
 ) -> Result<()> {
     serve(listener, helper, max_frame_bytes).await
+}
+
+/// Whether a connection ended because the peer closed before sending a whole
+/// request. Callers check that the helper is listening by connecting and
+/// closing, which is not an error worth a warning.
+fn closed_without_a_frame(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::UnexpectedEof)
+    })
 }
 
 async fn handle_connection(
@@ -352,6 +367,29 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Verifier, VerifyingKey};
     use tempfile::tempdir;
+
+    #[test]
+    fn a_connect_and_close_is_quiet_but_a_bad_frame_is_not() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (mut server, client) = UnixStream::pair().unwrap();
+            drop(client);
+            let closed = read_frame::<SignerHelperRequest>(&mut server, 1024)
+                .await
+                .unwrap_err();
+            assert!(closed_without_a_frame(&closed), "{closed:#}");
+
+            let (mut server, mut client) = UnixStream::pair().unwrap();
+            client.write_all(&u32::MAX.to_be_bytes()).await.unwrap();
+            let oversized = read_frame::<SignerHelperRequest>(&mut server, 1024)
+                .await
+                .unwrap_err();
+            assert!(!closed_without_a_frame(&oversized), "{oversized:#}");
+        });
+    }
 
     fn key_path(dir: &Path) -> PathBuf {
         let path = dir.join("tenant-key.ed25519");

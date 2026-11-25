@@ -95,7 +95,8 @@ pub struct CollectorConfig<S, C, F> {
     connector: C,
     signer: F,
     /// The signer's socket, when the signer is reached through one. An attempt
-    /// made while it is absent could only fail after the guest had answered.
+    /// made while nothing answers on it could only fail after the guest had
+    /// answered.
     signer_socket: Option<PathBuf>,
     // A fn-pointer marker: streams are only ever created inside the worker
     // thread, so the config itself never holds one and stays `Send`
@@ -132,7 +133,7 @@ where
         }
     }
 
-    /// Dial the guest only while `socket`, the signer's, exists.
+    /// Dial the guest only while something accepts on `socket`, the signer's.
     #[must_use]
     pub fn with_signer_socket(mut self, socket: PathBuf) -> Self {
         self.signer_socket = Some(socket);
@@ -345,8 +346,13 @@ where
         return AttemptEnd::Failed("registration-stale");
     }
     // Without its signer a dial wakes the guest, which reports the failed
-    // session on its console, every backoff for the life of the VM.
-    if config.signer_socket.as_ref().is_some_and(|s| !s.exists()) {
+    // session on its console, every backoff for the life of the VM. A socket
+    // file a dead signer left behind still exists, so connect, not stat.
+    if config
+        .signer_socket
+        .as_ref()
+        .is_some_and(|s| std::os::unix::net::UnixStream::connect(s).is_err())
+    {
         return AttemptEnd::Failed("signer-unavailable");
     }
     let mut stream = match (config.connector)() {
@@ -976,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_signer_is_reported_without_dialing_the_guest_until_it_appears() {
+    fn an_absent_or_dead_signer_is_reported_without_dialing_the_guest_until_one_listens() {
         use std::sync::atomic::AtomicUsize;
         let state = tempfile::tempdir().unwrap();
         let (guest_key, anchor_key) = keys();
@@ -1010,8 +1016,21 @@ mod tests {
         });
         assert_eq!(dials.load(Ordering::SeqCst), 0, "the guest is never dialed");
 
+        // A signer that died leaves its socket file behind; nothing accepts
+        // on it, so the guest is still not dialed.
+        drop(std::os::unix::net::UnixListener::bind(&signer_socket).unwrap());
+        assert!(signer_socket.exists());
+        // Long enough for several more attempts on the backoff.
+        std::thread::sleep(BACKOFF_BASE * 15);
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            0,
+            "a dead signer is not dialed past"
+        );
+
         // A signer that comes up later is used: the next attempt dials.
-        std::fs::write(&signer_socket, b"").unwrap();
+        std::fs::remove_file(&signer_socket).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(&signer_socket).unwrap();
         wait_until("a dial once the signer exists", || {
             dials.load(Ordering::SeqCst) > 0
         });
