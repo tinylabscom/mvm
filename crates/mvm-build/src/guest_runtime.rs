@@ -2389,7 +2389,6 @@ mod tests {
             crate::image_source::GUEST_RUNTIME_SOURCE_ROOT_ENV,
             &workspace,
         );
-        env.set("MVM_ALLOW_UNSIGNED_RUNTIME", "1");
         let cache = tempfile::tempdir().unwrap();
         let arch = GuestArch::X86_64;
         let mut manifest = fixture_manifest_with_source_sdk(arch, &workspace);

@@ -104,7 +104,6 @@ write_files:
     owner: mvm:mvm
     permissions: '0644'
     content: |
-      export MVM_NO_LEGACY_BANNER=1
       export CARGO_INCREMENTAL=0
       export RUST_BACKTRACE=1
 

@@ -90,7 +90,6 @@ fn audit_consistency_real_commands_generate_verify_and_refuse_rollback() {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_mvmctl"));
         cmd.env("MVM_HOME", &empty_home)
             .env("HOME", dir.path())
-            .env("MVM_NO_LEGACY_BANNER", "1")
             .args(["trust", "audit", verb])
             .arg("--old-root")
             .arg(&old_path)
@@ -115,7 +114,6 @@ fn audit_consistency_real_commands_generate_verify_and_refuse_rollback() {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_mvmctl"));
         cmd.env("MVM_HOME", &home)
             .env("HOME", dir.path())
-            .env("MVM_NO_LEGACY_BANNER", "1")
             .args(["trust", "audit", verb])
             .arg("--old-root")
             .arg(old)
