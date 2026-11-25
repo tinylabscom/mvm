@@ -9,7 +9,7 @@
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 fn main() {
-    mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-hvf-supervisor");
+    mvm_core::helper_contract::exit_with_probe_answer_if_requested("mvm-hvf-supervisor");
     eprintln!(
         "mvm-hvf-supervisor runs only on macOS / Apple silicon (Hypervisor.framework); \
          this is a stub build"
@@ -659,10 +659,10 @@ fn run() -> anyhow::Result<()> {
     let replay_hint = std::env::var_os(REPLAY_HINT);
     let raw = read_config_input(libc::STDIN_FILENO, replay_hint.as_deref())?;
     if raw.is_empty() && replay_hint.is_none() {
-        mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-hvf-supervisor");
+        mvm_core::helper_contract::exit_with_probe_answer_if_requested("mvm-hvf-supervisor");
     }
     anyhow::ensure!(
-        !mvm_vmm::host::helper_contract::probe_requested(std::env::args()),
+        !mvm_core::helper_contract::probe_requested(std::env::args()),
         "a contract probe cannot carry boot configuration"
     );
     let cfg: HvfSupervisorConfig =

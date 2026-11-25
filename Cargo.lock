@@ -4075,7 +4075,7 @@ version = "0.28.0-rc.11"
 dependencies = [
  "libc",
  "mvm-contract",
- "mvm-vmm",
+ "mvm-core",
  "tempfile",
 ]
 

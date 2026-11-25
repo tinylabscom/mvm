@@ -63,6 +63,8 @@ pub mod guest_netd;
 /// The filename of the sidecar manifest that sits beside a built rootfs.
 pub mod guest_sidecar;
 pub mod health;
+/// The version every host helper binary answers before it is spawned.
+pub mod helper_contract;
 /// Transport-independent host interface: contract, fail-closed preflight, local adapter.
 pub mod host_interface;
 pub mod host_storage_encryption;

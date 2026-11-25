@@ -760,8 +760,8 @@ mod tests {
         let stub = home.path().join("endpoint");
         std::fs::write(&stub, format!(
             "#!/bin/sh\nif [ \"$1\" = '{}' ]; then printf '%s' '{}'; exit 0; fi\n[ \"$#\" -eq 0 ] || exit 91\nprintf '%s' \"$$\" > '{}'\ncat >/dev/null\nprintf '%s\\n' '{{\"env\":[],\"input_fingerprints\":[]}}'\nexec sleep 30\n",
-            mvm_vmm::host::helper_contract::CONTRACT_PROBE_FLAG,
-            mvm_vmm::host::helper_contract::probe_response("mvm-network-endpoint"),
+            mvm_core::helper_contract::CONTRACT_PROBE_FLAG,
+            mvm_core::helper_contract::probe_response("mvm-network-endpoint"),
             pid_capture.display(),
         )).unwrap();
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
