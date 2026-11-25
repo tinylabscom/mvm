@@ -27,7 +27,7 @@
 //!
 //! The pin is what makes this work on every build. An earlier shape fetched
 //! through the release checksum manifest instead, which needs the
-//! `manifest-verify` feature to authenticate; a contributor's `just embed` build
+//! `manifest-verify` feature to authenticate; a contributor's `just build embed` build
 //! does not carry that feature, so every HVF bootstrap on the ordinary inner
 //! loop refused before booting anything. A source pin needs no feature and no
 //! network trust decision at run time: the decision was made when the pin was

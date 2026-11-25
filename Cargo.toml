@@ -577,7 +577,7 @@ release-channel = ["mvm-cli/release-channel"]
 # builds it from its checkout when it first needs a builder VM. Off by default so
 # neither a debug nor a plain release build pays for the cross-compile.
 
-# `just embed` and the tag-push release workflow turn it on.
+# `just build embed` and the tag-push release workflow turn it on.
 embed-host-bins = ["mvm-cli/embed-host-bins"]
 
 # Optional S3 storage backend for the template registry — a heavy cloud dep kept

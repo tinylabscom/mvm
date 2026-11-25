@@ -50,7 +50,7 @@ pub(in crate::commands) enum BuildCmd {
     ///
     /// Its consumer is mvmctl; mvm-images does not consume it.
     ///
-    /// Needs the pinned cross toolchain: `just payload::toolchain`.
+    /// Needs the pinned cross toolchain: `just setup toolchain`.
     #[command(name = "guest-bins")]
     GuestBins(guest_bins::Args),
     /// Seal an already-built template for internal fixtures and CI.

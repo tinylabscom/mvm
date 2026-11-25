@@ -856,7 +856,7 @@ fn missing_message(spec: &AuxBin, release_binary: bool) -> String {
     format!(
         "{bin} not found. It is a per-VM host helper `[[bin]]` of {pkg}; on \
          a source checkout build it with `{command}` (add `--release` to match a \
-         release build, or use `just payload::supervisors`), or set {env}=<path>.{hint}",
+         release build, or use `just build supervisors`), or set {env}=<path>.{hint}",
         bin = spec.bin,
         pkg = spec.rebuild_package,
         command = manual_build_command(spec),
@@ -933,7 +933,7 @@ fn workspace_root_from_manifest_dir() -> Option<PathBuf> {
 }
 
 /// `target/{release,debug}` under each workspace target dir (default plus a
-/// `CARGO_TARGET_DIR` override), the fallback for `just payload::supervisors`.
+/// `CARGO_TARGET_DIR` override), the fallback for `just build supervisors`.
 fn workspace_target_dirs() -> Vec<PathBuf> {
     workspace_root_from_manifest_dir()
         .map_or_else(Vec::new, |root| workspace_target_dirs_for(&root))
@@ -1983,7 +1983,7 @@ mod tests {
             "{err}"
         );
         assert!(!err.contains("cargo build --bins"), "{err}");
-        assert!(err.contains("just payload::supervisors"), "{err}");
+        assert!(err.contains("just build supervisors"), "{err}");
     }
 
     #[test]
