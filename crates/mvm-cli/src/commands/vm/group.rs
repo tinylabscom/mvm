@@ -14,8 +14,8 @@ use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 use super::{
-    checkpoint, cp, diff, display, forward, fs, pause, proc, prompt, rekernel, replay, sandbox,
-    session, set_ttl, snapshot, telemetry, volume, wait, workspace_apply,
+    checkpoint, cp, diff, display, fs, pause, proc, prompt, rekernel, replay, sandbox, session,
+    set_ttl, snapshot, telemetry, volume, wait, workspace_apply,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -78,9 +78,6 @@ pub(in crate::commands) enum VmCmd {
     /// Set or clear a sandbox TTL
     #[command(name = "set-ttl", hide = true)]
     SetTtl(set_ttl::Args),
-    /// Explain how to migrate dynamic forwarding to declared ingress
-    #[command(hide = true)]
-    Forward(forward::Args),
     /// Show what the host collected from a machine's guest: status, losses,
     /// spans, events, logs and stdio
     Telemetry(telemetry::Args),
@@ -114,7 +111,7 @@ impl VmCmd {
 
     /// Whether this VM op warrants the reconcile-on-entry convergence pass.
     /// Only the running-VM lifecycle ops converge stale dead records first;
-    /// registry-record and guest-RPC ops (set-ttl, cp, fs, wait, forward, …)
+    /// registry-record and guest-RPC ops (set-ttl, cp, fs, wait, …)
     /// must not, or convergence would sweep a registered VM whose process
     /// isn't live before the op reads its record.
     pub(in crate::commands) fn touches_vm_state(&self) -> bool {
@@ -145,7 +142,6 @@ impl VmCmd {
             VmCmd::Wait(_) => "wait",
             VmCmd::BootReport(_) => "boot-report",
             VmCmd::SetTtl(_) => "set-ttl",
-            VmCmd::Forward(_) => "forward",
             VmCmd::Telemetry(_) => "telemetry",
             VmCmd::Sandbox(_) => "sandbox",
             VmCmd::Session(_) => "session",
@@ -175,7 +171,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         VmCmd::Wait(a) => wait::run_wait(cli, a, cfg),
         VmCmd::BootReport(a) => wait::run_boot_report(cli, a, cfg),
         VmCmd::SetTtl(a) => set_ttl::run(cli, a, cfg),
-        VmCmd::Forward(a) => forward::run(cli, a, cfg),
         VmCmd::Telemetry(a) => telemetry::run(cli, a, cfg),
         VmCmd::Sandbox(a) => sandbox::run(cli, a, cfg),
         VmCmd::Session(a) => session::run(cli, a, cfg),

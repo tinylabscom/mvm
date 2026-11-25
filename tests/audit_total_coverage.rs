@@ -417,7 +417,6 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("telemetry", AuditPosture::ReadOnly),
     ("set-ttl", AuditPosture::Emits("VmTtlSet")),
     ("rekernel", AuditPosture::Emits("VmRekernel")),
-    ("forward", AuditPosture::ReadOnly),
     ("sandbox", AuditPosture::DelegatesToSub(SANDBOX_SUB)),
     ("session", AuditPosture::DelegatesToSub(SESSION_SUB)),
     ("volume", AuditPosture::DelegatesToSub(VOLUME_SUB)),

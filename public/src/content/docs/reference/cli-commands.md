@@ -90,8 +90,8 @@ verification under `trust`. Domains that already own their own subcommands
 
 | Group / top-level          | Commands                                                                                                                                                                |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Daily drivers (top-level)  | `machine` (`run`/`fork`/`restore`/`exec`/`console`/`logs`/`ls`/`stop`/`forward`/…), `build`, `dev`, `doctor`, `init`, `bootstrap`                                       |
-| `machine <sub>` (advanced) | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `telemetry`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
+| Daily drivers (top-level)  | `machine` (`run`/`fork`/`restore`/`exec`/`console`/`logs`/`ls`/`stop`/…), `build`, `dev`, `doctor`, `init`, `bootstrap`                                       |
+| `machine <sub>` (advanced) | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `telemetry`, `set-ttl`, `sandbox`, `session`, `volume` |
 | `dev <sub>`                | `compile`, `validate`, `kernel`, `runtime-overlay`, `sdk-sidecar`, `address`, `image-set`, `guest-bins`                                                                 |
 | `ops <sub>`                | `metrics`, `config`, `mcp`                                                                                                                                              |
 | `env <sub>`                | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign`                                                                                                                   |
