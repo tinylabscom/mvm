@@ -15,7 +15,7 @@ pub(super) const FIRECRACKER_SECURITY_PROFILE: BackendSecurityProfile = BackendS
     layer_coverage: LayerCoverage::all_layers(),
     tier: "Tier 1",
     notes: &[
-        "Full ADR-002 — all seven CI-enforced claims hold.",
+        "Full ADR-001 — all seven CI-enforced claims hold.",
         "Hardware isolation via KVM. Verified boot via dm-verity (W3).",
     ],
 };

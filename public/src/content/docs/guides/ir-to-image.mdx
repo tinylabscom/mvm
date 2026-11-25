@@ -261,7 +261,7 @@ Absent that block, function calls run cold-tier: agent execs the oneshot wrapper
 
 ## Layer 5 — The rootfs builder: `mkGuest`
 
-**Source:** `nix/lib/mk-guest.nix` (Plan 60, ADR-013)
+**Source:** `nix/lib/mk-guest.nix` (Plan 60)
 
 `mkGuest` is the low-level rootfs builder. It is the same function command-style workloads use; the function-call path just calls it through a factory.
 

@@ -76,7 +76,7 @@ This pattern (sometimes called the _matryoshka_ model after the nested Russian d
 
 ## The claims
 
-mvm makes fifteen CI-enforced security claims, plus three preview claims whose
+mvm makes eighteen CI-enforced security claims, plus three preview claims whose
 witnesses run but whose guarantee is narrower. Each one is backed by a test or a
 continuous-integration check that fails the build if the claim ceases to hold.
 The claims that defend a nesting layer are what the layer model is about; the

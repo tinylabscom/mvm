@@ -166,11 +166,11 @@ mvm runs Nix builds inside the project builder VM and copies the finished artifa
 
 - **Linux** (with `/dev/kvm`): the builder VM owns image construction; Firecracker is the default runtime backend.
 - **macOS Apple Silicon**: the host `mvmctl machine build` command orchestrates the builder VM. The resulting dev image can then boot on the selected macOS runtime backend.
-- **Windows / WSL2**: WSL2 with nested `/dev/kvm` is supported for the libkrun-backed workload runtime path. Native Windows and a Hyper-V managed Linux builder are not supported local paths today.
+- **Windows / WSL2**: Neither native Windows nor WSL2 is a supported local microVM host today; `mvmctl` refuses the libkrun workload backend on WSL2 even when nested `/dev/kvm` is exposed.
 
 ## Why this is structured this way
 
-ADR-013 names a single architectural commitment: **mvm is a library, your project owns its flake.** An early iteration of mvm shipped a `nix/images/builder/` directory with a default dev-image flake that users would fork or edit. That coupled every user's dev workflow to mvm's internal layout, so any refactor of the library broke everyone's build.
+The design rests on a single architectural commitment: **mvm is a library, your project owns its flake.** An early iteration of mvm shipped a `nix/images/builder/` directory with a default dev-image flake that users would fork or edit. That coupled every user's dev workflow to mvm's internal layout, so any refactor of the library broke everyone's build.
 
 The current shape:
 

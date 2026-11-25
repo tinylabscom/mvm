@@ -127,24 +127,18 @@ not performed automatically. Operator-facing knobs:
   `build` request without `MVM_ALLOW_LOCAL_BUILDER_BUILD` is refused rather
   than silently falling back.
 
-**Image boundary.** Today the signed image set from `mvm-images` carries the
-builder image, kernels, base workload root filesystems and Stage 0 seeds, and
-also the runtime overlay, SDK sidecars and initramfs, which `mvm-images`
-compiles from this tree through its `mvm` flake input. The maintainer decided
-on 2026-10-05 to narrow that ([#4100](https://github.com/tinylabscom/mvm/issues/4100),
-ADR-054): `mvm-images` builds only the Linux layer and stops reading this
-tree, and the guest runtime ships as a signed asset with each `mvmctl` release,
-from which `mvmctl` assembles the overlay, initramfs and sidecar. Until the
-workstreams under #4100 land, write and test against today's behaviour, and do
-not add new guest-runtime work to `mvm-images` or a new dependency on its
-`mvm` input.
+**Image boundary.** The signed image set from `mvm-images` is the Linux layer:
+the builder image, kernels, base workload root filesystems and Stage 0 seeds
+([#4100](https://github.com/tinylabscom/mvm/issues/4100), ADR-054).
+`mvm-images`' source no longer has an `mvm` flake input. The pinned published
+set predates that and still lists a runtime overlay, SDK sidecars and an
+initramfs, which `mvmctl` reads as retired roles and never requires.
+The guest runtime ships as a signed asset with each `mvmctl` release (a source
+build makes the archive from this tree), and `mvmctl` assembles the overlay,
+initramfs and sidecars from it. Do not add guest-runtime work to `mvm-images`.
 
 Owner-approved exceptions (unchanged):
 
-- **Lima as a test-environment KVM provider only** — a virtual `/dev/kvm` for
-  Firecracker / Linux-KVM E2E tests that cannot run on the builder VM or
-  GitHub-hosted runners. Modeled as a test/dev-tier `VmBackend`, refused by
-  prod admission (like the Docker fallback tier). Never for builds/evals.
 - **Native macOS HVF live lifecycle tests and teardown benchmarks** — explicit
   HVF test/benchmark commands, because the Linux builder VM cannot provide
   Hypervisor.framework. All other runtime commands still require the builder VM.
@@ -267,10 +261,9 @@ export CARGO_HOME="$PWD/.mvm-test/cargo"
 These exports apply to commands in the current shell until it is closed or
 the variables are unset.
 
-**Still shared between worktrees** — vary microVM and TAP names if two worktrees
+**Still shared between worktrees** — vary microVM names if two worktrees
 run microVMs concurrently: `.git/objects` + packed refs + hooks (the git rule
-above is what keeps these safe), the builder VM's `/var/lib/mvm/`, `br-mvm`
-bridge, and TAP devices; the Nix store (shared by design; Nix locking handles
+above is what keeps these safe), the builder VM's `/var/lib/mvm/`; the Nix store (shared by design; Nix locking handles
 it). The builder VM itself is shared across worktrees — **never fork a
 per-worktree VM** (boot cost, duplicated tens-of-GB store, warm-cache loss).
 
@@ -286,11 +279,9 @@ currently enforce Nix formatting because the flake declares no formatter.
 
 Developing the binaries that run inside a microVM — agent, egress client,
 protocol crates — happens entirely in this repository. A guest-binary-only
-change must never require an `mvm-images` checkout, edit, or release. Today
-the dev-tier build arms rebuild the runtime overlay and the initramfs from
-this checkout on the host; the SDK sidecar is the gap, since it still builds
-only from an `mvm-images` checkout, and the published image set still carries
-copies of all three built from the `mvm` input. The image boundary in
+change must never require an `mvm-images` checkout, edit, or release. A source
+build assembles the runtime overlay, the initramfs and the SDK sidecars from
+this checkout on the host. The image boundary in
 [#4100](https://github.com/tinylabscom/mvm/issues/4100) (ADR-054) makes the
 rule true by construction: every guest piece ships with `mvmctl`, and
 `mvm-images` has no `mvm` input to change. `mvm-images` is entered
