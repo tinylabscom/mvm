@@ -1,8 +1,9 @@
-//! Read-only validation of the permanent installer-provisioned commissioning lock inode.
+//! Validation and transient exclusion for the permanent commissioning lock inode.
 //!
-//! Validation retains the observed descriptor but never acquires a lock. The
-//! installer alone creates this lifetime-stable object. Even a successful
-//! validation proves neither installer transaction freshness nor exclusion.
+//! Validation retains the observed descriptor without acquiring a lock. A
+//! successful guard adds only cooperative, process-lifetime advisory exclusion
+//! on that descriptor. The installer alone creates this lifetime-stable object.
+//! Neither operation proves installer transaction freshness.
 
 use std::fs::File;
 use std::io;
@@ -11,6 +12,7 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use crate::hvf_owner_commissioning_intent::has_extended_acl;
 use crate::hvf_owner_commissioning_state::RetainedCommissioningState;
 use crate::hvf_owner_protected_authority_root::ProtectedAuthorityRoot;
+use crate::util::atomic_io::FileLock;
 
 /// Fixed child name below the protected authority root.
 pub const COMMISSIONING_LOCK_NAME: &str = "owner-commissioning.lock";
@@ -46,11 +48,7 @@ impl ValidatedCommissioningLock {
         &self,
         state: &RetainedCommissioningState,
     ) -> CommissioningLockBinding {
-        if state.lock_device() == self.device && state.lock_inode() == self.inode {
-            CommissioningLockBinding::Matches
-        } else {
-            CommissioningLockBinding::Mismatch
-        }
+        compare_state_binding(self.device, self.inode, state)
     }
 }
 
@@ -58,6 +56,53 @@ impl std::fmt::Debug for ValidatedCommissioningLock {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ValidatedCommissioningLock")
+            .field("device", &self.device)
+            .field("inode", &self.inode)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Exclusive advisory exclusion on the validated permanent lock inode.
+///
+/// This unique process-local guard is intentionally neither cloneable nor
+/// serializable. It exposes observations only, not its descriptor, unlocking,
+/// or mutation. Exclusion is effective only while every mutator participates in
+/// this advisory locking protocol.
+#[must_use]
+pub struct CommissioningLockGuard {
+    _lock: FileLock,
+    device: u64,
+    inode: u64,
+}
+
+impl CommissioningLockGuard {
+    /// Device identity used by durable state-log bindings.
+    #[must_use]
+    pub fn device(&self) -> u64 {
+        self.device
+    }
+
+    /// Inode identity used by durable state-log bindings.
+    #[must_use]
+    pub fn inode(&self) -> u64 {
+        self.inode
+    }
+
+    /// Compare this held inode with the retained state log's lock binding.
+    ///
+    /// This pure comparison grants no mutation authority.
+    pub fn compare_state_binding(
+        &self,
+        state: &RetainedCommissioningState,
+    ) -> CommissioningLockBinding {
+        compare_state_binding(self.device, self.inode, state)
+    }
+}
+
+impl std::fmt::Debug for CommissioningLockGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CommissioningLockGuard")
             .field("device", &self.device)
             .field("inode", &self.inode)
             .finish_non_exhaustive()
@@ -92,6 +137,30 @@ pub enum HvfOwnerCommissioningLockError {
     FilesystemPolicy,
     /// The fixed path named a different inode when it was observed again.
     #[error("protected HVF owner commissioning lock identity changed during validation")]
+    IdentityChanged,
+}
+
+/// Permanent commissioning-lock acquisition failure.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum HvfOwnerCommissioningLockAcquisitionError {
+    /// The host cannot establish the production macOS lock contract.
+    #[error("protected HVF owner commissioning lock acquisition requires macOS")]
+    Unsupported,
+    /// Another cooperating process currently holds exclusive exclusion.
+    #[error("protected HVF owner commissioning lock is busy")]
+    Busy,
+    /// The installer-provisioned fixed lock child is absent.
+    #[error("protected HVF owner commissioning lock is missing")]
+    Missing,
+    /// The validated descriptor or fixed child could not be locked or inspected.
+    #[error("protected HVF owner commissioning lock is unavailable")]
+    Unavailable(#[source] io::Error),
+    /// Type, ownership, mode, link, length, ACL, or immutable policy failed.
+    #[error("protected HVF owner commissioning lock filesystem policy failed")]
+    FilesystemPolicy,
+    /// The held descriptor or fixed path no longer names the validated inode.
+    #[error("protected HVF owner commissioning lock identity changed")]
     IdentityChanged,
 }
 
@@ -139,6 +208,61 @@ pub fn validate_test_hvf_owner_commissioning_lock(
     expected_gid: u32,
 ) -> Result<ValidatedCommissioningLock, HvfOwnerCommissioningLockError> {
     validate_from_root(root, LockPolicy::test(expected_uid, expected_gid), || {})
+}
+
+/// Try to acquire exclusive advisory exclusion on a validated lock descriptor.
+///
+/// Acquisition never waits, polls, retries, opens a replacement for locking, or
+/// changes durable state. After locking the retained descriptor, this revalidates
+/// both that descriptor and a fresh fixed-child open through `root`, including
+/// identity and complete filesystem policy. The trusted protected-root owner can
+/// still change namespace or inode state after these observations; every mutator
+/// must participate in the advisory lock protocol.
+///
+/// # Errors
+/// Returns typed contention immediately and refuses unsupported hosts, absence,
+/// unsafe filesystem metadata, identity replacement, and operating-system
+/// failures. Every refusal releases any acquired kernel lock on drop.
+#[cfg(target_os = "macos")]
+pub fn try_acquire_hvf_owner_commissioning_lock(
+    root: &ProtectedAuthorityRoot,
+    validated: ValidatedCommissioningLock,
+) -> Result<CommissioningLockGuard, HvfOwnerCommissioningLockAcquisitionError> {
+    try_acquire_from_root(root, validated, LockPolicy::production(), || {})
+}
+
+/// Unsupported platforms cannot establish the production immutable-inode contract.
+///
+/// # Errors
+/// Always returns [`HvfOwnerCommissioningLockAcquisitionError::Unsupported`]
+/// without I/O.
+#[cfg(not(target_os = "macos"))]
+pub fn try_acquire_hvf_owner_commissioning_lock(
+    _root: &ProtectedAuthorityRoot,
+    _validated: ValidatedCommissioningLock,
+) -> Result<CommissioningLockGuard, HvfOwnerCommissioningLockAcquisitionError> {
+    Err(HvfOwnerCommissioningLockAcquisitionError::Unsupported)
+}
+
+/// Acquire through an injected protected root for hermetic tests.
+///
+/// # Errors
+/// Refuses the same contention, fixed-child, and filesystem-policy failures as
+/// production while injecting only the ownership expectation.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn try_acquire_test_hvf_owner_commissioning_lock(
+    root: &ProtectedAuthorityRoot,
+    validated: ValidatedCommissioningLock,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> Result<CommissioningLockGuard, HvfOwnerCommissioningLockAcquisitionError> {
+    try_acquire_from_root(
+        root,
+        validated,
+        LockPolicy::test(expected_uid, expected_gid),
+        || {},
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -201,6 +325,73 @@ fn validate_from_root(
     })
 }
 
+fn try_acquire_from_root(
+    root: &ProtectedAuthorityRoot,
+    validated: ValidatedCommissioningLock,
+    policy: LockPolicy,
+    after_acquire: impl FnOnce(),
+) -> Result<CommissioningLockGuard, HvfOwnerCommissioningLockAcquisitionError> {
+    let ValidatedCommissioningLock {
+        _file: file,
+        device,
+        inode,
+    } = validated;
+    let Some(lock) = FileLock::try_acquire_opened(file)
+        .map_err(HvfOwnerCommissioningLockAcquisitionError::Unavailable)?
+    else {
+        return Err(HvfOwnerCommissioningLockAcquisitionError::Busy);
+    };
+
+    after_acquire();
+
+    let reopened = root.open_commissioning_lock().map_err(|error| {
+        if error == rustix::io::Errno::NOENT {
+            HvfOwnerCommissioningLockAcquisitionError::Missing
+        } else {
+            HvfOwnerCommissioningLockAcquisitionError::Unavailable(error.into())
+        }
+    })?;
+    let reopened_identity =
+        require_lock_file(&reopened, policy).map_err(map_acquisition_validation_error)?;
+    if reopened_identity != (device, inode) {
+        return Err(HvfOwnerCommissioningLockAcquisitionError::IdentityChanged);
+    }
+
+    let held_identity =
+        require_lock_file(lock.opened_file(), policy).map_err(map_acquisition_validation_error)?;
+    if held_identity != (device, inode) {
+        return Err(HvfOwnerCommissioningLockAcquisitionError::IdentityChanged);
+    }
+
+    Ok(CommissioningLockGuard {
+        _lock: lock,
+        device,
+        inode,
+    })
+}
+
+fn map_acquisition_validation_error(
+    error: HvfOwnerCommissioningLockError,
+) -> HvfOwnerCommissioningLockAcquisitionError {
+    match error {
+        HvfOwnerCommissioningLockError::Unsupported => {
+            HvfOwnerCommissioningLockAcquisitionError::Unsupported
+        }
+        HvfOwnerCommissioningLockError::Missing => {
+            HvfOwnerCommissioningLockAcquisitionError::Missing
+        }
+        HvfOwnerCommissioningLockError::Unavailable(error) => {
+            HvfOwnerCommissioningLockAcquisitionError::Unavailable(error)
+        }
+        HvfOwnerCommissioningLockError::FilesystemPolicy => {
+            HvfOwnerCommissioningLockAcquisitionError::FilesystemPolicy
+        }
+        HvfOwnerCommissioningLockError::IdentityChanged => {
+            HvfOwnerCommissioningLockAcquisitionError::IdentityChanged
+        }
+    }
+}
+
 fn open_fixed_lock(root: &ProtectedAuthorityRoot) -> Result<File, HvfOwnerCommissioningLockError> {
     root.open_commissioning_lock().map_err(|error| {
         if error == rustix::io::Errno::NOENT {
@@ -233,6 +424,18 @@ fn require_lock_file(
         return Err(HvfOwnerCommissioningLockError::FilesystemPolicy);
     }
     Ok((metadata.dev(), metadata.ino()))
+}
+
+fn compare_state_binding(
+    device: u64,
+    inode: u64,
+    state: &RetainedCommissioningState,
+) -> CommissioningLockBinding {
+    if state.lock_device() == device && state.lock_inode() == inode {
+        CommissioningLockBinding::Matches
+    } else {
+        CommissioningLockBinding::Mismatch
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -334,6 +537,18 @@ mod tests {
         fn validate(&self) -> Result<ValidatedCommissioningLock, HvfOwnerCommissioningLockError> {
             validate_test_hvf_owner_commissioning_lock(&self.authority, self.uid, self.gid)
         }
+
+        fn acquire(
+            &self,
+            validated: ValidatedCommissioningLock,
+        ) -> Result<CommissioningLockGuard, HvfOwnerCommissioningLockAcquisitionError> {
+            try_acquire_test_hvf_owner_commissioning_lock(
+                &self.authority,
+                validated,
+                self.uid,
+                self.gid,
+            )
+        }
     }
 
     impl Drop for Fixture {
@@ -417,6 +632,161 @@ mod tests {
         assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
         assert_eq!(after.len(), 0);
         assert_eq!(after.permissions().mode() & 0o7777, 0o444);
+    }
+
+    #[test]
+    fn read_only_immutable_guard_excludes_second_contender_and_drop_releases() {
+        let fixture = Fixture::new();
+        fixture.create_lock();
+        let first = fixture.validate().expect("validate first contender");
+        let second = fixture.validate().expect("validate second contender");
+        let guard = fixture.acquire(first).expect("acquire first contender");
+        assert_eq!((guard.device(), guard.inode()), {
+            let metadata = fs::metadata(fixture.lock_path()).expect("read lock identity");
+            (metadata.dev(), metadata.ino())
+        });
+        assert!(matches!(
+            fixture.acquire(second),
+            Err(HvfOwnerCommissioningLockAcquisitionError::Busy)
+        ));
+
+        drop(guard);
+        let third = fixture.validate().expect("validate third contender");
+        assert!(
+            fixture.acquire(third).is_ok(),
+            "drop must release exclusion for the next contender"
+        );
+    }
+
+    #[test]
+    fn acquisition_does_not_create_or_mutate_lock_state() {
+        let fixture = Fixture::new();
+        fixture.create_lock();
+        let before = fs::metadata(fixture.lock_path()).expect("read lock metadata");
+        let before_bytes = fs::read(fixture.lock_path()).expect("read lock contents");
+
+        let guard = fixture
+            .acquire(fixture.validate().expect("validate lock"))
+            .expect("acquire lock");
+        let after = fs::metadata(fixture.lock_path()).expect("reread lock metadata");
+        let after_bytes = fs::read(fixture.lock_path()).expect("reread lock contents");
+
+        assert_eq!(before_bytes, after_bytes);
+        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        assert_eq!(after.len(), before.len());
+        assert_eq!(
+            after.permissions().mode() & 0o7777,
+            before.permissions().mode() & 0o7777
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn refuses_path_replacement_after_acquisition_and_releases_lock() {
+        let fixture = Fixture::new();
+        fixture.create_lock();
+        let validated = fixture.validate().expect("validate original lock");
+        let original = fixture.lock_path();
+        let original_probe = File::open(&original).expect("retain independent original descriptor");
+        let replacement = fixture.authority_path().join("replacement");
+        fs::write(&replacement, []).expect("create replacement");
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o444))
+            .expect("set replacement mode");
+
+        let result = try_acquire_from_root(
+            &fixture.authority,
+            validated,
+            LockPolicy::test(fixture.uid, fixture.gid),
+            || {
+                set_immutable(&original, false);
+                fs::remove_file(&original).expect("remove original path");
+                fs::rename(&replacement, &original).expect("replace fixed path");
+                set_immutable(&original, true);
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(HvfOwnerCommissioningLockAcquisitionError::IdentityChanged)
+        ));
+        assert!(
+            FileLock::try_acquire_opened(original_probe)
+                .expect("probe original lock")
+                .is_some(),
+            "refusal must release the original inode"
+        );
+
+        let replacement = fixture.validate().expect("validate replacement");
+        assert!(
+            fixture.acquire(replacement).is_ok(),
+            "replacement inode remains independently lockable"
+        );
+    }
+
+    #[test]
+    fn refuses_path_removal_after_acquisition_with_typed_missing() {
+        let fixture = Fixture::new();
+        fixture.create_lock();
+        let validated = fixture.validate().expect("validate lock");
+        let path = fixture.lock_path();
+        let original_probe = File::open(&path).expect("retain independent original descriptor");
+
+        let result = try_acquire_from_root(
+            &fixture.authority,
+            validated,
+            LockPolicy::test(fixture.uid, fixture.gid),
+            || {
+                set_immutable(&path, false);
+                fs::remove_file(&path).expect("remove fixed lock path");
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(HvfOwnerCommissioningLockAcquisitionError::Missing)
+        ));
+        assert!(
+            FileLock::try_acquire_opened(original_probe)
+                .expect("probe removed original lock")
+                .is_some(),
+            "missing-path refusal must release the original inode"
+        );
+
+        fixture.create_lock();
+        let recreated = fixture.validate().expect("validate recreated lock");
+        assert!(
+            fixture.acquire(recreated).is_ok(),
+            "recreated inode remains independently lockable"
+        );
+    }
+
+    #[test]
+    fn refuses_policy_change_after_acquisition_and_releases_lock() {
+        let fixture = Fixture::new();
+        fixture.create_lock();
+        let validated = fixture.validate().expect("validate lock");
+        let path = fixture.lock_path();
+
+        let result = try_acquire_from_root(
+            &fixture.authority,
+            validated,
+            LockPolicy::test(fixture.uid, fixture.gid),
+            || {
+                set_immutable(&path, false);
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+                    .expect("weaken lock mode");
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(HvfOwnerCommissioningLockAcquisitionError::FilesystemPolicy)
+        ));
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).expect("restore lock mode");
+        set_immutable(&path, true);
+        let repaired = fixture.validate().expect("validate restored policy");
+        assert!(
+            fixture.acquire(repaired).is_ok(),
+            "policy refusal must release the kernel lock"
+        );
     }
 
     #[test]

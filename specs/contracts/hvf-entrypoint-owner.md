@@ -354,8 +354,21 @@ granting mutation authority. The permanent inode's installer-only creation and
 lifetime are a future deployment contract; validation proves neither the
 installer transaction nor freshness.
 
-Lock acquisition, stable installer deployment, the state writer and all
-commissioning effects remain unimplemented.
+A source-only transient exclusion primitive consumes that validated observation
+and tries one nonblocking exclusive advisory `flock` on its retained descriptor.
+Contention is an immediate typed refusal, with no wait, polling or retry. After
+acquisition it fully revalidates both the held descriptor and a fresh
+descriptor-relative open of the fixed child, including the complete policy and
+matching device/inode; any absence, replacement or policy change refuses and
+Drop releases the kernel lock. The non-cloneable, non-serializable guard exposes
+only device/inode observation and pure state-binding comparison. It creates,
+repairs and mutates nothing. A trusted root can still change state after the
+observations, and advisory exclusion is effective only when all mutators
+participate.
+
+Stable installer deployment, every state writer and transition, durable crash
+meaning, permit consumption, key/journal/receipt/completion effects, endpoint,
+VM and factory remain unimplemented.
 The v1 preflight checks only these fixed sibling conflict names; it does not
 claim to discover arbitrary state beneath a future authority-owned
 subdirectory. Trusted installation and state mutation must be serialized across

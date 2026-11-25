@@ -219,12 +219,22 @@ Proposed trusted setup sequence:
    detect replacement during validation but is not exclusion or an atomic
    snapshot. Installer-only creation and lifetime of this permanent inode are a
    future stable deployment contract, not proof supplied by validation.
-   These validators and loaders create nothing and prove neither authority,
-   freshness nor an atomic snapshot. Lock acquisition, stable installer
-   deployment, transition methods, the log writer and every commissioning
-   effect remain unimplemented;
-   future mutation must acquire the separately designed exclusion and then
-   reload and revalidate.
+   A source-only transient exclusion primitive consumes that validated
+   observation and makes one nonblocking exclusive advisory `flock` attempt on
+   its retained descriptor. Busy is an immediate typed refusal without waiting,
+   polling or retry. Once acquired, both the held descriptor and a fresh
+   descriptor-relative fixed-child open must pass the complete policy and match
+   the validated device/inode; absence, replacement or policy change refuses,
+   and Drop releases the kernel lock. The non-cloneable, non-serializable guard
+   exposes only device/inode observation and pure state-binding comparison. It
+   creates, repairs and mutates nothing. A trusted root can still change state
+   after validation, and advisory exclusion requires every mutator to
+   participate.
+   These validators, loaders and the exclusion primitive prove neither
+   authority, freshness, durable crash meaning nor an atomic snapshot. Stable
+   installer deployment, transition methods, the log writer, permit
+   consumption, key/journal/receipt effects, endpoint, VM, factory and every
+   commissioning effect remain unimplemented.
 2. A fixed initialization entry point runs as the authority UID, exclusively
    locks the authority namespace under that future design and creates the issuer
    only for that intent.

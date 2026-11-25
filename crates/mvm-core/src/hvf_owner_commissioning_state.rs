@@ -544,7 +544,7 @@ mod tests {
     };
     use crate::hvf_owner_commissioning_lock::{
         COMMISSIONING_LOCK_NAME, CommissioningLockBinding,
-        validate_test_hvf_owner_commissioning_lock,
+        try_acquire_test_hvf_owner_commissioning_lock, validate_test_hvf_owner_commissioning_lock,
     };
     use crate::hvf_owner_deployment_receipt::{OwnerComponentPinV1, cohort_digest};
     use crate::hvf_owner_protected_authority_root::{
@@ -823,28 +823,35 @@ mod tests {
             fixture.installer_gid,
         )
         .expect("validate lock");
+        let guard = try_acquire_test_hvf_owner_commissioning_lock(
+            &fixture.authority,
+            lock,
+            fixture.installer_uid,
+            fixture.installer_gid,
+        )
+        .expect("acquire lock");
 
         let mut records = valid_records(&fixture.intent, CommissioningPhase::Prepared);
-        records[0].content.lock_device = lock.device();
-        records[0].content.lock_inode = lock.inode();
+        records[0].content.lock_device = guard.device();
+        records[0].content.lock_inode = guard.inode();
         records[0].record_digest = record_digest(&records[0].content);
         fixture.write_state(&encode_records(&records));
         let state = retained(fixture.load().expect("load matching state"));
         assert_eq!(
-            lock.compare_state_binding(&state),
+            guard.compare_state_binding(&state),
             CommissioningLockBinding::Matches
         );
 
-        records[0].content.lock_inode = lock.inode().checked_add(1).expect("inode has room");
+        records[0].content.lock_inode = guard.inode().checked_add(1).expect("inode has room");
         records[0].record_digest = record_digest(&records[0].content);
         fixture.write_state(&encode_records(&records));
         let state = retained(fixture.load().expect("load mismatched state"));
         assert_eq!(
-            lock.compare_state_binding(&state),
+            guard.compare_state_binding(&state),
             CommissioningLockBinding::Mismatch
         );
 
-        drop(lock);
+        drop(guard);
         #[cfg(target_os = "macos")]
         {
             let status = std::process::Command::new("chflags")

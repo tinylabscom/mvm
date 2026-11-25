@@ -797,6 +797,25 @@ impl FileLock {
         Ok(Self { _file: file })
     }
 
+    /// Try to lock an already-opened, caller-validated stable lock inode.
+    ///
+    /// This never opens, creates, or repairs a path. On success the returned
+    /// guard retains the exact descriptor supplied by the caller.
+    ///
+    /// # Errors
+    /// Returns an operating-system error other than lock contention.
+    pub fn try_acquire_opened(file: fs::File) -> std::io::Result<Option<Self>> {
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
+
+    pub(crate) fn opened_file(&self) -> &fs::File {
+        &self._file
+    }
+
     /// Acquire an exclusive lock for operations on `path`.
     ///
     /// Creates `<path>.lock` if it doesn't exist, then acquires an exclusive
@@ -873,6 +892,43 @@ mod tests {
         assert!(FileLock::try_acquire(&path).unwrap().is_none());
         drop(held);
         assert!(FileLock::try_acquire(&path).unwrap().is_some());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn try_opened_file_lock_is_nonblocking_and_preserves_descriptor_custody() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dir = tempfile::tempdir().expect("create lock directory");
+        let lock_path = dir.path().join("permanent.lock");
+        fs::write(&lock_path, []).expect("create permanent lock");
+        let before = fs::metadata(&lock_path).expect("read lock metadata");
+
+        let held = FileLock::try_acquire_opened(
+            fs::File::open(&lock_path).expect("open permanent lock read-only"),
+        )
+        .expect("try first lock")
+        .expect("first lock must succeed");
+        let contender = FileLock::try_acquire_opened(
+            fs::File::open(&lock_path).expect("open contender read-only"),
+        )
+        .expect("try contended lock");
+        assert!(
+            contender.is_none(),
+            "contended lock must return immediately"
+        );
+
+        drop(held);
+        let reacquired = FileLock::try_acquire_opened(
+            fs::File::open(&lock_path).expect("reopen permanent lock read-only"),
+        )
+        .expect("try lock after release");
+        assert!(reacquired.is_some(), "drop must release the kernel lock");
+
+        let after = fs::metadata(&lock_path).expect("reread lock metadata");
+        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        assert_eq!(after.len(), before.len());
+        assert_eq!(after.permissions(), before.permissions());
     }
 
     #[test]
