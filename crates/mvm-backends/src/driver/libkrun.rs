@@ -464,8 +464,8 @@ impl VmmDriver for LibkrunDriver {
             // default: on Linux a cgroup can bound whatever process this
             // backend runs — libkrun does go through the dedicated
             // mvm-libkrun-supervisor binary, but the cgroup claim doesn't
-            // depend on that; it holds for any Linux process. libkrun's
-            // macOS 13-25 default host has no cgroup at all, so
+            // depend on that; it holds for any Linux process. A macOS
+            // host has no cgroup at all, so
             // `for_backend` answers host-conditionally rather than by kind.
             resource_controls: ResourceControls::for_backend(BackendKind::Libkrun),
             ..VmCapabilities::default()

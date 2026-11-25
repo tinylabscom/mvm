@@ -11,8 +11,8 @@
 //! [`super::libkrun`].
 //!
 //! The file was called `libkrun_legacy` while the backend split was in
-//! progress. Nothing in it is legacy: it is the live path on Linux and on
-//! macOS 13-25.
+//! progress. Nothing in it is legacy: it is the live path wherever libkrun is
+//! selected.
 
 use anyhow::{Context, Result, anyhow};
 use mvm_core::kernel_format::KernelFormat;
