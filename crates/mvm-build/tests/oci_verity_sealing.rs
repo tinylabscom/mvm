@@ -6,11 +6,11 @@
 //!
 //! 1. `#[cfg(target_os = "linux")]` — the whole file compiles only
 //!    on Linux.
-//! 2. `which::which("veritysetup")` — skips cleanly when
+//! 2. `veritysetup` on `PATH` — skips cleanly when
 //!    `cryptsetup` (which provides `veritysetup`) isn't installed.
 //!    Contributor environments without `cryptsetup` see a one-line
 //!    note rather than a false failure.
-//! 3. `which::which("mke2fs")` — the round-trip tests need to
+//! 3. `mke2fs` on `PATH` — the round-trip tests need to
 //!    produce a real ext4 first (via `materialize_to_ext4`),
 //!    then seal it. CI's Linux KVM lane has both binaries.
 //!
@@ -30,7 +30,7 @@ use std::path::Path;
 use tempfile::TempDir;
 
 fn skip_if_no_veritysetup() -> bool {
-    if which::which("veritysetup").is_err() {
+    if mvm_core::util::which("veritysetup").is_none() {
         eprintln!(
             "mvm-oci verity integration test skipped: veritysetup not on $PATH \
              (install cryptsetup to run this test)"
@@ -41,7 +41,7 @@ fn skip_if_no_veritysetup() -> bool {
 }
 
 fn skip_if_no_mke2fs() -> bool {
-    if which::which("mke2fs").is_err() {
+    if mvm_core::util::which("mke2fs").is_none() {
         eprintln!("mvm-oci verity integration test skipped: mke2fs not on $PATH");
         return true;
     }

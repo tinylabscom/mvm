@@ -319,8 +319,8 @@ fn builder_backend_check_for(
         BuilderBackendChoice::Qemu => {
             // Linux dev/builder backend. KVM-accelerated
             // where /dev/kvm is present, TCG fallback otherwise.
-            if which::which("qemu-system-x86_64").is_ok()
-                || which::which("qemu-system-aarch64").is_ok()
+            if mvm_core::util::which("qemu-system-x86_64").is_some()
+                || mvm_core::util::which("qemu-system-aarch64").is_some()
             {
                 let accel = if std::path::Path::new("/dev/kvm").exists() {
                     "KVM"

@@ -11,7 +11,7 @@ use mvm_core::platform::{self, Platform};
 /// - Windows: requires WSL2 (delegates to [`bootstrap_wsl2`])
 pub fn check_package_manager() -> Result<()> {
     if cfg!(target_os = "macos") {
-        ui::info(homebrew_report(which::which("brew").is_ok()));
+        ui::info(homebrew_report(mvm_core::util::which("brew").is_some()));
         Ok(())
     } else if cfg!(target_os = "windows") {
         bootstrap_wsl2()
@@ -29,7 +29,7 @@ pub fn check_package_manager() -> Result<()> {
 /// users may have installed prerequisites by other means.
 fn check_linux_package_manager() -> Result<()> {
     for cmd in &["apt-get", "dnf", "pacman"] {
-        if which::which(cmd).is_ok() {
+        if mvm_core::util::which(cmd).is_some() {
             ui::info(&format!("Package manager found: {}", cmd));
             return Ok(());
         }
@@ -54,7 +54,7 @@ fn check_linux_package_manager() -> Result<()> {
 /// users follow today.
 #[cfg(target_os = "windows")]
 pub fn bootstrap_wsl2() -> Result<()> {
-    if which::which("wsl").is_err() {
+    if mvm_core::util::which("wsl").is_none() {
         anyhow::bail!(
             "WSL is not installed on this Windows host.\n\
              Install it from an elevated PowerShell:\n  \

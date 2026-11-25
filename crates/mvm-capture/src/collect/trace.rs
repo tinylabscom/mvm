@@ -124,7 +124,7 @@ fn read_limited(path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
 }
 
 fn build_trace_command(command: &[String], output_path: &Path, max_seconds: u64) -> Command {
-    let has_timeout = which::which("timeout").is_ok();
+    let has_timeout = mvm_core::util::which("timeout").is_some();
     if has_timeout {
         let mut cmd = mvm_core::env_hygiene::helper_command("timeout");
         cmd.arg("--signal=KILL")
@@ -269,7 +269,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_child_observes_the_project_directory_as_its_working_directory() {
-        if which::which("strace").is_err() {
+        if mvm_core::util::which("strace").is_none() {
             eprintln!("skipped: strace not installed");
             return;
         }

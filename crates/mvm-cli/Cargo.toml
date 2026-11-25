@@ -77,7 +77,6 @@ tracing.workspace = true
 # span-timing and OTLP layers) with this. Host-only: guest binaries emit
 # through the `tracing` facade and never install a subscriber.
 tracing-subscriber.workspace = true
-which.workspace = true
 
 [[example]]
 name = "verification_loop"

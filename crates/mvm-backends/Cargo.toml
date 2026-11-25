@@ -26,7 +26,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
-which = { workspace = true }
 
 # Every driver here — Firecracker, HVF, libkrun, QEMU, and the mock that
 # stands in for them — drives a VMM through Unix sockets, file descriptors

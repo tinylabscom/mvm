@@ -1230,15 +1230,7 @@ fn parse_memory_limit_exceeded(show: &str) -> Option<MemoryLimitExceeded> {
 /// Resolved by inspection rather than by spawning: probing availability must
 /// not itself start a process on a host where the answer is "absent".
 fn binary_on_path(binary: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find_map(|dir| {
-        let candidate = dir.join(binary);
-        if candidate.is_file() {
-            candidate.canonicalize().ok()
-        } else {
-            None
-        }
-    })
+    crate::util::which(binary)?.canonicalize().ok()
 }
 
 /// The launcher this process can execute, or the exact missing mechanism.

@@ -56,7 +56,7 @@ impl BuilderVmConfig {
             .mvmctl_path
             .as_deref()
             .unwrap_or_else(|| Path::new("mvmctl"));
-        which::which(bin).is_ok()
+        mvm_core::util::which(bin).is_some()
     }
 
     fn mvmctl(&self) -> PathBuf {

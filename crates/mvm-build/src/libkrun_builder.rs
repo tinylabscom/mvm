@@ -2173,7 +2173,7 @@ fn resolve_supervisor_path_for(host: &HostProcess) -> Result<PathBuf, BuilderVmE
     }
     let binary_dir = host.binary_dir();
     let exe_dir = binary_dir.as_deref();
-    let on_path = which::which(LIBKRUN_SUPERVISOR_BIN).ok();
+    let on_path = mvm_core::util::which(LIBKRUN_SUPERVISOR_BIN);
     let source_checkout_build = match source_checkout_supervisor(exe_dir) {
         Some(Ok(path)) => Some(path),
         Some(Err(err)) => return Err(err),

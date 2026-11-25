@@ -115,7 +115,7 @@ impl AuditRunner for HostAuditRunner {
 }
 
 fn run_pip_audit(content_dir: &Path) -> Result<Vec<u8>> {
-    let pip_audit = which::which("pip-audit").map_err(|_| {
+    let pip_audit = mvm_core::util::which("pip-audit").ok_or_else(|| {
         anyhow::anyhow!(
             "pip-audit not found on PATH. Install with \
              `pipx install pip-audit` (preferred) or `python -m pip install pip-audit`, \
@@ -144,7 +144,7 @@ fn run_pip_audit(content_dir: &Path) -> Result<Vec<u8>> {
 }
 
 fn run_pnpm_audit(content_dir: &Path) -> Result<Vec<u8>> {
-    let pnpm = which::which("pnpm").map_err(|_| {
+    let pnpm = mvm_core::util::which("pnpm").ok_or_else(|| {
         anyhow::anyhow!(
             "pnpm not found on PATH. Install with `npm install -g pnpm` or \
              `corepack enable && corepack prepare pnpm@latest --activate`, \

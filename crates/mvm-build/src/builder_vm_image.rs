@@ -386,7 +386,7 @@ fn find_host_mkfs_ext4() -> Option<PathBuf> {
     .into_iter()
     .map(PathBuf::from)
     .find(|path| path.is_file())
-    .or_else(|| which::which("mkfs.ext4").ok())
+    .or_else(|| mvm_core::util::which("mkfs.ext4"))
 }
 
 pub(crate) fn host_file_4k_blocks(path: &Path) -> Result<u64, BuilderVmError> {

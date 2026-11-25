@@ -44,9 +44,7 @@ with open(out, "w") as f:
 "#;
 
 fn python3_on_path() -> Option<std::path::PathBuf> {
-    which::which("python3")
-        .ok()
-        .or_else(|| which::which("python").ok())
+    mvm_core::util::which("python3").or_else(|| mvm_core::util::which("python"))
 }
 
 #[test]

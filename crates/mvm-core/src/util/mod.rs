@@ -10,7 +10,9 @@ pub mod test_env;
 pub mod time;
 #[allow(clippy::module_inception)]
 pub mod util;
+mod which;
 #[cfg(unix)]
 pub mod writable_image;
 
 pub use self::util::parse_human_size;
+pub use self::which::which;

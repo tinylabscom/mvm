@@ -280,7 +280,6 @@ tempfile = "3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "ansi", "smallvec", "json", "env-filter"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
-which = "7"
 
 # Archive handling and compiler parsers.
 flate2 = "1"
@@ -470,9 +469,6 @@ serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 toml.workspace = true
-# Plan 73 Followup H — `tests/run_plan_mode.rs` resolves python3 from
-# PATH to drive the SDK record-mode auto-exec end-to-end.
-which.workspace = true
 # `tests/audit_receipt_export.rs` builds a synthetic chain-signed audit log
 # directly with the same primitives the host uses.
 mvm-hostd = { workspace = true, default-features = false }
