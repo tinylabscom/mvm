@@ -937,6 +937,45 @@ mod tests {
     }
 
     #[test]
+    fn an_unchanged_status_refreshes_its_age_without_replacing_the_file() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status.json");
+        let mut last = None;
+        let collecting = status_snapshot(
+            "vm",
+            &CoverageStatus::Collecting { generation: 1 },
+            HostLosses::default(),
+        );
+        write_status(&path, &collecting, &mut last);
+        let first = std::fs::metadata(&path).unwrap();
+        let long_ago = std::time::UNIX_EPOCH + Duration::from_secs(1);
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+
+        write_status(&path, &collecting, &mut last);
+        let refreshed = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            refreshed.ino(),
+            first.ino(),
+            "an unchanged snapshot keeps its directory entry"
+        );
+        assert!(refreshed.modified().unwrap() > long_ago, "its age is reset");
+
+        let degraded = status_snapshot(
+            "vm",
+            &CoverageStatus::Degraded { code: "x" },
+            HostLosses::default(),
+        );
+        write_status(&path, &degraded, &mut last);
+        let read: CollectorStatusSnapshot =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(read.status, "degraded:x", "a change is written");
+    }
+
+    #[test]
     fn an_absent_signer_is_reported_without_dialing_the_guest_until_it_appears() {
         use std::sync::atomic::AtomicUsize;
         let state = tempfile::tempdir().unwrap();
@@ -1115,13 +1154,33 @@ fn status_snapshot(
     }
 }
 
-/// Atomically replace the status file with the current snapshot.
-fn write_status(path: &std::path::Path, snapshot: &CollectorStatusSnapshot) {
-    let tmp = path.with_extension("json.tmp");
-    if let Ok(bytes) = serde_json::to_vec_pretty(snapshot)
-        && std::fs::write(&tmp, bytes).is_ok()
+/// Persist the current snapshot; `last` holds the bytes last persisted.
+///
+/// A changed snapshot atomically replaces the file. An unchanged one is
+/// rewritten in place with the same bytes: readers take the file's age as the
+/// collector's heartbeat, and a rewrite refreshes it without creating or
+/// renaming a directory entry, which the VM's console follower would wake for.
+fn write_status(
+    path: &std::path::Path,
+    snapshot: &CollectorStatusSnapshot,
+    last: &mut Option<Vec<u8>>,
+) {
+    use std::io::Write as _;
+    let Ok(bytes) = serde_json::to_vec_pretty(snapshot) else {
+        return;
+    };
+    if last.as_deref() == Some(bytes.as_slice())
+        && std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|mut file| file.write_all(&bytes))
+            .is_ok()
     {
-        let _ = std::fs::rename(&tmp, path);
+        return;
+    }
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, &bytes).is_ok() && std::fs::rename(&tmp, path).is_ok() {
+        *last = Some(bytes);
     }
 }
 
@@ -1303,9 +1362,11 @@ pub fn start_embedded(
     use anyhow::Context as _;
 
     let status_file = status_path(config);
+    let mut last_status = None;
     write_status(
         &status_file,
         &status_snapshot(vm_name, &CoverageStatus::Connecting, HostLosses::default()),
+        &mut last_status,
     );
 
     let anchor_bytes: [u8; 32] = std::fs::read(&config.host_anchor_path)
@@ -1406,6 +1467,7 @@ pub fn start_embedded(
                     write_status(
                         &status_file,
                         &status_snapshot(&vm_name, &current, losses.snapshot()),
+                        &mut last_status,
                     );
                 }
             })?
