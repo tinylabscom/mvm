@@ -12,7 +12,15 @@ use crate::world::CliWorld;
 #[when("the scripted mission demo runs")]
 fn run_demo(world: &mut CliWorld) {
     let output = Command::new("cargo")
-        .args(["test", "-p", "mvm-hostd", "--test", "mission_demo"])
+        .args([
+            "test",
+            "-p",
+            "mvm-hostd",
+            "--features",
+            "test-support",
+            "--test",
+            "mission_demo",
+        ])
         .args(["--", "--nocapture"])
         .current_dir(crate::steps::cli::workspace_root())
         .env_remove("RUSTFLAGS")

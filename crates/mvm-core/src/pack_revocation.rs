@@ -7,7 +7,7 @@
 //! learn about a revoked pack without any local config. `CombinedRevocations`
 //! lets a caller union the two sources into one `PackRevocationChecker`.
 
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::pack_trust::{RevokedPack, revocation_status};
@@ -23,14 +23,14 @@ pub const PACK_REVOCATION_SCHEMA_VERSION: u32 = 1;
 /// operator's hand-placed config, a fetched list can go stale if the
 /// publishing pipeline stalls — a caller that trusted a stale list would
 /// miss a real revocation.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackRevocationList {
     pub schema_version: u32,
     #[serde(default)]
     pub revocations: Vec<RevokedPack>,
-    pub issued_at: DateTime<Utc>,
-    pub not_after: DateTime<Utc>,
+    pub issued_at: UtcTimestamp,
+    pub not_after: UtcTimestamp,
 }
 
 impl PackRevocationChecker for PackRevocationList {
@@ -66,8 +66,8 @@ pub enum PackRevocationError {
     UnsupportedSchema { found: u32, supported: u32 },
     #[error("pack revocation list is stale: not_after {not_after} (now {now})")]
     Stale {
-        not_after: DateTime<Utc>,
-        now: DateTime<Utc>,
+        not_after: UtcTimestamp,
+        now: UtcTimestamp,
     },
 }
 
@@ -81,7 +81,7 @@ pub fn verify_pack_revocation_list(
     list_bytes: &[u8],
     cosign_bundle: &[u8],
     keyless: &KeylessTrust,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<PackRevocationList, PackRevocationError> {
     let identities: Vec<&str> = keyless
         .accepted_identities
@@ -121,7 +121,7 @@ pub fn verify_pack_revocation_list(
     _list_bytes: &[u8],
     _cosign_bundle: &[u8],
     _keyless: &KeylessTrust,
-    _now: DateTime<Utc>,
+    _now: UtcTimestamp,
 ) -> Result<PackRevocationList, PackRevocationError> {
     Err(PackRevocationError::SignatureInvalid(
         "manifest-verify feature disabled in this build; rebuild mvmctl with \
@@ -132,14 +132,12 @@ pub fn verify_pack_revocation_list(
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
-
     use super::*;
     use crate::pack_trust::PackTrustConfig;
 
-    fn utc(y: i32, m: u32, d: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(y, m, d, 0, 0, 0)
-            .single()
+    fn utc(y: i32, m: u32, d: u32) -> UtcTimestamp {
+        format!("{y:04}-{m:02}-{d:02}T00:00:00Z")
+            .parse()
             .expect("valid timestamp")
     }
 
@@ -167,6 +165,21 @@ mod tests {
         let json = serde_json::to_string(&list).expect("serialize");
         let recovered: PackRevocationList = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(recovered, list);
+    }
+
+    /// The serialized form is what a publisher signs and a host persists; it
+    /// must not move when the timestamp representation does.
+    #[test]
+    fn list_serialization_bytes_are_pinned() {
+        let whole = r#"{"schema_version":1,"revocations":[],"issued_at":"2026-01-01T00:00:00Z","not_after":"2026-12-31T00:00:00Z"}"#;
+        let list: PackRevocationList = serde_json::from_str(whole).expect("whole");
+        assert_eq!(serde_json::to_string(&list).expect("ser"), whole);
+        let fractional = r#"{"schema_version":1,"revocations":[],"issued_at":"2026-01-01T00:00:00.123Z","not_after":"2026-12-31T00:00:00.500Z"}"#;
+        let list: PackRevocationList = serde_json::from_str(fractional).expect("fractional");
+        assert_eq!(serde_json::to_string(&list).expect("ser"), fractional);
+        let offset = whole.replace("T00:00:00Z", "T00:00:00+00:00");
+        let list: PackRevocationList = serde_json::from_str(&offset).expect("offset");
+        assert_eq!(serde_json::to_string(&list).expect("ser"), whole);
     }
 
     #[test]

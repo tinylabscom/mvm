@@ -471,6 +471,22 @@ impl Default for PauseOpts {
     }
 }
 
+/// What one `expire_quarantined_mailbox` call did to a quarantined workload's
+/// mailbox store.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxExpiry {
+    /// Messages past their deadline that were expired.
+    pub expired: u64,
+    /// Compactions that retired records past their signed retention.
+    pub compactions: u64,
+    /// False when the call stopped at its commit bound with work still due;
+    /// call again. True says nothing is due now, not that the store is empty:
+    /// a record whose deadline or retention ends later needs a later call.
+    pub complete: bool,
+}
+
 /// The outcome of a successful `pause_machine`. A sealed-snapshot backend
 /// reports its replay epoch and artifact lengths; a backend-native vCPU pause
 /// reports zeroes because it creates no sealed artifacts. Plain data the caller

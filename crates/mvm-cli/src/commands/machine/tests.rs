@@ -3777,6 +3777,8 @@ fn machine_vm_op_uses_per_op_audit_verb() {
     assert_eq!(action.verb_name(), "snapshot");
     let action = parse(&["set-ttl", "myvm", "5m"]).unwrap();
     assert_eq!(action.verb_name(), "set-ttl");
+    let action = parse(&["mailbox-expire", "myvm", "--json"]).unwrap();
+    assert_eq!(action.verb_name(), "mailbox-expire");
 }
 
 #[test]

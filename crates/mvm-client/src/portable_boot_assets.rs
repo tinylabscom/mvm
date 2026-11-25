@@ -205,7 +205,7 @@ impl PreparedPortableBootAssets {
             "portable producer closure belongs to another home"
         );
         let current = mvm_core::image_set_revocation::ImageSetRevocationStore::in_mvm_home()
-            .load(chrono::Utc::now())?;
+            .load(mvm_core::util::time::utc_timestamp_now())?;
         anyhow::ensure!(
             current.checkpoint() == self.publisher.revocations().verified().checkpoint(),
             "portable publisher policy advanced; capture a fresh closure"

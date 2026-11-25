@@ -7,14 +7,8 @@
 //! common shape to a single line and makes adding a future optional
 //! field a one-method change in the builder.
 //!
-//! Companion to `scripts/migrate-audit-emit.sh`. Together they cover
-//! the workflow:
-//!
-//!   * Sweep: `./scripts/migrate-audit-emit.sh` rewrites the four
-//!     common shapes via perl regex.
-//!   * Audit: `cargo xtask check-audit-positional` reports anything
-//!     the sweep skipped, line by line, so a human can finish the
-//!     migration.
+//! `cargo run -p xtask -- check-audit-positional` reports each remaining
+//! positional call, line by line, so a human can finish the migration.
 //!
 //! Opt-out: add `// allow(audit-positional): <reason>` on the line
 //! above the offending call (one line per call). Reasons land in the

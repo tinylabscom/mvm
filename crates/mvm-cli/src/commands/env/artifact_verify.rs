@@ -105,7 +105,7 @@ pub(crate) fn fetch_expected_hashes(
     download_file(&checksums_url, &tmp_path).with_context(|| {
         format!(
             "Failed to download checksum manifest from {checksums_url}.\n\
-             ADR-002 §W5.1 requires a hash-verified download; refusing to\n\
+             ADR-001 claim 6 requires a hash-verified download; refusing to\n\
              proceed without the checksum file."
         )
     })?;
@@ -132,7 +132,7 @@ pub(crate) fn fetch_expected_hashes(
             anyhow::bail!(
                 "Checksum manifest at {checksums_url} did not include\n\
                  an entry for '{w}'. Refusing to download an unverifiable\n\
-                 artifact. ADR-002 §W5.1."
+                 artifact. ADR-001 claim 6."
             );
         }
     }
@@ -161,7 +161,7 @@ pub(super) fn verify_manifest_signature(
         anyhow::Error::new(error).context(format!(
             "Refusing to parse an unauthenticated checksum manifest \
              ({}). Every artifact digest below it would inherit the \
-             manifest's trust. ADR-002 §W5.1.",
+             manifest's trust. ADR-001 claim 20.",
             manifest.asset
         ))
     })
@@ -180,7 +180,7 @@ pub(crate) fn verify_artifact_hash(
     if std::env::var_os("MVM_SKIP_HASH_VERIFY").is_some() {
         tracing::warn!(
             "MVM_SKIP_HASH_VERIFY set — skipping integrity check on {name}. \
-             ADR-002 §W5.1 documents this as an emergency-rotation escape hatch."
+             This is an emergency-rotation escape hatch."
         );
         return Ok(());
     }
@@ -220,7 +220,7 @@ pub(crate) fn verify_artifact_hash(
              - mid-flight corruption (retry the download);\n\
              - mirror/CDN cache poisoning (open an issue);\n\
              - the release was re-uploaded and the manifest is stale.\n\
-             ADR-002 §W5.1."
+             ADR-001 claim 6."
         );
     }
     ui::info(&format!("  ✓ verified {name} sha256={}", &actual[..12]));

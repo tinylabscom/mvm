@@ -10,7 +10,7 @@
 //!    `readiness_of` / `register_machine` / `touch_activity` / `set_ttl` /
 //!    `gc_stale_registrations`.
 //! 2. `any-backend` — `AnyBackend` VMM dispatch. Route through mvm-client:
-//!    `start_prepared` / `backend_is_running` / `backend_stop_by_name` /
+//!    admitted launch owners / `backend_is_running` / `backend_stop_by_name` /
 //!    `list_machines` / `stop_machine` / ….
 //!
 //! Legitimately-direct callers — the store surfaces (checkpoint/snapshot), the
@@ -160,7 +160,7 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
         bail!(
             "check-cli-runtime-surface: {} mvm-runtime reach(es) in mvm-cli drive-a-machine code.\n\
              Route them through the mvm-client facade (record_readiness / register_machine /\n\
-             set_ttl / gc_stale_registrations / start_prepared / backend_stop_by_name / …). A\n\
+             set_ttl / gc_stale_registrations / admitted launch owners / backend_stop_by_name / …). A\n\
              legitimately-direct caller (a store surface, a streaming verb, or build/diagnostics\n\
              backend selection) earns a rule-scoped EXEMPTIONS entry in\n\
              xtask/src/check_cli_runtime_surface.rs, with a reason.\n{}",

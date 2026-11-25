@@ -2337,6 +2337,9 @@ mod tests {
                 "crates/mvm-hostd/src/seal_gate.rs",
                 "crates/mvm-hostd/src/mailbox_service.rs",
                 "crates/mvm-hostd/src/plan_admission/cli_cold.rs",
+                // Enabled through mvm-client's dev-dependency so its retained
+                // fork containment tests exercise the private test restorer.
+                "crates/mvm-hostd/src/plan_admission/retained_vm_full.rs",
                 "tests/audit_emissions_live.rs",
             ]
             .iter()

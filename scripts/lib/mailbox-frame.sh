@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # The one place that knows how a workload leaves a message for the host.
 #
-# Sourced by scripts/mailbox-live-witness.sh and scripts/mission-demo-live.sh.
+# Sourced by scripts/mission-demo-live.sh.
 # The caller defines `mvm`, a function that runs its mvmctl. When the outbox
 # layout changes, this is the only function to change.
 

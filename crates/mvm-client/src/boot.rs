@@ -1,9 +1,8 @@
-//! Host-local dispatch for admitted boots and unmigrated prepared sources.
+//! Host-local dispatch for admitted boots and typed lifecycle owners.
 //!
 //! Persistent starts hand their one-use admitted plan to hostd while keeping
-//! post-readiness acceptance in the client. The prepared-start helpers below
-//! remain for sources not yet migrated to that executor; no serialized plan
-//! projection grants authority to either path.
+//! post-readiness acceptance in the client. No serialized plan projection grants
+//! authority to the remaining native-owned handoff.
 
 use crate::{MvmError, Result};
 use mvm_core::protocol::vm_backend::{VmId, VmStatus};
@@ -141,8 +140,7 @@ pub fn resume_and_boot_local(
     )
 }
 
-/// A VM [`start_prepared`] started, together with the backend object that
-/// started it.
+/// A VM started through an admitted owner, together with its backend object.
 ///
 /// Anything done to the VM after the start — applying its grants, undoing the
 /// launch — has to go to this object, not to one rebuilt from the hypervisor
@@ -169,50 +167,6 @@ impl StartedVm {
     pub(crate) fn from_started(backend: mvm_runtime::backend::AnyBackend, vm_id: VmId) -> Self {
         Self { backend, vm_id }
     }
-}
-
-/// Verify `backend` supports workloads and start the fully-prepared config on
-/// it. Both failure arms carry the same `backend-start` reason, with the
-/// underlying error chain preserved so the caller can surface and audit it.
-///
-/// Returns the backend that performed the start alongside the VM id, so the
-/// post-start steps act on that same object.
-pub fn start_prepared(
-    backend: mvm_runtime::backend::AnyBackend,
-    config: &mvm_core::vm_backend::VmStartConfig,
-) -> Result<StartedVm> {
-    start_prepared_custodied(backend, config, Vec::new())
-}
-
-/// Start with original writable-image custody transferred to the final writer.
-#[cfg(unix)]
-pub fn start_prepared_custodied(
-    backend: mvm_runtime::backend::AnyBackend,
-    config: &mvm_core::vm_backend::VmStartConfig,
-    images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
-) -> Result<StartedVm> {
-    start_prepared_custodied_with_verified_runtime(backend, config, images, None)
-}
-
-/// Transfer release proof custody beside the selected config to the backend.
-#[cfg(unix)]
-pub fn start_prepared_custodied_with_verified_runtime(
-    backend: mvm_runtime::backend::AnyBackend,
-    config: &mvm_core::vm_backend::VmStartConfig,
-    images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
-    runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
-) -> Result<StartedVm> {
-    mvm_runtime::workload_backend::require_workload_backend(&backend).map_err(|e| {
-        MvmError::Backend {
-            reason: format!("{e:#}"),
-        }
-    })?;
-    let vm_id = backend
-        .start_custodied_verified_release(config, images, runtime.map(|set| set.release()))
-        .map_err(|e| MvmError::Backend {
-            reason: format!("{e:#}"),
-        })?;
-    Ok(StartedVm { backend, vm_id })
 }
 
 /// Spend a persistent admission through hostd while retaining its readiness owner.

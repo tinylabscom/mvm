@@ -464,6 +464,9 @@ seed_workload_kernel
 if [[ "${SKIP_BUILD}" != "1" ]]; then
   "${run_env[@]}" cargo build --release -p mvmctl --bin mvmctl
   "${run_env[@]}" cargo build --release -p mvm-hostd --bin mvm-network-endpoint
+  # mvmctl finds these beside itself; without them every unit's telemetry
+  # collector has no signer and backs off for the whole run.
+  "${run_env[@]}" cargo build --release -p mvm-hostd --bin mvm-host-agent --bin mvm-signer-helper
   if [[ "${BACKEND}" == "hvf" ]]; then
     "${run_env[@]}" cargo build --release -p mvm-hostd --bin mvm-hvf-supervisor
   fi

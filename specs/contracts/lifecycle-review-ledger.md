@@ -499,6 +499,38 @@ labels and controller rollback classification. They do not qualify a live
 Firecracker/HVF trial, hardware attestation, cloud/GCP behavior, native
 backend custody, Nix artifacts or formal launch performance.
 
+## Final workload dispatch source boundary
+
+The final [#5520](https://github.com/tinylabscom/mvm/issues/5520) source gate
+classifies workload dispatch into fresh-authority and same-identity owners.
+Fresh authority remains with the private hostd admitted tail, typed client
+facades for CLI cold, warm claim, filesystem quick fork, operator trial and
+full-VM fresh-child fork, explicit native/actor ownership, and named lower
+runtime/backend implementations. A cold-tier durable-session resume stages a
+retained filesystem into a fresh boot under a newly signed plan; it is not a
+same-identity restore exception.
+
+Same identity has exactly two owners. `mvmctl vm checkpoint restore` enters the
+client facade and then one runtime vm_full transaction. One authenticated
+metadata value selects the target identity, backend restorer, content, tenant
+and retained-runtime checks, so a catalog replacement cannot mix generations.
+Sealed instance resume enters `verify_and_resume*` and its guarded no-NIC
+load/resume implementation. Neither path is forced through fresh admission.
+
+The generic public client prepared-start functions and raw checkpoint restore
+reexports are removed. Full-VM fresh-child dispatch accepts only the concrete
+Firecracker and HVF restorers selected from authenticated checkpoint origin;
+the hostd boundary no longer accepts an arbitrary callback hidden behind a
+backend tag. The production-source gate strips comments, strings and test-only
+items, retains the raw-template checks, rejects additional same-identity owners
+or fresh dispatch in those modules, and pins the exact typed seams.
+
+Fixture and compile-fail evidence covers the source/API boundary. Existing
+HMAC, epoch, runtime, no-NIC and vm_full lineage witnesses remain the behavioral
+evidence. This source classification does not qualify a live Firecracker/HVF
+restore or launch, cloud/GCP behavior, Nix artifacts, or formal cold/warm
+performance.
+
 ## Signed application HVF startup diagnostics
 
 Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone
@@ -930,11 +962,28 @@ what is due. The stop kills the helper two seconds after the signal, and a pass
 cut off there leaves the remainder unexpired; the pass is bounded in rounds,
 not in time. A third test stops a parked helper after a quarantine and sees the
 overdue message expired, and a test of the helper binary sees it exit with
-status zero on the signal. Records whose retention ends
-later, a helper whose ordinary maintenance commit raced the quarantine between
-that read and the commit, an already-exited helper,
-and actor journals are not covered, and their ciphertext can outlive its
-retention until the store is removed by hand. An actor endpoint's
+status zero on the signal. A quarantined
+workload's store can also be expired with no VM and no helper:
+`expire_quarantined_mailbox` in `mailbox_process/offline.rs`, reached through
+the optional `MvmClient::expire_quarantined_mailbox` that the local backend
+implements and through `mvmctl machine mailbox-expire`. It refuses unless the
+ledger names the workload quarantined at the stored plan's epoch, and while the
+VM or the recorded helper pid is alive. It opens the store under the custody
+manifest the host signed at the production launch rather than a launch posture:
+the stored plan must hash to its own id and the manifest must name that id and
+nonce. It enrolls as the helper does, marks every commit retention-only, and
+commits only expiry and compaction, at most 4096 commits a call. It expires
+what is due at the time of the call; nothing schedules it, so a record whose
+deadline or retention ends later stays until someone calls again. It needs the
+VM's state directory, because the stored plan and the helper's pid file are
+there, so a store whose VM was removed is not reachable this way. The
+journal admits one writer, so a second call at the same time, or a helper that
+has the store open, makes the call refuse as busy. A test stops a helper
+with a message outstanding, quarantines the workload, and sees the call expire
+the message once its deadline passes and the destination's tip advance. A
+helper whose ordinary maintenance commit raced the quarantine between its read
+and the commit, and actor journals, which have no expiry at all, are still not
+covered. An actor endpoint's
 opener takes the ordering choice as a required argument, so a new opener has to
 name it; nothing stops one from naming the unordered choice for a production
 launch. A

@@ -1855,13 +1855,6 @@ fn the_cross_compile_installers_share_a_cortex_flag_compatible_zigbuild() {
         action.contains(&format!("VERSION={version}")),
         "{action_path} must install the workspace cargo-zigbuild pin {version}"
     );
-
-    let script_path = "scripts/local-aarch64-no-kvm-smoke.sh";
-    let script = fs::read_to_string(script_path).expect("read local aarch64 smoke script");
-    assert!(
-        script.contains(&format!("cargo-zigbuild --version {version}")),
-        "{script_path} must install the workspace cargo-zigbuild pin {version}"
-    );
 }
 
 /// Every workflow that can mint an identity a shipped binary trusts must be
