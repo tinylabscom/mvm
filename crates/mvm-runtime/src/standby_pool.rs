@@ -67,6 +67,22 @@ impl SupervisorStandbyPool {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
+    /// Load a selected record, distinguishing a confirmed concurrent removal.
+    ///
+    /// Malformed and unreadable records remain errors: only `NotFound` proves
+    /// that the selected parent was consumed between selection and reservation.
+    pub(crate) fn load_selected(&self, id: &str) -> Result<Option<StandbyHandle>> {
+        let path = self.root.join(id).join(HANDLE_FILE);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| format!("read {}", path.display()));
+            }
+        };
+        Ok(Some(serde_json::from_slice(&bytes)?))
+    }
+
     /// All recorded handles (ignoring unreadable/garbage dirs — they get reaped by
     /// [`reap_stale`](Self::reap_stale)).
     pub fn list(&self) -> Result<Vec<StandbyHandle>> {
@@ -387,6 +403,28 @@ fn set_mode_0700(p: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use mvm_core::vm_backend::{StandbyCompat, StandbyHandle, StandbyState};
+
+    #[test]
+    fn selected_load_distinguishes_removed_from_malformed_records() {
+        let tmp = tempfile::tempdir().expect("pool");
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        assert!(
+            pool.load_selected("winner-removed")
+                .expect("confirmed absence")
+                .is_none()
+        );
+
+        let malformed_dir = tmp.path().join("malformed");
+        std::fs::create_dir_all(&malformed_dir).expect("malformed record dir");
+        std::fs::write(malformed_dir.join(HANDLE_FILE), b"{not json").expect("malformed record");
+        let error = pool
+            .load_selected("malformed")
+            .expect_err("malformed record is not reservation loss");
+        assert!(
+            error.to_string().contains("key must be a string"),
+            "{error:#}"
+        );
+    }
 
     #[test]
     fn standby_pool_ttl_exceeds_always_warm_idle_window() {

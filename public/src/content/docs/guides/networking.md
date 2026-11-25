@@ -178,7 +178,7 @@ mediated ping helper is the only ICMP-shaped surface.
 For a repeatable live proof on macOS Apple Silicon, run:
 
 ```bash
-just kernel::hvf-oci-smoke
+just e2e hvf-oci-smoke
 ```
 
 The smoke boots `python:3.12-alpine` through the production FlowMux path,

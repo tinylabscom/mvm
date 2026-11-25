@@ -39,7 +39,7 @@
 #   MVM_INSTALL_DIR        directory for the commands on PATH; default: ~/.local/bin
 #   MVM_INSTALL_LIB_DIR    versioned release directories; default: <MVM_INSTALL_DIR>/../lib/mvm
 #   MVM_INSTALL_KEEP       complete releases to keep, current included; default: 3
-#   MVM_INSTALL_BACKEND    backend to stage (e.g. libkrun); default: auto-detect,
+#   MVM_INSTALL_BACKEND    backend to stage (e.g. qemu); default: auto-detect,
 #                          same as --backend
 #   MVM_TRUSTED_ARCHIVE_SHA256 optional independent archive hash for a fresh install
 #   MVM_TRUSTED_COSIGN_SHA256 trusted bootstrap-cosign hash override (rotation only)
@@ -73,10 +73,10 @@ KEEP="${MVM_INSTALL_KEEP:-3}"
 
 # What staging drops from the extracted archive, and the backend this host
 # ends up with. Both are computed from the archive's components.tsv after
-# extraction (select_backend_components); archives predating that file fall
-# back to the rule they were published with: the libkrun compatibility tier
-# stages on macOS hosts older than 26 and drops out on 26+ and on Linux. The
-# installer-compat lane reads the legacy list by name.
+# extraction (select_backend_components); archives predating that file carry
+# libkrun payloads for macOS hosts older than 26, which this installer no
+# longer supports, so staging always drops them. The installer-compat lane
+# reads the legacy list by name.
 PRUNE_PAYLOADS=""
 SELECTED_BACKEND=""
 LEGACY_LIBKRUN_TIER_PAYLOADS="mvm-libkrun-supervisor lib licenses sources SOURCE-OFFER.txt SOURCE-PINS"
@@ -88,6 +88,9 @@ RELEASE_MARKER=".mvm-release"
 say() { printf '[mvm] %s\n' "$1"; }
 warn() { printf '[mvm] WARN: %s\n' "$1" >&2; }
 die() { printf '[mvm] ERROR: %s\n' "$1" >&2; exit 1; }
+
+# The sentence mvmctl prints for the same refusal.
+UNSUPPORTED_HOST="this host is not supported: mvm runs on Apple Silicon macOS 26 or later and on Linux with KVM. See https://runmvm.com/reference/platform-support/"
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 
 detect_target() {
@@ -96,9 +99,8 @@ detect_target() {
   case "$os" in
     Darwin) case "$arch" in
         arm64|aarch64) echo "aarch64-apple-darwin" ;;
-        # Intel mac is deferred — no x86_64-apple-darwin asset is published
-        # yet (Intel-macOS CI runners unavailable). Apple Silicon only.
-        x86_64) die "Intel macOS is not supported yet — Apple Silicon macs and Linux only" ;;
+        # No x86_64-apple-darwin asset is published. Apple Silicon only.
+        x86_64) die "$UNSUPPORTED_HOST" ;;
         *) die "unsupported macOS arch: $arch" ;;
       esac ;;
     Linux) case "$arch" in
@@ -909,7 +911,7 @@ stage_guest_runtime() {
 # `-` marks an empty field; files is a space-separated `kind:path` list with
 # kind one of bin/dir/file. The install-time default itself comes from the
 # just-extracted mvmctl (`backend detect --plain`), so the shell never
-# reimplements the macOS-version tier logic.
+# reimplements the table's host matching.
 
 # Host facts for the row match: the macOS major version on Darwin (empty
 # elsewhere), and 1/0 for a present /dev/kvm. The KVM probe is existence, the
@@ -1409,6 +1411,9 @@ esac
 
 TARGET="$(detect_target)"
 ARCHIVE="mvmctl-${TARGET}.tar.gz"
+if [ -n "$MACOS_MAJOR" ] && [ "$MACOS_MAJOR" -lt 26 ]; then
+  die "$UNSUPPORTED_HOST"
+fi
 
 # An explicit pin wins. Otherwise install the newest stable release; the baked
 # release is the fallback for a host that cannot reach the releases API (rate
@@ -1504,13 +1509,9 @@ else
   if [ -n "$BACKEND_REQUESTED" ]; then
     die "--backend / MVM_INSTALL_BACKEND need a release carrying components.tsv; $VERSION predates backend selection"
   fi
-  # The rule the pre-table releases were published with: the libkrun
-  # compatibility tier stages only on macOS hosts older than 26; macOS 26+
-  # and every Linux host leave it out.
+  # Pre-table releases carry libkrun payloads for macOS hosts older than
+  # 26; no supported host stages them.
   PRUNE_PAYLOADS="$LEGACY_LIBKRUN_TIER_PAYLOADS"
-  if [ "$(uname -s)" = "Darwin" ] && [ "$MACOS_MAJOR" -lt 26 ]; then
-    PRUNE_PAYLOADS=""
-  fi
 fi
 stage_guest_runtime
 

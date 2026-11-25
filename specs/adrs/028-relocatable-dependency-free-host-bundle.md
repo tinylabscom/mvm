@@ -2,6 +2,14 @@
 
 ## Status
 
+**Amended 2026-11-24** ([#4839](https://github.com/tinylabscom/mvm/issues/4839)).
+macOS below 26 is no longer supported, so the release no longer builds or
+ships the libkrun compatibility tier described below, and #4577's witness on
+macOS 13-25 hardware is moot. A release install on macOS 26+ uses HVF and
+needs no Homebrew package; libkrun is a source-build opt-in that uses the
+host's own installation. The rest of this status paragraph records the state
+before that decision.
+
 Accepted — staged. The release archive for macOS 13-25 now carries the
 libkrun compatibility tier (#4688), so a release install needs no Homebrew
 VMM package; macOS 26+ uses HVF and needs none either. A source build still

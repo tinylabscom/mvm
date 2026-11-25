@@ -268,6 +268,9 @@ pub struct AcquisitionWork {
     /// boots, so on that lane this is zero, and any nonzero value is work the
     /// launch repeated.
     pub artifact_bytes_hashed: u64,
+    /// Time spent reading and digesting those bytes, in microseconds. Zero
+    /// exactly when `artifact_bytes_hashed` is.
+    pub artifact_hash_us: u64,
     /// Snapshots taken of the host process table during this launch.
     ///
     /// Each one costs a subprocess and scales with how busy the host is, not
@@ -289,6 +292,7 @@ struct AcquisitionRecorder {
     image_pull: AtomicBool,
     image_build: AtomicBool,
     artifact_bytes_hashed: AtomicU64,
+    artifact_hash_us: AtomicU64,
     process_table_scans: AtomicU64,
     bundle_verified: AtomicBool,
     bundle_verify_us: AtomicU64,
@@ -298,6 +302,7 @@ static ACQUISITION: AcquisitionRecorder = AcquisitionRecorder {
     image_pull: AtomicBool::new(false),
     image_build: AtomicBool::new(false),
     artifact_bytes_hashed: AtomicU64::new(0),
+    artifact_hash_us: AtomicU64::new(0),
     process_table_scans: AtomicU64::new(0),
     bundle_verified: AtomicBool::new(false),
     bundle_verify_us: AtomicU64::new(0),
@@ -321,6 +326,15 @@ pub fn record_artifact_bytes_hashed(bytes: u64) {
     ACQUISITION
         .artifact_bytes_hashed
         .fetch_add(bytes, Ordering::Relaxed);
+}
+
+/// Record that digesting artifacts took `elapsed`, beside the byte count, so a
+/// launch report can tell hashing from booting. Accumulates like the bytes.
+pub fn record_artifact_hash_time(elapsed: Duration) {
+    let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+    ACQUISITION
+        .artifact_hash_us
+        .fetch_add(micros, Ordering::Relaxed);
 }
 
 /// Record that this process snapshotted the host process table.
@@ -350,6 +364,7 @@ pub fn recorded_acquisition() -> AcquisitionWork {
         image_pull: ACQUISITION.image_pull.load(Ordering::Relaxed),
         image_build: ACQUISITION.image_build.load(Ordering::Relaxed),
         artifact_bytes_hashed: ACQUISITION.artifact_bytes_hashed.load(Ordering::Relaxed),
+        artifact_hash_us: ACQUISITION.artifact_hash_us.load(Ordering::Relaxed),
         process_table_scans: ACQUISITION.process_table_scans.load(Ordering::Relaxed),
         bundle_verify_us: ACQUISITION
             .bundle_verified
@@ -611,6 +626,16 @@ mod tests {
             recorded_acquisition().artifact_bytes_hashed >= before + 201_000,
             "each reported read must add to the total, not replace it"
         );
+    }
+
+    /// Hash time accumulates like the bytes it belongs to, asserted as a delta
+    /// for the same reason.
+    #[test]
+    fn artifact_hash_time_accumulates_every_read() {
+        let before = recorded_acquisition().artifact_hash_us;
+        record_artifact_hash_time(Duration::from_micros(1_500));
+        record_artifact_hash_time(Duration::from_micros(500));
+        assert!(recorded_acquisition().artifact_hash_us >= before + 2_000);
     }
 
     /// Bundle verification is reported as a duration only once one ran, so an

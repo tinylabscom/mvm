@@ -136,7 +136,7 @@ fn emit_pinned_toolchain_env(workspace_root: &Path) {
 /// Both feature variants write the same `target/<profile>/mvmctl`, so whichever
 /// cargo invocation ran last decides whether the binary on `PATH` carries the
 /// payload. A cached, zero-compile `cargo build` is enough to take it away,
-/// which is why an unembedded `mvmctl` kept coming back after a `just embed`
+/// which is why an unembedded `mvmctl` kept coming back after a `just build embed`
 /// that had genuinely worked. Restoring here closes that: the key covers each
 /// binary's dependency closure, `Cargo.lock` and the pinned toolchain, so a hit
 /// is exactly the bytes this tree produces — the same proof the embedding arm
@@ -188,7 +188,7 @@ fn restore_embedded_from_store(
         return Vec::new();
     };
     // Watch the store itself, not just the sources. Publishing from a
-    // `just embed` changes no file this unit already watches, so without this
+    // `just build embed` changes no file this unit already watches, so without this
     // the restore below would never re-run and the next plain build would keep
     // shipping the empty table it cached — the exact swap this arm exists to
     // stop. Created when absent so the watch is a stable directory rather than
@@ -318,7 +318,7 @@ fn embed_host_binaries(workspace_root: &Path, out_dir: &Path) {
             eprintln!(
                 "[build.rs] embedded {} is STALE — this build's changes are \
                  NOT in it. Dev profile reuses it rather than pay a ~163s \
-                 cross-compile per edit; run `just payload::refresh` or build \
+                 cross-compile per edit; run `just clean payload` or build \
                  with MVM_EMBED_NO_CACHE=1 before booting a VM that must \
                  carry the change.",
                 binary.name
@@ -365,7 +365,7 @@ fn embed_host_binaries(workspace_root: &Path, out_dir: &Path) {
         println!(
             "cargo:warning=embedded host binaries are STALE (this build's \
              changes to their sources are not in them). Dev builds reuse them \
-             instead of a ~163s cross-compile. Run `just payload::refresh`, or \
+             instead of a ~163s cross-compile. Run `just clean payload`, or \
              set MVM_EMBED_NO_CACHE=1, before booting a VM that must carry \
              the change."
         );

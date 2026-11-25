@@ -2053,21 +2053,21 @@ mod tests {
     }
 
     fn gate_with_pinned_localhost() -> EgressGate {
-        use chrono::{Duration as ChronoDuration, Utc};
         use mvm_contract::policy::dns_pin::{DnsPin, DnsPinRegistry};
         use mvm_contract::policy::network_policy::{HostPort, NetworkPolicy};
+        use mvm_core::util::time::{utc_now, utc_plus_duration};
 
-        let now = Utc::now();
-        let later = now + ChronoDuration::hours(1);
+        let now = utc_now();
+        let later = utc_plus_duration(Duration::from_secs(3600));
         let mut pins = DnsPinRegistry::new();
         pins.add(DnsPin::at(
             "localhost",
             vec!["127.0.0.1".parse().unwrap()],
-            now.to_rfc3339(),
-            later.to_rfc3339(),
+            now.clone(),
+            later,
         ));
         let policy = NetworkPolicy::allow_list(vec![HostPort::new("localhost", 53)]);
-        EgressGate::from_network_policy(&policy, &pins, &now.to_rfc3339())
+        EgressGate::from_network_policy(&policy, &pins, &now)
     }
 
     pub(super) fn run_session(
@@ -2137,21 +2137,16 @@ mod tests {
     /// A gate that pins `name` to `ip` and admits it on `port`, so a test can
     /// use a name without needing DNS.
     pub(super) fn gate_pinning_name(name: &str, ip: IpAddr, port: u16) -> EgressGate {
-        use chrono::{Duration as ChronoDuration, Utc};
         use mvm_contract::policy::dns_pin::{DnsPin, DnsPinRegistry};
         use mvm_contract::policy::network_policy::{HostPort, NetworkPolicy};
+        use mvm_core::util::time::{utc_now, utc_plus_duration};
 
-        let now = Utc::now();
-        let later = now + ChronoDuration::hours(1);
+        let now = utc_now();
+        let later = utc_plus_duration(Duration::from_secs(3600));
         let mut pins = DnsPinRegistry::new();
-        pins.add(DnsPin::at(
-            name,
-            vec![ip],
-            now.to_rfc3339(),
-            later.to_rfc3339(),
-        ));
+        pins.add(DnsPin::at(name, vec![ip], now.clone(), later));
         let policy = NetworkPolicy::allow_list(vec![HostPort::new(name, port)]);
-        EgressGate::from_network_policy(&policy, &pins, &now.to_rfc3339())
+        EgressGate::from_network_policy(&policy, &pins, &now)
     }
 
     /// A chain-signed recorder writing to `path`, plus the key that verifies it.

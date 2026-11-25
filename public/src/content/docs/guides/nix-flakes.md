@@ -156,7 +156,7 @@ Operationally, this means:
 - Updating the runtime overlay is the normal way to update guest runtime
   binaries for **future boots**.
 - You can prebuild that artifact explicitly with
-  `mvmctl dev runtime-overlay build` (or `just check::overlay` in a
+  `mvmctl dev runtime-overlay build` (or `just build overlay` in a
   source checkout) so later required-overlay boots do not pay guest-binary
   rebuild cost on the hot path.
 - A stopped VM picks up the newer overlay on its next `machine start` /

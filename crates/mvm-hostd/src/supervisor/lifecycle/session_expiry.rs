@@ -28,10 +28,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::audit::{LocalAuditKind, emit as audit_emit};
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::session::{self, SessionId, SessionRecord, SessionState};
+use mvm_core::util::time::try_utc_timestamp_now;
+#[cfg(test)]
+use mvm_core::util::time::utc_timestamp_now;
 
 use super::wall_clock::{
     SupervisorTimerInputs, WorkloadKiller, decode_admitted_plan, supervisor_emitter,
@@ -60,7 +63,7 @@ const DISCOVERY_WINDOW: Duration = Duration::from_secs(300);
 /// # Errors
 /// The record could not be read or rewritten, or changed state between the
 /// read and the rewrite.
-pub fn claim_expired_session(id: &SessionId, now: DateTime<Utc>) -> Result<Option<SessionRecord>> {
+pub fn claim_expired_session(id: &SessionId, now: UtcTimestamp) -> Result<Option<SessionRecord>> {
     let Some(record) = session::read_session(id)? else {
         return Ok(None);
     };
@@ -128,7 +131,7 @@ enum Pass {
 /// has been idle past its timeout.
 pub struct SessionExpiryWatcher {
     vm_name: String,
-    booted_at: DateTime<Utc>,
+    booted_at: UtcTimestamp,
     sealer: Option<Sealer>,
     killer: Box<dyn WorkloadKiller>,
     tracked: Option<SessionId>,
@@ -140,7 +143,7 @@ impl SessionExpiryWatcher {
     #[must_use]
     pub fn new(
         vm_name: impl Into<String>,
-        booted_at: DateTime<Utc>,
+        booted_at: UtcTimestamp,
         killer: Box<dyn WorkloadKiller>,
     ) -> Self {
         Self {
@@ -161,7 +164,7 @@ impl SessionExpiryWatcher {
 
     /// Run one pass at `now` and stop the guest if the session expired.
     /// Returns whether there is anything left to watch.
-    pub fn step(&mut self, now: DateTime<Utc>) -> bool {
+    pub fn step(&mut self, now: UtcTimestamp) -> bool {
         match self.pass(now) {
             Pass::Continue => true,
             Pass::StandDown => false,
@@ -176,13 +179,17 @@ impl SessionExpiryWatcher {
     pub fn run(mut self, poll: Duration) {
         loop {
             std::thread::sleep(poll);
-            if !self.step(Utc::now()) {
-                return;
+            match try_utc_timestamp_now() {
+                Ok(now) if !self.step(now) => return,
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(err = %e, "session expiry: host clock unusable; skipping this poll")
+                }
             }
         }
     }
 
-    fn pass(&mut self, now: DateTime<Utc>) -> Pass {
+    fn pass(&mut self, now: UtcTimestamp) -> Pass {
         let id = match &self.tracked {
             Some(id) => id.clone(),
             None => match self.discover() {
@@ -233,21 +240,21 @@ impl SessionExpiryWatcher {
                 return None;
             }
         };
-        let booted = self.booted_at.timestamp();
+        let booted = self.booted_at.unix_secs();
         records
             .into_iter()
             .filter(|r| r.state == SessionState::Running && r.vm_name == self.vm_name)
             .find(|r| {
-                DateTime::parse_from_rfc3339(&r.started_at)
-                    .is_ok_and(|started| started.timestamp() >= booted)
+                r.started_at
+                    .parse::<UtcTimestamp>()
+                    .is_ok_and(|started| started.unix_secs() >= booted)
             })
             .map(|r| r.id)
     }
 
-    fn discovery_closed(&self, now: DateTime<Utc>) -> bool {
-        now.signed_duration_since(self.booted_at)
-            .to_std()
-            .is_ok_and(|elapsed| elapsed >= DISCOVERY_WINDOW)
+    fn discovery_closed(&self, now: UtcTimestamp) -> bool {
+        now.duration_since(self.booted_at)
+            .is_some_and(|elapsed| elapsed >= DISCOVERY_WINDOW)
     }
 
     /// Best-effort: the guest is stopped either way, and a missing seal is
@@ -299,7 +306,11 @@ pub fn arm_for_supervisor(
         );
         return false;
     };
-    let mut watcher = SessionExpiryWatcher::new(vm_name, Utc::now(), killer);
+    let Ok(booted) = try_utc_timestamp_now() else {
+        tracing::warn!(vm = %vm_name, "session expiry: host clock unusable; not watching");
+        return false;
+    };
+    let mut watcher = SessionExpiryWatcher::new(vm_name, booted, killer);
     match decode_admitted_plan(plan_json).and_then(|plan| Ok((plan, supervisor_emitter(inputs)?))) {
         Ok((plan, emitter)) => watcher = watcher.sealing_under(plan, emitter),
         Err(e) => tracing::warn!(
@@ -322,6 +333,10 @@ pub fn arm_for_supervisor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plus(t: UtcTimestamp, secs: i64) -> UtcTimestamp {
+        t.checked_add_secs(secs).unwrap()
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ed25519_dalek::SigningKey;
@@ -367,12 +382,12 @@ mod tests {
         }
     }
 
-    fn rfc3339(at: DateTime<Utc>) -> String {
-        at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    fn rfc3339(at: UtcTimestamp) -> String {
+        at.to_string()
     }
 
     /// A running session for `vm`, started at `started`, idle since then.
-    fn session_for(vm: &str, started: DateTime<Utc>, idle_timeout_secs: u64) -> SessionRecord {
+    fn session_for(vm: &str, started: UtcTimestamp, idle_timeout_secs: u64) -> SessionRecord {
         let mut record = SessionRecord::new_running(vm, "wl", SessionMode::Prod);
         record.started_at = rfc3339(started);
         record.idle_timeout_secs = idle_timeout_secs;
@@ -387,14 +402,14 @@ mod tests {
             .state
     }
 
-    fn watcher(vm: &str, booted: DateTime<Utc>, killer: &CountingKiller) -> SessionExpiryWatcher {
+    fn watcher(vm: &str, booted: UtcTimestamp, killer: &CountingKiller) -> SessionExpiryWatcher {
         SessionExpiryWatcher::new(vm, booted, Box::new(killer.clone()))
     }
 
     #[test]
     fn an_expired_session_is_stopped_reaped_audited_and_sealed_without_a_command() {
         let home = Home::new();
-        let booted = Utc::now() - chrono::Duration::seconds(120);
+        let booted = plus(utc_timestamp_now(), -120);
         let record = session_for("vm-idle", booted, 60);
 
         let audit_dir = home.audit_dir();
@@ -410,12 +425,12 @@ mod tests {
             watcher("vm-idle", booted, &killer).sealing_under(plan.clone(), emitter.clone());
 
         // Still inside the timeout: nothing happens.
-        assert!(watcher.step(booted + chrono::Duration::seconds(30)));
+        assert!(watcher.step(plus(booted, 30)));
         assert_eq!(killer.kills(), 0);
         assert_eq!(state_of(&record.id), SessionState::Running);
 
         // Past it: the watcher alone stops, reaps, audits and seals.
-        assert!(!watcher.step(booted + chrono::Duration::seconds(61)));
+        assert!(!watcher.step(plus(booted, 61)));
         assert_eq!(killer.kills(), 1, "the guest is stopped exactly once");
         assert_eq!(state_of(&record.id), SessionState::Reaped);
         let local = home.local_audit();
@@ -441,10 +456,10 @@ mod tests {
     #[test]
     fn a_session_still_inside_its_timeout_is_left_alone() {
         let _home = Home::new();
-        let booted = Utc::now();
+        let booted = utc_timestamp_now();
         let record = session_for("vm-busy", booted, 300);
         session::update_session(&record.id, |r| {
-            r.last_invoke_at = Some(rfc3339(booted + chrono::Duration::seconds(400)));
+            r.last_invoke_at = Some(rfc3339(plus(booted, 400)));
             Ok(())
         })
         .expect("record a call");
@@ -452,7 +467,7 @@ mod tests {
         let killer = CountingKiller::default();
         let mut watcher = watcher("vm-busy", booted, &killer);
         // Long after start, but a call came in recently.
-        assert!(watcher.step(booted + chrono::Duration::seconds(600)));
+        assert!(watcher.step(plus(booted, 600)));
         assert_eq!(killer.kills(), 0);
         assert_eq!(state_of(&record.id), SessionState::Running);
     }
@@ -460,14 +475,14 @@ mod tests {
     #[test]
     fn another_machines_session_and_an_earlier_incarnation_are_not_ours() {
         let _home = Home::new();
-        let booted = Utc::now() - chrono::Duration::seconds(120);
+        let booted = plus(utc_timestamp_now(), -120);
         let other = session_for("vm-other", booted, 1);
         // Same name, but recorded before this machine booted.
-        let stale = session_for("vm-mine", booted - chrono::Duration::seconds(60), 1);
+        let stale = session_for("vm-mine", plus(booted, -60), 1);
 
         let killer = CountingKiller::default();
         let mut watcher = watcher("vm-mine", booted, &killer);
-        assert!(watcher.step(booted + chrono::Duration::seconds(30)));
+        assert!(watcher.step(plus(booted, 30)));
         assert_eq!(killer.kills(), 0);
         assert_eq!(state_of(&other.id), SessionState::Running);
         assert_eq!(state_of(&stale.id), SessionState::Running);
@@ -476,29 +491,29 @@ mod tests {
     #[test]
     fn a_machine_that_never_becomes_a_session_stops_looking() {
         let _home = Home::new();
-        let booted = Utc::now();
+        let booted = utc_timestamp_now();
         let killer = CountingKiller::default();
         let mut watcher = watcher("vm-plain", booted, &killer);
-        assert!(watcher.step(booted + chrono::Duration::seconds(10)));
-        assert!(!watcher.step(booted + chrono::Duration::from_std(DISCOVERY_WINDOW).unwrap()));
+        assert!(watcher.step(plus(booted, 10)));
+        assert!(!watcher.step(plus(booted, DISCOVERY_WINDOW.as_secs() as i64)));
         assert_eq!(killer.kills(), 0);
     }
 
     #[test]
     fn a_session_ended_some_other_way_stands_the_watcher_down() {
         let _home = Home::new();
-        let booted = Utc::now();
+        let booted = utc_timestamp_now();
         let record = session_for("vm-killed", booted, 60);
         let killer = CountingKiller::default();
         let mut watcher = watcher("vm-killed", booted, &killer);
-        assert!(watcher.step(booted + chrono::Duration::seconds(1)));
+        assert!(watcher.step(plus(booted, 1)));
 
         session::update_session(&record.id, |r| {
             r.state = SessionState::Killed;
             Ok(())
         })
         .expect("kill");
-        assert!(!watcher.step(booted + chrono::Duration::seconds(600)));
+        assert!(!watcher.step(plus(booted, 600)));
         assert_eq!(
             killer.kills(),
             0,
@@ -510,7 +525,7 @@ mod tests {
     #[test]
     fn a_claim_refuses_what_is_not_an_expired_running_session() {
         let _home = Home::new();
-        let now = Utc::now();
+        let now = utc_timestamp_now();
         assert!(
             claim_expired_session(&SessionId::new(), now)
                 .expect("absent is not an error")
@@ -519,7 +534,7 @@ mod tests {
         let fresh = session_for("vm-fresh", now, 60);
         assert!(claim_expired_session(&fresh.id, now).unwrap().is_none());
 
-        let expired = session_for("vm-expired", now - chrono::Duration::seconds(120), 60);
+        let expired = session_for("vm-expired", plus(now, -120), 60);
         let claimed = claim_expired_session(&expired.id, now)
             .unwrap()
             .expect("claimed");

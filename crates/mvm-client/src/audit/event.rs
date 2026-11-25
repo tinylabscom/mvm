@@ -6,7 +6,7 @@
 //! pair with its typed cursor. Serialization shapes are pinned with
 //! `deny_unknown_fields` so drift fails loudly on both ends.
 
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 /// Which local chain format an event or refusal came from.
@@ -195,8 +195,8 @@ pub struct AuditReadRequest {
     pub(crate) tenant: Option<String>,
     pub(crate) machine: Option<String>,
     pub(crate) kinds: Vec<AuditEventKind>,
-    pub(crate) since: Option<DateTime<Utc>>,
-    pub(crate) until: Option<DateTime<Utc>>,
+    pub(crate) since: Option<UtcTimestamp>,
+    pub(crate) until: Option<UtcTimestamp>,
     pub(crate) limit: Option<usize>,
     pub(crate) cursor: Option<AuditCursor>,
 }
@@ -247,14 +247,14 @@ impl AuditReadRequestBuilder {
 
     /// Only events at or after this instant.
     #[must_use]
-    pub fn since(mut self, since: DateTime<Utc>) -> Self {
+    pub fn since(mut self, since: UtcTimestamp) -> Self {
         self.request.since = Some(since);
         self
     }
 
     /// Only events at or before this instant.
     #[must_use]
-    pub fn until(mut self, until: DateTime<Utc>) -> Self {
+    pub fn until(mut self, until: UtcTimestamp) -> Self {
         self.request.until = Some(until);
         self
     }
@@ -333,9 +333,9 @@ impl OrderKey {
 /// Epoch milliseconds of an RFC 3339 timestamp; unparseable timestamps
 /// sort oldest so they can never jump the queue.
 pub(crate) fn parse_ts_millis(timestamp: &str) -> i64 {
-    DateTime::parse_from_rfc3339(timestamp)
-        .map(|t| t.timestamp_millis())
-        .unwrap_or(i64::MIN)
+    timestamp
+        .parse::<UtcTimestamp>()
+        .map_or(i64::MIN, UtcTimestamp::unix_millis)
 }
 
 /// Map a lifecycle-chain event name onto the normalized kind.

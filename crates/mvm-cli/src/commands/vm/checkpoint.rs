@@ -36,7 +36,7 @@ mod revert;
 mod timeline;
 mod vm_state;
 pub(in crate::commands) use fork_vm_full::{ForkVmFullArmParams, fork_vm_full_arm};
-pub(in crate::commands) use mvm_client::checkpoint::anchor::{ClaimChainAnchor, SignedChainAnchor};
+pub(in crate::commands) use mvm_client::checkpoint::anchor::SignedChainAnchor;
 pub(in crate::commands) use revert::{
     AdvanceArgs, RevertArgs, RevertImageSource, RevertOutcome, RevertRunImage, run_advance,
     run_revert, run_rewind,
@@ -663,6 +663,25 @@ fn rm(id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Refuse to restore a machine that is a topology unit with a liveness
+/// period. The unit is looked up under the tenant and workload of the plan the
+/// machine last ran, and under `tenant` and its own name when none is cached.
+fn refuse_unwatched_restore(
+    vm_name: &str,
+    prior_plan: Option<&mvm_core::plan::ExecutionPlan>,
+    tenant: &str,
+) -> Result<()> {
+    let (tenant, unit) = match prior_plan {
+        Some(plan) => (plan.tenant.clone(), plan.workload.clone()),
+        None => (
+            mvm_core::plan::TenantId(tenant.to_string()),
+            mvm_core::plan::WorkloadId(vm_name.to_string()),
+        ),
+    };
+    mvm_client::checkpoint::refuse_unwatched_resume(&tenant, &unit, None)
+        .with_context(|| format!("cannot restore '{vm_name}' under its own identity"))
+}
+
 /// JSON shape of a completed same-identity restore.
 #[derive(Serialize)]
 struct CheckpointRestoreJson<'a> {
@@ -699,7 +718,9 @@ fn restore(id: &str, json: bool) -> Result<()> {
     if cfg!(target_os = "linux") {
         mvm_client::policy_profiles::coordinator::ensure_if_activated()?;
     }
-    let _prior_plan = mvm_client::policy_profiles::coordinator::restore_plan(&meta.vm_name)?;
+    let prior_plan = mvm_client::policy_profiles::coordinator::restore_plan(&meta.vm_name)?;
+    let tenant = crate::commands::vm::tenant_resolution::resolve_tenant(None);
+    refuse_unwatched_restore(&meta.vm_name, prior_plan.as_ref(), &tenant)?;
     // Held until the restored supervisor is up. Until then the target's state
     // dir has no live owner and no registry record, so this lock is what keeps
     // a stop or reconcile in another process from deleting it mid-restore,
@@ -711,17 +732,13 @@ fn restore(id: &str, json: bool) -> Result<()> {
             meta.vm_name
         );
     }
-    let restorer = mvm_client::checkpoint::vm_full_restorer_for(&meta)?;
     let anchor = SignedChainAnchor::load()
         .context("loading the signed audit chain to verify the restore source")?;
-    mvm_client::checkpoint::restore_checkpoint(
+    mvm_client::checkpoint::restore_vm_full_checkpoint(
         &store,
-        mvm_client::checkpoint::RestoreParams {
-            checkpoint: id.clone(),
-            target_vm: meta.vm_name.clone(),
-            tenant: crate::commands::vm::tenant_resolution::resolve_tenant(None),
-        },
-        restorer.as_ref(),
+        id.clone(),
+        &meta.vm_name,
+        tenant,
         &anchor,
     )
     .with_context(|| format!("restoring checkpoint {}", id.as_str()))?;
@@ -1229,6 +1246,64 @@ mod tests {
     use mvm_core::plan::{SecretBinding, SecretSource};
     use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
     use mvm_runtime::checkpoint::{CheckpointChainAnchor, verify_lineage};
+
+    /// A same-identity restore starts a supervisor with no plan, so a unit
+    /// whose topology declares a liveness period would run with nothing
+    /// holding its deadline.
+    #[test]
+    fn restoring_a_unit_with_a_liveness_period_under_its_own_identity_is_refused() {
+        use mvm_hostd::topology_admission::{
+            HostCpus, TopologyAdmissionRequest, admit_topology, sign_topology_as_host,
+        };
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let mut watched = crate::bench::fit::tests::unit("watched", 1, 64, 64, &[]);
+        watched.liveness_period_ms = std::num::NonZeroU32::new(5_000);
+        // Units sort by name.
+        let topology = crate::bench::fit::tests::topology(
+            vec![
+                crate::bench::fit::tests::unit("plain", 1, 64, 64, &[]),
+                watched,
+            ],
+            Vec::new(),
+        );
+        let signer = mvm_hostd::audit::host_keypair::load_or_init().unwrap();
+        let emitter = mvm_hostd::audit::emitter::AuditEmitter::new(signer.signing).unwrap();
+        admit_topology(&TopologyAdmissionRequest {
+            tenant: &topology.tenant,
+            signed: &sign_topology_as_host(&topology, None).unwrap(),
+            backend: mvm_core::vm_backend::BackendKind::Hvf,
+            measured_failover: None,
+            host_cpus: &HostCpus {
+                scope_cpuset: false,
+                online: None,
+                isolated: None,
+                live: Vec::new(),
+            },
+            clock: &mvm_core::time::SystemClock,
+            host_signer_keys_dir: None,
+            emitter: &emitter,
+        })
+        .expect("HVF holds a liveness deadline");
+        let tenant = topology.tenant.0.as_str();
+
+        let error = refuse_unwatched_restore("watched", None, tenant).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("cannot restore 'watched'"), "{message}");
+        assert!(message.contains("5000 ms liveness period"), "{message}");
+        refuse_unwatched_restore("plain", None, tenant).expect("no period to hold");
+        refuse_unwatched_restore("watched", None, "another-tenant").expect("no topology");
+
+        // The plan the machine last ran names its tenant and unit, whatever
+        // the caller resolved.
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant(tenant)
+            .workload("watched")
+            .build();
+        assert!(refuse_unwatched_restore("renamed", Some(&plan), "another-tenant").is_err());
+    }
 
     #[cfg(unix)]
     mod fs_quick_client_delegation {
@@ -2577,7 +2652,9 @@ mod tests {
         let grant = mvm_core::plan::VerbGrant {
             session_id: "test-session".into(),
             plan_nonce: mvm_core::plan::Nonce::from_bytes([1u8; 16]),
-            not_after: chrono::Utc::now() + chrono::Duration::hours(1),
+            not_after: mvm_core::util::time::utc_timestamp_now()
+                .checked_add_secs(3600)
+                .unwrap(),
             verbs: vec![],
             drive: None,
             application_terminal: None,
@@ -2621,7 +2698,9 @@ mod tests {
             grant: mvm_core::plan::VerbGrant {
                 session_id: "parent-session".into(),
                 plan_nonce: nonce.clone(),
-                not_after: chrono::Utc::now() + chrono::Duration::hours(1),
+                not_after: mvm_core::util::time::utc_timestamp_now()
+                    .checked_add_secs(3600)
+                    .unwrap(),
                 verbs: vec![],
                 drive: None,
                 application_terminal: None,

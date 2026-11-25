@@ -10,7 +10,7 @@
 //! boots without network access.
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 
 use mvm_core::image_set_revocation::{
     ImageSetRevocationStore, ImageSetRevocationStoreError, VerifiedImageSetRevocations,
@@ -38,7 +38,7 @@ impl OfflineRevocationPolicy {
     /// older than one already seen.
     pub fn load_at(
         store: &ImageSetRevocationStore,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<Self, ImageSetRevocationStoreError> {
         let verified = store.load(now)?;
         Ok(Self { verified })
@@ -50,7 +50,7 @@ impl OfflineRevocationPolicy {
     }
 
     /// The end of the loaded list's validity window.
-    pub fn not_after(&self) -> DateTime<Utc> {
+    pub fn not_after(&self) -> UtcTimestamp {
         self.verified.not_after()
     }
 
@@ -74,8 +74,9 @@ mod tests {
     fn missing_store_gives_clear_message() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = ImageSetRevocationStore::new(tmp.path().join("nonexistent"));
-        let err = OfflineRevocationPolicy::load_at(&store, Utc::now())
-            .expect_err("should fail on missing store");
+        let err =
+            OfflineRevocationPolicy::load_at(&store, mvm_core::util::time::utc_timestamp_now())
+                .expect_err("should fail on missing store");
         assert!(
             matches!(err, ImageSetRevocationStoreError::Missing),
             "got: {err}"

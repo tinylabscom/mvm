@@ -29,10 +29,11 @@ pub(super) struct CosignCommandVerifier;
 
 impl CosignVerifier for CosignCommandVerifier {
     fn verify(&self, reference: &str, identity: &CosignIdentity) -> Result<(), CosignVerifyError> {
-        let cosign = which::which("cosign").map_err(|e| {
-            CosignVerifyError::ToolUnavailable(format!(
-                "cosign is required for production OCI policy; install cosign or run without --prod ({e})"
-            ))
+        let cosign = mvm_core::util::which("cosign").ok_or_else(|| {
+            CosignVerifyError::ToolUnavailable(
+                "cosign is required for production OCI policy; install cosign or run without --prod (cannot find binary path)"
+                    .to_string(),
+            )
         })?;
         let output = mvm_core::env_hygiene::helper_command(cosign)
             .args([

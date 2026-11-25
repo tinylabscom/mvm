@@ -5,9 +5,9 @@ Feature: The documented machine verbs operate a real guest
   a guest that is already running, and no scenario was willing to boot one for
   a single assertion.
 
-  Parsing cannot see the defect that matters here. `machine forward` parses
-  cleanly and then refuses at runtime — it was retired, while
-  `examples/obscura/README.md` still tells a reader to run it. Only executing
+  Parsing cannot see the defect that matters here. `machine forward` parsed
+  cleanly and then refused at runtime — it had been retired, while
+  `examples/obscura/README.md` still told a reader to run it. Only executing
   the verb against a live guest distinguishes "documented and working" from
   "documented and merely still in the clap tree".
 

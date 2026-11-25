@@ -283,6 +283,51 @@ impl std::error::Error for ColdHvfBootFailure {
 }
 
 impl ColdHvfBootFailure {
+    /// Synthetic legacy-boundary value for custody-classification tests.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_fixture() -> Self {
+        Self {
+            error: Some(anyhow::anyhow!("synthetic native launch custody")),
+            custody: Some(Box::new(std::sync::Mutex::new(FailedLaunchCustody {
+                outcome: FailedLaunchOutcome::NeverLaunched,
+                supporting: Vec::new(),
+            }))),
+        }
+    }
+
+    /// Synthetic unconfirmed child custody for cross-crate classification tests.
+    #[cfg(all(feature = "test-support", unix))]
+    #[doc(hidden)]
+    pub fn uncertain_test_fixture() -> Self {
+        let child = mvm_core::env_hygiene::helper_command("sh")
+            .args(["-c", "while :; do sleep 60; done"])
+            .spawn()
+            .expect("spawn synthetic uncertain native child");
+        Self {
+            error: Some(anyhow::anyhow!("synthetic unconfirmed native launch")),
+            custody: Some(Box::new(std::sync::Mutex::new(FailedLaunchCustody {
+                outcome: FailedLaunchOutcome::Unconfirmed {
+                    child,
+                    vm_name: "synthetic-uncertain-native".into(),
+                },
+                supporting: Vec::new(),
+            }))),
+        }
+    }
+
+    /// Reap the synthetic child without requiring an HVF supervisor endpoint.
+    #[cfg(all(feature = "test-support", unix))]
+    #[doc(hidden)]
+    pub fn reap_uncertain_test_fixture(mut self) {
+        let custody = self.custody_mut();
+        if let FailedLaunchOutcome::Unconfirmed { child, .. } = &mut custody.outcome {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        custody.outcome = FailedLaunchOutcome::NeverLaunched;
+    }
+
     pub fn error(&self) -> &anyhow::Error {
         self.error
             .as_ref()

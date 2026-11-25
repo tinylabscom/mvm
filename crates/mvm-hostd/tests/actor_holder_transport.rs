@@ -24,7 +24,7 @@ impl Drop for OwnedChild {
 
 #[test]
 fn actor_holder_contract_probe_needs_no_inherited_actor_sockets() {
-    use mvm_vmm::host::helper_contract::{CONTRACT_PROBE_FLAG, HOST_HELPER_CONTRACT_VERSION};
+    use mvm_core::helper_contract::{CONTRACT_PROBE_FLAG, HOST_HELPER_CONTRACT_VERSION};
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_mvm-actor-holder"))
         .arg(CONTRACT_PROBE_FLAG)

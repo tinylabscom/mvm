@@ -590,8 +590,8 @@ fn time_window_filter_bounds_the_read() {
         .reader()
         .read(
             &AuditReadRequest::builder()
-                .since(ts(8, 30))
-                .until(ts(9, 30))
+                .since(ts(8, 30).try_into().unwrap())
+                .until(ts(9, 30).try_into().unwrap())
                 .build(),
         )
         .unwrap();
@@ -750,4 +750,18 @@ fn unreadable_audit_dir_is_an_io_error_not_a_refusal() {
         .read(&AuditReadRequest::builder().build())
         .unwrap_err();
     assert!(matches!(err, AuditReadError::Io { .. }), "{err}");
+}
+
+#[test]
+fn event_timestamps_order_by_their_instant_in_every_written_form() {
+    use super::event::parse_ts_millis;
+    let base = 1_785_571_200_000; // 2026-08-01T08:00:00Z
+    assert_eq!(parse_ts_millis("2026-08-01T08:00:00Z"), base);
+    assert_eq!(parse_ts_millis("2026-08-01T08:00:00+00:00"), base);
+    assert_eq!(parse_ts_millis("2026-08-01T10:00:00+02:00"), base);
+    assert_eq!(
+        parse_ts_millis("2026-08-01T08:00:00.123456789Z"),
+        base + 123
+    );
+    assert_eq!(parse_ts_millis("not a time"), i64::MIN);
 }

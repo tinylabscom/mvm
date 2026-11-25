@@ -11,7 +11,7 @@ Prerequisites:
 
 - Native Apple Silicon macOS with Hypervisor.framework support.
 - The repository's pinned Rust, Zig and cargo-zigbuild toolchain, including
-  `aarch64-unknown-linux-musl`. The existing `just payload::toolchain` recipe
+  `aarch64-unknown-linux-musl`. The existing `just setup toolchain` recipe
   documents installation; this witness does not install system tooling.
 - An already acquired, verified AArch64 workload kernel. Supply its absolute
   path in `MVM_ACTOR_KERNEL`; the witness pins its bytes in each synthesized plan
@@ -60,7 +60,7 @@ The fixture-only test builds and reads ext4 images and exercises the ordinary
 sidecar gate, without building guest payloads or starting a VM:
 
 ```bash
-just tests::scoped mvm-hostd rootfs_artifacts_match_sidecar \
+just test scoped mvm-hostd rootfs_artifacts_match_sidecar \
   --example actor_live_hvf --features hvf-live-validation
 ```
 

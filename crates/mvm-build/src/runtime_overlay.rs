@@ -1315,7 +1315,7 @@ pub(crate) fn verify_file_sha256(
     if std::env::var_os(SKIP_HASH_VERIFY_ENV).is_some() {
         tracing::warn!(
             "{SKIP_HASH_VERIFY_ENV} set — skipping integrity check on {name}. \
-             ADR-002 §W5.1 documents this as an emergency-rotation escape hatch."
+             This is an emergency-rotation escape hatch."
         );
         return Ok(());
     }

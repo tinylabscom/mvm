@@ -630,6 +630,76 @@ fn entrypoint_failed_grant_rollback_remains_unsealed_when_stop_is_unconfirmed() 
 }
 
 #[test]
+fn operator_trial_failed_grant_rollback_retains_exact_dispatch_custody() {
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let keys = tempfile::tempdir().unwrap();
+    let audit = tempfile::tempdir().unwrap();
+    let backend = mvm_runtime::AnyBackend::Mock(
+        mvm_runtime::mock::MockBackend::new()
+            .with_failing_apply_grants()
+            .with_failing_stop(),
+    );
+    let config = VmStartConfig {
+        name: "operator-trial-uncertain-stop".into(),
+        rootfs_path: "/store/rootfs.ext4".into(),
+        ..Default::default()
+    };
+    let admitted = admit_for_run(
+        &fixture_input(&config.name),
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+        Some(keys.path()),
+        None,
+        RunPosture::on_backend(Variant::Dev, backend.kind()),
+    )
+    .unwrap();
+    let plan_id = admitted.plan_id().clone();
+    let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+        ed25519_dalek::SigningKey::from_bytes(&[52; 32]),
+        audit.path(),
+    )
+    .unwrap();
+
+    let error = start_operator_trial_with_verified_release(
+        StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config: config.clone(),
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            assurance: None,
+        },
+        None,
+    )
+    .expect_err("grant application and rollback both fail");
+    let uncertain = error
+        .downcast_ref::<OperatorTrialDispatchUncertain>()
+        .expect("operator trial retains typed dispatch custody");
+    assert_eq!(uncertain.vm_id.0, config.name);
+    assert_eq!(uncertain.admitted.plan_id(), &plan_id);
+    assert!(uncertain.enforced_grants.is_none());
+    assert!(matches!(
+        backend.status(&uncertain.vm_id),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
+    let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap_or_default();
+    assert!(!chain.contains("plan.failed"), "{chain}");
+    assert!(!chain.contains("session.sealed"), "{chain}");
+    assert!(!chain.contains("plan.launched"), "{chain}");
+}
+
+#[cfg(unix)]
+#[test]
+fn operator_trial_native_start_uncertainty_is_retained_before_terminal_audit() {
+    let native = mvm_runtime::backend::uncertain_native_start_failure_for_test();
+
+    let uncertain = super::operator_trial::classify_start_error(native)
+        .expect_err("unconfirmed native start custody must not become terminal");
+
+    mvm_runtime::backend::reap_uncertain_native_start_failure_for_test(uncertain);
+}
+
+#[test]
 fn owned_entrypoint_refuses_a_mock_without_spending_or_losing_admission() {
     let (_env, _home) = host_with_ceiling(Default::default());
     let dir = tempfile::tempdir().unwrap();
@@ -1338,6 +1408,239 @@ fn cli_cold_preparation_orders_attach_and_admission_without_starting_backend() {
 }
 
 #[test]
+fn lost_warm_reservation_restores_the_exact_cli_capability_for_cold_dispatch() {
+    struct NoAnchor;
+    impl mvm_runtime::checkpoint::CheckpointChainAnchor for NoAnchor {
+        fn recorded_creation_digest(
+            &self,
+            _meta: &mvm_core::checkpoint::CheckpointMeta,
+        ) -> anyhow::Result<Option<mvm_core::checkpoint::CheckpointDigest>> {
+            Ok(None)
+        }
+
+        fn recorded_creation_tenant(
+            &self,
+            _meta: &mvm_core::checkpoint::CheckpointMeta,
+        ) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let keys = tempfile::tempdir().expect("keys");
+    let audit = tempfile::tempdir().expect("audit");
+    let backend = mvm_runtime::AnyBackend::Mock(
+        mvm_runtime::mock::MockBackend::new()
+            .with_standby()
+            .with_lost_standby_reservation(),
+    );
+    let name = "img";
+    let prepared = prepare_cli_cold(
+        PrepareCliColdParams {
+            backend: &backend,
+            config: VmStartConfig {
+                name: name.into(),
+                rootfs_path: "/store/rootfs.ext4".into(),
+                ..Default::default()
+            },
+        },
+        |_| Ok(None),
+        |_, runtime| {
+            assert!(runtime.is_none(), "fixture has no selected release runtime");
+            Ok(persistent_boundary_admission(
+                name,
+                &backend,
+                keys.path(),
+                audit.path(),
+            ))
+        },
+    )
+    .expect("prepare CLI cold");
+    let plan_id = prepared.plan().plan_id.clone();
+    let nonce = prepared.plan().nonce.clone();
+
+    let pool = mvm_runtime::standby_pool::SupervisorStandbyPool::at(_home.path().join("pool"));
+    let checkpoints =
+        mvm_runtime::checkpoint::CheckpointStore::at(_home.path().join("checkpoints"));
+    let snapshots = mvm_fs::snapshot_store::FsSnapshotStore::new(_home.path().join("snapshots"))
+        .expect("snapshot store");
+    let anchor = NoAnchor;
+    let parent_checkpoint = mvm_core::checkpoint::CheckpointId::new("parent");
+    let registry_path = _home.path().join("names.json");
+    let ctx = mvm_runtime::workload_runner::ClaimContext {
+        pool: &pool,
+        checkpoints: &checkpoints,
+        snapshots: &snapshots,
+        anchor: &anchor,
+        parent_checkpoint: &parent_checkpoint,
+        registry_path: &registry_path,
+        grant_issuer: None,
+    };
+    let handle = mvm_core::vm_backend::StandbyHandle {
+        id: "selected-parent".into(),
+        template_id: None,
+        control_socket: String::new(),
+        pid: 0,
+        kernel_sha256: String::new(),
+        vcpus: 1,
+        mem_mib: 128,
+        binding_nonce: String::new(),
+        spawned_unix_secs: 0,
+        state: mvm_core::vm_backend::StandbyState::Idle,
+        image_sha256: None,
+        root_strategy: Default::default(),
+        parent_checkpoint: Some(parent_checkpoint.to_string()),
+        preloaded_child_vm_name: None,
+        vsock_egress: false,
+    };
+
+    let prepared = match claim_prepared_cli_cold(prepared, &backend, &ctx, &handle) {
+        PreparedCliWarmClaim::ReservationLost(prepared) => *prepared,
+        PreparedCliWarmClaim::Claimed { .. } => panic!("reservation-loss fixture claimed"),
+        PreparedCliWarmClaim::Refused { error, .. } => {
+            panic!("reservation loss must remain retryable: {error:#}")
+        }
+    };
+    assert_eq!(prepared.plan().plan_id, plan_id);
+    assert_eq!(prepared.plan().nonce, nonce);
+
+    let (_dispatched, started) = start_prepared_cli_cold(prepared, &backend, Vec::new());
+    assert_eq!(
+        started.expect("restored capability cold-dispatches").0,
+        name
+    );
+    backend
+        .stop(&VmId(name.into()))
+        .expect("stop cold fallback fixture");
+}
+
+#[test]
+fn uncertain_warm_stop_maps_to_cli_uncertain_without_becoming_terminal_refusal() {
+    let error = super::cli_cold::map_cli_warm_claim_error(
+        mvm_core::vm_backend::StandbyError::StopUnconfirmed(
+            "child and parent remain retained".into(),
+        ),
+    );
+    let classified = error
+        .downcast_ref::<CliStartFailure>()
+        .expect("uncertain warm stop keeps the typed CLI failure");
+    assert!(matches!(classified, CliStartFailure::UncertainStop(_)));
+
+    let terminal = super::cli_cold::map_cli_warm_claim_error(
+        mvm_core::vm_backend::StandbyError::ClaimFailed("refused".into()),
+    );
+    assert!(
+        terminal.downcast_ref::<CliStartFailure>().is_none(),
+        "ordinary runner refusal remains terminal"
+    );
+}
+
+#[test]
+fn required_cli_warm_durability_refusal_spends_authority_before_runner_claim() {
+    struct NoAnchor;
+    impl mvm_runtime::checkpoint::CheckpointChainAnchor for NoAnchor {
+        fn recorded_creation_digest(
+            &self,
+            _meta: &mvm_core::checkpoint::CheckpointMeta,
+        ) -> anyhow::Result<Option<mvm_core::checkpoint::CheckpointDigest>> {
+            Ok(None)
+        }
+
+        fn recorded_creation_tenant(
+            &self,
+            _meta: &mvm_core::checkpoint::CheckpointMeta,
+        ) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    let (_env, home) = host_with_ceiling(Default::default());
+    let keys = tempfile::tempdir().expect("keys");
+    let audit = tempfile::tempdir().expect("audit");
+    let backend =
+        mvm_runtime::AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
+    let name = "img";
+    let prepared = prepare_cli_cold(
+        PrepareCliColdParams {
+            backend: &backend,
+            config: VmStartConfig {
+                name: name.into(),
+                rootfs_path: "/store/rootfs.ext4".into(),
+                admission_durability: Some(
+                    mvm_core::admission_durability::AdmissionDurability::settled(Err(
+                        anyhow::anyhow!("injected required audit sync failure"),
+                    )),
+                ),
+                ..Default::default()
+            },
+        },
+        |_| Ok(None),
+        |_, _| {
+            Ok(persistent_boundary_admission(
+                name,
+                &backend,
+                keys.path(),
+                audit.path(),
+            ))
+        },
+    )
+    .expect("prepare CLI cold");
+    let plan_id = prepared.plan().plan_id.clone();
+    let pool = mvm_runtime::standby_pool::SupervisorStandbyPool::at(home.path().join("pool"));
+    let checkpoints = mvm_runtime::checkpoint::CheckpointStore::at(home.path().join("checkpoints"));
+    let snapshots = mvm_fs::snapshot_store::FsSnapshotStore::new(home.path().join("snapshots"))
+        .expect("snapshots");
+    let anchor = NoAnchor;
+    let parent_checkpoint = mvm_core::checkpoint::CheckpointId::new("parent");
+    let registry_path = home.path().join("names.json");
+    let ctx = mvm_runtime::workload_runner::ClaimContext {
+        pool: &pool,
+        checkpoints: &checkpoints,
+        snapshots: &snapshots,
+        anchor: &anchor,
+        parent_checkpoint: &parent_checkpoint,
+        registry_path: &registry_path,
+        grant_issuer: None,
+    };
+    let handle = mvm_core::vm_backend::StandbyHandle {
+        id: "durability-parent".into(),
+        template_id: None,
+        control_socket: String::new(),
+        pid: 0,
+        kernel_sha256: String::new(),
+        vcpus: 1,
+        mem_mib: 128,
+        binding_nonce: String::new(),
+        spawned_unix_secs: 0,
+        state: mvm_core::vm_backend::StandbyState::Idle,
+        image_sha256: None,
+        root_strategy: Default::default(),
+        parent_checkpoint: Some(parent_checkpoint.to_string()),
+        preloaded_child_vm_name: None,
+        vsock_egress: false,
+    };
+
+    let (error, dispatched) = match claim_prepared_cli_cold(prepared, &backend, &ctx, &handle) {
+        PreparedCliWarmClaim::Refused { error, dispatched } => (error, dispatched),
+        PreparedCliWarmClaim::Claimed { .. } => panic!("durability failure cannot claim"),
+        PreparedCliWarmClaim::ReservationLost(_) => panic!("durability failure precedes reserve"),
+    };
+    assert!(
+        format!("{error:#}").contains("injected required audit sync failure"),
+        "{error:#}"
+    );
+    let (plan, _emitter, ()) = dispatched.into_parts();
+    assert_eq!(plan.plan_id, plan_id);
+    assert!(
+        !matches!(
+            backend.status(&VmId(handle.id)),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ),
+        "runner claim is not reached"
+    );
+}
+
+#[test]
 fn persistent_boundary_lock_mismatch_refuses_before_attachment_or_admission() {
     let (_env, _home) = host_with_ceiling(Default::default());
     let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
@@ -1642,7 +1945,7 @@ fn a_campaign_that_cannot_open_rolls_the_launch_back() {
             .expect("fixture digest");
     synthesis.image_sha256 = &image_sha256;
 
-    let err = admit_and_start(
+    let err = super::operator_trial::prepare(
         &backend,
         AdmitAndStartParams {
             synthesis: &synthesis,
@@ -1655,10 +1958,11 @@ fn a_campaign_that_cannot_open_rolls_the_launch_back() {
             variant: Variant::Dev,
             policy_bundle: None,
             emitter: Some(&emitter),
-            audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+            audit_durability: crate::audit::durability::AuditDurability::Required,
             assurance: Some(&campaign),
         },
     )
+    .and_then(super::operator_trial::PreparedOperatorTrial::dispatch)
     .expect_err("a campaign declaring no destination cannot open");
     // Deliberately not asserted on the message: which refusal fires
     // depends on whether a neighbouring test installed the process-global
@@ -1674,6 +1978,125 @@ fn a_campaign_that_cannot_open_rolls_the_launch_back() {
         ),
         "a campaign that could not open must not leave the VM up"
     );
+}
+
+#[test]
+fn operator_trial_retains_one_verified_release_from_admission_through_dispatch() {
+    use std::sync::Arc;
+
+    use crate::assurance_session::{CampaignDeclaration, CampaignRequest, default_policy_ceiling};
+    use mvm_contract::assurance::{ApprovalSet, AssuranceId, RequestedAuthority, Sha256Digest};
+
+    let (_env, _home) = host_with_ceiling(Default::default());
+    let keys = tempfile::tempdir().unwrap();
+    let audit = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    let emitter = Arc::new(
+        crate::audit::emitter::AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&[55; 32]),
+            audit.path(),
+        )
+        .unwrap(),
+    );
+    let id = |raw: &str| AssuranceId::parse(raw).unwrap();
+    let campaign = CampaignRequest {
+        declaration: CampaignDeclaration {
+            request_id: id("release-request"),
+            idempotency_key: id("release-retry"),
+            campaign_id: id("release-campaign"),
+            trial_id: id("release-trial"),
+            source_run_id: id("release-source"),
+            source_digest: Sha256Digest::parse(format!("sha256:{}", "7".repeat(64))).unwrap(),
+            artifact_digest: Sha256Digest::parse(format!("sha256:{}", "8".repeat(64))).unwrap(),
+            edges: Vec::new(),
+            approvals: ApprovalSet::none(),
+            requested: RequestedAuthority {
+                allowed_tools: Vec::new(),
+                observation_scopes: Vec::new(),
+                max_steps: 1,
+                max_output_bytes: 1024,
+                deadline_unix_ms: 0,
+            },
+            grant_ttl_ms: 1000,
+        },
+        emitter: Arc::clone(&emitter),
+        policy_ceiling: default_policy_ceiling(),
+        policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+        backend: "mock".into(),
+        now_unix_ms: 1_800_000_000_000,
+    };
+    let runtime = mvm_build::guest_runtime::evidence::verified_release_runtime_fixture(
+        runtime_dir.path(),
+        mvm_core::arch::GuestArch::host(),
+        mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
+    );
+    let release = Arc::clone(&runtime.release);
+    let mut config = baked_assurance_config(keys.path());
+    let vm_name = "operator-release-retained".to_string();
+    config.name.clone_from(&vm_name);
+    config.legacy_bundle_runtime = None;
+    let mut synthesis = fixture_input(&vm_name);
+    synthesis.services =
+        vec![mvm_core::protocol::broker::ServiceId::parse("host.assurance.v1").unwrap()];
+    let image_sha256 =
+        mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+            .unwrap();
+    synthesis.image_sha256 = &image_sha256;
+    let ledger = InMemoryNonceLedger::new();
+
+    let prepared = super::operator_trial::fixture_with_attachment(
+        &backend,
+        AdmitAndStartParams {
+            synthesis: &synthesis,
+            config,
+            clock: &SystemClock,
+            ledger: &ledger,
+            host_signer_keys_dir: Some(keys.path()),
+            bundle_ctx: None,
+            extension_ctx: None,
+            variant: Variant::Dev,
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            audit_durability: crate::audit::durability::AuditDurability::Required,
+            assurance: Some(&campaign),
+        },
+        |config| {
+            config.runtime_release_proof = Some(release.proof().clone());
+            config.runtime_overlay_path = Some(runtime.overlay.display().to_string());
+            config.runtime_overlay_verity_path = Some(runtime.overlay_verity.display().to_string());
+            config.runtime_overlay_roothash = Some(runtime.overlay_roothash.clone());
+            config.runtime_overlay_version = Some(release.proof().version.clone());
+            config.initrd_path = Some(runtime.initramfs.display().to_string());
+            Ok(Some(Arc::clone(&release)))
+        },
+    )
+    .expect("operator trial preparation");
+    assert_eq!(
+        prepared.retained_release_ptr(),
+        Some(release.as_ref() as *const _ as usize)
+    );
+    assert_eq!(
+        prepared.admitted_runtime_archive_sha256(),
+        Some(release.proof().archive_sha256.as_str())
+    );
+
+    let error = prepared
+        .dispatch()
+        .expect_err("the mock refuses verified-release custody at dispatch");
+    assert!(
+        format!("{error:#}").contains("mock backend cannot consume a verified release runtime"),
+        "{error:#}"
+    );
+    assert!(!matches!(
+        backend.status(&mvm_core::vm_backend::VmId(
+            "operator-release-retained".into()
+        )),
+        Ok(mvm_core::vm_backend::VmStatus::Running)
+    ));
+    let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap_or_default();
+    assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
 }
 
 #[test]
@@ -1918,7 +2341,8 @@ fn a_declared_campaign_opens_its_session_on_the_boot_path() {
             .expect("fixture digest");
     synthesis.image_sha256 = &image_sha256;
 
-    let started = admit_and_start(
+    let extension_context = ExtensionAdmissionContext::ambient(&verify);
+    let prepared = super::operator_trial::prepare(
         &backend,
         AdmitAndStartParams {
             synthesis: &synthesis,
@@ -1927,15 +2351,18 @@ fn a_declared_campaign_opens_its_session_on_the_boot_path() {
             ledger: &ledger,
             host_signer_keys_dir: Some(dir.path()),
             bundle_ctx: None,
-            extension_ctx: Some(&ExtensionAdmissionContext::ambient(&verify)),
+            extension_ctx: Some(&extension_context),
             variant: Variant::Dev,
             policy_bundle: None,
             emitter: Some(&emitter),
-            audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+            audit_durability: crate::audit::durability::AuditDurability::Required,
             assurance: Some(&campaign),
         },
     )
-    .expect("admit + boot with a declared campaign");
+    .expect("prepare a declared operator trial");
+    let started = prepared
+        .dispatch()
+        .expect("admit + boot with a declared campaign");
 
     let plane = host_assurance_plane().expect("the plane this test installed");
     let binding = plane
@@ -1957,7 +2384,7 @@ fn a_declared_campaign_opens_its_session_on_the_boot_path() {
     refused_synthesis
         .audit_labels
         .remove("assurance.source_digest");
-    let refusal = admit_and_start(
+    let refusal = super::operator_trial::prepare(
         &backend,
         AdmitAndStartParams {
             synthesis: &refused_synthesis,
@@ -1973,10 +2400,11 @@ fn a_declared_campaign_opens_its_session_on_the_boot_path() {
             variant: Variant::Dev,
             policy_bundle: None,
             emitter: Some(&emitter),
-            audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+            audit_durability: crate::audit::durability::AuditDurability::Required,
             assurance: Some(&campaign),
         },
     )
+    .and_then(super::operator_trial::PreparedOperatorTrial::dispatch)
     .expect_err("an assurance launch without its admitted service must fail");
     assert!(
         refusal

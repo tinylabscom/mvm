@@ -49,7 +49,7 @@ pub(crate) fn project_local() -> Option<PathBuf> {
 /// first hit, or `None` if no candidate is on `PATH`.
 pub(crate) fn on_path() -> Option<PathBuf> {
     for candidate in CANDIDATES {
-        if let Ok(found) = which::which(candidate) {
+        if let Some(found) = mvm_core::util::which(candidate) {
             return Some(found);
         }
     }

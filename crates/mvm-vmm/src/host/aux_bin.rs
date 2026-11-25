@@ -49,7 +49,7 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::host::codesign::{self, RequiredEntitlement, SignTarget};
 use crate::host::file_memo::{FileStamp, file_stamp, now_ns, stamp_is_settled};
-use crate::host::helper_contract;
+use mvm_core::helper_contract;
 use source_build::{Built, SourceBuild};
 
 mod host_process;
@@ -841,22 +841,22 @@ fn resolve_from(spec: &AuxBin, lookup: &Lookup) -> Result<PathBuf> {
 }
 
 /// The error for a helper that resolved nowhere. A release download ships a
-/// fixed set of helpers, so for one the remedy is adding the signed component
-/// set or choosing another backend, never a `cargo build`.
+/// fixed set of helpers, so for one the remedy is choosing a backend it
+/// carries, never a `cargo build`.
 fn missing_message(spec: &AuxBin, release_binary: bool) -> String {
     if release_binary && spec.bin == LIBKRUN_SUPERVISOR_BIN {
         return format!(
-            "{} not found. This release install can fetch the signed libkrun component \
-             set: run `mvmctl backend add libkrun` (macOS 13-25 Apple Silicon); no \
-             separate libkrun install is needed. On macOS 26+ the default HVF backend \
-             needs no libkrun files. See https://runmvm.com/reference/platform-support/.",
+            "{} not found. A release install does not carry the libkrun backend; it \
+             is an opt-in for source builds. Use the default backend instead: HVF on \
+             macOS 26+ Apple Silicon, Firecracker on Linux with KVM. See \
+             https://runmvm.com/reference/platform-support/.",
             spec.bin
         );
     }
     format!(
         "{bin} not found. It is a per-VM host helper `[[bin]]` of {pkg}; on \
          a source checkout build it with `{command}` (add `--release` to match a \
-         release build, or use `just payload::supervisors`), or set {env}=<path>.{hint}",
+         release build, or use `just build supervisors`), or set {env}=<path>.{hint}",
         bin = spec.bin,
         pkg = spec.rebuild_package,
         command = manual_build_command(spec),
@@ -933,7 +933,7 @@ fn workspace_root_from_manifest_dir() -> Option<PathBuf> {
 }
 
 /// `target/{release,debug}` under each workspace target dir (default plus a
-/// `CARGO_TARGET_DIR` override), the fallback for `just payload::supervisors`.
+/// `CARGO_TARGET_DIR` override), the fallback for `just build supervisors`.
 fn workspace_target_dirs() -> Vec<PathBuf> {
     workspace_root_from_manifest_dir()
         .map_or_else(Vec::new, |root| workspace_target_dirs_for(&root))
@@ -1983,7 +1983,7 @@ mod tests {
             "{err}"
         );
         assert!(!err.contains("cargo build --bins"), "{err}");
-        assert!(err.contains("just payload::supervisors"), "{err}");
+        assert!(err.contains("just build supervisors"), "{err}");
     }
 
     #[test]
@@ -2010,15 +2010,16 @@ mod tests {
     }
 
     #[test]
-    fn a_release_binary_names_the_backend_add_and_hvf_remedies() {
+    fn a_release_binary_names_the_default_backends_as_the_remedy() {
         let spec = AuxBin::new(
             "mvm-libkrun-supervisor",
             "MVM_LIBKRUN_SUPERVISOR",
             "mvm-hostd",
         );
         let message = missing_message(&spec, true);
-        assert!(message.contains("mvmctl backend add libkrun"), "{message}");
+        assert!(!message.contains("backend add"), "{message}");
         assert!(message.contains("HVF"), "{message}");
+        assert!(message.contains("Firecracker"), "{message}");
         assert!(!message.contains("cargo build"), "{message}");
         // A release install never prints a Homebrew instruction.
         assert!(!message.to_lowercase().contains("brew"), "{message}");

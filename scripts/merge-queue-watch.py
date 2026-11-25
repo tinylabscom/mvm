@@ -10,6 +10,7 @@ import urllib.request
 REPO = "tinylabscom/mvm"
 TITLE = "Merge queue stalled"
 STALE_AFTER = dt.timedelta(minutes=30)
+RUN_STALE_AFTER = dt.timedelta(minutes=60)
 QUERY = """
 query {
   repository(owner: "tinylabscom", name: "mvm") {
@@ -86,6 +87,12 @@ def alert_if_stalled(call, head, run, now):
     entered = dt.datetime.fromisoformat(head["enqueuedAt"].replace("Z", "+00:00"))
     if now - entered < STALE_AFTER:
         return False
+    # The queue can wait for runners before CI starts. Do not call an active
+    # validation run stalled merely because the queue entry is 30 minutes old.
+    if run and run["status"] in ("queued", "in_progress"):
+        started = dt.datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
+        if now - started < RUN_STALE_AFTER:
+            return False
     number = head["pullRequest"]["number"]
     url = f"https://github.com/{REPO}/pull/{number}"
     run_url = run["html_url"] if run else "No merge-group CI run found"

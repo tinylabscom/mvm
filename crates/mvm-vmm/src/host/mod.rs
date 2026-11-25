@@ -22,7 +22,8 @@ pub mod fc_kernel;
 pub mod file_memo;
 pub mod flowmux_identity;
 pub mod gpu_endpoint_spawn;
-pub mod helper_contract;
+#[cfg(test)]
+mod helper_contract;
 pub mod helper_exit;
 pub mod host_agent_spawn;
 pub mod hvf_control_transport;

@@ -334,7 +334,7 @@ widens to broad `--net` behavior and never falls back to a guest NIC.
 When the helper path is available and you want a live runtime proof, run:
 
 ```bash
-just kernel::hvf-oci-smoke
+just e2e hvf-oci-smoke
 ```
 
 The script runs one Python OCI workload through the production FlowMux path,
@@ -519,11 +519,7 @@ The standard macOS backend is native `hvf`. Its per-VM supervisor needs ad-hoc c
 
 - `com.apple.security.hypervisor` — required by the `mvm-hvf-supervisor` process that directly calls Hypervisor.framework.
 
-The release installer signs the supervisor during installation. On macOS
-13–25 the same signed Apple Silicon archive carries the libkrun supervisor and
-its relocatable dylibs; select it explicitly with `--hypervisor libkrun`. The
-packaged tier remains a preview until the real guest-launch witness tracked in
-[mvm#4577](https://github.com/tinylabscom/mvm/issues/4577) passes.
+The release installer signs the supervisor during installation.
 
 What you'll see on the first run:
 

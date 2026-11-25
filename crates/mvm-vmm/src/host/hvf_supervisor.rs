@@ -831,7 +831,7 @@ mod tests {
         assert!(!PROTECTED_DIAGNOSTICS_HINT.contains("synthetic-sensitive-stderr-marker"));
     }
 
-    /// The config contract is version-stamped (see `host::helper_contract`),
+    /// The config contract is version-stamped (see `mvm_core::helper_contract`),
     /// and this pin forces the stamp to move with the schema: serializing
     /// the full fixture must hash to the pinned value, so adding, renaming,
     /// or retyping a field fails here until the contract version and the pin
@@ -845,7 +845,7 @@ mod tests {
         assert_eq!(
             hash,
             crate::host::helper_contract::HVF_CONFIG_SHAPE_HASH,
-            "HvfSupervisorConfig's shape changed: bump              HOST_HELPER_CONTRACT_VERSION in host::helper_contract and update              HVF_CONFIG_SHAPE_HASH to 0x{hash:016x}"
+            "HvfSupervisorConfig's shape changed: bump              HOST_HELPER_CONTRACT_VERSION in mvm_core::helper_contract and update              HVF_CONFIG_SHAPE_HASH to 0x{hash:016x}"
         );
     }
 

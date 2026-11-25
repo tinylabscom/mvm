@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::{ParseTimestampError, UtcTimestamp};
 
 /// Shared wall-clock seam for code that needs deterministic time in tests.
 ///
@@ -67,6 +68,38 @@ pub fn utc_now() -> String {
     rfc3339_from_system_time(std::time::SystemTime::now())
 }
 
+/// `ts` in the `+00:00` form `chrono::DateTime::to_rfc3339` prints, for output
+/// that predates `UtcTimestamp` (its own `Display` ends in `Z`).
+pub fn rfc3339_offset(ts: UtcTimestamp) -> String {
+    chrono::DateTime::<chrono::Utc>::from(ts).to_rfc3339()
+}
+
+/// `at` as a [`UtcTimestamp`], nanosecond precision, saturating at the epoch
+/// for an instant before 1970. Errors when `at` is past year 9999, which the
+/// type cannot hold.
+pub fn utc_timestamp_at(at: std::time::SystemTime) -> Result<UtcTimestamp, ParseTimestampError> {
+    let since_epoch = at
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    UtcTimestamp::from_unix(
+        i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX),
+        since_epoch.subsec_nanos(),
+    )
+    .ok_or(ParseTimestampError)
+}
+
+/// The current instant as a [`UtcTimestamp`], or an error when the host clock
+/// is past year 9999. Every production path that can refuse uses this one, so
+/// a bad clock refuses the operation instead of aborting the process.
+pub fn try_utc_timestamp_now() -> Result<UtcTimestamp, ParseTimestampError> {
+    utc_timestamp_at(std::time::SystemTime::now())
+}
+
+/// [`try_utc_timestamp_now`] for tests, which have no error path to take.
+pub fn utc_timestamp_now() -> UtcTimestamp {
+    try_utc_timestamp_now().expect("the current time is within years 0000..=9999")
+}
+
 /// Render a `SystemTime` as the same ISO 8601 / RFC 3339 shape [`utc_now`]
 /// emits, so a filesystem timestamp and a recorded one are comparable by eye
 /// and by `parse_iso8601`.
@@ -116,6 +149,22 @@ pub fn parse_iso8601(s: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rfc3339_offset_keeps_the_chrono_form() {
+        let whole = UtcTimestamp::from_unix(1_790_812_800, 0).unwrap();
+        assert_eq!(rfc3339_offset(whole), "2026-10-01T00:00:00+00:00");
+        let frac = UtcTimestamp::from_unix(1_790_812_800, 123_000_000).unwrap();
+        assert_eq!(rfc3339_offset(frac), "2026-10-01T00:00:00.123+00:00");
+    }
+
+    #[test]
+    fn a_clock_past_year_9999_is_an_error_not_a_panic() {
+        let end = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(253_402_300_800);
+        assert!(utc_timestamp_at(end).is_err());
+        assert!(utc_timestamp_at(end - Duration::from_secs(1)).is_ok());
+        assert!(try_utc_timestamp_now().is_ok());
+    }
 
     #[test]
     fn test_utc_now_format() {
@@ -200,6 +249,12 @@ mod tests {
             x ^= x << 17;
             check((x % 253_402_300_800) as i64 - 62_135_596_800);
         }
+    }
+
+    #[test]
+    fn utc_timestamp_now_matches_chrono_now_within_a_second() {
+        let ours = chrono::DateTime::<Utc>::from(utc_timestamp_now());
+        assert!((Utc::now() - ours).num_seconds().abs() <= 1);
     }
 
     #[test]

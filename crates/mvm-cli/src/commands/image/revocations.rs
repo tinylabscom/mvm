@@ -8,9 +8,9 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use clap::{Args as ClapArgs, Subcommand};
 use mvm_client::image_admin::revocations as client_revocations;
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::image_set_revocation::{ImageSetRevocationCheckpoint, VerifiedImageSetRevocations};
 use serde::Serialize;
 
@@ -69,7 +69,7 @@ fn describe_checkpoint(checkpoint: &ImageSetRevocationCheckpoint) -> String {
     format!(
         "verified image-set revocations publication {} issued {} (sha256 {})",
         checkpoint.publication,
-        checkpoint.issued_at.to_rfc3339(),
+        mvm_core::util::time::rfc3339_offset(checkpoint.issued_at),
         checkpoint.sha256.as_str()
     )
 }
@@ -77,8 +77,8 @@ fn describe_checkpoint(checkpoint: &ImageSetRevocationCheckpoint) -> String {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct StatusReport {
     publication: u64,
-    issued_at: DateTime<Utc>,
-    not_after: DateTime<Utc>,
+    issued_at: UtcTimestamp,
+    not_after: UtcTimestamp,
     sha256: String,
     signer_identity: String,
     entries: usize,
@@ -103,8 +103,8 @@ impl StatusReport {
         format!(
             "publication: {}\nissued_at:   {}\nnot_after:   {}\nsha256:      {}\nsigner:      {}\nentries:     {}",
             self.publication,
-            self.issued_at.to_rfc3339(),
-            self.not_after.to_rfc3339(),
+            mvm_core::util::time::rfc3339_offset(self.issued_at),
+            mvm_core::util::time::rfc3339_offset(self.not_after),
             self.sha256,
             self.signer_identity,
             self.entries
@@ -283,10 +283,9 @@ mod tests {
 
     #[test]
     fn checkpoint_formatter_preserves_labels_using_metadata_only() {
-        use chrono::TimeZone;
         let checkpoint = ImageSetRevocationCheckpoint {
             publication: 7,
-            issued_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            issued_at: "2026-01-01T00:00:00Z".parse().unwrap(),
             sha256: mvm_core::packs::Sha256Hex::from_bytes(b"formatter fixture, not verification"),
         };
         assert_eq!(
@@ -300,12 +299,11 @@ mod tests {
 
     #[test]
     fn status_text_and_json_shapes_are_pinned_by_unverified_metadata_only() {
-        use chrono::TimeZone;
         // This is a rendering fixture, deliberately not a Verified value.
         let report = StatusReport {
             publication: 7,
-            issued_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
-            not_after: Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap(),
+            issued_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            not_after: "2026-02-01T00:00:00Z".parse().unwrap(),
             sha256: "a".repeat(64),
             signer_identity: "rendering-fixture-not-authentication".into(),
             entries: 3,

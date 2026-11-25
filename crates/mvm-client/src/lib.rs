@@ -25,6 +25,15 @@
 //! authoring requires an explicit `mvm-sdk` dependency. The language SDKs
 //! reach the runtime surface through `libmvm_hostlib`, a C ABI over this crate.
 //!
+//! Generic prepared-start functions are intentionally not part of this facade:
+//!
+//! ```compile_fail
+//! use mvm_client::boot::{
+//!     start_prepared, start_prepared_custodied,
+//!     start_prepared_custodied_with_verified_runtime,
+//! };
+//! ```
+//!
 //! ```no_run
 //! use mvm_client::{LaunchRequest, LifecycleMode, LocalBackend, RootfsSource};
 //!
@@ -134,8 +143,8 @@ pub use mvm_contract::protocol::agent_session;
 pub use mvm_core::client::dto;
 pub use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineSpecBuilder, MachineState,
-    MachineStatus, PauseOpts, PauseOutcome, PortMapping, ReconfigureRequest, ResumeOpts,
-    ResumeOutcome,
+    MachineStatus, MailboxExpiry, PauseOpts, PauseOutcome, PortMapping, ReconfigureRequest,
+    ResumeOpts, ResumeOutcome,
 };
 #[cfg(feature = "remote")]
 pub use mvm_core::client::gateway;
@@ -153,7 +162,7 @@ pub use mvm_core::rootfs_source::{RootfsSource, RootfsSourceParseError};
 pub use boot::{
     ResumeBootLocalRequest, ResumeBootLocalRequestBuilder, StartedVm, backend_is_running,
     backend_kind_for, backend_stop_by_name, clamp_vcpus_for_backend, require_hypervisor_selectable,
-    resume_and_boot_local, start_prepared,
+    resume_and_boot_local,
 };
 pub use builder_bundle::{
     BuilderBundleRequest, BuilderBundleResult, build_and_export_bundle, build_and_export_bundle_on,

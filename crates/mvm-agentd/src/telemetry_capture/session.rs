@@ -26,11 +26,16 @@
 //!   summaries between turns instead of draining forever.
 //!
 //! The session is one-way after the handshake, so an idle host's death
-//! cannot wait for the next write: each idle turn probes the stream with one
-//! read under a short timeout. End-of-file is the peer gone, a timeout is
-//! the peer alive. Under load the probe is skipped, because the next write
-//! observes a dead peer anyway. Producer teardown never joins or flushes
-//! this loop, and nothing here makes a producer wait.
+//! cannot wait for the next write: between idle turns the loop waits for the
+//! stream to become readable, which end-of-file does at once. Under load the
+//! wait is skipped, because the next write observes a dead peer anyway.
+//! Producer teardown never joins or flushes this loop, and nothing here makes
+//! a producer wait.
+//!
+//! Producers never notify, so the wait between turns is a timer. While turns
+//! keep finding records it stays at [`DRAIN_INTERVAL`]; each empty turn
+//! doubles it up to [`IDLE_WAIT_CEILING`], so an idle session wakes its guest
+//! about once a second instead of forty times.
 
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
@@ -46,10 +51,16 @@ use mvm_core::protocol::telemetry::{
 use super::state::{CaptureState, ProducerId, SourceLosses};
 use crate::telemetry_service::{AGENT_COVERAGE_CODE, SessionEnd};
 
-/// How long the loop waits between turns once the queue is empty.
-/// Producers never notify — the offer budget forbids it — so this cadence
+/// How long the loop waits after a turn that sent records and emptied the
+/// queue. Producers never notify — the offer budget forbids it — so the wait
 /// is the delivery latency ceiling, and telemetry tolerates it.
 const DRAIN_INTERVAL: Duration = Duration::from_millis(25);
+
+/// The longest wait between turns, reached after consecutive empty turns.
+/// It bounds the delivery latency of the first record after an idle spell
+/// and how late a stop is noticed; each wait is a guest wakeup, and at 1000 Hz
+/// with an idle tick each one also costs the guest a timer interrupt or two.
+const IDLE_WAIT_CEILING: Duration = Duration::from_secs(1);
 
 /// How often accumulated losses are summarized to the host. Measured in
 /// time, not turns, so a flood that shortens turns does not turn the
@@ -96,6 +107,10 @@ pub trait TimedStream: Read + Write {
     /// Wait at most `timeout` for room to write. `Ok` on room or timeout
     /// alike; the caller's deadline decides which it was.
     fn wait_writable(&mut self, timeout: Duration) -> io::Result<()>;
+
+    /// Wait at most `timeout` for something to read, end-of-file included.
+    /// `Ok(false)` is the timeout (or an interrupted wait).
+    fn wait_readable(&mut self, timeout: Duration) -> io::Result<bool>;
 }
 
 impl<T: Read + Write + AsRawFd> TimedStream for T {
@@ -129,22 +144,34 @@ impl<T: Read + Write + AsRawFd> TimedStream for T {
     }
 
     fn wait_writable(&mut self, timeout: Duration) -> io::Result<()> {
-        let millis = libc::c_int::try_from(timeout.as_millis().max(1)).unwrap_or(libc::c_int::MAX);
-        let mut fds = [libc::pollfd {
-            fd: self.as_raw_fd(),
-            events: libc::POLLOUT,
-            revents: 0,
-        }];
-        // SAFETY: one live pollfd, its length passed alongside.
-        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 1, millis) };
-        if rc < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
-            }
-        }
-        Ok(())
+        poll_one(self.as_raw_fd(), libc::POLLOUT, timeout).map(|_| ())
     }
+
+    fn wait_readable(&mut self, timeout: Duration) -> io::Result<bool> {
+        poll_one(self.as_raw_fd(), libc::POLLIN, timeout)
+    }
+}
+
+/// Poll one descriptor for `events` for at most `timeout`. `Ok(true)` when it
+/// reported anything (hang-up and error included), `Ok(false)` on timeout or
+/// an interrupted wait.
+fn poll_one(fd: i32, events: libc::c_short, timeout: Duration) -> io::Result<bool> {
+    let millis = libc::c_int::try_from(timeout.as_millis().max(1)).unwrap_or(libc::c_int::MAX);
+    let mut fds = [libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    }];
+    // SAFETY: one live pollfd, its length passed alongside.
+    let rc = unsafe { libc::poll(fds.as_mut_ptr(), 1, millis) };
+    if rc < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+        return Ok(false);
+    }
+    Ok(rc > 0)
 }
 
 fn set_socket_timeout(fd: i32, option: libc::c_int, timeout: Duration) -> io::Result<()> {
@@ -285,6 +312,7 @@ pub fn serve_capture_session<S: TimedStream>(
 
     let mut summarized = [SourceLosses::default(); ProducerId::ALL.len()];
     let mut last_summary = Instant::now();
+    let mut wait = DRAIN_INTERVAL;
     loop {
         if stop.load(Ordering::Acquire) {
             return SessionEnd::PeerClosed;
@@ -310,12 +338,32 @@ pub fn serve_capture_session<S: TimedStream>(
             // More is probably queued: take the next turn straight away.
             continue;
         }
-        match probe_peer(stream) {
+        wait = next_wait(wait, sent);
+        match wait_for_peer(stream, wait) {
             PeerProbe::Alive => {}
             PeerProbe::Closed => return SessionEnd::PeerClosed,
             PeerProbe::Broken => return SessionEnd::Failed,
         }
-        std::thread::sleep(DRAIN_INTERVAL);
+    }
+}
+
+/// The wait after a turn that sent `sent` records: back to the drain cadence
+/// when the turn found work, otherwise double the last wait up to the ceiling.
+fn next_wait(last: Duration, sent: usize) -> Duration {
+    if sent > 0 {
+        DRAIN_INTERVAL
+    } else {
+        (last * 2).min(IDLE_WAIT_CEILING)
+    }
+}
+
+/// Wait up to `wait` for the one-way peer to say anything, then probe it.
+/// Nothing to read is a live peer; end-of-file wakes the wait at once.
+fn wait_for_peer<S: TimedStream>(stream: &mut S, wait: Duration) -> PeerProbe {
+    match stream.wait_readable(wait) {
+        Ok(false) => PeerProbe::Alive,
+        Ok(true) => probe_peer(stream),
+        Err(_) => PeerProbe::Broken,
     }
 }
 
@@ -1164,5 +1212,107 @@ mod tests {
         );
         assert_eq!(end, SessionEnd::Failed);
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// Serve a session over `guest` on its own thread with no stop, so only
+    /// the peer can end it. Returns the thread's `/proc` task directory and
+    /// a handle yielding the session's end and when it ended.
+    fn idle_session(
+        mut guest: UnixStream,
+        guest_key: SigningKey,
+        anchor: VerifyingKey,
+        capture: Arc<CaptureState>,
+    ) -> (
+        std::path::PathBuf,
+        std::thread::JoinHandle<(SessionEnd, Instant)>,
+    ) {
+        let (task_tx, task_rx) = std::sync::mpsc::channel();
+        let session = std::thread::spawn(move || {
+            let task = std::fs::read_link("/proc/thread-self")
+                .map(|t| std::path::Path::new("/proc").join(t));
+            task_tx.send(task.unwrap_or_default()).unwrap();
+            let stop = AtomicBool::new(false);
+            let end =
+                serve_capture_session(&mut guest, guest_key, &anchor, &capture, &stop, BOUNDS);
+            (end, Instant::now())
+        });
+        (task_rx.recv().unwrap(), session)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn voluntary_switches(task: &std::path::Path) -> u64 {
+        std::fs::read_to_string(task.join("status"))
+            .expect("read thread status")
+            .lines()
+            .find_map(|line| line.strip_prefix("voluntary_ctxt_switches:"))
+            .and_then(|count| count.trim().parse().ok())
+            .expect("voluntary_ctxt_switches in thread status")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_idle_session_does_not_wake_on_the_drain_cadence() {
+        // A probe read plus a sleep every 25 ms woke the thread about eighty
+        // times in two idle seconds. Backing off to the ceiling costs a few.
+        let (guest_key, anchor_key) = keys();
+        let (guest, mut host) = UnixStream::pair().unwrap();
+        let expected = guest_key.verifying_key();
+        let (task, session) = idle_session(
+            guest,
+            guest_key,
+            anchor_key.verifying_key(),
+            Arc::new(capture_over(4)),
+        );
+        let mut receiver = authenticate(&mut host, &anchor_key, &expected);
+        receiver.receive(&mut host).expect("announcement");
+        let before = voluntary_switches(&task);
+        std::thread::sleep(Duration::from_secs(2));
+        let wakeups = voluntary_switches(&task) - before;
+        drop(host);
+        assert_eq!(session.join().unwrap().0, SessionEnd::PeerClosed);
+        assert!(
+            wakeups < 15,
+            "the idle session woke {wakeups} times in two seconds"
+        );
+    }
+
+    #[test]
+    fn an_idle_session_still_delivers_within_its_ceiling_and_sees_a_close_at_once() {
+        let (guest_key, anchor_key) = keys();
+        let (guest, mut host) = UnixStream::pair().unwrap();
+        let expected = guest_key.verifying_key();
+        let capture = Arc::new(capture_over(4));
+        let (_task, session) = idle_session(
+            guest,
+            guest_key,
+            anchor_key.verifying_key(),
+            Arc::clone(&capture),
+        );
+        let mut receiver = authenticate(&mut host, &anchor_key, &expected);
+        receiver.receive(&mut host).expect("announcement");
+
+        // Idle long enough for the wait to reach its ceiling, then produce.
+        std::thread::sleep(IDLE_WAIT_CEILING + Duration::from_millis(500));
+        let emitted = Instant::now();
+        diagnostic(&capture, "after-idle");
+        let record = receiver.receive(&mut host).expect("the record crosses");
+        let latency = emitted.elapsed();
+        assert!(matches!(record.body(), RecordBody::Event { .. }));
+        assert!(
+            latency < IDLE_WAIT_CEILING + Duration::from_millis(500),
+            "a record waited {latency:?} after an idle spell"
+        );
+
+        // A close ends the idle wait itself, not the next timer.
+        std::thread::sleep(IDLE_WAIT_CEILING + Duration::from_millis(500));
+        let closed = Instant::now();
+        drop(host);
+        let (end, ended) = session.join().unwrap();
+        assert_eq!(end, SessionEnd::PeerClosed);
+        assert!(
+            ended.duration_since(closed) < Duration::from_millis(500),
+            "the close was seen {:?} late",
+            ended.duration_since(closed)
+        );
     }
 }

@@ -78,7 +78,14 @@ impl DisplayAuthority {
                 }
                 envelope
                     .grant
-                    .verify(&signer.verifying, vm, &plan.nonce, chrono::Utc::now())
+                    .verify(
+                        &signer.verifying,
+                        vm,
+                        &plan.nonce,
+                        mvm_core::util::time::try_utc_timestamp_now().map_err(|error| {
+                            authority_error(&format!("host clock unusable: {error}"))
+                        })?,
+                    )
                     .map_err(|error| {
                         DisplayAuthorityError::Authority(anyhow::anyhow!(
                             "host-signed verb grant verification failed: {error}"
@@ -205,7 +212,7 @@ mod tests {
             &keystore,
             vm,
             &plan.nonce,
-            plan.valid_until.into(),
+            plan.valid_until,
             verbs
                 .iter()
                 .map(|verb| mvm_contract::plan::VerbId::new(verb).unwrap())

@@ -20,6 +20,20 @@ use mvm_core::vm_backend::{StandbyHandle, StandbyState};
 pub use mvm_runtime::backend::OwnedWarmClaim;
 pub use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool};
 
+mod claim;
+mod prepared;
+pub use claim::{CliWarmClaimOutcome, claim_selected_cli_warm};
+pub use prepared::{
+    PlanlessWarmParentAnchor, PreparedWarmParent, WarmRefillResult,
+    is_warm_parent_ownership_uncertain, standby_compat,
+};
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use prepared::{
+    refill_borrowed_for_test, warm_parent_cleanup_uncertain_for_test,
+    warm_parent_native_custody_for_test,
+};
+
 /// How often the idle watcher looks at the pool.
 const WATCH_TICK: Duration = Duration::from_secs(5);
 

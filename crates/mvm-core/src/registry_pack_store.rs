@@ -10,7 +10,7 @@ use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -68,6 +68,8 @@ pub enum RegistryPackStoreError {
     RevocationStore(#[from] RegistryPackRevocationStoreError),
     #[error(transparent)]
     Revoked(#[from] RegistryPackRevocationError),
+    #[error("the host clock is outside years 0000-9999: {0}")]
+    Clock(#[from] mvm_contract::timestamp::ParseTimestampError),
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,7 +95,7 @@ pub fn check_registry_pack_revocations_if_configured(
         &trust_path,
         &operator_store,
         &official_store,
-        Utc::now(),
+        host_now()?,
     )
 }
 
@@ -118,7 +120,7 @@ pub(crate) fn check_application_revocations(
         verified,
         builtin_policy,
         &crate::config::registry_pack_revocation_trust_path(),
-        Utc::now(),
+        host_now()?,
         |trust, at| {
             official_store
                 .load(trust, at)
@@ -132,6 +134,21 @@ pub(crate) fn check_application_revocations(
     )
 }
 
+/// The host clock as a feed timestamp; a clock outside years 0000..=9999
+/// refuses the revocation check rather than skipping it.
+fn host_now() -> Result<UtcTimestamp, RegistryPackStoreError> {
+    host_now_at(std::time::SystemTime::now())
+}
+
+fn host_now_at(at: std::time::SystemTime) -> Result<UtcTimestamp, RegistryPackStoreError> {
+    Ok(crate::util::time::utc_timestamp_at(at)?)
+}
+
+#[cfg(test)]
+fn now() -> UtcTimestamp {
+    crate::util::time::utc_timestamp_now()
+}
+
 fn uses_builtin_feed(verified: &impl AuthenticatedRegistryManifest, builtin_policy: bool) -> bool {
     verified.reference().namespace() == "mvm"
         || (builtin_policy
@@ -142,18 +159,18 @@ fn check_application_revocations_at<O, P>(
     verified: &impl AuthenticatedRegistryManifest,
     builtin_policy: bool,
     operator_trust_path: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     official_load: O,
     operator_load: P,
 ) -> Result<(), RegistryPackStoreError>
 where
     O: FnOnce(
         &KeylessTrust,
-        DateTime<Utc>,
+        UtcTimestamp,
     ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError>,
     P: FnOnce(
         &KeylessTrust,
-        DateTime<Utc>,
+        UtcTimestamp,
     ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError>,
 {
     if !uses_builtin_feed(verified, builtin_policy) {
@@ -181,9 +198,9 @@ where
 
 /// Expiry of the cached official feed, or `None` when it is absent, corrupt,
 /// rolled back or already expired. Lets a client decide whether to refresh.
-pub fn official_registry_pack_revocation_valid_until() -> Option<DateTime<Utc>> {
+pub fn official_registry_pack_revocation_valid_until() -> Option<UtcTimestamp> {
     official_registry_pack_revocation_store()
-        .load(&official_registry_pack_revocation_trust(), Utc::now())
+        .load(&official_registry_pack_revocation_trust(), host_now().ok()?)
         .ok()
         .map(|feed| feed.not_after())
 }
@@ -191,13 +208,13 @@ pub fn official_registry_pack_revocation_valid_until() -> Option<DateTime<Utc>> 
 fn check_application_revocations_with<F>(
     verified: &impl AuthenticatedRegistryManifest,
     trust_path: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     load: F,
 ) -> Result<(), RegistryPackStoreError>
 where
     F: FnOnce(
         &KeylessTrust,
-        DateTime<Utc>,
+        UtcTimestamp,
     ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError>,
 {
     let trust = load_revocation_trust(trust_path)?.ok_or_else(|| {
@@ -226,7 +243,7 @@ fn check_revocations_for_pack_at(
     operator_trust_path: &Path,
     operator_store: &RegistryPackRevocationStore,
     official_store: &RegistryPackRevocationStore,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<(), RegistryPackStoreError> {
     if verified.reference().namespace() == "mvm" {
         check_official_registry_pack_revocations_with(verified, now, |trust, at| {
@@ -241,13 +258,13 @@ fn check_revocations_for_pack_at(
 
 fn check_official_registry_pack_revocations_with<F>(
     verified: &impl crate::registry_pack::AuthenticatedRegistryManifest,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     load: F,
 ) -> Result<(), RegistryPackStoreError>
 where
     F: FnOnce(
         &KeylessTrust,
-        DateTime<Utc>,
+        UtcTimestamp,
     ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError>,
 {
     if verified.signer().identity == OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY {
@@ -270,7 +287,7 @@ pub fn update_official_registry_pack_revocations(
         document,
         bundle,
         &official_registry_pack_revocation_trust(),
-        Utc::now(),
+        host_now()?,
     )?;
     crate::policy::audit::event(crate::policy::audit::LocalAuditKind::RegistryPackRevocationUpdate)
         .detail(format!(
@@ -291,7 +308,7 @@ pub fn update_registry_pack_revocations(
     let trust_path = crate::config::registry_pack_revocation_trust_path();
     let store = RegistryPackRevocationStore::in_mvm_home();
     let checkpoint =
-        update_registry_pack_revocations_at(document, bundle, &trust_path, &store, Utc::now())?;
+        update_registry_pack_revocations_at(document, bundle, &trust_path, &store, host_now()?)?;
     crate::policy::audit::event(crate::policy::audit::LocalAuditKind::RegistryPackRevocationUpdate)
         .detail(format!(
             "sequence={} sha256={}",
@@ -307,7 +324,7 @@ fn update_registry_pack_revocations_at(
     bundle: &[u8],
     trust_path: &Path,
     store: &RegistryPackRevocationStore,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<RegistryPackRevocationCheckpoint, RegistryPackStoreError> {
     let trust = load_revocation_trust(trust_path)?.ok_or_else(|| {
         RegistryPackStoreError::MissingRevocationTrust {
@@ -323,7 +340,7 @@ fn check_registry_pack_revocations_at(
     verified: &impl crate::registry_pack::AuthenticatedRegistryManifest,
     trust_path: &Path,
     store: &RegistryPackRevocationStore,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<(), RegistryPackStoreError> {
     check_registry_pack_revocations_with(verified, trust_path, now, |trust, at| {
         store.load(trust, at).map_err(RegistryPackStoreError::from)
@@ -333,13 +350,13 @@ fn check_registry_pack_revocations_at(
 fn check_registry_pack_revocations_with<F>(
     verified: &impl crate::registry_pack::AuthenticatedRegistryManifest,
     trust_path: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     load: F,
 ) -> Result<(), RegistryPackStoreError>
 where
     F: FnOnce(
         &KeylessTrust,
-        DateTime<Utc>,
+        UtcTimestamp,
     ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError>,
 {
     let trust = match load_revocation_trust(trust_path)? {
@@ -358,13 +375,13 @@ fn check_trusted_registry_pack_revocations<F>(
     verified: &impl crate::registry_pack::AuthenticatedRegistryManifest,
     trust_path: &Path,
     trust: &KeylessTrust,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     load: F,
 ) -> Result<(), RegistryPackStoreError>
 where
     F: FnOnce(
         &KeylessTrust,
-        DateTime<Utc>,
+        UtcTimestamp,
     ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError>,
 {
     if trust
@@ -1171,13 +1188,22 @@ pub fn read_pack_policy_document(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_host_clock_past_year_9999_refuses_the_revocation_check() {
+        let at =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(253_402_300_800);
+        assert!(matches!(
+            host_now_at(at),
+            Err(RegistryPackStoreError::Clock(_))
+        ));
+    }
+
     use super::*;
     use crate::packs::Sha256Hex;
     use crate::registry_pack::{
         PackAdoption, REGISTRY_PACK_MANIFEST_SCHEMA_VERSION, RegistryPackFile,
         RegistryPackManifest, RegistryPackPublisher,
     };
-    use chrono::TimeZone;
 
     const PROFILE: &[u8] = b"[tools]\nallow = [\"git\"]\n";
     const GROUP: &[u8] = b"[network]\nallow = [\"pypi.org:443\"]\n";
@@ -1376,10 +1402,7 @@ mod tests {
         revoked_identities: Vec<String>,
         revoked_manifests: Vec<String>,
     ) -> Result<(), RegistryPackStoreError> {
-        let now = Utc
-            .with_ymd_and_hms(2026, 10, day, 0, 0, 0)
-            .single()
-            .expect("valid test time");
+        let now = oct(day);
         let document = serde_json::to_vec(&serde_json::json!({
             "schema_version": 1,
             "sequence": 1,
@@ -1410,7 +1433,7 @@ mod tests {
             &verified_for_revocation_test(),
             &home.path().join("missing.toml"),
             &store,
-            Utc::now(),
+            now(),
         )
         .expect("legacy trust remains available");
     }
@@ -1425,7 +1448,7 @@ mod tests {
                 &verified_built_image_for_revocation_test(),
                 &trust_path,
                 &store,
-                Utc::now(),
+                now(),
             ),
             Err(RegistryPackStoreError::MissingRevocationTrust { path })
                 if path == trust_path.display().to_string()
@@ -1465,7 +1488,7 @@ mod tests {
                 &trust_path,
                 &operator_store,
                 &official_store,
-                Utc::now(),
+                now(),
             ),
             Err(RegistryPackStoreError::RevocationStore(
                 RegistryPackRevocationStoreError::Missing
@@ -1506,10 +1529,7 @@ mod tests {
         day: u32,
         revoked_manifests: Vec<String>,
     ) -> Result<(), RegistryPackStoreError> {
-        let now = Utc
-            .with_ymd_and_hms(2026, 10, day, 0, 0, 0)
-            .single()
-            .expect("valid test time");
+        let now = oct(day);
         let document = serde_json::to_vec(&serde_json::json!({
             "schema_version": 1,
             "sequence": 1,
@@ -1570,7 +1590,7 @@ mod tests {
                 &verified_for_revocation_test(),
                 &trust_path,
                 &store,
-                Utc::now(),
+                now(),
             ),
             Err(RegistryPackStoreError::RevocationStore(
                 RegistryPackRevocationStoreError::Missing
@@ -1634,7 +1654,7 @@ mod tests {
                 &verified_for_revocation_test(),
                 &trust_path,
                 &store,
-                Utc::now(),
+                now(),
             ),
             Err(RegistryPackStoreError::RevocationTrust { .. })
         ));
@@ -1659,7 +1679,7 @@ mod tests {
                 &verified_for_revocation_test(),
                 &trust_path,
                 &store,
-                Utc::now(),
+                now(),
             ),
             Err(RegistryPackStoreError::RevocationTrust { .. })
         ));
@@ -1698,7 +1718,7 @@ mod tests {
         let trust_path = home.path().join("trust.toml");
         let store = RegistryPackRevocationStore::new(home.path().join("cache"));
         assert!(matches!(
-            update_registry_pack_revocations_at(b"{}", b"bad", &trust_path, &store, Utc::now(),),
+            update_registry_pack_revocations_at(b"{}", b"bad", &trust_path, &store, now(),),
             Err(RegistryPackStoreError::MissingRevocationTrust { .. })
         ));
         write_trust(
@@ -1706,7 +1726,7 @@ mod tests {
             "schema_version = 1\nissuer = 'test issuer'\naccepted_identities = ['independent release identity']\n",
         );
         assert!(matches!(
-            update_registry_pack_revocations_at(b"{}", b"bad", &trust_path, &store, Utc::now(),),
+            update_registry_pack_revocations_at(b"{}", b"bad", &trust_path, &store, now(),),
             Err(RegistryPackStoreError::RevocationStore(
                 RegistryPackRevocationStoreError::Verification(
                     RegistryPackRevocationError::SignatureInvalid(_)
@@ -2075,7 +2095,7 @@ mod tests {
     fn signed_application_feed(
         verified: &crate::registry_pack::VerifiedRegistryApplication,
         trust: &KeylessTrust,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         revoked: bool,
     ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError> {
         signed_application_feed_at_position(verified, trust, now, revoked, 1, None)
@@ -2085,7 +2105,7 @@ mod tests {
     fn signed_application_feed_at_position(
         verified: &crate::registry_pack::VerifiedRegistryApplication,
         trust: &KeylessTrust,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         revoked: bool,
         sequence: u64,
         previous: Option<&RegistryPackRevocationCheckpoint>,
@@ -2130,7 +2150,7 @@ mod tests {
         let path = home.path().join("missing.toml");
         let application = application_for_revocation_test();
         assert!(matches!(
-            check_application_revocations_with(&application, &path, Utc::now(), |_, _| {
+            check_application_revocations_with(&application, &path, now(), |_, _| {
                 panic!("absent trust must refuse before loading a feed")
             }),
             Err(RegistryPackStoreError::MissingRevocationTrust { .. })
@@ -2138,7 +2158,7 @@ mod tests {
         check_registry_pack_revocations_with(
             &verified_for_revocation_test(),
             &path,
-            Utc::now(),
+            now(),
             |_, _| panic!("legacy absent trust must not load a feed"),
         )
         .unwrap();
@@ -2159,7 +2179,7 @@ mod tests {
         ] {
             write_trust(&path, &contents);
             assert!(matches!(
-                check_application_revocations_with(&application, &path, Utc::now(), |_, _| {
+                check_application_revocations_with(&application, &path, now(), |_, _| {
                     panic!("invalid trust must refuse before loading a feed")
                 }),
                 Err(RegistryPackStoreError::RevocationTrust { .. })
@@ -2177,11 +2197,7 @@ mod tests {
             "schema_version = 1\nissuer = 'unit Ed25519 seam'\naccepted_identities = ['independent feed signer']\n",
         );
         let application = application_for_revocation_test();
-        let at = |day| {
-            Utc.with_ymd_and_hms(2026, 10, day, 0, 0, 0)
-                .single()
-                .unwrap()
-        };
+        let at = |day| oct(day);
         assert!(matches!(
             check_application_revocations_with(&application, &path, at(7), |trust, now| {
                 RegistryPackRevocationStore::new(home.path().join("missing"))
@@ -2222,7 +2238,7 @@ mod tests {
             issuer: "unit Ed25519 seam".into(),
             accepted_identities: vec!["independent feed signer".into()],
         };
-        let now = Utc.with_ymd_and_hms(2026, 10, 7, 0, 0, 0).single().unwrap();
+        let now = UtcTimestamp::from_unix(1_790_812_800 + 6 * 86_400, 0).unwrap();
         let current =
             signed_application_feed_at_position(&application, &trust, now, false, 2, None).unwrap();
         assert!(matches!(
@@ -2291,7 +2307,7 @@ mod tests {
         previous: Option<RegistryPackRevocationCheckpoint>,
     ) -> impl FnOnce(
         &KeylessTrust,
-        DateTime<Utc>,
+        UtcTimestamp,
     ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError> {
         let application = application.clone();
         move |trust, at| {
@@ -2309,14 +2325,19 @@ mod tests {
     #[cfg(unix)]
     fn unavailable_feed(
         _: &KeylessTrust,
-        _: DateTime<Utc>,
+        _: UtcTimestamp,
     ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError> {
         panic!("this feed must not be consulted")
     }
 
+    /// 2026-10-`day`T00:00:00Z.
+    fn oct(day: u32) -> UtcTimestamp {
+        UtcTimestamp::from_unix(1_790_812_800 + (i64::from(day) - 1) * 86_400, 0).unwrap()
+    }
+
     #[cfg(unix)]
-    fn at_test_time() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 7, 0, 0, 0).single().unwrap()
+    fn at_test_time() -> UtcTimestamp {
+        oct(7)
     }
 
     #[cfg(unix)]
@@ -2353,7 +2374,7 @@ mod tests {
         ));
         let missing: fn(
             &KeylessTrust,
-            DateTime<Utc>,
+            UtcTimestamp,
         )
             -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError> =
             |_, _| Err(RegistryPackRevocationStoreError::Missing.into());
@@ -2444,7 +2465,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("absent.toml");
         let application = application_reference_for_revocation_test("agent/claude@2.0.0");
-        let after_expiry = Utc.with_ymd_and_hms(2026, 10, 9, 0, 0, 0).single().unwrap();
+        let after_expiry = oct(9);
         assert!(matches!(
             check_application_revocations_at(
                 &application,
@@ -2469,8 +2490,8 @@ mod tests {
         let document = serde_json::to_vec(&serde_json::json!({
             "schema_version": 1,
             "sequence": 1,
-            "issued_at": Utc::now() - chrono::Duration::minutes(1),
-            "not_after": Utc::now() + chrono::Duration::hours(36),
+            "issued_at": now().checked_add_secs(-60).unwrap(),
+            "not_after": now().checked_add_secs(36 * 3600).unwrap(),
         }))
         .unwrap();
         // The bundle is not a signature under the built-in release identity.

@@ -144,6 +144,10 @@ pub struct LaunchWork {
     /// re-read of an 8 MB kernel are the same boolean and very different
     /// launches.
     pub artifact_bytes_hashed: u64,
+    /// Microseconds spent reading and digesting those bytes. Zero when
+    /// `artifact_bytes_hashed` is, and zero in a sample written before the
+    /// span existed, which `artifact_bytes_hashed` then still contradicts.
+    pub artifact_hash_us: u64,
     /// Host process-table snapshots taken during this launch.
     ///
     /// Zero on a prepared launch: nothing it does spawns a helper, so nothing
@@ -211,6 +215,7 @@ pub(crate) fn recorded_work(mount_materialize: bool, warm_claim: bool) -> Launch
         mount_materialize,
         warm_claim,
         artifact_bytes_hashed: acquired.artifact_bytes_hashed,
+        artifact_hash_us: acquired.artifact_hash_us,
         process_table_scans: acquired.process_table_scans,
         bundle_verify_us: acquired.bundle_verify_us,
     }
@@ -638,6 +643,7 @@ mod tests {
             mount_materialize: true,
             warm_claim: false,
             artifact_bytes_hashed: 0,
+            artifact_hash_us: 0,
             process_table_scans: 0,
             bundle_verify_us: None,
         };

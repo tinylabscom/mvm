@@ -21,7 +21,7 @@ use crate::ui;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
-    /// The backend to add, by its stable label (e.g. `libkrun`)
+    /// The backend to add, by its stable label (e.g. `firecracker`)
     pub name: String,
 }
 
@@ -454,7 +454,7 @@ mod tests {
     fn componentless_backends_have_nothing_to_add() {
         assert!(row_for(BackendKind::Wasm).files.is_empty());
         assert!(row_for(BackendKind::Qemu).files.is_empty());
-        assert!(!row_for(BackendKind::Libkrun).files.is_empty());
+        assert!(row_for(BackendKind::Libkrun).files.is_empty());
     }
 
     /// Firecracker ships its pinned binary now, so `backend add firecracker`

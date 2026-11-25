@@ -50,7 +50,6 @@
 
 pub mod broker;
 pub mod console_source;
-mod console_wait;
 pub mod display_input_gate;
 pub mod display_input_route;
 pub mod display_source;

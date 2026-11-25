@@ -1,6 +1,6 @@
 name: Install zig + cargo-zigbuild
 description: |
-  Plan 115 / ADR-065 — install the pinned cross-compile toolchain that
+  Plan 115 / ADR-004 — install the pinned cross-compile toolchain that
   mvm-cli's build.rs needs to embed the host-vm binaries
   (mvm-host-vm-init, mvm-builderd, mvm-setpriv) for Linux musl targets
   (static; the builder VM rootfs has no FHS dynamic loader).
@@ -15,6 +15,12 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Restore pinned Zig archive
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ${{ runner.temp }}/zig-*.tar.xz
+        key: zig-0.13.0-${{ runner.os }}-${{ runner.arch }}-v1
+
     - name: Install zig
       shell: bash
       run: |
@@ -56,19 +62,21 @@ runs:
         TARBALL="zig-${TARGET}-${ZIG_VERSION}.tar.xz"
         WORK=$(mktemp -d)
         trap 'rm -rf "$WORK"' EXIT
-        # The pinned aarch64 tarball is large enough to exceed 120s on a slow
-        # hosted runner. Resume partial retries instead of starting from zero;
-        # the SHA-256 check below still refuses any incomplete or altered bytes.
-        curl -fL -C - --retry 3 --retry-all-errors --retry-delay 2 \
-          --connect-timeout 10 --max-time 300 --retry-max-time 900 \
-          -o "$WORK/$TARBALL" "https://ziglang.org/download/${ZIG_VERSION}/${TARBALL}"
+        ARCHIVE="${RUNNER_TEMP:-$WORK}/$TARBALL"
+        # A verified archive on the default branch serves merge groups without
+        # repeatedly depending on the Zig download server.
+        if [ ! -f "$ARCHIVE" ]; then
+          curl -fL -C - --retry 3 --retry-all-errors --retry-delay 2 \
+            --connect-timeout 10 --max-time 300 --retry-max-time 900 \
+            -o "$ARCHIVE" "https://ziglang.org/download/${ZIG_VERSION}/${TARBALL}"
+        fi
         if [ "$OS" = Darwin ]; then
-          printf '%s  %s\n' "$SHA256" "$WORK/$TARBALL" | shasum -a 256 -c -
+          printf '%s  %s\n' "$SHA256" "$ARCHIVE" | shasum -a 256 -c -
         else
-          printf '%s  %s\n' "$SHA256" "$WORK/$TARBALL" | sha256sum -c -
+          printf '%s  %s\n' "$SHA256" "$ARCHIVE" | sha256sum -c -
         fi
         sudo mkdir -p /opt
-        sudo tar -xJf "$WORK/$TARBALL" -C /opt
+        sudo tar -xJf "$ARCHIVE" -C /opt
         DIR="${TARBALL%.tar.xz}"
         sudo ln -sf "/opt/${DIR}/zig" /usr/local/bin/zig
         zig version

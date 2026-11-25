@@ -582,11 +582,6 @@ tier = "parse"
 reason = "names a run receipt, which only a real launch produces"
 
 [[command]]
-path = "machine forward"
-tier = "parse"
-reason = "retired at runtime while still present in the clap tree; the docs no longer reference it"
-
-[[command]]
 path = "secret set"
 tier = "parse"
 reason = "documented only as a placeholder template, so there is no concrete invocation to execute"

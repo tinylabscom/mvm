@@ -12,6 +12,7 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,11 @@ use std::time::{Duration, Instant};
 /// (was `MAX_EXEC_OUTPUT` in the agent bin).
 pub const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
 const DRAIN_BUF: usize = 4096;
+
+/// Longest the exec loop waits for output or the child's exit before it looks
+/// again on its own. Either event ends the wait sooner; this only bounds the
+/// cases neither announces.
+const IDLE_WAIT_MAX: Duration = Duration::from_secs(1);
 
 fn resolve_exec_environment() -> crate::workload_env::WorkloadEnvironment {
     resolve_exec_environment_from(
@@ -48,6 +54,7 @@ fn spawn_drain<R: Read + Send + 'static>(
     mut reader: R,
     buf: Arc<Mutex<Vec<u8>>>,
     stream: mvm_core::protocol::telemetry::StdioStream,
+    wake: SyncSender<()>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut chunk = [0u8; DRAIN_BUF];
@@ -61,6 +68,9 @@ fn spawn_drain<R: Read + Send + 'static>(
                     buf.lock()
                         .expect("exec drain buf")
                         .extend_from_slice(&chunk[..n]);
+                    // One pending wake is enough: the loop drains everything
+                    // buffered each time it runs.
+                    let _ = wake.try_send(());
                 }
                 Err(_) => break,
             }
@@ -120,7 +130,7 @@ fn kill_pgroup(child: &Child) {
 }
 
 /// Run `command` under `/bin/sh -c`, streaming stdout/stderr via `emit`
-/// (arrival order, ~poll-interval granularity), and return the terminal
+/// (arrival order, as the drain threads read it), and return the terminal
 /// `ExecEvent::Exit` or `ExecEvent::TimedOut`. `emit` is never called
 /// with a terminal event — that is the return value.
 pub fn stream_exec<F: FnMut(ExecEvent)>(
@@ -244,11 +254,15 @@ fn stream_command_with_environment<F: FnMut(ExecEvent)>(
 
     let out_buf = Arc::new(Mutex::new(Vec::new()));
     let err_buf = Arc::new(Mutex::new(Vec::new()));
+    // Drain threads ping this after each read and drop their end at EOF, so
+    // output and the child closing its pipes both end the loop's idle wait.
+    let (wake_tx, wake_rx) = mpsc::sync_channel::<()>(1);
     let mut out_handle = child.stdout.take().map(|o| {
         spawn_drain(
             o,
             out_buf.clone(),
             mvm_core::protocol::telemetry::StdioStream::Stdout,
+            wake_tx.clone(),
         )
     });
     let mut err_handle = child.stderr.take().map(|e| {
@@ -256,8 +270,10 @@ fn stream_command_with_environment<F: FnMut(ExecEvent)>(
             e,
             err_buf.clone(),
             mvm_core::protocol::telemetry::StdioStream::Stderr,
+            wake_tx.clone(),
         )
     });
+    drop(wake_tx);
 
     let mut sent_out = 0usize;
     let mut sent_err = 0usize;
@@ -316,19 +332,25 @@ fn stream_command_with_environment<F: FnMut(ExecEvent)>(
                 };
             }
             Ok(None) => {
-                // Backoff, not a flat tick. `/bin/true` has not been reaped by
-                // the time the first `try_wait` runs, so a fixed interval here
-                // was a floor under *every* exec: the second check found the
-                // child already gone, having waited the whole gap to look. It
-                // put 50ms on a command that takes microseconds.
-                //
-                // The same shared backoff the readiness and pid-exit waits
-                // use, so a quick command is noticed in ~1ms while a long one
-                // still settles to a ceiling rather than spinning. The ceiling
-                // is also what bounds output-streaming latency, since this
-                // loop drains stdout/stderr on each pass.
-                std::thread::sleep(mvm_core::poll_backoff::poll_delay(idle_polls));
-                idle_polls = idle_polls.saturating_add(1);
+                // While a drain thread is alive, output or the child closing
+                // its pipes wakes this at once, so an idle command costs no
+                // timer. Bounded by the deadline and `IDLE_WAIT_MAX`.
+                let wait = deadline
+                    .map_or(IDLE_WAIT_MAX, |d| {
+                        d.saturating_duration_since(Instant::now())
+                    })
+                    .min(IDLE_WAIT_MAX);
+                if let Err(RecvTimeoutError::Disconnected) = wake_rx.recv_timeout(wait) {
+                    // Both pipes are closed, so the child is exiting or has
+                    // shut its output. Backoff, not a flat tick: `/bin/true`
+                    // has not been reaped by the time the first `try_wait`
+                    // runs, and a fixed interval put its whole gap on a
+                    // command that takes microseconds. The shared backoff
+                    // notices a quick exit in ~1ms and settles to a ceiling
+                    // rather than spinning.
+                    std::thread::sleep(mvm_core::poll_backoff::poll_delay(idle_polls));
+                    idle_polls = idle_polls.saturating_add(1);
+                }
             }
             Err(e) => {
                 emit(ExecEvent::Stderr {
@@ -650,5 +672,54 @@ mod tests {
         let home = std::str::from_utf8(&out).expect("utf-8 home");
         assert_eq!(home, crate::guest_mount::workload_home());
         assert!(!home.is_empty());
+    }
+
+    #[test]
+    fn an_idle_commands_exit_is_noticed_without_waiting_out_the_idle_bound() {
+        let started = Instant::now();
+        let term = stream_exec("sleep 0.2", None, None, |_| {});
+        assert!(matches!(term, ExecEvent::Exit { code: 0 }), "{term:?}");
+        assert!(
+            started.elapsed() < Duration::from_millis(200) + IDLE_WAIT_MAX / 2,
+            "the exit waited for the idle bound: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn voluntary_switches_of_this_thread() -> u64 {
+        std::fs::read_to_string("/proc/thread-self/status")
+            .expect("read thread status")
+            .lines()
+            .find_map(|line| line.strip_prefix("voluntary_ctxt_switches:"))
+            .and_then(|count| count.trim().parse().ok())
+            .expect("voluntary_ctxt_switches in thread status")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_idle_command_wakes_the_exec_loop_without_a_poll_timer() {
+        // The backoff ceiling is 25 ms, so a two-second idle command used to
+        // wake this loop about eighty times. Waiting on the drain threads
+        // costs a handful: the early chunk, one per idle bound, the hang-up
+        // at exit and the reap.
+        let started = Instant::now();
+        let mut first_chunk_at = None;
+        let before = voluntary_switches_of_this_thread();
+        let term = stream_exec("printf early; sleep 2", None, None, |event| {
+            if matches!(event, ExecEvent::Stdout { .. }) && first_chunk_at.is_none() {
+                first_chunk_at = Some(started.elapsed());
+            }
+        });
+        let wakeups = voluntary_switches_of_this_thread() - before;
+        assert!(matches!(term, ExecEvent::Exit { code: 0 }), "{term:?}");
+        assert!(
+            first_chunk_at.is_some_and(|at| at < Duration::from_secs(1)),
+            "output did not reach emit before the command exited: {first_chunk_at:?}"
+        );
+        assert!(
+            wakeups < 20,
+            "the exec loop woke {wakeups} times over an idle two-second command"
+        );
     }
 }

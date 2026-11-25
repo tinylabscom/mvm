@@ -28,14 +28,20 @@ use std::sync::LazyLock;
 use crate::check_bundle_trust_sites::{is_production_source, production_part};
 
 /// Production host-service code: the mailbox service and every other hostd
-/// service, the core mailbox and host interface, and the mailbox contract.
+/// service, the core mailbox and host interface, the mailbox contract, the
+/// broker call context and actor session, and the host-side wiring that
+/// spawns a workload's broker and services.
 const SCOPE: &[&str] = &[
     "crates/mvm-hostd/src",
     "crates/mvm-core/src/mailbox",
     "crates/mvm-core/src/mailbox.rs",
     "crates/mvm-core/src/host_interface",
+    "crates/mvm-core/src/net",
+    "crates/mvm-core/src/protocol",
     "crates/mvm-contract/src/protocol/mailbox",
     "crates/mvm-contract/src/protocol/mailbox.rs",
+    "crates/mvm-runtime/src/workload_runner",
+    "crates/mvm-vmm/src/host",
 ];
 
 /// (file, enclosing function, comparisons, reason)
@@ -179,9 +185,27 @@ const AGREEMENT: &[Entry] = &[
     ),
     (
         "crates/mvm-hostd/src/mailbox_custody.rs",
-        "open_existing",
+        "open_bound",
         2,
         "a signed custody manifest names the identity's epoch",
+    ),
+    (
+        "crates/mvm-core/src/net/actor_session.rs",
+        "session_id",
+        1,
+        "a session binding names a non-zero epoch",
+    ),
+    (
+        "crates/mvm-runtime/src/workload_runner/runner/broker.rs",
+        "capabilities_for_plan",
+        1,
+        "a controller grant names its plan's epoch",
+    ),
+    (
+        "crates/mvm-vmm/src/host/actor_identity.rs",
+        "for_plan",
+        1,
+        "a controller grant names its plan's epoch",
     ),
     (
         "crates/mvm-hostd/src/actor_bootstrap.rs",
@@ -308,6 +332,18 @@ const AGREEMENT: &[Entry] = &[
         "accept_call",
         2,
         "a reply grant is scoped to exactly the peer's epoch",
+    ),
+    // Each closed owner signer keeps its `new` binding checks outside the
+    // gate: construction refuses the uncommissioned sentinel epoch and
+    // requires the derived provider identity to name the grants store's
+    // recorded epoch. The signer authorizes nothing at construction; the
+    // epoch is part of the commissioned identity being verified, not an
+    // epoch being granted acting authority.
+    (
+        "crates/mvm-hostd/src/hvf_owner_native_control_signer.rs",
+        "new",
+        2,
+        "binds the holder: refuses the uncommissioned sentinel epoch and requires the derived provider identity to name the grants store's recorded epoch",
     ),
 ];
 
@@ -537,6 +573,14 @@ mod tests {
     fn range_and_ordering_methods_count() {
         assert_eq!(found("fn f() { (lo..=hi_epoch).contains(&e); }").len(), 1);
         assert_eq!(found("fn f() { epoch.cmp(&other); }").len(), 1);
+    }
+
+    #[test]
+    fn a_test_module_declaration_does_not_hide_the_production_code_after_it() {
+        let text = "#[cfg(test)]\nmod tests;\n\nfn serve(grant: &Grant, current: ExecutionEpoch) {\n    if grant.epoch < current {}\n}\n";
+        let problems = problems(&found(text), &[], &[]);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("service.rs:5 in `serve`"));
     }
 
     #[test]

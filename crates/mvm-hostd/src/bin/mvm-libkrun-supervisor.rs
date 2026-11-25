@@ -86,7 +86,7 @@ struct PrelaunchEnvelope {
 }
 
 fn main() -> ExitCode {
-    mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-libkrun-supervisor");
+    mvm_core::helper_contract::exit_with_probe_answer_if_requested("mvm-libkrun-supervisor");
     // First statement in the process: a panic before this line would
     // print its payload unredacted.
     mvm_hostd::panic_hook::install("libkrun-supervisor");

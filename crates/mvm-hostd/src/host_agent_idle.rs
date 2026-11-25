@@ -139,7 +139,13 @@ pub async fn run_session_watcher(tenant: String, watched_sessions: Arc<AtomicUsi
         let pass = tokio::task::spawn_blocking(move || {
             let mut current = current;
             let watched = match mvm_core::session::list_sessions() {
-                Ok(records) => current.step(&records, chrono::Utc::now()),
+                Ok(records) => match mvm_core::util::time::try_utc_timestamp_now() {
+                    Ok(now) => current.step(&records, now),
+                    Err(error) => {
+                        tracing::warn!(%error, "session watcher: host clock unusable");
+                        0
+                    }
+                },
                 Err(error) => {
                     tracing::warn!(%error, "session watcher: could not list sessions");
                     0

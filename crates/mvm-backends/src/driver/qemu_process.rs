@@ -108,12 +108,14 @@ pub(crate) fn locate_qemu() -> Result<String> {
         "aarch64" => "qemu-system-aarch64",
         other => bail!("no qemu-system emulator mapped for host arch `{other}`"),
     };
-    which::which(bin).map(|_| bin.to_string()).map_err(|_| {
-        anyhow!(
-            "`{bin}` not found on $PATH. Install QEMU \
+    mvm_core::util::which(bin)
+        .map(|_| bin.to_string())
+        .ok_or_else(|| {
+            anyhow!(
+                "`{bin}` not found on $PATH. Install QEMU \
              (`apt install qemu-system-x86 qemu-utils` / `dnf install qemu-system-x86`)."
-        )
-    })
+            )
+        })
 }
 
 /// `/dev/kvm` present + read-write for this process. Drives the KVM-vs-TCG

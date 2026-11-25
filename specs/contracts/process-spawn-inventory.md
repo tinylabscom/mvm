@@ -68,6 +68,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-agentd | `src/process_rpc.rs` | 1 | guest workload | process-control RPC start of a requested program | guest | CHS | - | RAW_SITES (guest) | guest-side |
 | mvm-agentd | `src/worker_pool.rs` | 1 | guest workload | warm worker-pool process | guest | CHS | - | RAW_SITES (guest) | guest-side |
 | mvm-backends | `src/driver/hvf.rs` | 2 | hypervisor supervisor | spawn mvm-hvf-supervisor for an HVF VM (cold and restore) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
+| mvm-backends | `src/driver/hvf/cold_channel.rs` | 1 | test harness | test-support only: synthetic unconfirmed-launch custody fixture spawning an idle sh child (absent from a build without the test-support feature) | dev harness, not shipped | CH | - | `helper_command` env scrub | test-only |
 | mvm-backends | `src/driver/hvf_restore.rs` | 1 | hypervisor supervisor | spawn mvm-hvf-supervisor for a snapshot restore | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-backends | `src/driver/libkrun.rs` | 1 | hypervisor supervisor | spawn mvm-libkrun-supervisor | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-backends | `src/driver/qemu.rs` | 1 | hypervisor | launch QEMU | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
@@ -151,12 +152,12 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-vmm | `src/host/network_endpoint_spawn/owned.rs` | 1 | helper bin | spawn an owned network endpoint | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; check-single-network-path | required-host-primitive |
 | mvm-vmm | `src/host/shell/exec.rs` | 6 | shell script | run_in_vm / run_host: bash -c and direct program exec for every ShellEnvironment caller | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | open-review |
 
-Totals: 191 production sites in 100 files.
+Totals: 192 production sites in 101 files.
 
 | Crate | Sites |
 |---|--:|
 | mvm-agentd | 27 |
-| mvm-backends | 9 |
+| mvm-backends | 10 |
 | mvm-build | 27 |
 | mvm-builder-guest | 32 |
 | mvm-capture | 6 |
@@ -181,7 +182,7 @@ Totals: 191 production sites in 100 files.
 | guest-side | 60 | 27 |
 | open-review | 12 | 3 |
 | required-host-primitive | 39 | 22 |
-| test-only | 6 | 4 |
+| test-only | 7 | 5 |
 
 Reviewed library-reachable sites (disposition, then why):
 
@@ -196,7 +197,7 @@ Reviewed library-reachable sites (disposition, then why):
 | `mvm-client/src/secret/source.rs` | bounded-user-adapter | `SecretSourceResolver::run_cli`: the program is one of two fixed names (`Cli::OnePassword`, `Cli::Bitwarden`) found only in trusted directories (`find_trusted`: absolute, canonical, not under an untrusted root, owner and mode checked); argv is a fixed subcommand plus typed references; environment is scrubbed with only that CLI's own session variables re-admitted by exact name (`helper_command_with`); stdin null; run through the shared `mvm_core::bounded_run::run_bounded` with stdout capped at `MAX_SOURCE_BYTES` and stderr at 4 KiB, and a wall-clock timeout that kills the child (`CliTimedOut`); errors carry at most 200 characters of the first stderr line and never the value. It cannot run `mvmctl` (`check-no-cli-shellout`). |
 | `mvm-core/src/crypto/key_rotation.rs` | bounded-fixed-argv-utility | `rotate_luks_slot` via `run_change_key`: fixed `cryptsetup luksChangeKey`; both passphrases go through 0600 tempfiles named in argv, never argv text or env. Runs under `run_bounded` (5 min timeout, 64 KiB capture, stdin null); the error carries a capped, control-stripped stderr excerpt only. Requires a live LUKS device by contract. |
 | `mvm-core/src/host_storage_encryption.rs` | fixed-argv-utility | `detect_macos`/`detect_linux`: read-only `diskutil info`, `findmnt --json`, `tune2fs -l` and `lsblk --inverse` probes with fixed argv; the only variable argument is a path or a `/dev/` device that `detect_linux` checks with `starts_with("/dev/")` before `tune2fs` and `lsblk` (after `--`). The runner is injected, and tests pin fail-closed behaviour (`missing_tools_fail_closed`, `failed_findmnt_never_inspects_a_device`, `failed_diskutil_refuses_even_with_encrypted_stdout`). A failed or absent probe means not-encrypted. No wall-clock bound. |
-| `mvm-core/src/platform/platform.rs` | fixed-argv-utility | `macos_major_version` runs `sw_vers -productVersion` (fixed argv, parsed to a number, 0 on failure). The `nix --version` presence probe that used to sit beside it had no callers anywhere in the tree and was deleted. |
+| `mvm-core/src/platform/platform.rs` | fixed-argv-utility | `macos_major_version` runs `sw_vers -productVersion` (fixed argv, parsed to a number, `None` on failure, probed once per process). The `nix --version` presence probe that used to sit beside it had no callers anywhere in the tree and was deleted. |
 | `mvm-fs/src/oci_to_rootfs/ext4.rs` | bounded-fixed-argv-utility | `build_mke2fs_command`/`run_mke2fs_bounded`: program is `mke2fs` or an explicit `Mke2fsOptions` path, argv is fixed flags plus typed label, uuid, hash seed, block size and paths as separate args (no shell), deterministic-time env set. Runs under `run_bounded` (15 min timeout, 64 KiB capture per stream); the error quotes at most 2000 characters of each stream. Linux only. |
 | `mvm-fs/src/oci_to_rootfs/verity.rs` | bounded-fixed-argv-utility | `run_veritysetup_format_bounded`: `veritysetup format` with typed options as `--flag=value` args and two paths, no shell. Runs under `run_bounded` (15 min timeout, 64 KiB capture); the error quotes at most 2000 characters of each stream; the `Root hash:` line is parsed from the captured stdout or an error is returned. Linux only. |
 | `mvm-runtime/src/storage/backend.rs` | bounded-fixed-argv-utility | `dmsetup_linux::probe`: `dmsetup --version` availability probe, fixed argv, under `run_bounded` (30 s timeout, 4 KiB capture); a hang or non-zero exit maps to `StorageError::BackendUnavailable`. |
@@ -211,7 +212,7 @@ Still open-review, and the concrete missing piece:
 | `mvm-vmm/src/host/linux_env.rs` | `NativeEnv::{run, run_visible, run_capture}` run `bash -c <script>` for every `LinuxEnv` caller. Same gap as `shell/exec.rs`: callers are audited and tested, the wrapper is not constrained. |
 | `mvm-vmm/src/host/shell/exec.rs` | `run_in_vm*`/`run_on_vm*` hand a caller-built script to `bash -c` (host bash on native Linux and for custom VM names); `run_host` runs a caller-named program but has CLI callers only. Every library caller was read (see the shell-wrapper caller audit) and the unquoted ones fixed, but the seam itself still accepts any string, so nothing stops a new caller interpolating raw. Missing: a gate or typed command form that makes unquoted interpolation into these scripts unrepresentable, and a wall-clock bound (builds are long-running, so the bound has to be per caller). |
 
-By construct: `Command::new` 57, `helper_command` 123, `helper_command_with` 3, `openpty` 2, `raw:execve` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
+By construct: `Command::new` 57, `helper_command` 124, `helper_command_with` 3, `openpty` 2, `raw:execve` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
 <!-- inventory:end -->
 
 Linked and Traced are host-side facts about the crate and the call graph. A `guest` or `builder VM` row is crate-linked into the host closure (so `CHS`), but its binary only ever runs inside the microVM; the host never calls it. Read those rows by Authority.

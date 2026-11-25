@@ -17,7 +17,7 @@ unless invoked by the repository GCP runner. That runner provisions Firecracker
 and jailer, NOT mvmctl or its helpers; provision --bin-dir separately first.
 Its dev-env target directory resolves to /opt/mvm/.mvm-test/target. After
 separately arranging source-matched Linux binaries in its debug/ directory:
-  just lab::gcp-kvm python3 scripts/check-oci-bundle-smoke.py --backend firecracker --bin-dir /opt/mvm/.mvm-test/target/debug
+  just e2e gcp-kvm python3 scripts/check-oci-bundle-smoke.py --backend firecracker --bin-dir /opt/mvm/.mvm-test/target/debug
 This command needs operator authorization for billing and source transfer.
 Linux proves isolated HOME/install-path reuse, not producer filesystem denial.
 Production admission and enforced Linux producer-input denial are separate witnesses.

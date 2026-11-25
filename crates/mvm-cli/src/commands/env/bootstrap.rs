@@ -650,7 +650,7 @@ mod tests {
                 &helper,
                 format!(
                     "#!/bin/sh\nprintf '%s\\n' '{}'",
-                    mvm_vmm::host::helper_contract::probe_response(spec.bin).trim_end()
+                    mvm_core::helper_contract::probe_response(spec.bin).trim_end()
                 ),
             )
             .unwrap();

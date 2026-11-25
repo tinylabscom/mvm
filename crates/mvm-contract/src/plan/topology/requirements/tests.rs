@@ -142,6 +142,49 @@ fn a_liveness_period_is_refused_with_its_unit_where_no_deadline_is_held() {
     }
 }
 
+#[test]
+fn a_liveness_period_is_admitted_on_the_supervised_tiers_and_refused_on_the_rest() {
+    let mut topology = stating_nothing();
+    topology.units[3].liveness_period_ms = Some(ms(MIN_LIVENESS_PERIOD_MS));
+    let admits = |kind| check_requirements(&topology, ResourceControls::for_backend(kind), None);
+    for kind in [
+        BackendKind::Libkrun,
+        BackendKind::Hvf,
+        BackendKind::AppleContainer,
+    ] {
+        assert_eq!(admits(kind), Ok(()), "{kind:?}");
+    }
+    for kind in [
+        BackendKind::Firecracker,
+        BackendKind::Qemu,
+        BackendKind::Wasm,
+        BackendKind::WebLinux,
+    ] {
+        assert!(
+            matches!(admits(kind), Err(UnmetRequirement::LivenessPeriod { .. })),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn the_period_range_holds_on_the_supervised_tiers() {
+    for kind in [BackendKind::Libkrun, BackendKind::Hvf] {
+        for period in [MIN_LIVENESS_PERIOD_MS - 1, MAX_LIVENESS_PERIOD_MS + 1] {
+            let mut topology = stating_nothing();
+            topology.units[3].liveness_period_ms = Some(ms(period));
+            assert_eq!(
+                check_requirements(&topology, ResourceControls::for_backend(kind), None),
+                Err(UnmetRequirement::LivenessPeriodOutOfRange {
+                    unit: id("w1-standby"),
+                    period_ms: ms(period),
+                }),
+                "{kind:?} {period}"
+            );
+        }
+    }
+}
+
 fn host_deadline() -> ResourceControls {
     ResourceControls {
         liveness: LivenessControl::HostDeadline,
@@ -185,7 +228,7 @@ fn more_liveness_units_than_the_host_holds_are_refused_by_count() {
     topology.units = (0..=MAX_LIVENESS_UNITS)
         .map(|i| Unit {
             workload: id(&alloc::format!("u{i:03}")),
-            liveness_period_ms: Some(ms(1_000)),
+            liveness_period_ms: Some(ms(5_000)),
             ..template.clone()
         })
         .collect();

@@ -48,10 +48,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
 use mvm_contract::hash::hex;
 use mvm_contract::merkle::merkle_root;
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_contract::verify::{PlanAuditEntry, SignedEnvelope, hash_line};
 use mvm_core::plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
@@ -913,8 +913,8 @@ pub struct LedgerCheck {
 /// of it is; an event when its own timestamp is.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TimeRange {
-    pub since: Option<DateTime<Utc>>,
-    pub until: Option<DateTime<Utc>>,
+    pub since: Option<UtcTimestamp>,
+    pub until: Option<UtcTimestamp>,
 }
 
 impl TimeRange {
@@ -930,8 +930,8 @@ impl TimeRange {
     }
 }
 
-fn parse_ts(ts: &str) -> Option<DateTime<Utc>> {
-    mvm_core::util::time::parse_iso8601(ts)
+fn parse_ts(ts: &str) -> Option<UtcTimestamp> {
+    ts.parse().ok()
 }
 
 /// Every session in chain `lines`, in the order they were admitted, with the

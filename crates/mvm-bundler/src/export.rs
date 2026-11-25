@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::crypto::image_verify::{sha256_file, sha256_reader};
 use mvm_core::guest_sidecar::SIDECAR_FILENAME;
 use mvm_core::plan::bundle::{
@@ -159,14 +160,18 @@ pub fn stage_bundle_with_signer(
     inputs: &BundleExportInputs<'_>,
     signer: &dyn BundleSigner,
 ) -> Result<StagedBundle> {
-    stage_bundle_at(inputs, signer, Utc::now())
+    stage_bundle_at(
+        inputs,
+        signer,
+        mvm_core::util::time::try_utc_timestamp_now()?,
+    )
 }
 
 #[cfg(test)]
 fn export_bundle_at(
     inputs: &BundleExportInputs<'_>,
     signer: &dyn BundleSigner,
-    now: chrono::DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<ExportedBundle> {
     stage_bundle_at(inputs, signer, now)?.publish()
 }
@@ -174,7 +179,7 @@ fn export_bundle_at(
 fn stage_bundle_at(
     inputs: &BundleExportInputs<'_>,
     signer: &dyn BundleSigner,
-    now: chrono::DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<StagedBundle> {
     refuse_summary_over_archive(inputs)?;
     anyhow::ensure!(
@@ -348,7 +353,7 @@ impl BundleContents {
         &mut self,
         proof: &crate::CanonicalLinuxProofInputs<'_>,
         boot: &crate::CliBootAssetsInputs<'_>,
-        now: chrono::DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<()> {
         use mvm_core::image_set::{ImageSetRequirement, ImageSetVerification, image_train_lock};
         anyhow::ensure!(

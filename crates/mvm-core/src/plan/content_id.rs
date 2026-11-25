@@ -114,8 +114,8 @@ mod tests {
     fn identical_content_yields_identical_id() {
         // Two independently-built plans with identical load-bearing content
         // (same nonce, same window) address to the same id.
-        let from = chrono::Utc::now();
-        let until = from + chrono::Duration::minutes(10);
+        let from = crate::util::time::utc_timestamp_now();
+        let until = from.checked_add_secs(600).unwrap();
         let a = PlanFixture::new()
             .nonce([4u8; 16])
             .validity(from, until)
@@ -266,7 +266,7 @@ mod tests {
     /// reseeding is deliberate and leaves a diff that has to be justified.
     mod replay_vectors {
         use super::*;
-        use chrono::{DateTime, Utc};
+        use mvm_contract::timestamp::UtcTimestamp;
 
         fn check(name: &str, actual: &str, expected: &str) {
             if std::env::var_os("MVM_PRINT_ADDRESS_VECTORS").is_some() {
@@ -280,9 +280,9 @@ mod tests {
             );
         }
 
-        /// `PlanFixture::build` defaults its validity window to `Utc::now()`,
+        /// `PlanFixture::build` defaults its validity window to `now`,
         /// which would make the address differ on every run.
-        fn window() -> (DateTime<Utc>, DateTime<Utc>) {
+        fn window() -> (UtcTimestamp, UtcTimestamp) {
             (
                 "2020-01-01T00:00:00Z".parse().expect("valid RFC 3339"),
                 "2030-01-01T00:00:00Z".parse().expect("valid RFC 3339"),

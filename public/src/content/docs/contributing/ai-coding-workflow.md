@@ -42,14 +42,14 @@ Use one route from intent to implementation:
 
 Do not recursively read `specs/`: it contains historical research and frozen
 pre-migration plans alongside durable documents. For a read-only briefing, run
-`just maint::task-context <issue-number>`. Its output is generated from the live
+`python3 scripts/task-context.py <issue-number>`. Its output is generated from the live
 issue, linked repository documents, open pull requests, and Trail; do not save it
 as another status file.
 
 For a plain terminal list of unchecked tasks in `tinylabscom/mvm#3731` and
-`#4839`, run `just maint::watch-issues`. It needs Python 3 and an authenticated
+`#4839`, run `python3 scripts/watch-issues.py`. It needs Python 3 and an authenticated
 `gh` CLI, refreshes 30 seconds after each fetch on a TTY, and exits cleanly on
-Ctrl+C. Use `just maint::watch-issues --once` for a single snapshot; redirected
+Ctrl+C. Use `python3 scripts/watch-issues.py --once` for a single snapshot; redirected
 output is also one-shot. Append issue numbers, `owner/repo#number` refs, or
 GitHub issue URLs to include children explicitly; it does not crawl links.
 Only issue bodies are read (including closed issues); comments and fenced code
@@ -95,10 +95,10 @@ For a Linux/KVM E2E test that cannot run on the builder VM or a GitHub-hosted
 runner, use the repository-owned disposable host from the task's worktree:
 
 ```bash
-just lab::gcp-kvm just bdd::live-ci
+just e2e gcp-kvm just e2e live-ci
 ```
 
-The command after `lab::gcp-kvm` is preserved as an exact argument vector; it
+The command after `gcp-kvm` is preserved as an exact argument vector; it
 is not interpolated into a remote shell. When shell syntax is intentional, pass
 `bash -lc` explicitly. Tests can retain logs or other artifacts by writing them
 to `$MVM_GCP_KVM_RESULTS_DIR`; the controller downloads that directory as the
@@ -107,8 +107,8 @@ result archive printed at exit.
 Use the direct entry point to inspect or override cloud settings:
 
 ```bash
-scripts/run-gcp-kvm-test.sh --dry-run -- just bdd::live-ci
-scripts/run-gcp-kvm-test.sh --project mvm-dev-495501 -- just bdd::live-ci
+scripts/run-gcp-kvm-test.sh --dry-run -- just e2e live-ci
+scripts/run-gcp-kvm-test.sh --project mvm-dev-495501 -- just e2e live-ci
 ```
 
 The controller creates an Intel C3 Spot VM with nested KVM and no Google
@@ -123,7 +123,7 @@ builder VM can perform. Before each real run, obtain explicit operator
 authorization for both the billable VM and tracked-file checkout transfer unless
 that exact invocation was already authorized.
 
-The `bdd::live-ci` recipe downloads the published, digest-verified workload
+The `e2e live-ci` recipe downloads the published, digest-verified workload
 kernel into the isolated worktree cache before running its KVM scenarios; it
 does not compile a kernel on the disposable host. The remote source identity
 must be reachable from the public `mvm` repository, so push or merge the
@@ -137,14 +137,14 @@ account, project, zone, machine, source worktree, and create command without
 changing cloud state:
 
 ```bash
-just lab::cve-3655-gcp --dry-run
+just e2e cve-3655-gcp --dry-run
 ```
 
 After the operator explicitly authorizes the billable VM and upload of the
 tracked-file checkout for that run, start the complete lifecycle with:
 
 ```bash
-just lab::cve-3655-gcp
+just e2e cve-3655-gcp
 ```
 
 This preset delegates the cloud lifecycle to the generic runner, then runs only
@@ -154,7 +154,7 @@ details are owned by
 steps manually.
 
 Interactive access is diagnostic-only and requires an explicit operator
-request. Run `just lab::cve-3655-gcp --keep-instance`; after the witness, the
+request. Run `just e2e cve-3655-gcp --keep-instance`; after the witness, the
 controller prints fully populated `gcloud compute ssh` and
 `gcloud compute instances delete` commands for that instance. Use the printed
 SSH command for the requested diagnosis, then run the printed delete command
@@ -255,15 +255,15 @@ until the whole ladder is green.
 
 | Rung | Command | What it proves | Cost |
 |------|---------|----------------|------|
-| 1 | `cargo fmt --all` (or `just lints::fmt`) | Formatting matches rustfmt across the workspace | seconds |
-| 2 | `cargo check -p <crate>` (optional first: `just check::toolchain`) | The touched crate compiles (`check::toolchain` only validates pinned toolchain/config wiring) | seconds–a minute |
-| 3 | `just tests::crate <crate>` (or `cargo test -p <crate> <filter>`) | New/changed behavior passes, including the failure path | a minute |
-| 4 | `just lints::clippy` | Zero warnings (`-D warnings`) across the workspace | a few minutes cold |
+| 1 | `cargo fmt --all` (or `just fmt`) | Formatting matches rustfmt across the workspace | seconds |
+| 2 | `cargo check -p <crate>` (optional first: `just check toolchain`) | The touched crate compiles (`check toolchain` only validates pinned toolchain/config wiring) | seconds–a minute |
+| 3 | `just test scoped <crate>` (or `cargo test -p <crate> <filter>`) | New/changed behavior passes, including the failure path | a minute |
+| 4 | `just lint clippy` | Zero warnings (`-D warnings`) across the workspace | a few minutes cold |
 | 5 | `cargo test --workspace` | Nothing else regressed | longer |
-| 6 | `just check::gated` | Linux-gated `cfg(target_os = "linux")` files compile (macOS `--all-targets` silently skips them) | minutes |
-| 7 | `just ci` (`lint test tests::doc bdd::run`) | The local approximation of the full CI gate | longest |
+| 6 | `just check gated` | Linux-gated `cfg(target_os = "linux")` files compile (macOS `--all-targets` silently skips them) | minutes |
+| 7 | `just ci` (`lint`, `test`, `test doc`, `test bdd`) | The local approximation of the full CI gate | longest |
 
-`just bdd::run` prints wall-clock seconds for `mvmctl-build`, `schema-emitters`
+`just test bdd` prints wall-clock seconds for `mvmctl-build`, `schema-emitters`
 (including xtask), `typescript-preparation`, and `conformance-compile-and-run`.
 The last phase includes Cargo's runner compilation and execution; it is not a
 test-only duration. On success or command failure, the recipe prints a timing

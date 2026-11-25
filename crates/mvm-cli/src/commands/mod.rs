@@ -19,6 +19,7 @@ mod deps;
 mod dispatch;
 pub(crate) mod env;
 mod generate;
+mod host_support;
 mod image;
 mod machine;
 mod manifest;
@@ -346,7 +347,7 @@ pub fn run() -> Result<()> {
     // The qemu vsock bridge re-execs this binary as a per-VM host helper, so
     // mvmctl answers the host-helper contract probe like every other helper —
     // before clap sees the unknown flag.
-    mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvmctl");
+    mvm_core::helper_contract::exit_with_probe_answer_if_requested("mvmctl");
     let result = run_command();
     // Emitted after the command settles so the profile covers teardown as well.
     // A no-op unless MVM_SPAN_TIMINGS is set.
@@ -415,6 +416,10 @@ fn run_command() -> Result<()> {
             crate::observability::exit(exit_code);
         }
     };
+    host_support::refuse_unsupported_host(
+        &cli.command,
+        mvm_core::platform::current().unsupported_host_message(),
+    )?;
     // Offline proofs and coordinator observation bypass telemetry and update
     // checks as well as configuration, command recording and signer creation.
     if cli.command.skips_startup() {
@@ -844,7 +849,7 @@ fn register_inhouse_builder() {
     // the pinned URL is a GitHub release asset, which redirects, and
     // `mvm-http` follows no redirects. Deliberately not `download_kernel`,
     // whose signed-manifest check needs `manifest-verify`, a feature an
-    // ordinary `just embed` build does not carry.
+    // ordinary `just build embed` build does not carry.
     mvm_build::stage0_kernel::register_bootstrap_kernel_fetcher(Box::new(
         |url: &str, dest: &std::path::Path| {
             let dest = dest

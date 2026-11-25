@@ -74,8 +74,10 @@ mod fs_quick;
 mod grant_validation;
 mod host_gates;
 mod launch_substrate;
+mod liveness_owner;
 mod mailbox_posture;
 mod nonce_ledger;
+pub(crate) mod operator_trial;
 mod placement;
 mod registry_pack;
 #[path = "plan_admission/retained_vm_full.rs"]
@@ -108,13 +110,14 @@ pub use launch_substrate::{
     persists_plan_before_start, populate_audit_substrate, stash_plan_and_mint_verb_grant,
     stash_plan_for_bridge, thread_cpu_grant, thread_tenant_id,
 };
+pub use liveness_owner::LivenessOwnerRefusal;
 pub use mailbox_posture::{MailboxLaunchPosture, MailboxPostureHandoff};
 pub use mvm_core::time::{Clock, SystemClock};
 pub use nonce_ledger::InMemoryNonceLedger;
+pub(crate) use operator_trial::OperatorTrialDispatchUncertain;
 pub use registry_pack::{BuiltPackBootCheck, PreparedBuiltPackRuntime, prepare_built_pack_start};
 pub use restore::{
-    RetainedVmFullFork, VerifiedVmFullForkSource, VmFullForkDispatch, VmFullForkRestorer,
-    verify_vm_full_fork_source,
+    RetainedVmFullFork, VerifiedVmFullForkSource, VmFullForkDispatch, verify_vm_full_fork_source,
 };
 pub use rollback::{
     UndoLaunchFailure, apply_admitted_grants_or_undo_launch,
@@ -132,9 +135,9 @@ pub use start::{
 };
 pub(crate) use start::{
     LaunchSource, admit_synthesized_with_verified_release, prepare_launch,
-    start_admitted_with_verified_release,
+    start_admitted_with_verified_release, start_operator_trial_with_verified_release,
 };
-pub use topology_binding::{CORE_PLACEMENT_STAGE, TOPOLOGY_BINDING_STAGE};
+pub use topology_binding::{CORE_PLACEMENT_STAGE, LIVENESS_OWNER_STAGE, TOPOLOGY_BINDING_STAGE};
 
 /// Result of a successful admission. Carries everything the caller
 /// needs to hand to the backend (the plan + its id), to the audit

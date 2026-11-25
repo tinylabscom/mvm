@@ -826,7 +826,6 @@ dependencies = [
  "base64",
  "flate2",
  "hex",
- "mvm-agentd",
  "mvm-compiler",
  "mvm-contract",
  "mvm-core",

@@ -23,7 +23,7 @@ change.
 | `assets/` | macOS code-signing entitlement profiles (`mvmctl`, `mvm-supervisor`). | `build.rs`, installer tests, release workflow |
 | `install.sh` | The published installer and uninstaller (`install.sh uninstall`). Paths and hashes are pinned by tests and the release workflow; do not move it. | `tests/install_sh.rs`, `release.yml` |
 | `AGENTS.md`, `CLAUDE.md`, `*.sigstore.json` | Contributor and agent instructions with detached signatures. | contributors, CI |
-| `Justfile`, `just/` | Recipe entry point and per-area modules (`check`, `tests`, `lints`, `payload`, `release`, ...). | contributors, CI |
+| `Justfile` | Every recipe, one per job (`build`, `check`, `test`, `lint`, `release`, ...); a variant is the first argument. | contributors, CI |
 | `scripts/`, `bin/` | Shell and Python helpers used by recipes and workflows; `bin/dev` runs this checkout's `mvmctl`. | `Justfile`, workflows, tests |
 | `.envrc.example` | Optional worktree-local direnv template; sources `scripts/dev-env.sh` when present. | contributors using direnv |
 | `.gitignore` | Keeps local caches, generated outputs, secrets and editor state out of tracked source. | git, contributors |
@@ -83,7 +83,7 @@ together with any move: `nix/lib/workspace-filter.nix`,
 fuzz manifests under `crates/*/fuzz*/`, and the inventory generators in
 `scripts/`. For `crates/deps/`: `xtask` (`check-single-home`,
 `check-workspace-dep-inheritance`, `check-no-virtio-fs`), `tests/release_assets.rs`,
-`just/release/mod.just` and the SDK packaging scripts. Nothing in either
+the `release` recipe in the `Justfile` and the SDK packaging scripts. Nothing in either
 directory is unused, so nothing is removed.
 
 ## `specs/`, `schema/`, `assets/`, `model/`

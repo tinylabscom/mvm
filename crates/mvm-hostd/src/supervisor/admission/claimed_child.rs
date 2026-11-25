@@ -10,39 +10,65 @@
 //! The handoff carries the child's admitted plan, bound into the handoff
 //! signature, and the supervisor arms from it exactly what it arms at a cold
 //! boot, with the same refusal: a bound it cannot audit stops the child rather
-//! than letting it run unbounded. The parent has not been told the claim
-//! committed at that point — the host is still waiting on the child's identity
-//! handshake — so a refused arm fails the claim instead of half-admitting it.
+//! than letting it run unbounded. That includes the unit timer: a child whose
+//! topology unit declares a liveness period, or writes a cell, gets the same
+//! deadline owner and cell digest here as it would from its own supervisor.
+//! The parent has not been told the claim committed at that point — the host
+//! is still waiting on the child's identity handshake — so a refused arm fails
+//! the claim instead of half-admitting it.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use mvm_vmm::hvf_handoff::AcceptedHandoff;
 
+use crate::supervisor::lifecycle::liveness_expiry::LivenessGuard;
 use crate::supervisor::lifecycle::wall_clock::{SupervisorTimerInputs, WallClockGuard};
 
-/// Arm the wall-clock timer and the session expiry watcher for the child
-/// `accepted` names, from the plan it was admitted under.
+/// What the supervisor holds for a claimed child. Dropping it stands every
+/// timer in it down.
+#[derive(Default)]
+pub struct ClaimedChildBounds {
+    wall_clock: Option<WallClockGuard>,
+    unit_timer: Option<LivenessGuard>,
+}
+
+impl ClaimedChildBounds {
+    /// Whether the child's wall-clock bound is being held.
+    #[must_use]
+    pub fn wall_clock_armed(&self) -> bool {
+        self.wall_clock.is_some()
+    }
+
+    /// Whether the child's unit timer, its liveness deadline and cell digest,
+    /// is running.
+    #[must_use]
+    pub fn unit_timer_armed(&self) -> bool {
+        self.unit_timer.is_some()
+    }
+}
+
+/// Arm the wall-clock timer, the session expiry watcher and the unit timer
+/// for the child `accepted` names, from the plan it was admitted under.
 ///
-/// `Ok(None)` when there is no wall-clock bound to hold: the claim carried no
-/// plan, or its plan declares none. The session watcher is armed either way
-/// when there is a plan, because it decides for itself whether the child is a
-/// session.
+/// Nothing is armed when the claim carried no plan. The session watcher is
+/// armed whenever there is one, because it decides for itself whether the
+/// child is a session.
 ///
 /// # Errors
-/// The plan is not JSON, cannot be decoded, or declares a bound whose kill
-/// could not be audited.
+/// The plan is not JSON, cannot be decoded, or declares a wall-clock bound or
+/// a unit timer whose record could not be audited.
 pub fn arm_for_claimed_child(
     accepted: &AcceptedHandoff,
     pid_file: &Path,
-) -> Result<Option<WallClockGuard>> {
+) -> Result<ClaimedChildBounds> {
     arm_child_with_policy(accepted, pid_file, false)
 }
 
 pub fn arm_for_claimed_child_preserving_evidence(
     accepted: &AcceptedHandoff,
     pid_file: &Path,
-) -> Result<Option<WallClockGuard>> {
+) -> Result<ClaimedChildBounds> {
     arm_child_with_policy(accepted, pid_file, true)
 }
 
@@ -50,9 +76,9 @@ fn arm_child_with_policy(
     accepted: &AcceptedHandoff,
     pid_file: &Path,
     retain_evidence: bool,
-) -> Result<Option<WallClockGuard>> {
+) -> Result<ClaimedChildBounds> {
     let Some(plan_json) = accepted.admitted_plan.as_deref() else {
-        return Ok(None);
+        return Ok(ClaimedChildBounds::default());
     };
     let binding = mvm_vmm::host::spec_map::plan_binding_for(plan_json)
         .context("the claimed child's admitted plan is not JSON")?;
@@ -71,10 +97,15 @@ fn arm_child_with_policy(
             Box::new(inputs.exit_killer())
         }
     };
-    let guard = crate::supervisor::lifecycle::wall_clock::arm_for_supervisor(inputs, killer())
+    let wall_clock = crate::supervisor::lifecycle::wall_clock::arm_for_supervisor(inputs, killer())
         .context("arming the claimed child's wall-clock bound")?;
     crate::supervisor::lifecycle::session_expiry::arm_for_supervisor(&inputs, killer());
-    Ok(guard)
+    let unit_timer = crate::supervisor::lifecycle::liveness_expiry::arm_for_supervisor(&inputs)
+        .context("arming the claimed child's unit timer")?;
+    Ok(ClaimedChildBounds {
+        wall_clock,
+        unit_timer,
+    })
 }
 
 #[cfg(test)]
@@ -122,23 +153,147 @@ mod tests {
         // which stands the timer down.
         let guard = arm_for_claimed_child(&handoff(Some(signed_plan_with_bound(3600))), &pid_file)
             .expect("a bounded plan with an audit chain arms");
-        assert!(guard.is_some(), "the child's wall-clock bound is enforced");
+        assert!(
+            guard.wall_clock_armed(),
+            "the child's wall-clock bound is enforced"
+        );
+        assert!(!guard.unit_timer_armed(), "the plan names no topology unit");
     }
 
     #[test]
     fn a_claim_without_a_plan_or_a_bound_arms_no_timer() {
         let _home = isolated_home();
         let pid_file = mvm_core::config::vm_state_dir("standby-parent").join("hvf.pid");
+        for plan in [None, Some(signed_plan_with_bound(0))] {
+            let bounds = arm_for_claimed_child(&handoff(plan), &pid_file).unwrap();
+            assert!(!bounds.wall_clock_armed() && !bounds.unit_timer_armed());
+        }
+    }
+
+    const TENANT: &str = "acme";
+    const CHILD: &str = "claimed-child";
+
+    /// Admit a topology whose one unit is the claimed child, declaring
+    /// `period_ms`, and return the child's plan bound to it and signed.
+    fn signed_plan_for_unit(period_ms: Option<u32>) -> String {
+        use mvm_contract::plan::topology::{
+            CorePlacement, CryptoSuite, SealedTransitions, TOPOLOGY_SCHEMA_VERSION, Topology,
+            TopologyBinding, Unit, UnitResources, UnitRole,
+        };
+        use mvm_core::plan::{TenantId, WorkloadId};
+
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant(TENANT)
+            .workload(CHILD)
+            .build();
+        let now = chrono::Utc::now();
+        let topology = Topology {
+            schema_version: TOPOLOGY_SCHEMA_VERSION,
+            tenant: TenantId(TENANT.into()),
+            generation: 1,
+            valid_from: now - chrono::Duration::hours(1),
+            valid_until: now + chrono::Duration::days(1),
+            suite: CryptoSuite::CLASSICAL,
+            units: vec![Unit {
+                workload: WorkloadId(CHILD.into()),
+                role: UnitRole::Worker,
+                recipe: mvm_contract::assurance::Sha256Digest::from_bytes(&[7; 32]),
+                resources: UnitResources {
+                    cpus: 1,
+                    mem_mib: 64,
+                    disk_mib: 64,
+                },
+                placement: CorePlacement::Floating,
+                min_isolation: None,
+                permits: SealedTransitions::default(),
+                liveness_period_ms: period_ms.and_then(std::num::NonZeroU32::new),
+                require_isolated_cores: false,
+            }],
+            standby_pairs: Vec::new(),
+            cells: Vec::new(),
+            edges: Vec::new(),
+            succession: Vec::new(),
+        };
+        let keys = mvm_core::config::mvm_keys_dir();
+        let signer = crate::audit::host_keypair::load_or_init_at(&keys).expect("host signer");
+        let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+            signer.signing.clone(),
+            &mvm_core::config::mvm_audit_dir(),
+        )
+        .expect("emitter");
+        crate::topology_admission::admit_topology(
+            &crate::topology_admission::TopologyAdmissionRequest {
+                tenant: &topology.tenant,
+                signed: &crate::topology_admission::sign_topology_as_host(&topology, Some(&keys))
+                    .expect("signs"),
+                backend: mvm_core::vm_backend::BackendKind::Hvf,
+                measured_failover: None,
+                host_cpus: &crate::topology_admission::HostCpus {
+                    scope_cpuset: false,
+                    online: None,
+                    isolated: None,
+                    live: Vec::new(),
+                },
+                clock: &mvm_core::time::SystemClock,
+                host_signer_keys_dir: Some(&keys),
+                emitter: &emitter,
+            },
+        )
+        .expect("the topology is admitted on HVF");
+        plan.topology = Some(TopologyBinding {
+            topology: topology.digest(),
+            unit: WorkloadId(CHILD.into()),
+        });
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &signer.signing, "host"))
+            .expect("encode the signed plan")
+    }
+
+    #[test]
+    fn a_claimed_child_whose_unit_declares_a_liveness_period_gets_its_deadline_owner() {
+        let _home = isolated_home();
+        let pid_file = mvm_core::config::vm_state_dir("standby-parent").join("hvf.pid");
+        let bounds =
+            arm_for_claimed_child(&handoff(Some(signed_plan_for_unit(Some(5_000)))), &pid_file)
+                .expect("a watched unit with an audit chain arms");
         assert!(
-            arm_for_claimed_child(&handoff(None), &pid_file)
-                .unwrap()
-                .is_none()
+            bounds.unit_timer_armed(),
+            "the child's deadline has an owner"
         );
-        assert!(
-            arm_for_claimed_child(&handoff(Some(signed_plan_with_bound(0))), &pid_file)
-                .unwrap()
-                .is_none()
-        );
+        // The timer's first pass resolves the mvm home; let it, before the
+        // isolated home is handed back.
+        let passed = mvm_core::config::liveness_dir_at(Path::new(&mvm_core::config::mvm_home()));
+        let started = std::time::Instant::now();
+        while !passed.exists() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(30),
+                "the armed timer never made a pass"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_claimed_child_whose_unit_declares_no_period_starts_no_unit_timer() {
+        let _home = isolated_home();
+        let pid_file = mvm_core::config::vm_state_dir("standby-parent").join("hvf.pid");
+        let bounds =
+            arm_for_claimed_child(&handoff(Some(signed_plan_for_unit(None))), &pid_file).unwrap();
+        assert!(!bounds.unit_timer_armed());
+    }
+
+    #[test]
+    fn a_watched_claimed_child_with_no_audit_chain_fails_the_claim() {
+        let _home = isolated_home();
+        let pid_file = mvm_core::config::vm_state_dir("standby-parent").join("hvf.pid");
+        let plan = signed_plan_for_unit(Some(5_000));
+        // The handoff derives the key location from the home; without the key
+        // the expiry could not be recorded.
+        std::fs::remove_dir_all(mvm_core::config::mvm_keys_dir()).unwrap();
+        let error = arm_for_claimed_child(&handoff(Some(plan)), &pid_file)
+            .err()
+            .expect("a deadline nobody could record is refused");
+        assert!(format!("{error:#}").contains("unit timer"), "{error:#}");
     }
 
     #[test]

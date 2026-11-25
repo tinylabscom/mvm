@@ -1997,7 +1997,7 @@ mod tests {
         // universal initramfs is attached from the shared cache and its agent
         // sets the dm-verity target up itself.
         // Skips cleanly when `veritysetup` (cryptsetup) is not installed.
-        if which::which("veritysetup").is_err() {
+        if mvm_core::util::which("veritysetup").is_none() {
             eprintln!("skipped: veritysetup not on $PATH (install cryptsetup)");
             return;
         }

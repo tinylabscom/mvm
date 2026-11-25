@@ -230,7 +230,7 @@ mod sidecar_gate_tests {
     use super::*;
 
     /// A launch that was never admitted carries no binding, so there is nothing
-    /// to check and nothing to refuse. Template restores take this path.
+    /// to check and nothing to refuse.
     #[test]
     fn an_unadmitted_launch_is_not_refused() {
         refuse_unloadable_sidecar("/img/rootfs.ext4", &[], None)

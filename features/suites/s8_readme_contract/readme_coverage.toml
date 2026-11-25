@@ -46,12 +46,8 @@ language = "rust"
 classification = "static-only"
 language = "bash"
 
-# Release preparation and publication operate on the real repository and GitHub;
-# they must not run as README examples in the hermetic conformance suite.
-[[block]]
-classification = "static-only"
-language = "bash"
-
+# The release command operates on the real repository and GitHub; it must not
+# run as a README example in the hermetic conformance suite.
 [[block]]
 classification = "static-only"
 language = "bash"

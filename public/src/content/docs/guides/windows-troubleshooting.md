@@ -1,14 +1,14 @@
 ---
 title: "Windows troubleshooting"
-description: "Windows-specific notes for mvm. Native Windows is unsupported; WSL2 with nested KVM is the supported libkrun-backed workload path."
+description: "Windows-specific notes for mvm. Neither native Windows nor WSL2 is a supported local microVM host today."
 ---
 
 This page is the Windows-specific FAQ and research note. For current Windows guidance see [Install on Windows](/install/windows); for WSL2 caveats see [the WSL2 notes](/guides/windows-wsl2). General mvm troubleshooting lives in [the main troubleshooting page](/guides/troubleshooting).
 
-Windows is not a supported **native** local microVM host today. The supported
-Windows-adjacent path is WSL2 with nested `/dev/kvm`, libkrun installed in the
-distro, and repo/runtime state on the WSL ext4 filesystem. Native Windows and a
-Hyper-V managed Linux builder remain future backend work tracked in
+Windows is not a supported local microVM host today, natively or through WSL2:
+`mvmctl` refuses the libkrun workload backend on WSL2 even when the distro
+exposes nested `/dev/kvm`. The WSL2 notes below are kept as research. Native
+Windows and a Hyper-V managed Linux builder remain future backend work tracked in
 [mvm#428](https://github.com/tinylabscom/mvm/issues/428).
 
 ## Setup

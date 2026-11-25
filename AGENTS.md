@@ -127,24 +127,18 @@ not performed automatically. Operator-facing knobs:
   `build` request without `MVM_ALLOW_LOCAL_BUILDER_BUILD` is refused rather
   than silently falling back.
 
-**Image boundary.** Today the signed image set from `mvm-images` carries the
-builder image, kernels, base workload root filesystems and Stage 0 seeds, and
-also the runtime overlay, SDK sidecars and initramfs, which `mvm-images`
-compiles from this tree through its `mvm` flake input. The maintainer decided
-on 2026-10-05 to narrow that ([#4100](https://github.com/tinylabscom/mvm/issues/4100),
-ADR-054): `mvm-images` builds only the Linux layer and stops reading this
-tree, and the guest runtime ships as a signed asset with each `mvmctl` release,
-from which `mvmctl` assembles the overlay, initramfs and sidecar. Until the
-workstreams under #4100 land, write and test against today's behaviour, and do
-not add new guest-runtime work to `mvm-images` or a new dependency on its
-`mvm` input.
+**Image boundary.** The signed image set from `mvm-images` is the Linux layer:
+the builder image, kernels, base workload root filesystems and Stage 0 seeds
+([#4100](https://github.com/tinylabscom/mvm/issues/4100), ADR-054).
+`mvm-images`' source no longer has an `mvm` flake input. The pinned published
+set predates that and still lists a runtime overlay, SDK sidecars and an
+initramfs, which `mvmctl` reads as retired roles and never requires.
+The guest runtime ships as a signed asset with each `mvmctl` release (a source
+build makes the archive from this tree), and `mvmctl` assembles the overlay,
+initramfs and sidecars from it. Do not add guest-runtime work to `mvm-images`.
 
 Owner-approved exceptions (unchanged):
 
-- **Lima as a test-environment KVM provider only** — a virtual `/dev/kvm` for
-  Firecracker / Linux-KVM E2E tests that cannot run on the builder VM or
-  GitHub-hosted runners. Modeled as a test/dev-tier `VmBackend`, refused by
-  prod admission (like the Docker fallback tier). Never for builds/evals.
 - **Native macOS HVF live lifecycle tests and teardown benchmarks** — explicit
   HVF test/benchmark commands, because the Linux builder VM cannot provide
   Hypervisor.framework. All other runtime commands still require the builder VM.
@@ -165,13 +159,13 @@ builder VM or GitHub-hosted runners have one repository-owned remote lifecycle.
 Run the requested test from its worktree:
 
 ```bash
-just lab::gcp-kvm just bdd::live-ci
+just e2e gcp-kvm just e2e live-ci
 ```
 
 The command creates an Intel C3 Spot VM with nested KVM, uploads only files
 tracked by git from the current worktree, prepares the pinned
 Rust/Zig/Firecracker
-toolchain, runs the exact argument vector after `lab::gcp-kvm`, downloads a
+toolchain, runs the exact argument vector after `gcp-kvm`, downloads a
 result archive under the printed `/tmp` path, and deletes the outer VM on
 success or failure. Compute Engine also deletes it after a two-hour maximum
 runtime if the local runner disappears before its cleanup trap can run.
@@ -190,8 +184,8 @@ already authorized.
 Issue #3655's destructive witness is the pinned preset:
 
 ```bash
-just lab::cve-3655-gcp --dry-run
-just lab::cve-3655-gcp
+just e2e cve-3655-gcp --dry-run
+just e2e cve-3655-gcp
 ```
 
 It delegates host ownership to the generic runner and supplies only the pinned
@@ -267,14 +261,13 @@ export CARGO_HOME="$PWD/.mvm-test/cargo"
 These exports apply to commands in the current shell until it is closed or
 the variables are unset.
 
-**Still shared between worktrees** — vary microVM and TAP names if two worktrees
+**Still shared between worktrees** — vary microVM names if two worktrees
 run microVMs concurrently: `.git/objects` + packed refs + hooks (the git rule
-above is what keeps these safe), the builder VM's `/var/lib/mvm/`, `br-mvm`
-bridge, and TAP devices; the Nix store (shared by design; Nix locking handles
+above is what keeps these safe), the builder VM's `/var/lib/mvm/`; the Nix store (shared by design; Nix locking handles
 it). The builder VM itself is shared across worktrees — **never fork a
 per-worktree VM** (boot cost, duplicated tens-of-GB store, warm-cache loss).
 
-One-time per clone: `just maint::hooks` points `core.hooksPath` at
+One-time per clone: `just setup hooks` points `core.hooksPath` at
 `.githooks/`. The pre-commit hook runs `cargo fmt --all` (auto-restaging),
 scoped stable clippy `-D warnings`, and `actionlint` for workflow changes —
 never Nix on the host or the full test suite. Nix flake checks run in CI;
@@ -286,11 +279,9 @@ currently enforce Nix formatting because the flake declares no formatter.
 
 Developing the binaries that run inside a microVM — agent, egress client,
 protocol crates — happens entirely in this repository. A guest-binary-only
-change must never require an `mvm-images` checkout, edit, or release. Today
-the dev-tier build arms rebuild the runtime overlay and the initramfs from
-this checkout on the host; the SDK sidecar is the gap, since it still builds
-only from an `mvm-images` checkout, and the published image set still carries
-copies of all three built from the `mvm` input. The image boundary in
+change must never require an `mvm-images` checkout, edit, or release. A source
+build assembles the runtime overlay, the initramfs and the SDK sidecars from
+this checkout on the host. The image boundary in
 [#4100](https://github.com/tinylabscom/mvm/issues/4100) (ADR-054) makes the
 rule true by construction: every guest piece ships with `mvmctl`, and
 `mvm-images` has no `mvm` input to change. `mvm-images` is entered
@@ -314,7 +305,7 @@ No task is complete without all of:
 1. **Tests first**: Write or update tests covering the new/changed behavior before marking a task done. Unit tests for logic, integration tests for CLI and cross-crate interactions.
 2. **All tests green**: Run `cargo test --workspace` and confirm zero failures. New tests must pass alongside all existing tests.
 3. **Zero clippy warnings/errors**: Run `cargo clippy --workspace -- -D warnings` and fix all findings before calling a feature done. Never suppress a clippy lint with `#[allow(...)]` — fix the underlying issue instead.
-4. **Compiling workspace**: Run `cargo check --workspace` (or full `cargo test`/`cargo build`) and fix any errors before you finish. Never leave the workspace in a non-compiling state. **`--all-targets` is not exhaustive**: it silently skips targets behind `required-features` (the `mvm-conformance` cucumber runner needs `--features bdd`), and on macOS it cannot compile `cfg(target_os = "linux")` files at all — including Linux-gated _test_ files, which `just check::linux` also misses because that recipe is `--lib` only. Changing the shape of a shared type (adding a struct field, a trait method, an enum variant) therefore needs `just check::gated` before pushing. Skipping it costs a CI round trip: the break surfaces there as a compile error in the "Build workspace tests" job.
+4. **Compiling workspace**: Run `cargo check --workspace` (or full `cargo test`/`cargo build`) and fix any errors before you finish. Never leave the workspace in a non-compiling state. **`--all-targets` is not exhaustive**: it silently skips targets behind `required-features` (the `mvm-conformance` cucumber runner needs `--features bdd`), and on macOS it cannot compile `cfg(target_os = "linux")` files at all — including Linux-gated _test_ files, which `just check linux` also misses because that recipe is `--lib` only. Changing the shape of a shared type (adding a struct field, a trait method, an enum variant) therefore needs `just check gated` before pushing. Skipping it costs a CI round trip: the break surfaces there as a compile error in the "Build workspace tests" job.
 5. **Keep the issue authoritative**: GitHub issues own work status, remaining
    scope, dependencies, and acceptance criteria. Every PR for issue-related
    work must link to each issue it addresses in its description, including
@@ -395,7 +386,7 @@ do not extend a foreground timeout and rerun the same command.
 
 ## Scoped feedback and worktree shell
 
-Debug with `just tests::scoped <crate> <filter>`: read the failure, make one
+Debug with `just test scoped <crate> <filter>`: read the failure, make one
 change, and rerun that scoped test. Append `--lib` for a library unit test or
 `--test <name>` for one integration target, avoiding compilation of unrelated
 test binaries. Use an empty filter (`""`) to run every test in that target.

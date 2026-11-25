@@ -1,9 +1,8 @@
-//! Host-local dispatch for admitted boots and unmigrated prepared sources.
+//! Host-local dispatch for admitted boots and typed lifecycle owners.
 //!
 //! Persistent starts hand their one-use admitted plan to hostd while keeping
-//! post-readiness acceptance in the client. The prepared-start helpers below
-//! remain for sources not yet migrated to that executor; no serialized plan
-//! projection grants authority to either path.
+//! post-readiness acceptance in the client. No serialized plan projection grants
+//! authority to the remaining native-owned handoff.
 
 use crate::{MvmError, Result};
 use mvm_core::protocol::vm_backend::{VmId, VmStatus};
@@ -141,8 +140,7 @@ pub fn resume_and_boot_local(
     )
 }
 
-/// A VM [`start_prepared`] started, together with the backend object that
-/// started it.
+/// A VM started through an admitted owner, together with its backend object.
 ///
 /// Anything done to the VM after the start — applying its grants, undoing the
 /// launch — has to go to this object, not to one rebuilt from the hypervisor
@@ -169,50 +167,6 @@ impl StartedVm {
     pub(crate) fn from_started(backend: mvm_runtime::backend::AnyBackend, vm_id: VmId) -> Self {
         Self { backend, vm_id }
     }
-}
-
-/// Verify `backend` supports workloads and start the fully-prepared config on
-/// it. Both failure arms carry the same `backend-start` reason, with the
-/// underlying error chain preserved so the caller can surface and audit it.
-///
-/// Returns the backend that performed the start alongside the VM id, so the
-/// post-start steps act on that same object.
-pub fn start_prepared(
-    backend: mvm_runtime::backend::AnyBackend,
-    config: &mvm_core::vm_backend::VmStartConfig,
-) -> Result<StartedVm> {
-    start_prepared_custodied(backend, config, Vec::new())
-}
-
-/// Start with original writable-image custody transferred to the final writer.
-#[cfg(unix)]
-pub fn start_prepared_custodied(
-    backend: mvm_runtime::backend::AnyBackend,
-    config: &mvm_core::vm_backend::VmStartConfig,
-    images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
-) -> Result<StartedVm> {
-    start_prepared_custodied_with_verified_runtime(backend, config, images, None)
-}
-
-/// Transfer release proof custody beside the selected config to the backend.
-#[cfg(unix)]
-pub fn start_prepared_custodied_with_verified_runtime(
-    backend: mvm_runtime::backend::AnyBackend,
-    config: &mvm_core::vm_backend::VmStartConfig,
-    images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
-    runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
-) -> Result<StartedVm> {
-    mvm_runtime::workload_backend::require_workload_backend(&backend).map_err(|e| {
-        MvmError::Backend {
-            reason: format!("{e:#}"),
-        }
-    })?;
-    let vm_id = backend
-        .start_custodied_verified_release(config, images, runtime.map(|set| set.release()))
-        .map_err(|e| MvmError::Backend {
-            reason: format!("{e:#}"),
-        })?;
-    Ok(StartedVm { backend, vm_id })
 }
 
 /// Spend a persistent admission through hostd while retaining its readiness owner.
@@ -552,6 +506,40 @@ mod backend_select_tests {
         let msg = err.to_string();
         assert!(msg.contains("NIC-less host-vsock-proxy backend"));
         assert!(msg.contains("backend hvf is unavailable on this host"));
+    }
+
+    #[test]
+    fn validate_backend_for_egress_admits_firecracker_before_its_binary_is_fetched() {
+        let _guard = mvm_runtime::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().expect("tempdir");
+        env.set("MVM_HOME", home.path());
+        env.remove("MVM_FIRECRACKER_BIN");
+        let policy = NetworkPolicy::allow_list(vec![mvm_core::network_policy::HostPort::new(
+            "example.com",
+            443,
+        )]);
+        let verdict = validate_backend_for_egress(
+            "firecracker",
+            true,
+            &policy,
+            "OCI --image runs with outbound egress enabled",
+        );
+        // Nothing is fetched into this home, so the verdict turns on the host
+        // alone: one that can open /dev/kvm is admitted and fetches at launch.
+        let can_open_kvm = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/kvm")
+            .is_ok();
+        if can_open_kvm {
+            verdict.expect("an absent Firecracker is fetched at launch, not a refusal");
+        } else {
+            let msg = verdict.expect_err("no KVM must refuse").to_string();
+            assert!(msg.contains("backend firecracker is unavailable on this host"));
+        }
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

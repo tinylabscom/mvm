@@ -96,7 +96,6 @@ mvm-fs = { workspace = true }
 # gzip layer decode at this crate's boundary (mvm-fs's oci module stays
 # decompressor-free by design; the CLI decodes at its boundary the same way).
 flate2 = { workspace = true }
-which.workspace = true
 # `Vec<u8>` implements tokio's `AsyncWrite`, the sink for `fetch_layer`.
 tokio = { workspace = true, features = ["rt"] }
 tempfile = { workspace = true }

@@ -1,12 +1,20 @@
 //! The post-admission tail every admitted boot shares, and the one-call
 //! admit-and-boot entry point.
 
+mod assurance_audit;
 mod portable_entrypoint;
+mod preparation;
+pub(super) use assurance_audit::{attach_assurance_proxy, launch_decision_record};
+pub(crate) use preparation::{PreparedLaunch, prepare_launch};
 
 pub use portable_entrypoint::prepare_portable_entrypoint;
 
 use super::admit::admit_plan_for_run;
 use super::assurance_runtime::verify_selected_runtime;
+use super::operator_trial::{
+    OperatorTrialDispatchUncertain, classify_start_error as classify_operator_trial_start_error,
+    dispatch_error as operator_trial_dispatch_error,
+};
 use super::rollback::{
     FailureAuditPolicy, UndoLaunch, UndoLaunchFailure, apply_admitted_grants_or_undo_launch,
     apply_admitted_grants_with_rollback, apply_entrypoint_grants_or_undo_launch,
@@ -15,13 +23,8 @@ use super::rollback::{
 };
 use super::{AdmitAndStartParams, AdmittedPlan, RunPosture, final_gates, registry_pack};
 use anyhow::{Context, Result};
-use chrono::Utc;
 use mvm_contract::protocol::resource_controls::EnforcedGrants;
-use mvm_contract::provenance::{
-    ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionOutcome,
-    DecisionRecord, DecisionRecordBuilder,
-};
-use mvm_core::plan::{ExecutionPlan, synthesize_plan};
+use mvm_core::plan::synthesize_plan;
 use mvm_core::policy::PolicyBundle;
 use mvm_core::vm_backend::{StandbyClaim, StandbyError, StandbyHandle, VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
@@ -124,6 +127,8 @@ pub fn start_owned_entrypoint(
 enum StartFinalization {
     /// Record launch and failures at the host dispatch boundary.
     Immediate,
+    /// Operator trials retain custody unless a post-start rollback is confirmed.
+    OperatorTrial,
     /// Keep the ordinary launch/rollback tail, but persist the bridge
     /// substrate before an entrypoint's backend opens its endpoint.
     Entrypoint,
@@ -240,6 +245,9 @@ pub struct PreparedPersistent<C> {
 }
 
 pub(crate) enum LaunchSource<'a> {
+    OperatorTrial {
+        backend_kind: mvm_core::vm_backend::BackendKind,
+    },
     Persistent {
         lifecycle: &'a MachineLifecycleLock,
     },
@@ -258,62 +266,6 @@ pub(crate) enum LaunchSource<'a> {
     PortableEntrypoint {
         backend_kind: mvm_core::vm_backend::BackendKind,
     },
-}
-
-pub(crate) struct PreparedLaunch<A> {
-    pub(crate) config: VmStartConfig,
-    pub(crate) verified_runtime:
-        Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
-    pub(crate) admission: A,
-}
-
-pub(crate) fn prepare_launch<A>(
-    source: LaunchSource<'_>,
-    mut config: VmStartConfig,
-    attach: impl FnOnce(
-        &mut VmStartConfig,
-    ) -> Result<
-        Option<std::sync::Arc<mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>>,
-    >,
-    admit: impl FnOnce(
-        &mut VmStartConfig,
-        Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
-    ) -> Result<A>,
-) -> Result<PreparedLaunch<A>> {
-    match source {
-        LaunchSource::Persistent { lifecycle } | LaunchSource::LocalTransient { lifecycle } => {
-            lifecycle
-                .require_name(&config.name)
-                .map_err(CliStartFailure::StateNotOwned)?;
-            lifecycle
-                .require_cold_state()
-                .map_err(CliStartFailure::StateNotOwned)?;
-        }
-        LaunchSource::FilesystemFork { backend_kind }
-        | LaunchSource::CliCold { backend_kind }
-        | LaunchSource::Entrypoint { backend_kind }
-        | LaunchSource::PortableEntrypoint { backend_kind } => {
-            tracing::trace!(
-                backend = backend_kind.as_str(),
-                "preparing selected cold source"
-            );
-        }
-    }
-
-    let release = attach(&mut config)?;
-    let verified_runtime = match release {
-        Some(release) => Some(std::sync::Arc::new(
-            mvm_runtime::runtime_evidence::verify_release_runtime_set(&config, release)?,
-        )),
-        None => mvm_runtime::runtime_evidence::verify_selected_release_runtime_set(&config)?
-            .map(std::sync::Arc::new),
-    };
-    let admission = admit(&mut config, verified_runtime.as_deref())?;
-    Ok(PreparedLaunch {
-        config,
-        verified_runtime,
-        admission,
-    })
 }
 
 /// An ordinary entrypoint prepared through attachment, runtime verification and admission.
@@ -478,45 +430,6 @@ pub fn start_persistent(
     })
 }
 
-pub(super) fn launch_decision_record(plan: &ExecutionPlan, backend_name: &str) -> DecisionRecord {
-    DecisionRecordBuilder::new()
-        .version(1)
-        .category(DecisionCategory::Launch)
-        .actor(ActorRef {
-            principal: crate::audit::host_keypair::host_signer_id(),
-            key_id: crate::audit::host_keypair::host_signer_id(),
-            key_role: Some(DecisionActorRole::Orchestrator),
-        })
-        .scenario(mvm_contract::provenance::DecisionScenario {
-            plan_id: Some(plan.plan_id.0.clone()),
-            ..Default::default()
-        })
-        .reasoning(format!("workload launched on backend {backend_name}"))
-        .outcome(DecisionOutcome::Approved)
-        .timestamp(Utc::now().to_rfc3339())
-        .attestation(AttestationBinding {
-            plan_id: Some(plan.plan_id.0.clone()),
-            ..AttestationBinding::default()
-        })
-        .build()
-        .expect("launch decision record is well-formed")
-}
-
-pub(super) fn attach_assurance_proxy(
-    config: &mut VmStartConfig,
-    proxy: mvm_contract::protocol::broker_control::ServiceProxyBinding,
-) -> Result<()> {
-    if config
-        .service_proxies
-        .iter()
-        .any(|binding| binding.service == proxy.service)
-    {
-        anyhow::bail!("assurance controller proxy service is already configured");
-    }
-    config.service_proxies.push(proxy);
-    Ok(())
-}
-
 /// Everything the post-admission tail needs, in one struct.
 ///
 /// A params struct rather than six positional arguments: three of the fields
@@ -617,6 +530,28 @@ pub(crate) fn start_admitted_with_verified_release(
         enforced_grants: started
             .enforced_grants
             .expect("immediate host start always checks enforced grants"),
+    })
+}
+
+/// Dispatch an operator trial without sealing an unconfirmed rollback as terminal.
+pub(crate) fn start_operator_trial_with_verified_release(
+    params: StartAdmittedParams<'_>,
+    verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
+) -> Result<StartedMachine> {
+    let started = start_admitted_with_finalization(
+        params,
+        verified_runtime,
+        StartFinalization::OperatorTrial,
+        None,
+        None,
+        || Ok(()),
+    )?;
+    Ok(StartedMachine {
+        vm_id: started.vm_id,
+        admitted: started.admitted,
+        enforced_grants: started
+            .enforced_grants
+            .expect("operator trial host start always checks enforced grants"),
     })
 }
 
@@ -767,12 +702,7 @@ pub fn claim_cli_transient(
             admitted.dispatched = false;
             Ok(WarmClaimDispatch::ReservationLost(Box::new(admitted)))
         }
-        Err(error) => Err(match error {
-            StandbyError::StopUnconfirmed(_) => {
-                CliStartFailure::UncertainStop(anyhow::Error::new(error)).into()
-            }
-            other => anyhow::Error::new(other).context("admitted warm claim"),
-        }),
+        Err(error) => Err(super::cli_cold::map_cli_warm_claim_error(error)),
     }
 }
 
@@ -788,6 +718,7 @@ fn start_admitted_with_finalization(
     let persistent = matches!(finalization, StartFinalization::Persistent { .. });
     let fork = matches!(finalization, StartFinalization::FsQuickFork);
     let entrypoint = matches!(finalization, StartFinalization::Entrypoint);
+    let operator_trial = matches!(finalization, StartFinalization::OperatorTrial);
     let backend = params.backend;
     let mut admitted = params.admitted;
     anyhow::ensure!(
@@ -1113,6 +1044,18 @@ fn start_admitted_with_finalization(
                     )
                     .map_err(entrypoint_rollback_error)?,
                 )
+            } else if operator_trial {
+                match apply_entrypoint_grants_or_undo_launch(
+                    backend,
+                    &vm_id,
+                    &admitted,
+                    params.emitter,
+                ) {
+                    Ok(grants) => Some(grants),
+                    Err(error) => {
+                        return Err(operator_trial_dispatch_error(error, vm_id, admitted, None));
+                    }
+                }
             } else {
                 Some(apply_admitted_grants_or_undo_launch(
                     backend,
@@ -1145,6 +1088,21 @@ fn start_admitted_with_finalization(
                     params.emitter,
                 )
                 .map_err(entrypoint_rollback_error)?;
+            } else if operator_trial {
+                if let Err(error) = record_entrypoint_charge_or_undo_launch(
+                    backend,
+                    &vm_id,
+                    &vm_name,
+                    &admitted,
+                    params.emitter,
+                ) {
+                    return Err(operator_trial_dispatch_error(
+                        error,
+                        vm_id,
+                        admitted,
+                        enforced_grants,
+                    ));
+                }
             } else if !cli_transient && !persistent && !fork {
                 record_charge_or_undo_launch(backend, &vm_id, &vm_name, &admitted, params.emitter)?;
             }
@@ -1210,6 +1168,13 @@ fn start_admitted_with_finalization(
                     cli_rollback_error(undo_cli_launch(undo))
                 } else if entrypoint {
                     entrypoint_rollback_error(undo_cli_launch(undo))
+                } else if operator_trial {
+                    operator_trial_dispatch_error(
+                        undo_cli_launch(undo),
+                        vm_id,
+                        admitted,
+                        enforced_grants,
+                    )
                 } else {
                     undo_start(undo, &mut actor_owner)
                 });
@@ -1264,6 +1229,13 @@ fn start_admitted_with_finalization(
                         cli_rollback_error(undo_cli_launch(undo))
                     } else if entrypoint {
                         entrypoint_rollback_error(undo_cli_launch(undo))
+                    } else if operator_trial {
+                        operator_trial_dispatch_error(
+                            undo_cli_launch(undo),
+                            vm_id,
+                            admitted,
+                            enforced_grants,
+                        )
                     } else {
                         undo_start(undo, &mut actor_owner)
                     });
@@ -1311,6 +1283,18 @@ fn start_admitted_with_finalization(
             }
             let (err, persistent_stop_uncertain) = if persistent {
                 classify_persistent_dispatch_error(err)
+            } else if operator_trial {
+                match classify_operator_trial_start_error(err) {
+                    Ok(error) => (error, false),
+                    Err(uncertainty) => {
+                        return Err(anyhow::Error::new(OperatorTrialDispatchUncertain {
+                            vm_id: VmId(vm_name.clone()),
+                            admitted,
+                            enforced_grants: None,
+                            uncertainty,
+                        }));
+                    }
+                }
             } else {
                 (err, false)
             };

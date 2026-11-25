@@ -1227,7 +1227,7 @@ pub(crate) fn ensure_rust_targets(
     Err(GuestAgentBuildError::BuildFailed {
         reason: format!(
             "Rust {toolchain} has no std for {}; install the guest targets with \
-             `just payload::toolchain`, or with `rustup target add {} --toolchain {toolchain}`",
+             `just setup toolchain`, or with `rustup target add {} --toolchain {toolchain}`",
             missing.join(", "),
             guest_rust_targets().join(" "),
         ),
@@ -1270,7 +1270,7 @@ fn rustup_tool(toolchain: &str, tool: &str) -> Result<PathBuf, GuestAgentBuildEr
         return Err(GuestAgentBuildError::BuildFailed {
             reason: format!(
                 "Rust {toolchain} is required for guest binaries; install it with \
-                 `just payload::toolchain`, or with `rustup toolchain install {toolchain} \
+                 `just setup toolchain`, or with `rustup toolchain install {toolchain} \
                  --profile minimal` followed by `rustup target add {targets} \
                  --toolchain {toolchain}`"
             ),
@@ -1835,7 +1835,7 @@ mod tests {
         );
         let mut cmd = std::process::Command::new("cargo");
         let err = apply_pinned_zig(&mut cmd, &spec).unwrap_err().to_string();
-        assert!(err.contains("just payload::toolchain"), "{err}");
+        assert!(err.contains("just setup toolchain"), "{err}");
     }
 
     #[test]

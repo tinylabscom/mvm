@@ -966,16 +966,15 @@ mod tests {
     #[test]
     fn encode_verb_grant_cmdline_empty_pubkey_is_none() {
         use crate::plan::{Nonce, VerbGrant, VerbId};
-        use chrono::{Duration, Utc};
         use ed25519_dalek::{Signer, SigningKey};
 
         let k = SigningKey::from_bytes(&[3u8; 32]);
         let nonce = Nonce::from_bytes([1u8; 16]);
-        let now = Utc::now();
+        let now = mvm_contract::timestamp::UtcTimestamp::from_unix(2_000_000_000, 0).unwrap();
         let mut grant = VerbGrant {
             session_id: "sess-x".into(),
             plan_nonce: nonce.clone(),
-            not_after: now + Duration::minutes(5),
+            not_after: now,
             verbs: vec![VerbId::new("run-entrypoint").unwrap()],
             drive: None,
             application_terminal: None,
@@ -995,16 +994,15 @@ mod tests {
     #[test]
     fn encode_verb_grant_cmdline_round_trips_as_single_token() {
         use crate::plan::{Nonce, VerbGrant, VerbId};
-        use chrono::{Duration, Utc};
         use ed25519_dalek::{Signer, SigningKey};
 
         let k = SigningKey::from_bytes(&[7u8; 32]);
         let nonce = Nonce::from_bytes([2u8; 16]);
-        let now = Utc::now();
+        let now = mvm_contract::timestamp::UtcTimestamp::from_unix(2_000_000_000, 0).unwrap();
         let mut grant = VerbGrant {
             session_id: "sess-rt".into(),
             plan_nonce: nonce.clone(),
-            not_after: now + Duration::minutes(10),
+            not_after: now,
             verbs: vec![
                 VerbId::new("run-entrypoint").unwrap(),
                 VerbId::new("ping").unwrap(),

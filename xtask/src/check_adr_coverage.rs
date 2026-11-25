@@ -373,60 +373,11 @@ fn section_resolves(body: &str, section: &str) -> bool {
 /// successor ADR, or (c) delete the references entirely. The
 /// allowlist exists to keep the CI signal clean while that work is
 /// sequenced, not to make broken references permanent.
-const KNOWN_MISSING_ADRS: &[(u32, &str)] = &[
-    (
-        9,
-        "function-call entrypoints — split across ADR-005/008/010/011 during the function-service \
-         refactor; references to the original ADR-009 number are historical",
-    ),
-    (
-        15,
-        "legacy plan-era ADR reference; no canonical doc shipped — replace refs with the relevant \
-         ADR-008/028/029 (encryption layering) or delete during a follow-up sweep",
-    ),
-    (
-        16,
-        "single legacy ref; superseded by the encryption-substrate ADRs (042 / 008) — delete in a \
-         follow-up sweep",
-    ),
-    (
-        17,
-        "legacy refs predating the cross-platform-strategy split — successor is ADR-009",
-    ),
-    (
-        18,
-        "47 refs to a legacy provider-CLI concept — successor is ADR-006 (mvm-provider-cli-contract)",
-    ),
-    (
-        19,
-        "legacy refs; no canonical doc shipped — follow-up sweep should replace with the relevant \
-         function-service ADR (008/010) or delete",
-    ),
-    (
-        20,
-        "legacy refs to a runtime-overlay precursor — successor is ADR-005 (runtime-overlay-composition, folded into the function-call-entrypoints canonical)",
-    ),
-    (
-        26,
-        "single legacy ref to an unwritten ADR — delete or rewrite in a follow-up",
-    ),
-    (
-        28,
-        "legacy refs to an unwritten ADR; concept folded into ADR-008 (iroh-aware encryption and \
-         encryption substrate, post-consolidation)",
-    ),
-    (29, "single legacy ref; concept folded into ADR-008"),
-    (
-        36,
-        "AI-agent threat model — flagged TBD in the SOC 2 controls mapping under ADR-001 \
-         §\"Compliance mapping\"; ADR pending the agent threat model write-up",
-    ),
-    (
-        999,
-        "test literal inside this xtask's own unit tests (extract_adr_refs_finds_padded_and_unpadded) \
+const KNOWN_MISSING_ADRS: &[(u32, &str)] = &[(
+    999,
+    "test literal inside this xtask's own unit tests (extract_adr_refs_finds_padded_and_unpadded) \
          — the scanner sees its own test fixture",
-    ),
-];
+)];
 
 const KNOWN_MISSING_ADR_SECTIONS: &[(u32, &str, &str)] = &[];
 

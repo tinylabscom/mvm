@@ -312,7 +312,7 @@ jobs:
   # release path calls, gated on the narrower `bdd` scope.
   # The single owner of the Gherkin suite, and gated on `code` rather than the
   # narrower `bdd` scope because it inherited `ci-linux-coverage.sh`'s trigger
-  # along with its `just bdd::run`. `bdd` is a strict subset of `code` — `crates/`
+  # along with its `just test bdd`. `bdd` is a strict subset of `code` — `crates/`
   # contains `crates/mvm-cli/`, `tests/` contains `tests/machine-fixtures/`, and
   # both cover `features/` and the Justfile — so this widening admits exactly
   # the runs the Linux lane was already covering and no others.
@@ -625,7 +625,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      # No uv, Node or `just` here. All three existed for the `just bdd::run` this
+      # No uv, Node or `just` here. All three existed for the `just test bdd` this
       # lane no longer runs — the suite builds the TypeScript SDK, which is what
       # needed Node and uv. What is left is the wasm/no_std targets, the browser
       # demo (wasm-pack plus a system python3) and the ext4 oracle, none of which
@@ -733,7 +733,7 @@ jobs:
 
       # The one lane that must keep a floating nightly, and not by oversight.
       # `crates/mvm-hostd/ebpf/rust-toolchain.toml` pins `channel = "nightly"`,
-      # and both the bpf-linker install below and `just check::ebpf` say
+      # and both the bpf-linker install below and `just check ebpf` say
       # `cargo +nightly` — they resolve the toolchain *by that name*. Installing
       # a dated nightly instead leaves `+nightly` pointing at whatever rustup
       # auto-installs, which carries no `rust-src`, and the build dies asking
@@ -840,7 +840,7 @@ jobs:
           tool: just
 
       - name: Build the eBPF object
-        run: just check::ebpf
+        run: just check ebpf
 
       - name: Run mvm-hostd eBPF telemetry load/attach test
         run: cargo test -p mvm-hostd --features ebpf-telemetry --lib
@@ -1045,6 +1045,39 @@ jobs:
             < /tmp/boot-image/overlay/overlay.roothash)" \
           cargo test --test runtime_boot_bench \
             prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
+
+      - name: Delegate the cpuset controller to the runner's user manager
+        # systemd hands a user manager cpu, memory and pids by default; a scope
+        # can only carry `AllowedCPUs=` once cpuset is delegated too. Restarting
+        # the manager applies it, so this runs after the boot gate, which has
+        # no use for the scope's cpuset.
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"
+          sudo mkdir -p /etc/systemd/system/user@.service.d
+          printf '[Service]\nDelegate=cpu cpuset io memory pids\n' \
+            | sudo tee /etc/systemd/system/user@.service.d/mvm-cpuset.conf >/dev/null
+          sudo systemctl daemon-reload
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl restart "user@${uid}.service"
+
+      - name: Start a systemd user session for the placement scope
+        uses: ./.github/actions/user-session
+
+      - name: Witness exclusive core placement on a real VMM
+        # The witness panics, rather than skipping, when the scope cannot carry
+        # a cpuset, so a runner that loses the delegation fails here. The
+        # grep fails the step if the filter ever matches nothing, which cargo
+        # reports as success.
+        env:
+          MVM_LIVE_GUEST_MIB: "512"
+        run: |
+          set -euo pipefail
+          export MVM_LIVE_VMM_ARGV="${MVM_FIRECRACKER_BIN} --api-sock ${RUNNER_TEMP}/placed-vmm.sock"
+          cargo test -p mvm-hostd --test spawn_ceiling_audit_live \
+            a_placed_vmm_reads_back_its_cpuset_and_runs_only_there \
+            -- --ignored --exact --nocapture --test-threads 1 | tee "${RUNNER_TEMP}/placed-witness.log"
+          grep -Eq 'test result: ok\. 1 passed' "${RUNNER_TEMP}/placed-witness.log"
 
       - name: Dump VMM diagnostics on failure
         if: failure()

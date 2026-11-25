@@ -4,7 +4,6 @@
 //! once, so this check is stateless by construction (no ledger is taken) and
 //! the supervisor can repeat it without turning the restore into a replay.
 
-use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
 use mvm_contract::timestamp::UtcTimestamp;
 
@@ -24,7 +23,7 @@ pub struct RestoredChildBinding<'a> {
     /// The fresh identity the child runs under; the plan's workload.
     pub vm_name: &'a str,
     pub image: ImageBinding<'a>,
-    pub now: DateTime<Utc>,
+    pub now: UtcTimestamp,
 }
 
 /// Verify `signed` under `trusted` and bind it to the restored machine.
@@ -51,9 +50,8 @@ pub fn verify_restored_child_plan(
             "restored child plan pins a different image than the one restored"
         );
     }
-    let now = UtcTimestamp::try_from(binding.now)?;
     anyhow::ensure!(
-        plan.valid_from <= now && now < plan.valid_until,
+        plan.valid_from <= binding.now && binding.now < plan.valid_until,
         "restored child plan is outside its validity window"
     );
     Ok(plan)
@@ -63,6 +61,7 @@ pub fn verify_restored_child_plan(
 mod tests {
     use super::*;
     use crate::plan::test_support::PlanFixture;
+    use crate::util::time::utc_timestamp_now;
     use ed25519_dalek::SigningKey;
 
     fn key(seed: u8) -> SigningKey {
@@ -87,7 +86,7 @@ mod tests {
             &RestoredChildBinding {
                 vm_name: vm,
                 image: image.map_or(ImageBinding::NotChecked, ImageBinding::Pinned),
-                now: Utc::now(),
+                now: utc_timestamp_now(),
             },
         )
     }
@@ -126,12 +125,12 @@ mod tests {
     #[test]
     fn an_expired_plan_is_refused() {
         let k = key(1);
-        let now = Utc::now();
+        let now = utc_timestamp_now();
         let plan = PlanFixture::new()
             .workload("child")
             .validity(
-                now - chrono::Duration::minutes(10),
-                now - chrono::Duration::minutes(5),
+                now.checked_add_secs(-600).unwrap(),
+                now.checked_add_secs(-300).unwrap(),
             )
             .build();
         let s = crate::plan::sign_plan(&plan, &k, "host:t");

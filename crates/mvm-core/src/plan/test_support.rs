@@ -10,7 +10,10 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
+
+use crate::util::time::utc_timestamp_now;
 
 use crate::plan::execution_plan::{ExecutionPlan, SCHEMA_VERSION};
 use crate::plan::types::{
@@ -35,8 +38,8 @@ pub struct PlanFixture {
     runtime_profile: String,
     nonce: [u8; 16],
     secrets: Vec<SecretBinding>,
-    valid_from: Option<DateTime<Utc>>,
-    valid_until: Option<DateTime<Utc>>,
+    valid_from: Option<UtcTimestamp>,
+    valid_until: Option<UtcTimestamp>,
     services: Vec<ServiceId>,
     extensions: Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>,
     stream_edges: Vec<mvm_contract::stream::StreamEdge>,
@@ -166,14 +169,14 @@ impl PlanFixture {
 
     /// Pin an explicit validity window. Without this the plan is valid from
     /// `now` to `now + 10min`.
-    pub fn validity(mut self, from: DateTime<Utc>, until: DateTime<Utc>) -> Self {
+    pub fn validity(mut self, from: UtcTimestamp, until: UtcTimestamp) -> Self {
         self.valid_from = Some(from);
         self.valid_until = Some(until);
         self
     }
 
     pub fn build(self) -> ExecutionPlan {
-        let now = Utc::now();
+        let now = utc_timestamp_now();
         ExecutionPlan {
             workflow: None,
             grants: self.grants,
@@ -232,8 +235,11 @@ impl PlanFixture {
                 snapshot_on_idle: false,
                 idle_secs: 0,
             },
-            valid_from: utc_timestamp(self.valid_from.unwrap_or(now)),
-            valid_until: utc_timestamp(self.valid_until.unwrap_or(now + Duration::minutes(10))),
+            valid_from: self.valid_from.unwrap_or(now),
+            valid_until: self.valid_until.unwrap_or_else(|| {
+                now.checked_add_secs(600)
+                    .expect("ten minutes past now stays within year 9999")
+            }),
             nonce: Nonce::from_bytes(self.nonce),
             agent_verbs: None,
             bundle: None,
@@ -273,8 +279,8 @@ mod tests {
 
     #[test]
     fn overrides_are_applied() {
-        let from = Utc::now();
-        let until = from + Duration::minutes(5);
+        let from = utc_timestamp_now();
+        let until = from.checked_add_secs(300).unwrap();
         let plan = PlanFixture::new()
             .tenant("acme")
             .plan_id("p-1")
@@ -296,8 +302,8 @@ mod tests {
         assert_eq!(plan.workload.0, "w-1");
         assert_eq!(plan.runtime_profile.0, "hvf");
         assert_eq!(plan.nonce, Nonce::from_bytes([7u8; 16]));
-        assert_eq!(plan.valid_from, utc_timestamp(from));
-        assert_eq!(plan.valid_until, utc_timestamp(until));
+        assert_eq!(plan.valid_from, from);
+        assert_eq!(plan.valid_until, until);
     }
 
     #[test]

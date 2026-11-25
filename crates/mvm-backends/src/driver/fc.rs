@@ -925,7 +925,7 @@ impl VmmDriver for FcDriver {
     }
 
     fn is_available(&self) -> Result<bool> {
-        crate::fc::host::is_installed()
+        crate::fc::host::is_launchable()
     }
 
     fn capabilities(&self) -> VmCapabilities {

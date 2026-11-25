@@ -202,7 +202,7 @@ jobs:
           RUNTIME_CHECKSUM_SHA256: ${{ inputs.runtime_checksum_sha256 }}
           RUNTIME_ARCHIVE_BUNDLE_SHA256: ${{ inputs.runtime_archive_bundle_sha256 }}
           RUNTIME_CHECKSUM_BUNDLE_SHA256: ${{ inputs.runtime_checksum_bundle_sha256 }}
-        run: just e2e::docs
+        run: just e2e docs
 
       - name: Dump VMM diagnostics on failure
         if: failure()
@@ -432,7 +432,7 @@ jobs:
           MVM_E2E_FAILURE_MANIFEST: ${{ runner.temp }}/failure-manifest-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}.json
         run: |
           set -o pipefail
-          uv run --no-project --python 3.12 -- just e2e::docs 2>&1 | tee "$RUNNER_TEMP/e2e-docs.log"
+          uv run --no-project --python 3.12 -- just e2e docs 2>&1 | tee "$RUNNER_TEMP/e2e-docs.log"
 
       - name: Export bounded failure observations
         id: failure-export

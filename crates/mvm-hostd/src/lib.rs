@@ -52,6 +52,8 @@ pub mod drive;
 pub mod egress_broker;
 pub mod extension_admission;
 pub mod extension_controller;
+/// How a thread following a file blocks until it may have changed.
+pub mod file_wait;
 pub mod hvf_owner_audit_signer;
 #[cfg(any(target_os = "macos", test))]
 pub mod hvf_owner_deployment;

@@ -88,7 +88,7 @@ stages and runs this scenario, downloads an evidence bundle under `/tmp`, and
 deletes the outer VM even when the witness fails:
 
 ```sh
-just lab::cve-3655-gcp
+just e2e cve-3655-gcp
 ```
 
 It uses the active `gcloud` account and project. `--project`, `--zone`,
@@ -120,7 +120,7 @@ MVM_BDD_CVE_EXPLOIT="$lab_dir/src/pocs/CVE-2026-80521/poc" \
 MVM_BDD_CVE_KERNEL="$lab_dir/vmlinux" \
 MVM_BDD_CVE_INITRAMFS="$lab_dir/detonation-initramfs.cpio.gz" \
 MVM_BDD_ONLY_TAG=destructive_lab_only \
-just bdd::run
+just test bdd
 ```
 
 `MVM_BDD_CVE_EXPLOIT` names the admitted image (OCI reference or local image

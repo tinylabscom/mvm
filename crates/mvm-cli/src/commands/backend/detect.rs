@@ -1,11 +1,9 @@
 //! `mvmctl backend detect` — the backend install.sh selects on this host.
 //!
-//! This is the *install-time* answer, not the runtime auto-detect: it takes
-//! the host's OS version into account, so macOS 13–25 Apple Silicon answers
-//! libkrun while the runtime ladder keeps its own rules (explicit libkrun,
-//! no fallback). install.sh calls `mvmctl backend detect --plain` against the
-//! just-extracted archive so the shell never reimplements the macOS-version
-//! logic.
+//! This is the *install-time* answer, not the runtime auto-detect: it reads
+//! the component table, and refuses a host no row covers. install.sh calls
+//! `mvmctl backend detect --plain` against the just-extracted archive so the
+//! shell never reimplements the table.
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
@@ -25,8 +23,8 @@ pub(in crate::commands) fn run(args: &Args) -> Result<()> {
     let Some(kind) = detect_install_default_for(&host) else {
         anyhow::bail!(
             "no backend supports this host. Supported: Linux with /dev/kvm (firecracker), \
-             Linux without KVM (qemu, dev/test), macOS 13-25 Apple Silicon (libkrun), \
-             macOS 26+ Apple Silicon (hvf). See https://runmvm.com/reference/platform-support/"
+             Linux without KVM (qemu, dev/test), macOS 26+ Apple Silicon (hvf). \
+             See https://runmvm.com/reference/platform-support/"
         );
     };
     if args.plain {

@@ -2,9 +2,10 @@ use super::*;
 use crate::admission::admit_plan_tests::pinning_params;
 use crate::admission::entrypoint_resolve::ResolvedEntrypoint;
 use crate::admission::{AdmissionContext, AdmitPlanForBootParams, admit_plan_for_boot};
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 use mvm_core::util::test_env::TestEnv;
+use mvm_core::util::time::utc_timestamp_now;
 use mvm_core::vm_backend::VmStartConfig;
 use mvm_hostd::plan_admission::{
     InMemoryNonceLedger, populate_audit_substrate, stash_plan_and_mint_verb_grant,
@@ -76,9 +77,13 @@ fn config() -> VmStartConfig {
     }
 }
 
-fn slow_preparation(prepared_at: &mut Option<DateTime<Utc>>) -> Result<()> {
+fn nanos(t: UtcTimestamp) -> i128 {
+    i128::from(t.unix_secs()) * 1_000_000_000 + i128::from(t.subsec_nanos())
+}
+
+fn slow_preparation(prepared_at: &mut Option<UtcTimestamp>) -> Result<()> {
     std::thread::sleep(SLOW_PREPARATION);
-    *prepared_at = Some(Utc::now());
+    *prepared_at = Some(utc_timestamp_now());
     Ok(())
 }
 
@@ -101,20 +106,19 @@ fn a_slow_preparation_cannot_spend_the_grant_window() {
     let envelope = host.mint(&mut config, &admission);
 
     let plan = admission.admitted.plan();
-    let valid_from = chrono::DateTime::<chrono::Utc>::from(plan.valid_from);
-    let valid_until = chrono::DateTime::<chrono::Utc>::from(plan.valid_until);
-    let window = valid_until - valid_from;
+    let (valid_from, valid_until) = (plan.valid_from, plan.valid_until);
+    let window = nanos(valid_until) - nanos(valid_from);
     let prepared_at = prepared_at.expect("preparation ran");
     assert!(
         valid_from >= prepared_at,
         "the plan's window must open after preparation, not before it"
     );
-    assert_eq!(envelope.grant.not_after, valid_until);
+    let not_after = envelope.grant.not_after;
+    assert_eq!(not_after, valid_until);
     assert!(
-        envelope.grant.not_after >= prepared_at + window,
-        "a grant expiring at {} leaves less than the {window} window after a preparation that \
-         ended at {prepared_at}",
-        envelope.grant.not_after
+        nanos(not_after) >= nanos(prepared_at) + window,
+        "a grant expiring at {not_after} leaves less than the {window} ns window after a \
+         preparation that ended at {prepared_at}"
     );
 }
 
@@ -132,13 +136,11 @@ fn admitting_before_preparation_loses_the_preparation_time() {
     let envelope = host.mint(&mut config, &admission);
 
     let plan = admission.admitted.plan();
-    let valid_from = chrono::DateTime::<chrono::Utc>::from(plan.valid_from);
-    let valid_until = chrono::DateTime::<chrono::Utc>::from(plan.valid_until);
-    let window = valid_until - valid_from;
-    let lost = prepared_at.unwrap() + window - envelope.grant.not_after;
+    let window = nanos(plan.valid_until) - nanos(plan.valid_from);
+    let lost = nanos(prepared_at.unwrap()) + window - nanos(envelope.grant.not_after);
     assert!(
-        lost >= chrono::Duration::from_std(SLOW_PREPARATION).unwrap(),
-        "admitting first should have cost the preparation time, lost only {lost}"
+        lost >= SLOW_PREPARATION.as_nanos() as i128,
+        "admitting first should have cost the preparation time, lost only {lost} ns"
     );
 }
 

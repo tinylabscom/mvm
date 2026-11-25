@@ -37,7 +37,7 @@ fs.writeFileSync(out, JSON.stringify(recording));
 "#;
 
 fn node_on_path() -> Option<std::path::PathBuf> {
-    which::which("node").ok()
+    mvm_core::util::which("node")
 }
 
 #[test]

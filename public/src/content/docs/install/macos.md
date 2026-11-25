@@ -1,13 +1,12 @@
 ---
 title: "Install mvm on macOS"
-description: "Install mvm on Apple Silicon, with native HVF on macOS 26+ and the bundled libkrun preview on macOS 13–25."
+description: "Install mvm on Apple Silicon macOS 26 or later, with the native HVF backend."
 ---
 
 mvm on macOS supports **Apple Silicon (M-series)**. macOS 26 and newer uses
-Apple's Hypervisor.framework through the native HVF backend. macOS 13–25 can
-use the bundled libkrun preview through an explicit `--hypervisor libkrun`
-selection. The one signed release archive carries the matching tier, so neither
-path requires Docker Desktop or a separate Homebrew VMM installation.
+Apple's Hypervisor.framework through the native HVF backend, with no Docker
+Desktop and no Homebrew VMM installation. macOS 25 and older is not supported:
+the installer and `mvmctl` refuse there and name the supported hosts.
 
 For the full host/backend matrix, see [Platform support](/reference/platform-support/).
 
@@ -15,10 +14,8 @@ Intel Macs are not a supported local microVM host. Use a Linux machine with `/de
 
 ## Prerequisites
 
-- Apple Silicon Mac running macOS 13 or newer.
-- No Homebrew VMM packages. On macOS 13–25 the installer retains the libkrun
-  supervisor and dylibs from the signed archive; on macOS 26+ it retains HVF
-  and removes that compatibility payload.
+- Apple Silicon Mac running macOS 26 or newer.
+- No Homebrew VMM packages. HVF ships with the operating system.
 
 You **do not need Nix on your Mac**. You run `mvmctl machine build` from macOS, and mvm runs Nix evaluation and `nix build` inside the Linux builder VM, then extracts the resulting rootfs back to the host. See [§"Linux builds on macOS"](#linux-builds-on-macos--zero-config-by-default) below for the design.
 
@@ -39,13 +36,13 @@ curl -fsSL https://runmvm.com/install.sh | MVM_VERSION=v0.16.1 sh
 ### Choose a backend
 
 The installer stages the backend the host supports and prints what it chose —
-libkrun on macOS 13–25, HVF on macOS 26+ — and never asks a question it cannot
-answer. Scripted installs can name the tier instead, and an unknown or
-unsupported name is refused with the valid ones listed:
+HVF on macOS — and never asks a question it cannot answer. Scripted installs
+can name the backend instead, and an unknown or unsupported name is refused
+with the valid ones listed:
 
 ```bash
-curl -fsSL https://runmvm.com/install.sh | sh -s -- --backend libkrun
-# or: MVM_INSTALL_BACKEND=libkrun
+curl -fsSL https://runmvm.com/install.sh | sh -s -- --backend hvf
+# or: MVM_INSTALL_BACKEND=hvf
 ```
 
 After install, `mvmctl backend list` shows every backend with this host's
@@ -72,8 +69,7 @@ contributor `mvmctl` builds each one into its own `target/<profile>/` the first
 time it needs it, signs the supervisor with the hypervisor entitlement, and
 announces the build. It rebuilds a helper the same way whenever one of the
 helper's sources is newer than it, so a helper never lags the checkout. An
-official release binary never does this; it ships its helpers and, for the
-macOS 13–25 tier, the relocatable libkrun dylibs.
+official release binary never does this; it ships its helpers.
 
 To install the binaries somewhere else, build the helpers explicitly:
 
@@ -135,11 +131,7 @@ mvmctl doctor
 
 `doctor` reports the active backend. On an Apple Silicon Mac with macOS 26+,
 image builds and workloads auto-detect the native HVF path. An HVF failure is
-reported directly; mvm does not silently retry through libkrun. On macOS 13–25,
-the bundled libkrun tier is a preview and remains explicit. Its build and run
-examples are withheld until they have end-to-end witnesses on a suitable
-existing host. [Issue #4714](https://github.com/tinylabscom/mvm/issues/4714)
-tracks those witnesses and restoration of the examples.
+reported directly; mvm does not silently retry through libkrun.
 
 ## First microVM
 
@@ -149,9 +141,6 @@ mvmctl init .
 mvmctl machine build
 mvmctl machine run --manifest .
 ```
-
-Those commands use the macOS 26+ HVF default. They are not a validated
-build-and-run recipe for the macOS 13–25 libkrun preview tier.
 
 `mvmctl init` scaffolds the project. (Bare `mvmctl run` is the transient verb and needs a command, e.g. `mvmctl run --image alpine -- uname -a`; without one it exits with an error.) On the first `mvmctl machine build`, mvm bootstraps the builder VM if needed and runs `nix build` inside it; `mvmctl machine run` boots the resulting rootfs with the selected macOS runtime backend. Expected runtime cold boot is measured after the image is already built. The builder VM image is built in [mvm-images](https://github.com/tinylabscom/mvm-images): when developing from this source checkout with an mvm-images checkout selected (`MVM_IMAGES_DIR`, or a sibling `../mvm-images`), it is built from that checkout, and otherwise fetched from the signed image set `images.lock` pins. The cache is reused only when its recorded fingerprint matches the selected source, its recorded artifact digests still match the cached files, and its provenance summary matches the same source and artifact filename set; on a miss or any drift the image is rebuilt or refetched, validated in staging, and only then promoted into the live cache. Run with `--verbose` to see the safe cache reason code, for example `hit`, `fingerprint_mismatch`, `artifact_digest_mismatch`, or `provenance_mismatch`.
 
@@ -166,9 +155,8 @@ codesign --sign - --force --entitlements assets/mvmctl.entitlements ~/.local/bin
 
 `install.sh` does this for you. It matters if you stripped entitlements, ran with `MVM_SKIP_CODESIGN=1`, or built from source with `cargo` — nothing in the build signs binaries, so a rebuild always leaves them unsigned.
 
-The libkrun supervisor uses the same hypervisor entitlement. A release install
-signs it as part of the macOS 13–25 tier; a source-built copy needs the same
-manual treatment.
+The libkrun supervisor, an opt-in for source builds only, uses the same
+hypervisor entitlement and needs the same manual treatment.
 
 **`nix build` fails with "a 'x86_64-linux' with features … is required"** — that is a direct host-side Nix command failing because macOS cannot build Linux derivations by itself. Use `mvmctl machine build --flake .` so the Linux build runs inside the builder VM. If you intentionally want direct `nix build` on macOS, configure [`nix-darwin`'s `linux-builder`](https://nix.dev/manual/nix/stable/installation/installing-binary).
 
@@ -178,10 +166,7 @@ manual treatment.
 
 - **Apple Silicon with macOS 26+** — supported local path through native HVF,
   with no third-party VMM dependency.
-- **Apple Silicon with macOS 13–25** — bundled libkrun preview, selected
-  explicitly. Package loading is verified on macOS 15; the real guest-launch
-  witness remains tracked in [mvm#4577](https://github.com/tinylabscom/mvm/issues/4577).
-- **macOS 25 and older** — unsupported by the standard local runtime; update macOS or use a Linux KVM host.
+- **macOS 25 and older** — unsupported. `install.sh` and `mvmctl` refuse and name the supported hosts; update macOS or use a Linux KVM host.
 - **Intel Macs** — unsupported for the local microVM path. Run mvm on a Linux KVM host, or use future remote/Windows-style builder work when it lands.
 
 The native HVF backend is the sole standard macOS builder and workload path (Hypervisor.framework, vsock-only egress).

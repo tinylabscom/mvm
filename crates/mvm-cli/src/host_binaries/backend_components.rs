@@ -135,14 +135,14 @@ pub struct BackendComponentSet {
     /// The same `BackendKind` the `VmBackend`/`VmmDriver` implementations
     /// report — never a parallel string.
     pub backend: BackendKind,
-    /// Host windows this backend supports. Empty when the backend never runs
-    /// on a native host (browser tier, test-only mock).
+    /// Host windows this backend supports. Empty when no release archive
+    /// carries the backend (browser tier, test-only mock, source-build opt-in).
     pub hosts: &'static [HostWindow],
     /// The archive paths this backend needs; empty when it has none.
     pub files: &'static [ComponentFile],
     /// One-line capability summary for `backend list`.
     pub summary: &'static str,
-    /// Why the backend is off the native-host surface, when `hosts` is empty.
+    /// Why install never offers the backend, when `hosts` is empty.
     pub unavailable: &'static str,
 }
 
@@ -193,15 +193,6 @@ const HVF_HOSTS: &[HostWindow] = &[HostWindow {
     selectable: true,
 }];
 
-const LIBKRUN_HOSTS: &[HostWindow] = &[HostWindow {
-    target: "aarch64-apple-darwin",
-    macos_min: Some(13),
-    macos_max_exclusive: Some(26),
-    needs_kvm: false,
-    install_default: true,
-    selectable: true,
-}];
-
 const WASM_HOSTS: &[HostWindow] = &[
     HostWindow {
         target: "x86_64-unknown-linux-gnu",
@@ -238,33 +229,6 @@ const APPLE_CONTAINER_HOSTS: &[HostWindow] = &[HostWindow {
     selectable: false,
 }];
 
-const LIBKRUN_FILES: &[ComponentFile] = &[
-    ComponentFile {
-        path: "mvm-libkrun-supervisor",
-        kind: ComponentKind::Binary,
-    },
-    ComponentFile {
-        path: "lib",
-        kind: ComponentKind::Directory,
-    },
-    ComponentFile {
-        path: "licenses",
-        kind: ComponentKind::Directory,
-    },
-    ComponentFile {
-        path: "sources",
-        kind: ComponentKind::Directory,
-    },
-    ComponentFile {
-        path: "SOURCE-OFFER.txt",
-        kind: ComponentKind::Data,
-    },
-    ComponentFile {
-        path: "SOURCE-PINS",
-        kind: ComponentKind::Data,
-    },
-];
-
 const HVF_FILES: &[ComponentFile] = &[ComponentFile {
     path: "mvm-hvf-supervisor",
     kind: ComponentKind::Binary,
@@ -299,10 +263,10 @@ pub const BACKEND_COMPONENT_TABLE: &[BackendComponentSet] = &[
     },
     BackendComponentSet {
         backend: BackendKind::Libkrun,
-        hosts: LIBKRUN_HOSTS,
-        files: LIBKRUN_FILES,
-        summary: "libkrun + libkrunfw (bundled kernel) for macOS 13–25 Apple Silicon",
-        unavailable: "",
+        hosts: &[],
+        files: &[],
+        summary: "libkrun; explicit opt-in for source builds (`--hypervisor libkrun`)",
+        unavailable: "source builds only; no release archive carries it",
     },
     BackendComponentSet {
         backend: BackendKind::Qemu,
@@ -385,10 +349,9 @@ pub fn viable_for(host: &HostFacts) -> Vec<&'static BackendComponentSet> {
 /// the install then fails with the supported matrix rather than staging a
 /// partial install.
 ///
-/// This is deliberately not the runtime auto-detect: the runtime ladder
-/// answers hvf on every Apple Silicon macOS tier and never selects libkrun,
-/// while the install answer must be libkrun on macOS 13–25, where hvf is
-/// outside its support window. The two are different functions.
+/// This is deliberately not the runtime auto-detect, which also weighs
+/// explicit selections and never answers "nothing"; install has to be able
+/// to refuse a host no row covers.
 pub fn detect_install_default_for(host: &HostFacts) -> Option<BackendKind> {
     let viable = viable_for(host);
     let mut default = None;
@@ -487,21 +450,18 @@ pub fn component_files_present(row: &BackendComponentSet, dirs: &[std::path::Pat
             .all(|file| dirs.iter().any(|dir| dir.join(file.path).exists()))
 }
 
-/// The running macOS major version. The platform predicates answer the two
-/// release-relevant boundaries (13 and 26), which is all a window match can
-/// ask; compose them into the major rather than probe `sw_vers` a second way.
+/// The running macOS major version. The platform predicate answers the one
+/// boundary the table distinguishes (26), which is all a window match can
+/// ask; use it rather than probe `sw_vers` a second way.
 fn live_macos_major(platform: Platform) -> Option<u32> {
     if !matches!(platform, Platform::MacOS) {
         return None;
     }
-    if platform.is_hvf_default_tier() {
-        // The 26 boundary is the highest the table distinguishes today.
-        return Some(26);
-    }
-    if platform.has_macos13_or_later() {
-        return Some(13);
-    }
-    Some(0)
+    Some(if platform.is_hvf_default_tier() {
+        26
+    } else {
+        0
+    })
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -714,23 +674,14 @@ mod tests {
     }
 
     #[test]
-    fn the_tsv_carries_the_libkrun_component_set() {
+    fn the_tsv_lists_libkrun_with_no_host_window_and_no_files() {
         let text = render_components_tsv();
-        let line = text
+        let rows: Vec<&str> = text
             .lines()
-            .find(|line| line.starts_with("libkrun\t"))
-            .expect("a libkrun row");
-        for path in [
-            "bin:mvm-libkrun-supervisor",
-            "dir:lib",
-            "dir:licenses",
-            "dir:sources",
-            "file:SOURCE-OFFER.txt",
-            "file:SOURCE-PINS",
-        ] {
-            assert!(line.contains(path), "the libkrun row must name {path}");
-        }
-        assert!(line.contains("\t13\t26\t"), "the libkrun window is 13–25");
+            .filter(|line| line.starts_with("libkrun\t"))
+            .collect();
+        assert_eq!(rows, ["libkrun\t-\t-\t-\tno\tno\tno\t-"]);
+        assert!(!text.contains("mvm-libkrun-supervisor"), "{text}");
     }
 
     /// Install links every top-level executable onto PATH, so a Firecracker
@@ -794,20 +745,10 @@ mod tests {
 
     #[test]
     fn install_detection_matches_the_support_matrix() {
-        // macOS Apple Silicon: libkrun on 13–25, hvf on 26+, none below 13.
+        // macOS Apple Silicon: hvf on 26+, nothing below it.
         let macos = |major| facts("aarch64-apple-darwin", Some(major), false);
-        assert_eq!(
-            detect_install_default_for(&macos(13)),
-            Some(BackendKind::Libkrun)
-        );
-        assert_eq!(
-            detect_install_default_for(&macos(15)),
-            Some(BackendKind::Libkrun)
-        );
-        assert_eq!(
-            detect_install_default_for(&macos(25)),
-            Some(BackendKind::Libkrun)
-        );
+        assert_eq!(detect_install_default_for(&macos(13)), None);
+        assert_eq!(detect_install_default_for(&macos(25)), None);
         assert_eq!(
             detect_install_default_for(&macos(26)),
             Some(BackendKind::Hvf)
@@ -850,31 +791,39 @@ mod tests {
             names(&facts("x86_64-unknown-linux-gnu", None, true)),
             ["firecracker", "qemu"]
         );
-        // One viable backend on each macOS tier: no picker question exists.
-        assert_eq!(
-            names(&facts("aarch64-apple-darwin", Some(15), false)),
-            ["libkrun"]
-        );
+        // One viable backend on supported macOS, so no picker question
+        // exists; below 26 there is none at all.
+        assert!(names(&facts("aarch64-apple-darwin", Some(25), false)).is_empty());
         assert_eq!(
             names(&facts("aarch64-apple-darwin", Some(26), false)),
             ["hvf"]
         );
-        // Opt-in tiers never join the picker.
-        assert!(
-            !names(&facts("aarch64-apple-darwin", Some(26), false)).contains(&"apple-container")
-        );
+        // Opt-in tiers never join the picker, libkrun included.
+        for opt_in in ["apple-container", "libkrun"] {
+            assert!(!names(&facts("aarch64-apple-darwin", Some(26), false)).contains(&opt_in));
+            assert!(!names(&facts("x86_64-unknown-linux-gnu", None, true)).contains(&opt_in));
+        }
     }
 
     #[test]
     fn unavailable_reasons_name_the_window() {
         let host = facts("aarch64-apple-darwin", Some(26), false);
-        let libkrun = row_for(BackendKind::Libkrun);
-        assert_eq!(
-            not_available_reason(libkrun, &host).as_deref(),
-            Some("requires macOS Apple Silicon 13–25")
-        );
         assert_eq!(not_available_reason(row_for(BackendKind::Hvf), &host), None);
+        assert_eq!(
+            not_available_reason(
+                row_for(BackendKind::Hvf),
+                &facts("aarch64-apple-darwin", Some(25), false)
+            )
+            .as_deref(),
+            Some("requires macOS Apple Silicon 26+")
+        );
         let linux = facts("x86_64-unknown-linux-gnu", None, true);
+        for host in [&host, &linux] {
+            assert_eq!(
+                not_available_reason(row_for(BackendKind::Libkrun), host).as_deref(),
+                Some("source builds only; no release archive carries it")
+            );
+        }
         assert_eq!(
             not_available_reason(row_for(BackendKind::Hvf), &linux).as_deref(),
             Some("requires macOS Apple Silicon 26+")
@@ -925,7 +874,7 @@ mod tests {
     /// not read as installed.
     #[test]
     fn presence_requires_every_listed_file() {
-        let row = row_for(BackendKind::Libkrun);
+        let row = row_for(BackendKind::Hvf);
         let dir = tempfile::tempdir().unwrap();
         assert!(!component_files_present(row, &[dir.path().to_path_buf()]));
         for file in row.files {

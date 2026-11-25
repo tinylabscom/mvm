@@ -41,6 +41,9 @@ impl fmt::Display for ParseTimestampError {
 impl core::error::Error for ParseTimestampError {}
 
 impl UtcTimestamp {
+    /// 1970-01-01T00:00:00Z.
+    pub const UNIX_EPOCH: Self = Self { secs: 0, nanos: 0 };
+
     /// `None` when `nanos` is a full second or more, or the instant is outside
     /// years 0000..=9999.
     pub fn from_unix(secs: i64, nanos: u32) -> Option<Self> {
@@ -68,6 +71,17 @@ impl UtcTimestamp {
         let nanos = |t: Self| i128::from(t.secs) * 1_000_000_000 + i128::from(t.nanos);
         // Both lie within years 0000..=9999, so the quotient fits an i64.
         ((nanos(self) - nanos(earlier)) / 1_000_000_000) as i64
+    }
+
+    /// Time from `earlier` to `self`; `None` when `earlier` is later.
+    pub fn duration_since(self, earlier: Self) -> Option<core::time::Duration> {
+        let nanos = |t: Self| i128::from(t.secs) * 1_000_000_000 + i128::from(t.nanos);
+        let diff = u128::try_from(nanos(self) - nanos(earlier)).ok()?;
+        // At most 10_000 years, so the seconds fit a u64.
+        Some(core::time::Duration::new(
+            (diff / 1_000_000_000) as u64,
+            (diff % 1_000_000_000) as u32,
+        ))
     }
 
     /// `None` when the result leaves years 0000..=9999.

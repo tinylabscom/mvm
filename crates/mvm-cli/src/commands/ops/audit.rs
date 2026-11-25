@@ -1480,7 +1480,7 @@ mod verify_cert_tests {
         DestructionReceipt {
             tenant: "acme".to_string(),
             workload: "build".to_string(),
-            destroyed_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0)
+            destroyed_at: mvm_contract::timestamp::UtcTimestamp::from_unix(1_700_000_000, 0)
                 .unwrap(),
             files_wiped: 5,
             bytes_wiped: 1024,

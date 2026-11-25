@@ -214,7 +214,7 @@ pub(in crate::commands) fn resolve_interpreter(lang: ScriptLanguage) -> Result<P
                 return Ok(p);
             }
             for candidate in ["python3", "python"] {
-                if let Ok(found) = which::which(candidate) {
+                if let Some(found) = mvm_core::util::which(candidate) {
                     return Ok(found);
                 }
             }
@@ -227,7 +227,7 @@ pub(in crate::commands) fn resolve_interpreter(lang: ScriptLanguage) -> Result<P
             if let Some(p) = env_override("MVM_NODE") {
                 return Ok(p);
             }
-            if let Ok(found) = which::which("node") {
+            if let Some(found) = mvm_core::util::which("node") {
                 return Ok(found);
             }
             bail!(

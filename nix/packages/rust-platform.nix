@@ -27,11 +27,18 @@ let
     targets = [ target ];
     inherit extensions;
   };
-in
-{
-  inherit toolchain;
-  rustPlatform = pkgs.makeRustPlatform {
-    cargo = toolchain;
-    rustc = toolchain;
+  pinned = {
+    inherit toolchain;
+    rustPlatform = pkgs.makeRustPlatform {
+      cargo = toolchain;
+      rustc = toolchain;
+    };
   };
-}
+in
+# A static (musl) pkgs has a musl buildPackages, so the overlay would select the musl-hosted
+# cargo, whose dynamic libgcc_s.so.1 no static gcc ships (autoPatchelf refuses it). Static
+# recipes use nixpkgs' own cached cargo/rustc instead; their version is nixpkgs', not the pin.
+if pkgs.stdenv.hostPlatform.isStatic then {
+  toolchain = pkgs.buildPackages.rustc;
+  inherit (pkgs) rustPlatform;
+} else pinned

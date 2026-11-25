@@ -20,8 +20,8 @@ class PayloadToolchainTests(unittest.TestCase):
         pins = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["metadata"]["mvm"][
             "toolchain"
         ]
-        recipe = (ROOT / "just/payload/mod.just").read_text().split("\ntoolchain:\n", 1)[1]
-        script = textwrap.dedent(recipe.split("\n# Build the per-VM", 1)[0])
+        recipe = (ROOT / "Justfile").read_text().split("\n      toolchain)\n", 1)[1]
+        script = "set -euo pipefail\n" + textwrap.dedent(recipe.split("\n        ;;", 1)[0])
         with tempfile.TemporaryDirectory() as temp:
             home = pathlib.Path(temp)
             tools = home / "tools"

@@ -141,13 +141,4 @@ pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
         features: "",
         scope: PerVmScope::MacOsAarch64,
     },
-    // Which macOS tier stages this supervisor is a component-table question
-    // (`backend_components::BACKEND_COMPONENT_TABLE`); the scope here only
-    // says the release builds and packages it for the Apple Silicon target.
-    PerVmBinary {
-        package: "mvm-hostd",
-        name: "mvm-libkrun-supervisor",
-        features: "libkrun-sys",
-        scope: PerVmScope::MacOsAarch64,
-    },
 ];

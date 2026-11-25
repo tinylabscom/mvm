@@ -15,6 +15,7 @@ pub mod doc_table;
 pub mod fit;
 pub mod harness;
 pub mod host_probe;
+pub mod launch_samples;
 pub mod report;
 pub mod resource_ingest;
 pub mod resource_report;

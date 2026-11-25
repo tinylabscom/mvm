@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::ui;
-use mvm_core::platform::{self, Platform};
+use mvm_core::platform;
 
 /// Check that a package manager is available for the current platform.
 ///
@@ -11,7 +11,7 @@ use mvm_core::platform::{self, Platform};
 /// - Windows: requires WSL2 (delegates to [`bootstrap_wsl2`])
 pub fn check_package_manager() -> Result<()> {
     if cfg!(target_os = "macos") {
-        ui::info(homebrew_report(which::which("brew").is_ok()));
+        ui::info(homebrew_report(mvm_core::util::which("brew").is_some()));
         Ok(())
     } else if cfg!(target_os = "windows") {
         bootstrap_wsl2()
@@ -29,7 +29,7 @@ pub fn check_package_manager() -> Result<()> {
 /// users may have installed prerequisites by other means.
 fn check_linux_package_manager() -> Result<()> {
     for cmd in &["apt-get", "dnf", "pacman"] {
-        if which::which(cmd).is_ok() {
+        if mvm_core::util::which(cmd).is_some() {
             ui::info(&format!("Package manager found: {}", cmd));
             return Ok(());
         }
@@ -54,7 +54,7 @@ fn check_linux_package_manager() -> Result<()> {
 /// users follow today.
 #[cfg(target_os = "windows")]
 pub fn bootstrap_wsl2() -> Result<()> {
-    if which::which("wsl").is_err() {
+    if mvm_core::util::which("wsl").is_none() {
         anyhow::bail!(
             "WSL is not installed on this Windows host.\n\
              Install it from an elevated PowerShell:\n  \
@@ -101,7 +101,7 @@ pub fn bootstrap_wsl2() -> Result<()> {
 /// Homebrew is optional. The default backend on Apple Silicon is the in-house
 /// HVF VMM, which needs nothing installed, and a release binary carries every
 /// helper it spawns; only the opt-in libkrun backend is installed through
-/// Homebrew, and [`hint_libkrun_if_useful`] says how when it applies. A
+/// Homebrew. A
 /// bootstrap that refused without Homebrew stopped before it prepared anything,
 /// so a first run on a Mac without it printed an install error and then paid
 /// the whole preparation itself.
@@ -114,12 +114,8 @@ fn homebrew_report(found: bool) -> &'static str {
     }
 }
 
-/// Print an informational hint about libkrun availability.
-/// libkrun is optional — when it's available, `mvmctl run`
-/// can use it as a Tier 2 backend on supported libkrun hosts: Linux
-/// with KVM and macOS Apple Silicon. This function does *not* attempt
-/// to install libkrun automatically since it lives in the host's
-/// package manager (Homebrew on macOS, distro packages on Linux).
+/// Say that an installed libkrun can be opted into. libkrun is optional, and
+/// no supported host needs it, so a host without it is told nothing.
 ///
 /// Idempotent and safe to call from any bootstrap path.
 pub fn hint_libkrun_if_useful() {
@@ -133,15 +129,6 @@ pub fn hint_libkrun_if_useful() {
         ui::info(
             "Detected libkrun on this host; you can opt in with `mvmctl run --hypervisor libkrun`.",
         );
-        return;
-    }
-    // Only suggest the install on macOS Apple Silicon. libkrun does
-    // not give us a supported Intel Mac or native Windows path.
-    if matches!(plat, Platform::MacOS) && cfg!(target_arch = "aarch64") {
-        ui::info(&format!(
-            "Tip: install libkrun for the local builder/runtime path on this Apple Silicon Mac.\n  {}",
-            libkrun_sys::install_hint()
-        ));
     }
 }
 

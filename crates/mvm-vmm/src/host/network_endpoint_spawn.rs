@@ -1337,9 +1337,8 @@ mod tests {
     fn stub_preamble() -> String {
         format!(
             "#!/bin/sh\nif [ \"$1\" = \"{flag}\" ]; then echo '{answer}'; exit 0; fi\n",
-            flag = crate::host::helper_contract::CONTRACT_PROBE_FLAG,
-            answer =
-                crate::host::helper_contract::probe_response("mvm-network-endpoint").trim_end(),
+            flag = mvm_core::helper_contract::CONTRACT_PROBE_FLAG,
+            answer = mvm_core::helper_contract::probe_response("mvm-network-endpoint").trim_end(),
         )
     }
 

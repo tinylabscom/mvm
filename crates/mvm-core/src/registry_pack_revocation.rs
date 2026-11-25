@@ -8,7 +8,7 @@
 #[cfg(any(feature = "manifest-verify", test))]
 use std::collections::BTreeSet;
 
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -33,10 +33,10 @@ pub(crate) enum RegistryPackRevocationValidity {
 
 impl RegistryPackRevocationValidity {
     #[cfg(any(feature = "manifest-verify", test))]
-    fn maximum(self) -> chrono::Duration {
+    fn maximum(self) -> std::time::Duration {
         match self {
-            Self::Operator => chrono::Duration::hours(48),
-            Self::Official => chrono::Duration::days(30),
+            Self::Operator => std::time::Duration::from_secs(48 * 3600),
+            Self::Official => std::time::Duration::from_secs(30 * 86_400),
         }
     }
 }
@@ -59,8 +59,8 @@ pub struct RegistryPackRevocationCheckpoint {
 struct RegistryPackRevocationDocument {
     schema_version: u32,
     sequence: u64,
-    issued_at: DateTime<Utc>,
-    not_after: DateTime<Utc>,
+    issued_at: UtcTimestamp,
+    not_after: UtcTimestamp,
     #[serde(default)]
     revoked_identities: Vec<String>,
     #[serde(default)]
@@ -82,7 +82,7 @@ impl VerifiedRegistryPackRevocations {
     }
 
     /// The instant after which this document no longer establishes trust.
-    pub fn not_after(&self) -> DateTime<Utc> {
+    pub fn not_after(&self) -> UtcTimestamp {
         self.document.not_after
     }
 
@@ -94,7 +94,7 @@ impl VerifiedRegistryPackRevocations {
     pub fn check_verified_pack_at(
         &self,
         verified_pack: &impl crate::registry_pack::AuthenticatedRegistryManifest,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<(), RegistryPackRevocationError> {
         self.check_pack_at(
             &verified_pack.signer().identity,
@@ -107,7 +107,7 @@ impl VerifiedRegistryPackRevocations {
         &self,
         authenticated_signer: &str,
         manifest_sha256: &Sha256Hex,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<(), RegistryPackRevocationError> {
         validate_time(&self.document, now)?;
         if self
@@ -176,7 +176,7 @@ pub fn verify_registry_pack_revocations(
     document_bytes: &[u8],
     signature_bundle: &[u8],
     release_trust: &KeylessTrust,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     previous: Option<&RegistryPackRevocationCheckpoint>,
 ) -> Result<VerifiedRegistryPackRevocations, RegistryPackRevocationError> {
     verify_registry_pack_revocations_for_validity(
@@ -194,7 +194,7 @@ pub(crate) fn verify_registry_pack_revocations_for_validity(
     document_bytes: &[u8],
     signature_bundle: &[u8],
     release_trust: &KeylessTrust,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     previous: Option<&RegistryPackRevocationCheckpoint>,
     validity: RegistryPackRevocationValidity,
 ) -> Result<VerifiedRegistryPackRevocations, RegistryPackRevocationError> {
@@ -228,7 +228,7 @@ pub fn verify_registry_pack_revocations(
     _document_bytes: &[u8],
     _signature_bundle: &[u8],
     _release_trust: &KeylessTrust,
-    _now: DateTime<Utc>,
+    _now: UtcTimestamp,
     _previous: Option<&RegistryPackRevocationCheckpoint>,
 ) -> Result<VerifiedRegistryPackRevocations, RegistryPackRevocationError> {
     Err(RegistryPackRevocationError::SignatureInvalid(
@@ -241,7 +241,7 @@ pub(crate) fn verify_registry_pack_revocations_for_validity(
     document_bytes: &[u8],
     signature_bundle: &[u8],
     release_trust: &KeylessTrust,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     previous: Option<&RegistryPackRevocationCheckpoint>,
     _validity: RegistryPackRevocationValidity,
 ) -> Result<VerifiedRegistryPackRevocations, RegistryPackRevocationError> {
@@ -259,7 +259,7 @@ pub(crate) fn verify_registry_pack_revocations_with<F>(
     document_bytes: &[u8],
     signature_bundle: &[u8],
     release_trust: &KeylessTrust,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     previous: Option<&RegistryPackRevocationCheckpoint>,
     verify_signature: F,
 ) -> Result<VerifiedRegistryPackRevocations, RegistryPackRevocationError>
@@ -284,7 +284,7 @@ pub(crate) fn authenticate_revocation_document<F>(
     document_bytes: &[u8],
     signature_bundle: &[u8],
     release_trust: &KeylessTrust,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     previous: Option<&RegistryPackRevocationCheckpoint>,
     validity: RegistryPackRevocationValidity,
     verify_signature: F,
@@ -328,7 +328,7 @@ where
 #[cfg(any(feature = "manifest-verify", test))]
 fn validate_document(
     document: &RegistryPackRevocationDocument,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     validity: RegistryPackRevocationValidity,
 ) -> Result<(), RegistryPackRevocationError> {
     if document.schema_version != REGISTRY_PACK_REVOCATION_SCHEMA_VERSION {
@@ -343,7 +343,11 @@ fn validate_document(
     if document.issued_at >= document.not_after {
         return Err(RegistryPackRevocationError::InvalidValidityWindow);
     }
-    if document.not_after - document.issued_at > validity.maximum() {
+    if document
+        .not_after
+        .duration_since(document.issued_at)
+        .is_some_and(|window| window > validity.maximum())
+    {
         return Err(RegistryPackRevocationError::ValidityTooLong);
     }
     validate_time(document, now)?;
@@ -367,7 +371,7 @@ fn validate_document(
 
 fn validate_time(
     document: &RegistryPackRevocationDocument,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<(), RegistryPackRevocationError> {
     if document.issued_at > now {
         return Err(RegistryPackRevocationError::IssuedInFuture);
@@ -380,8 +384,6 @@ fn validate_time(
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
-
     use super::*;
     use crate::crypto::image_verify::VerifiedSigner;
     use crate::registry_pack::{
@@ -389,10 +391,31 @@ mod tests {
         RegistryPackPublisherPolicy, RegistryPackVerificationError, adopt_registry_pack_with,
     };
 
-    fn at(day: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, day, 0, 0, 0)
-            .single()
+    fn at(day: u32) -> UtcTimestamp {
+        // 2026-10-01T00:00:00Z plus whole days.
+        UtcTimestamp::from_unix(1_790_812_800 + (i64::from(day) - 1) * 86_400, 0)
             .expect("valid date")
+    }
+
+    /// Documents the publisher already signed parse unchanged: chrono's `Z`,
+    /// `+00:00` and fractional forms, and a re-serialization keeps its `Z` bytes.
+    #[test]
+    fn previously_signed_document_times_parse_and_reserialize_as_chrono_wrote_them() {
+        let json = r#"{"schema_version":1,"sequence":3,"issued_at":"2026-10-06T00:00:00+00:00","not_after":"2026-10-08T00:00:00.250Z"}"#;
+        let parsed: RegistryPackRevocationDocument = serde_json::from_str(json).expect("parse");
+        assert_eq!(parsed.issued_at, at(6));
+        assert_eq!(
+            parsed.not_after,
+            UtcTimestamp::from_unix(at(8).unix_secs(), 250_000_000).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(&parsed).expect("serialize"),
+            r#"{"schema_version":1,"sequence":3,"issued_at":"2026-10-06T00:00:00Z","not_after":"2026-10-08T00:00:00.250Z","revoked_identities":[],"revoked_manifests":[]}"#
+        );
+    }
+
+    fn plus(t: UtcTimestamp, secs: i64) -> UtcTimestamp {
+        t.checked_add_secs(secs).expect("in range")
     }
 
     fn trust() -> KeylessTrust {
@@ -643,7 +666,7 @@ mod tests {
             RegistryPackRevocationError::Expired
         );
         assert_eq!(
-            verify_at(at(1) - chrono::Duration::seconds(1)).expect_err("future"),
+            verify_at(plus(at(1), -1)).expect_err("future"),
             RegistryPackRevocationError::IssuedInFuture
         );
         let mut invalid = document(1);
@@ -653,7 +676,7 @@ mod tests {
             RegistryPackRevocationError::InvalidValidityWindow
         );
         let mut too_long = document(1);
-        too_long.not_after += chrono::Duration::seconds(1);
+        too_long.not_after = plus(too_long.not_after, 1);
         assert_eq!(
             signed(&too_long, None).expect_err("overlong window"),
             RegistryPackRevocationError::ValidityTooLong
@@ -663,7 +686,7 @@ mod tests {
     #[test]
     fn official_validity_accepts_thirty_days_but_not_longer() {
         let mut feed = document(1);
-        feed.not_after = feed.issued_at + chrono::Duration::days(30);
+        feed.not_after = plus(feed.issued_at, 30 * 86_400);
         let bytes = serde_json::to_vec(&feed).expect("serialize");
         let verify = |policy| {
             authenticate_revocation_document(
@@ -681,7 +704,7 @@ mod tests {
             verify(RegistryPackRevocationValidity::Operator).expect_err("operator limit"),
             RegistryPackRevocationError::ValidityTooLong
         );
-        feed.not_after += chrono::Duration::seconds(1);
+        feed.not_after = plus(feed.not_after, 1);
         let overlong = serde_json::to_vec(&feed).expect("serialize");
         assert_eq!(
             authenticate_revocation_document(
@@ -701,7 +724,7 @@ mod tests {
     #[test]
     fn official_validity_still_expires_at_not_after() {
         let mut feed = document(1);
-        feed.not_after = feed.issued_at + chrono::Duration::days(30);
+        feed.not_after = plus(feed.issued_at, 30 * 86_400);
         let bytes = serde_json::to_vec(&feed).expect("serialize");
         assert_eq!(
             authenticate_revocation_document(

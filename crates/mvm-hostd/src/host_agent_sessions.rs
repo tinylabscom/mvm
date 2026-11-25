@@ -31,7 +31,7 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::session::{SessionRecord, SessionState};
 use mvm_core::vm_backend::BackendKind;
 use mvm_vmm::host::aux_bin::{CliSpawn, HostProcess};
@@ -126,7 +126,7 @@ impl SessionReaper for CliSessionReaper {
 pub struct SessionSweepWatcher<O, R> {
     ownership: O,
     reaper: R,
-    last_sweep: Option<DateTime<Utc>>,
+    last_sweep: Option<UtcTimestamp>,
 }
 
 impl<O: SessionOwnership, R: SessionReaper> SessionSweepWatcher<O, R> {
@@ -142,7 +142,7 @@ impl<O: SessionOwnership, R: SessionReaper> SessionSweepWatcher<O, R> {
     /// Look at `records` as of `now`, ask for a sweep if one of this agent's
     /// sessions has expired, and return how many running sessions it watches,
     /// which keeps the agent from idling out under them.
-    pub fn step(&mut self, records: &[SessionRecord], now: DateTime<Utc>) -> usize {
+    pub fn step(&mut self, records: &[SessionRecord], now: UtcTimestamp) -> usize {
         let watched: Vec<&SessionRecord> = records
             .iter()
             .filter(|r| r.state == SessionState::Running && self.ownership.watches(r))
@@ -155,11 +155,10 @@ impl<O: SessionOwnership, R: SessionReaper> SessionSweepWatcher<O, R> {
         watched.len()
     }
 
-    fn sweep_due(&self, now: DateTime<Utc>) -> bool {
+    fn sweep_due(&self, now: UtcTimestamp) -> bool {
         self.last_sweep.is_none_or(|last| {
-            now.signed_duration_since(last)
-                .to_std()
-                .is_ok_and(|since| since >= RESWEEP_AFTER)
+            now.duration_since(last)
+                .is_some_and(|since| since >= RESWEEP_AFTER)
         })
     }
 }
@@ -167,6 +166,10 @@ impl<O: SessionOwnership, R: SessionReaper> SessionSweepWatcher<O, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plus(t: UtcTimestamp, secs: i64) -> UtcTimestamp {
+        t.checked_add_secs(secs).unwrap()
+    }
     use std::cell::Cell;
     use std::collections::HashSet;
     use std::rc::Rc;
@@ -191,9 +194,9 @@ mod tests {
         }
     }
 
-    fn running(vm: &str, started: DateTime<Utc>, idle_timeout_secs: u64) -> SessionRecord {
+    fn running(vm: &str, started: UtcTimestamp, idle_timeout_secs: u64) -> SessionRecord {
         let mut record = SessionRecord::new_running(vm, "wl", SessionMode::Prod);
-        record.started_at = started.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        record.started_at = started.to_string();
         record.idle_timeout_secs = idle_timeout_secs;
         record
     }
@@ -228,51 +231,42 @@ mod tests {
 
     #[test]
     fn an_expired_watched_session_is_reaped_without_a_command() {
-        let started = Utc::now();
+        let started = mvm_core::util::time::utc_timestamp_now();
         let records = [running("fc-idle", started, 60)];
         let (mut watcher, reaps) = watcher(&["fc-idle"]);
 
-        assert_eq!(
-            watcher.step(&records, started + chrono::Duration::seconds(30)),
-            1
-        );
+        assert_eq!(watcher.step(&records, plus(started, 30)), 1);
         assert_eq!(reaps.get(), 0, "still inside its timeout");
 
-        assert_eq!(
-            watcher.step(&records, started + chrono::Duration::seconds(61)),
-            1
-        );
+        assert_eq!(watcher.step(&records, plus(started, 61)), 1);
         assert_eq!(reaps.get(), 1, "past it, the agent asks for the sweep");
     }
 
     #[test]
     fn a_sweep_that_left_the_session_running_is_retried_but_not_on_every_poll() {
-        let started = Utc::now();
+        let started = mvm_core::util::time::utc_timestamp_now();
         let records = [running("fc-stuck", started, 60)];
         let (mut watcher, reaps) = watcher(&["fc-stuck"]);
-        let expired = started + chrono::Duration::seconds(61);
+        let expired = plus(started, 61);
 
         watcher.step(&records, expired);
-        watcher.step(&records, expired + chrono::Duration::seconds(2));
+        watcher.step(&records, plus(expired, 2));
         assert_eq!(reaps.get(), 1, "one sweep in flight is enough");
 
-        watcher.step(
-            &records,
-            expired + chrono::Duration::from_std(RESWEEP_AFTER).unwrap(),
-        );
+        watcher.step(&records, plus(expired, RESWEEP_AFTER.as_secs() as i64));
         assert_eq!(reaps.get(), 2, "a session still running is swept again");
     }
 
     #[test]
     fn sessions_the_agent_does_not_own_or_that_ended_are_not_its_work() {
-        let started = Utc::now() - chrono::Duration::seconds(600);
+        let started = plus(mvm_core::util::time::utc_timestamp_now(), -600);
         let mut ended = running("fc-ended", started, 60);
         ended.state = SessionState::Reaped;
         let records = [running("hvf-supervised", started, 60), ended];
         let (mut watcher, reaps) = watcher(&["fc-ended"]);
 
         assert_eq!(
-            watcher.step(&records, Utc::now()),
+            watcher.step(&records, mvm_core::util::time::utc_timestamp_now()),
             0,
             "nothing keeps the agent awake"
         );
@@ -281,7 +275,7 @@ mod tests {
 
     #[test]
     fn a_running_session_keeps_the_agent_awake_until_it_ends() {
-        let started = Utc::now();
+        let started = mvm_core::util::time::utc_timestamp_now();
         let mut records = [running("fc-busy", started, 3600)];
         let (mut watcher, _reaps) = watcher(&["fc-busy"]);
         assert_eq!(watcher.step(&records, started), 1);

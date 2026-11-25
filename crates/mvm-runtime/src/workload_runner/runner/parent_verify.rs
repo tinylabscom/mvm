@@ -40,10 +40,13 @@ pub(super) fn reserve_and_verify_parent(
     {
         let _lock = acquire_registry_lock(ctx.registry_path)
             .map_err(|e| StandbyError::ClaimFailed(format!("acquire registry lock: {e:#}")))?;
-        let current = ctx
+        let Some(current) = ctx
             .pool
-            .load(&handle.id)
-            .map_err(|e| StandbyError::ClaimFailed(format!("load standby {}: {e:#}", handle.id)))?;
+            .load_selected(&handle.id)
+            .map_err(|e| StandbyError::ClaimFailed(format!("load standby {}: {e:#}", handle.id)))?
+        else {
+            return Err(StandbyError::ReservationLost);
+        };
         if !current.state.is_claimable() {
             // Not yet reserved (no `mark_claimed`), so nothing to release.
             return Err(StandbyError::ReservationLost);

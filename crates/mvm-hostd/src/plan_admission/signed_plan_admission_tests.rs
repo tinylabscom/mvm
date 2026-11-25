@@ -122,9 +122,12 @@ fn a_tampered_payload_is_refused() {
 #[test]
 fn an_expired_plan_is_refused() {
     let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
-    let now = Utc::now();
+    let now = mvm_core::util::time::utc_timestamp_now();
     let plan = PlanFixture::new()
-        .validity(now - Duration::hours(2), now - Duration::hours(1))
+        .validity(
+            now.checked_add_secs(-7_200).unwrap(),
+            now.checked_add_secs(-3_600).unwrap(),
+        )
         .build();
     let signed = signed_by_fleet(&plan);
 
@@ -139,9 +142,12 @@ fn an_expired_plan_is_refused() {
 #[test]
 fn a_not_yet_valid_plan_is_refused() {
     let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
-    let now = Utc::now();
+    let now = mvm_core::util::time::utc_timestamp_now();
     let plan = PlanFixture::new()
-        .validity(now + Duration::hours(1), now + Duration::hours(2))
+        .validity(
+            now.checked_add_secs(3_600).unwrap(),
+            now.checked_add_secs(7_200).unwrap(),
+        )
         .build();
     let signed = signed_by_fleet(&plan);
 

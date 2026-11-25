@@ -14,9 +14,10 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::cold_launch::{ColdLaunchReport, LaunchLane, SpanStats};
+use super::launch_samples::{STATUS_KEY, fold_launch_samples};
 use super::resource_report::{
     EndpointForm, Figure, MemoryQuantity, ResourceReport, Section, SourceRevision, ThreadWakeups,
-    UnitCost, WakeupQuantity, Wakeups,
+    UnitCost, WakeupQuantity, Wakeups, supported,
 };
 
 /// Launch mode the harness records in `metadata.json`.
@@ -642,7 +643,7 @@ pub fn fold_launch_reports(section: &mut Section, reports: &[ColdLaunchReport]) 
         }
     }
     let figure = |slot: Option<(SpanStats, bool)>| match slot {
-        Some((s, true)) => Some(Figure::measured(s)),
+        Some((s, true)) => Some(Figure::measured(supported(s))),
         Some((_, false)) => Some(Figure::unmeasured(
             "launch report does not record its backend and architecture",
         )),
@@ -690,7 +691,7 @@ pub fn fold_state_cell_latency(section: &mut Section, latency: &StateCellLatency
         bail!("the state-cell latency file carries a sample that is not a duration");
     }
     section.latencies.state_cell_update_ms =
-        Figure::measured(SpanStats::from_samples(&latency.write_ms));
+        Figure::measured(supported(SpanStats::from_samples(&latency.write_ms)));
     Ok(())
 }
 
@@ -709,6 +710,8 @@ pub fn assemble(
     state_cell_latency: Option<&Path>,
 ) -> Result<ResourceReport> {
     let mut section = from_density_dir(density_dir)?;
+    let summary = Summary::parse(&read_run_file(density_dir, "summary.tsv")?)?;
+    fold_launch_samples(&mut section, density_dir, summary.get(STATUS_KEY))?;
     if let Some(path) = state_cell_latency {
         fold_state_cell_latency(&mut section, &read_state_cell_latency(path)?)?;
     }
@@ -1308,6 +1311,20 @@ mod tests {
             NO_RESIDENT_HOST_PROCESS
         );
         assert_eq!(s.by_residency.running.memory_bytes, Figure::measured(2000));
+    }
+
+    #[test]
+    fn the_run_s_recorded_launch_sample_status_reaches_the_report() {
+        let reason = |dir: &Path| {
+            let report = assemble(dir, &[], None).unwrap();
+            report.sections[0].latencies.cold_launch_boot_ms.clone()
+        };
+        assert!(format!("{:?}", reason(&fixture())).contains("predates"));
+        let dir = edited(|s| format!("{s}launch_samples\tunavailable:every_launch_failed:boom\n"));
+        assert_eq!(
+            reason(dir.path()),
+            Figure::unmeasured("unavailable:every_launch_failed:boom")
+        );
     }
 
     #[test]

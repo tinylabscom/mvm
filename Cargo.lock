@@ -1528,12 +1528,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "env_home"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f84e12ccf0a7ddc17a6c41c93326024c42920d7ee630d04950e6926645c0fe"
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1660,9 +1654,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -3705,7 +3699,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
- "which",
 ]
 
 [[package]]
@@ -3743,7 +3736,6 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
- "which",
  "xattr",
 ]
 
@@ -3774,6 +3766,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "ed25519-dalek",
+ "mvm-contract",
  "mvm-core",
  "serde",
  "serde_json",
@@ -3796,7 +3789,6 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
- "which",
 ]
 
 [[package]]
@@ -3812,7 +3804,6 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "ext4-view",
- "flate2",
  "hex",
  "libc",
  "libkrun-sys",
@@ -3849,7 +3840,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "which",
  "zeroize",
 ]
 
@@ -3896,7 +3886,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "which",
 ]
 
 [[package]]
@@ -4074,7 +4063,7 @@ version = "0.28.0-rc.11"
 dependencies = [
  "libc",
  "mvm-contract",
- "mvm-vmm",
+ "mvm-core",
  "tempfile",
 ]
 
@@ -4366,7 +4355,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
- "which",
 ]
 
 [[package]]
@@ -6914,9 +6902,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
@@ -7554,18 +7542,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "which"
-version = "7.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24d643ce3fd3e5b54854602a080f34fb10ab75e0b813ee32d00ca2b44fa74762"
-dependencies = [
- "either",
- "env_home",
- "rustix",
- "winsafe",
-]
-
-[[package]]
 name = "widestring"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7821,12 +7797,6 @@ checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
 ]
-
-[[package]]
-name = "winsafe"
-version = "0.0.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 
 [[package]]
 name = "winx"

@@ -20,11 +20,11 @@ macOS Host (this CLI) -> libkrun Linux VM -> Firecracker microVM (/dev/kvm)
 Linux Host (this CLI) -> Firecracker microVM (/dev/kvm)
 ```
 
-Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Plan 72 W0–W6 + Plan 75 W0). libkrun is the default macOS 13-25 backend; HVF (the in-house Hypervisor.framework VMM, vsock-only) is the macOS 26+ Apple Silicon default; Firecracker is the Linux KVM path. There is no `--lima` flag and no Lima fallback. The Apple Virtualization.framework backend was **removed** (Plan 226 R1P1) — HVF is the destination macOS workload backend, with libkrun as the fallback, and the removed backend's `--hypervisor` value is gone. `xtask check-no-vz` enforces exactly two things: no Virtualization.framework / Containerization API, Swift import, or SwiftPM manifest anywhere under the workspace root, and no bare `vz` / `Vz` / `VZ` word in the Rust we own. What it does **not** forbid — and explicitly permits — is the `apple-container` backend, which still exists: `BackendKind::AppleContainer`, selector `--hypervisor apple-container` (alias `container`), is the HVF workload runner booting Apple's prebuilt container kernel, a fetched binary artifact carrying no Swift and no VZ. It is opt-in only; auto-detect never returns it.
+Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Plan 72 W0–W6 + Plan 75 W0). libkrun is never auto-selected on any host and runs only when a source build names it; macOS below 26 is not supported, and both `install.sh` and `mvmctl` (`unsupported_host_message`) refuse there, naming the supported hosts; HVF (the in-house Hypervisor.framework VMM, vsock-only) is the macOS 26+ Apple Silicon default; Firecracker is the Linux KVM path. There is no `--lima` flag and no Lima fallback. The Apple Virtualization.framework backend was **removed** (Plan 226 R1P1) — HVF is the destination macOS workload backend, with libkrun as the explicitly selected alternative, and the removed backend's `--hypervisor` value is gone. `xtask check-no-vz` enforces exactly two things: no Virtualization.framework / Containerization API, Swift import, or SwiftPM manifest anywhere under the workspace root, and no bare `vz` / `Vz` / `VZ` word in the Rust we own. What it does **not** forbid — and explicitly permits — is the `apple-container` backend, which still exists: `BackendKind::AppleContainer`, selector `--hypervisor apple-container` (alias `container`), is the HVF workload runner booting Apple's prebuilt container kernel, a fetched binary artifact carrying no Swift and no VZ. It is opt-in only; auto-detect never returns it.
 
 ## Host dependencies (macOS)
 
-The libkrun-backed builder VM (started automatically by `mvmctl bootstrap`, `mvmctl dev compile`, or `mvmctl machine run`) needs two Homebrew packages installed:
+The libkrun-backed builder VM (never started automatically; it runs only when named by `--builder libkrun` / `MVM_BUILDER_BACKEND=libkrun`) needs two Homebrew packages installed:
 
 ```sh
 brew install slp/krun/libkrun slp/krun/libkrunfw
@@ -56,7 +56,7 @@ feature fails the build hard when the pinned toolchain is missing, because it
 was asked for by name.
 
 Use the feature when the `mvmctl` you build has to carry the Linux host
-binaries itself: `just embed` (which also builds the per-VM helpers beside it),
+binaries itself: `just build embed` (which also builds the per-VM helpers beside it),
 the tag-push release workflow (so a downloaded binary is self-sufficient), and
 any CI lane that needs a builder VM without a checkout to build the payload
 from. Do not use it for the edit, check and test loop, or to run `mvmctl` from
@@ -80,11 +80,11 @@ or other consumer of `mvm-cli` gets the refusal from `host_binaries::extract`
 instead — and only in a source checkout: an official release binary always
 carries its payload.
 
-`just embed` remains for building every host binary in one go:
+`just build embed` remains for building every host binary in one go:
 
 ```sh
-just embed                    # build and invoke ./target/debug/mvmctl
-just embed --release          # build and invoke ./target/release/mvmctl
+just build embed                    # build and invoke ./target/debug/mvmctl
+just build embed --release          # build and invoke ./target/release/mvmctl
 ```
 
 On macOS the recipe also replaces any globally configured compiler-cache
@@ -143,7 +143,7 @@ Provision the toolchain with one command — it installs the exact pinned zig
 cargo-zigbuild:
 
 ```sh
-just payload::toolchain
+just setup toolchain
 ```
 
 Do **not** `brew install zig`: Homebrew's zig drifts to newer releases that are
@@ -163,22 +163,22 @@ Its bootstrap kernel is fetched rather than built: it cannot be built, because S
 
 ## Builder backend selection (Plan 98)
 
-The builder VM (the Linux guest that runs `nix build` inside `mvmctl machine build` / `mvmctl machine run --flake`) picks between three host VMMs:
+The builder VM (the Linux guest that runs `nix build` inside `mvmctl machine build` / `mvmctl machine run --flake`) picks between four host VMMs:
 
 - **hvf** — the HVF builder (Hypervisor.framework, no Homebrew deps). Default on macOS 26+ Apple Silicon. macOS-only.
 - **firecracker** — the Firecracker builder, the same VMM the Linux workload tier runs on, so a Linux host needs no second hypervisor to build with. Default on Linux-with-KVM. Bootstraps (Stage 0) and serves one-shot builds and shell jobs from the image Stage 0 produced, booted as-is; only the persistent builder refuses it by name. Live-proven on x86_64; aarch64 is untested.
-- **libkrun** — third-party in-process VMM via the `slp/krun/*` Homebrew trio. **Never auto-detected, and never fallen back to**; it runs only when named by `--builder libkrun` / `MVM_BUILDER_BACKEND=libkrun`. No builder path reaches it otherwise: a backend with no Stage 0 refuses and says so rather than lowering onto libkrun.
-- **qemu** — QEMU/microvm_nix builder (Linux dev/test substrate). Opt-in only.
+- **libkrun** — third-party in-process VMM via the two `slp/krun/*` Homebrew packages. **Never auto-detected, and never fallen back to**; it runs only when named by `--builder libkrun` / `MVM_BUILDER_BACKEND=libkrun`. No builder path reaches it otherwise: a backend with no Stage 0 refuses and says so rather than lowering onto libkrun.
+- **qemu** — QEMU/microvm_nix builder (Linux dev/test substrate). Auto-detected on every host that is neither macOS 26+ Apple Silicon nor Linux-with-KVM; opt-in elsewhere.
 
 (The Apple Virtualization.framework builder was removed in Plan 226 R1P1.)
 
 Selection priority (highest first):
 
-1. `--builder <libkrun|qemu|hvf>` global CLI flag.
-2. `MVM_BUILDER_BACKEND=libkrun|qemu|hvf` env var (case-insensitive, whitespace-trimmed; unrecognised values — including any retired backend name — log a warning and fall through to auto-detect).
-3. Auto-detect (`auto_detect_default_for`): **Apple Silicon macOS → hvf; Linux-with-KVM → firecracker; every other host → qemu.** libkrun appears nowhere in it.
+1. `--builder <libkrun|qemu|hvf|firecracker>` global CLI flag.
+2. `MVM_BUILDER_BACKEND=libkrun|qemu|hvf|firecracker` env var (case-insensitive, whitespace-trimmed; unrecognised values — including any retired backend name — log a warning and fall through to auto-detect).
+3. Auto-detect (`auto_detect_default_for`): **macOS 26+ Apple Silicon → hvf; Linux-with-KVM → firecracker; every other host → qemu.** libkrun appears nowhere in it.
 
-   Note what that means on macOS 13–25 Apple Silicon: auto-detect still answers hvf, which then reports the macOS 26 floor as unavailable — and there is no fallback (below). That tier has to pass `--builder libkrun` explicitly.
+   macOS below 26 never reaches this ladder: `mvmctl` refuses the host before any command runs.
 
 `mvmctl doctor` reports the resolved choice on the `builder backend` line with format `<backend> — <source> — <availability>` so the override path is observable.
 
@@ -232,13 +232,13 @@ Cargo workspace under `crates/` (including `crates/deps/`) (Bar-A consolidation 
 - `mvm-contract` -- `#![no_std]` + alloc, `forbid(unsafe_code)`; the wasm/browser-capable foundation. The audit-log verifier (and, incrementally, the `Workload` IR + wire protocol + policy DTOs). Builds on `wasm32-unknown-unknown`.
 - `mvm-core` -- std: types, IDs, config/paths (`MVM_HOME`), crypto, signing, routing. Absorbs `plan` (typed signed `ExecutionPlan`), `policy`, `crypto` (attestation/keystore/secret_store/snapshot + opt-in cosign behind `manifest-verify`). **Default build has no async deps**: `tokio` is optional, pulled only by the off-by-default `hostd-transport` or `manifest-verify` features. `xtask check-core-runtime-free` asserts `cargo tree -p mvm-core -e no-dev` carries no `tokio`.
 - `mvm-fs` -- image → mountable rootfs: OCI distribution client (registry/manifest/layer fetch + allow-listed `unpack/`) + a pure-Rust, memory-safe, deterministic ext4 writer (no `mkfs`, no subprocess) + `overlay`. Absorbs the old `mvm-ext4` + `mvm-oci`.
-- `mvm-net` -- `NetworkProvider` trait + provisioning/policy/registry seam (vsock/UDS + egress-tunnel plumbing). Was `mvm-network`; the concrete TAP/bridge impl lives in `mvm-runtime`.
+- `mvm-net` -- `NetworkProvider` trait + provisioning/policy/registry seam (vsock/UDS + egress-tunnel plumbing). Was `mvm-network`.
 - `mvm-build` -- Nix builder pipeline + artifact cache; hosts the builder-VM-only `[[bin]]`s (`mvm-host-vm-init` etc., cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
 - `mvm-bundler` -- seals built artifacts into a signed `.mvmpkg`: `export_bundle_with_signer` reads the kernel, rootfs, optional initrd, dm-verity pair and guest sidecar, builds the manifest, and signs it under a caller-supplied `BundleSigner`. It decides what an exported bundle contains; the format itself stays in `mvm_core::plan::bundle`. Depends on `mvm-core` alone — verity probing and template resolution stay with the caller, so no backend is in its closure. `mvmctl build` reaches it through `mvm_client::bundle`, which adds `HostBundleSigner` over the host key.
 - `mvm-vmm` -- backend-agnostic VMM device model and hypervisor seam: guest memory, FDT, arm64 kernel loading, virtio-mmio, the `hv::HypervisorVm`/`HypervisorVcpu` traits, the `driver::VmmDriver` seam, and the vsock transport. Low enough that `mvm-backends` can implement a backend without depending on `mvm-runtime`'s orchestration.
 - `mvm-backends` -- the concrete VMM mechanics behind that seam: `driver/{fc,hvf,libkrun,qemu}.rs` (the `VmmDriver` impls), their `*_process.rs` host-process siblings, `fc/`, and `mock.rs`. There is no `legacy` module — the `*_process.rs` files were briefly named `*_legacy` during the backend split and nothing in them is legacy. Orchestration stays in `mvm-runtime`; this crate owns only how a VM is built and run.
 - `mvm-http` -- a minimal HTTP/1.1-over-rustls client, deliberately smaller than a general one (no HTTP/2, redirects, pooling, proxy, compression), to keep the hyper/tower stack out of the shipped `mvmctl` closure.
-- `mvm-runtime` -- the big runtime crate (absorbs `mvm` + `mvm-backend` + `mvm-base`): the `VmBackend` trait and the `AnyBackend` dispatch over every backend, VM lifecycle (`vm/` templates + checkpoints), `microvm/` (Firecracker driver), `base/` (shell/ui/linux_env/cow host substrate), `storage/` (dm-thin), `network/` (the TAP/gateway impl behind the `mvm-net` seam). Re-exports the `mvmctl::runtime`/`::backend` contract.
+- `mvm-runtime` -- the big runtime crate (absorbs `mvm` + `mvm-backend` + `mvm-base`): the `VmBackend` trait and the `AnyBackend` dispatch over every backend, VM lifecycle (`vm/` templates + checkpoints), `microvm/` (Firecracker driver), `base/` (shell/ui/linux_env/cow host substrate), `storage/` (dm-thin). Re-exports the `mvmctl::runtime`/`::backend` contract.
 - `mvm-client` -- the local/remote client facade: `LocalBackend` (default) + `GatewayBackend` (the `remote` feature), the canonical host-wide machine inventory (`inventory`, which backs `mvmctl machine ls` and non-CLI consumers), plus a re-export of `mvm-core`'s `MvmClient` trait and its `stream` reader. Rust embedders use it for execution: it also re-exports the launch request's parts (`RootfsSource`, `Grants`, `HostPort`), the guest payload types in its `guest` module, inventory records, plan types, and the error codes. Build-time workload authoring requires a direct `mvm-sdk` dependency and `mvm_sdk` imports; `mvm_client::authoring` is removed, with no optional SDK dependency in the client. This is a source compatibility break, not a change to common IR or wire semantics. There is **no `dyn MvmClient` facade in the CLI** — `mvm-cli` uses `AnyBackend` directly for the backend surface, and the routing-everything-through-the-client refactor has not landed. Say what the code does, not what the plan said.
 - `mvm-cli` -- Clap CLI (the `mvmctl` surface), bootstrap/doctor/build/run/machine commands; `build.rs` embeds the host binaries. Its `observability` module owns the tracing subscriber assembly (fmt, span-timing and OTLP layers) for the host-side binaries. Its private `mcp` module adapts bounded stdio JSON-RPC to `MvmClient`.
 - `mvm-host-services` -- the in-guest host-services C ABI: one JSON-in/JSON-out entry point over the vsock broker, built as the `libmvm_host_services.so` cdylib every language SDK `dlopen`s. The package name is what makes cargo emit that filename directly. Its closure is deliberately tiny (no C, no async runtime) because it is compiled into every guest — `check-sdk-transport-free` holds that line, and the SDK sidecar's staleness fingerprint watches this crate and its dependencies rather than `mvm-sdk`.
@@ -271,7 +271,7 @@ mvm-contract: `verify` (audit-log verifier), `ir/` (Workload IR), wire/policy DT
 
 mvm-core: `plan/` (ExecutionPlan, bundle, signing, validity), `policy/` (security, audit, network_policy, bundle/resolver), `crypto/` (attestation, keystore, secret_store, snapshot_*), `protocol.rs`, `agent.rs`, `catalog.rs`, `config.rs` (paths/`MVM_HOME`)
 
-mvm-runtime: `backend.rs` (`AnyBackend` dispatch + `FirecrackerBackend`), `driver/` + `workload_runner/` (the converged runner seam every claim-bearing workload boots through), `backends/hvf/`, `wasm_backend.rs`, `apple_container_backend.rs`, `mock.rs`; the libkrun/qemu/hvf VMM impls themselves live in `mvm-backends` (`driver/{libkrun,qemu,hvf}.rs`) and are re-exported from `lib.rs`; the raw HVF substrate (`hv_impl.rs`, `kernel_boot.rs`, …) stays in `mvm-runtime/src/backends/hvf/`. Also `microvm/` (Firecracker driver), `vm/` (templates + `template/lifecycle/`, checkpoints), `agent_session/` (filesystem store for durable agent sessions, the checkpoint analog), `base/` (shell, ui, linux_env, cow), `storage/`, `network/`, `codesign.rs`, `artifacts/`
+mvm-runtime: `backend.rs` (`AnyBackend` dispatch + `FirecrackerBackend`), `driver/` + `workload_runner/` (the converged runner seam every claim-bearing workload boots through), `backends/hvf/`, `wasm_backend.rs`, `apple_container_backend.rs`, `mock.rs`; the libkrun/qemu/hvf VMM impls themselves live in `mvm-backends` (`driver/{libkrun,qemu,hvf}.rs`) and are re-exported from `lib.rs`; the raw HVF substrate (`hv_impl.rs`, `kernel_boot.rs`, …) stays in `mvm-runtime/src/backends/hvf/`. Also `microvm/` (Firecracker driver), `vm/` (templates + `template/lifecycle/`, checkpoints), `agent_session/` (filesystem store for durable agent sessions, the checkpoint analog), `base/` (shell, ui, linux_env, cow), `storage/`, `codesign.rs`, `artifacts/`
 
 mvm-fs: `oci/unpack/` (allow-listed unpacker), `oci/`, the ext4 writer, `overlay`
 
@@ -303,13 +303,13 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 
 ### Key Design Decisions
 
-- **Firecracker-only on Linux; libkrun (macOS 13-25) / HVF (macOS 26+) on macOS**: no Docker/containers on any auto-detected runtime path. The only container-tier backend is `--hypervisor apple-container` (Apple's prebuilt container kernel on the in-house HVF VMM), and `auto_select` returns it only when explicitly selected; it is not a fallback. Builds run Nix inside the selected builder VM: HVF on macOS 26+ Apple Silicon, Firecracker on native Linux, and QEMU on other hosts; libkrun remains explicit-only. A selected builder failure surfaces rather than silently switching VMMs. The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload. Egress default-deny is enforced at one seam for every workload runner — Firecracker, libkrun, HVF, QEMU, and `apple-container`, which holds an `HvfRunner` and substitutes only the kernel image, so it inherits that seam verbatim: the per-VM `mvm-network-endpoint`, whose shared `EgressGate` is the sole claim-10 decision point. `xtask check-single-network-path` pins every runner to that one spawn site and endpoint binary so a backend cannot grow a second gate. Wasm has no guest network and remains outside the microVM funnel.
+- **Firecracker on Linux; HVF on macOS 26+ Apple Silicon; libkrun only when named**: no Docker/containers on any auto-detected runtime path. The only container-tier backend is `--hypervisor apple-container` (Apple's prebuilt container kernel on the in-house HVF VMM), and `auto_select` returns it only when explicitly selected; it is not a fallback. Builds run Nix inside the selected builder VM: HVF on macOS 26+ Apple Silicon, Firecracker on native Linux, and QEMU on other hosts; libkrun remains explicit-only. A selected builder failure surfaces rather than silently switching VMMs. The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload. Egress default-deny is enforced at one seam for every workload runner — Firecracker, libkrun, HVF, QEMU, and `apple-container`, which holds an `HvfRunner` and substitutes only the kernel image, so it inherits that seam verbatim: the per-VM `mvm-network-endpoint`, whose shared `EgressGate` is the sole claim-10 decision point. `xtask check-single-network-path` pins every runner to that one spawn site and endpoint binary so a backend cannot grow a second gate. Wasm has no guest network and remains outside the microVM funnel.
 - **Workload microVMs have no NIC**: every workload _microVM_ backend boots the guest with a virtio-vsock device and **no net device at all** — Firecracker's config sequence omits `/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect` (which never calls a net attach), HVF's device model has no net device (and `apple-container` is that same device model with a different kernel image), and the QEMU workload driver emits no `-netdev`. The non-microVM tiers reach the same end differently: the Wasm tier mediates no networking at all. Egress leaves the guest only over the `NetworkFlow` channel to the host-side endpoint. This is what makes claim 10 (default-deny), claim 13 (no raw secret to the guest), and the audit chain mechanically enforceable: the host endpoint _originates_ every outbound connection, so it can authorize, substitute, and log it. `xtask check-single-network-path` fails closed if a guest NIC, raw-packet stack, alternate spawn implementation, or second workload socket owner appears. The builder VM is **also NIC-less** on every backend, QEMU included: its `nix build` substituter traffic and its dependency installs (`uv` / `pnpm`) ride the same vsock `NetworkFlow` relay under `NetworkPolicy::trusted_build_egress()`, through the one proxy environment the guest init hands every builder job. An install on a builder booted without vsock egress is refused rather than dialed direct. `check-single-network-path` fails if builder code opens a socket other than the egress client's readiness probe, if a host-binary manifest names the retired guest-side `mvm-egress-proxy`, or if the QEMU builder gains a NIC argument.
 - **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The builder VM (where Nix builds run) is headless too — no interactive shell or console, just a build engine you debug through its logs. See **Security model** below for the full posture.
 - **Trust-first over product parity**: a source-level comparison against a competing hosted microVM platform (ADR-058) settled the sequencing. The trust chain — the NIC-less guest behind one egress gate, signed admission, verified boot, the hash-chained audit — is the spine, and it is not traded for a wider command surface, a hosted service, or a host platform we do not support. The fleet authority in `mvmd` becomes operable before any hosted-service parity is pursued, because the advantage on that axis is operational maturity rather than authority design. ADR-058 §Decisions records the posture and the prior-art boundary; the findings and their evidence are tracked in issue #5013.
 - **Builder VM is headless**: there is no interactive shell into it. The builder VM exists solely to run `nix build` on behalf of `mvmctl build` / `mvmctl machine run`; `mvmctl bootstrap` optionally pre-fetches/builds its image ahead of time, but builds auto-bootstrap it on first use if you skip that step. On macOS 26+ Apple Silicon, the automatic choice is a long-lived HVF builder VM with Nix + build tools. On native Linux with KVM, it is Firecracker; other hosts select QEMU. Libkrun remains an explicit-only contributor choice. None of these start or SSH into a workload microVM — the builder VM and workload microVMs are always separate.
-- **Headless microVMs**: `mvmctl run` and `mvmctl machine start` boot Firecracker as a daemon. Interactive access via `mvmctl machine console` (PTY-over-vsock, dev-mode only).
-- **Local-command isolation**: `mvmctl start/stop` use a completely separate code path from orchestration.
+- **Headless microVMs**: `mvmctl run` and `mvmctl machine start` boot the selected workload backend as a daemon. Interactive access via `mvmctl machine console` (PTY-over-vsock, dev-mode only).
+- **Local-command isolation**: `mvmctl machine start` / `machine stop` use a completely separate code path from orchestration.
 - **Shell scripts inside run_in_vm**: complex ops are bash scripts handed to the active `LinuxEnv` backend (libkrun / HVF / Firecracker). Deliberate — they run inside the Linux VM, not on the macOS/Linux host.
 - **Idempotent setup**: every step checks if already done before acting.
 - **Templates use dev_build path**: `mvmctl build` runs `nix build` locally inside the builder VM (no ephemeral FC builder VMs). The `mvmctl template *` mutation namespace was removed; `template` is a read-only registry browser (`list`/`search`/`info`).
@@ -322,28 +322,31 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 
 ## Security model
 
-mvm makes fifteen CI-enforced security claims (numbered 1–15), plus three
+mvm makes eighteen CI-enforced security claims (numbered 1–15 and 19–21),
+plus three
 `Preview` claims: 16 (egress-substitution leak-gate, ADR-023), 17
 (workload input plane) and 18 (workload resource bounding — admission
 ceiling + host-wide budget + spawn-time CPU scope). For all three,
 witnesses are machine-checked but
 promotion into ADR-001's numbered prose is a pending maintainer
 decision, mirroring claim 14's path. Each one is
-backed by a test or a workflow gate. **ADR-001
+backed by a test or a workflow gate. Claim 21 (OCI base-image package and
+kernel inventory, CVE scan and SBOM) has no narrative below; its ledger row
+is the account. **ADR-001
 (`specs/adrs/001-microvm-security-posture.md`) is the source of truth**
 for the claim numbering, threat model, and per-backend tier matrix;
 this section is the summary.
 
 **The ledger is the claims table inside ADR-001**, not a separate
-catalog file: `xtask check-claim-catalog` parses that table (rows 1–19,
+catalog file: `xtask check-claim-catalog` parses that table (rows 1–21,
 witnesses spelled `fn:<test_name>` / `ci:<job_name>`) and fails when a
 named witness stops existing. `model/claims.toml` is the parallel
 conformance ID register that `xtask check-conformance` reads. There is
 no `specs/claims/` directory today; it existed and was deleted by the v1
 simplification restructure. Historical plans may still describe that removal,
 but live claim authority belongs to ADR-001 and `model/claims.toml`. Do not
-infer ADR existence from a numeric range: ADR-052 and ADR-110 are live, while
-some lower or intervening numbers were removed. Resolve every citation against
+infer ADR existence from a numeric range: ADR-001 through ADR-064 and ADR-110
+through ADR-112 have files, and no number between them does. Resolve every citation against
 `specs/adrs/`; `check-adr-coverage` enforces that rule.
 
 Keep the ADR-001 table in sync when you rename or move a witness. The
@@ -605,9 +608,8 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     asserts the prod gate refuses the high-CVE fixture and the dev
     gate admits it, and asserts a byte-flip on `cve.json` makes
     inspect refuse via `verify_sealed_volume`. Full builder-VM round-trip
-    (real `uv pip install` + `pip-audit` inside the libkrun /
-    cloud-hypervisor builder VM) is still gated on Plan 72 W4/W5
-    cutover; the CI lane exercises every code path that doesn't
+    (real `uv pip install` + `pip-audit` inside a booted builder VM) is not
+    run by this lane; the CI lane exercises every code path that doesn't
     require a working microVM backend.
 12. **Every host-side service the broker exposes is bound to a signed
     `ExecutionPlan.services` binding, enforced before handler
@@ -918,7 +920,7 @@ cargo clippy --workspace -- -D warnings  # zero warnings
 `cargo nextest run --workspace` (what `just test` and CI run) is the named
 test gate — it's process-parallel and faster than `cargo test` on this
 ~4,350-test suite. The one gap: **nextest skips doctests**, so the
-`cargo test --workspace --doc` line above (wrapped as `just tests::doc`, and
+`cargo test --workspace --doc` line above (wrapped as `just test doc`, and
 folded into `just ci`) keeps doc-fence coverage gated. `cargo test
 --workspace` still works as a fallback if nextest isn't installed.
 
@@ -927,8 +929,8 @@ folded into `just ci`) keeps doc-fence coverage gated. `cargo test
 any target behind `required-features` — `mvm-conformance`'s cucumber runner
 needs `--features bdd`, and without it the same broken tree reports zero
 errors — and on macOS it cannot compile `cfg(target_os = "linux")` files at
-all, including Linux-gated _test_ files, which `just check::linux` misses too
-because that recipe is `--lib` only. `just check::gated` covers both. Skipping
+all, including Linux-gated _test_ files, which `just check linux` misses too
+because that recipe is `--lib` only. `just check gated` covers both. Skipping
 it costs a CI round trip: the break surfaces there as a compile error in the
 "Build workspace tests" job, which compiles every workspace test target on
 Linux.
@@ -938,11 +940,11 @@ manifest crate (whichever one the manifest points at), silently missing
 drift in every other workspace member. CI runs `cargo fmt --all --
 --check`; if you only check the local crate, the merge will still fail.
 The pre-commit hook at `.githooks/pre-commit` auto-fixes with `cargo
-fmt --all` and re-stages — `just maint::hooks` wires
+fmt --all` and re-stages — `just setup hooks` wires
 `core.hooksPath` to `.githooks/` so it fires on every commit.
 
-The Justfile recipes wrap this correctly: `just lints::fmt-check`, `just
-lints::clippy`, `just lint` (both), `just ci` (lint + test + doctests). Prefer
+The Justfile recipes wrap this correctly: `just lint fmt`, `just
+lint clippy`, `just lint` (both), `just ci` (lint + test + doctests). Prefer
 those over raw cargo invocations.
 
 Every new module, type, or function needs test coverage:
@@ -969,8 +971,8 @@ local-only again. Nothing here is reviewed, shared, or carried to another clone,
 and a note you write is a note only you will read.
 
 One finding per file under `.agent-memory/notes/<slug>.md`, with `title`,
-`date` and `tags` frontmatter. `just mem::recall <terms>` searches them, `just
-mem::notes` lists them, `just mem::remember <slug>` scaffolds one. `xtask
+`date` and `tags` frontmatter. `just mem recall <terms>` searches them, `just
+mem notes` lists them, `just mem remember <slug>` scaffolds one. `xtask
 check-agent-notes` holds the shape and refuses a `[[link]]` to a note that does
 not exist — run it yourself; it is not in `check-all`, because in CI the
 directory does not exist and the gate has nothing to check.
@@ -1006,22 +1008,11 @@ Every subcommand is self-documenting via `--help`; the complete reference is
 validation, and artifact-preparation verbs live under `dev`; `console` is an
 interactive PTY, dev-mode only.
 
-## Dev Network Layout
-
-```
-MicroVM (172.16.0.2, eth0)
-    | TAP interface
-Builder VM (172.16.0.1, tap0) -- iptables NAT -- internet
-    | libkrun (macOS 13-25) / HVF (macOS 26+) / direct (Linux KVM)
-macOS / Linux Host
-```
-
 ## Documentation
 
 - `public/src/content/docs/contributing/development.md` -- contributor guide, testing, CI/CD
 - `public/src/content/docs/guides/nix-flakes.md` -- writing Nix flakes for microVM images (mkGuest API)
 - `public/src/content/docs/guides/troubleshooting.md` -- common issues and fixes
-- `public/src/content/docs/contributing/adr/001-firecracker-only.md` -- ADR: Firecracker-only execution
 - `public/src/content/docs/reference/cli-commands.md` -- complete CLI command reference
 - `specs/prd.md` -- the product requirements document
 - `specs/adrs/` and `specs/contracts/` -- durable decisions and stable contracts

@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use thiserror::Error;
 
 use super::{
@@ -44,6 +44,8 @@ pub enum ImageSetRevocationStoreError {
     Verification(#[from] ImageSetRevocationError),
     #[error("image-set revocation storage failed: {0}")]
     Storage(String),
+    #[error("the host clock is outside the representable years: {0}")]
+    Clock(#[from] mvm_contract::timestamp::ParseTimestampError),
 }
 
 impl From<FeedStoreFault> for ImageSetRevocationStoreError {
@@ -133,7 +135,7 @@ impl ImageSetRevocationStore {
         &self,
         document: &[u8],
         bundle: &[u8],
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<ImageSetRevocationCheckpoint, ImageSetRevocationStoreError> {
         self.feed
             .update_with(document, bundle, |bytes, signature, previous| {
@@ -152,7 +154,7 @@ impl ImageSetRevocationStore {
     /// Re-authenticate the applied list for use at `now`.
     pub fn load(
         &self,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<VerifiedImageSetRevocations, ImageSetRevocationStoreError> {
         Ok(self.capture_applied_proof(now)?.verified)
     }
@@ -162,7 +164,7 @@ impl ImageSetRevocationStore {
     /// persisted-checkpoint checks as `load`.
     pub fn capture_applied_proof(
         &self,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<RetainedImageSetRevocationProof, ImageSetRevocationStoreError> {
         self.feed.load_with(|bytes, signature, checkpoint| {
             let verified =
@@ -201,12 +203,16 @@ pub fn update_image_set_revocations(
     document: &[u8],
     bundle: &[u8],
 ) -> Result<ImageSetRevocationCheckpoint, ImageSetRevocationStoreError> {
-    let checkpoint = ImageSetRevocationStore::in_mvm_home().update(document, bundle, Utc::now())?;
+    let checkpoint = ImageSetRevocationStore::in_mvm_home().update(
+        document,
+        bundle,
+        crate::util::time::try_utc_timestamp_now()?,
+    )?;
     crate::policy::audit::event(crate::policy::audit::LocalAuditKind::ImageSetRevocationUpdate)
         .detail(format!(
             "publication={} issued_at={} sha256={}",
             checkpoint.publication,
-            checkpoint.issued_at.to_rfc3339(),
+            crate::util::time::rfc3339_offset(checkpoint.issued_at),
             checkpoint.sha256.as_str()
         ))
         .emit();
@@ -216,5 +222,5 @@ pub fn update_image_set_revocations(
 /// Load the host's applied image-set revocation list for an admission now.
 pub fn load_image_set_revocations()
 -> Result<VerifiedImageSetRevocations, ImageSetRevocationStoreError> {
-    ImageSetRevocationStore::in_mvm_home().load(Utc::now())
+    ImageSetRevocationStore::in_mvm_home().load(crate::util::time::try_utc_timestamp_now()?)
 }

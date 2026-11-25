@@ -80,9 +80,7 @@ else:
 "#;
 
 fn python_on_path() -> Option<PathBuf> {
-    which::which("python3")
-        .ok()
-        .or_else(|| which::which("python").ok())
+    mvm_core::util::which("python3").or_else(|| mvm_core::util::which("python"))
 }
 
 /// Write `body` behind the recorder for `build_mode`, run it under live mode,

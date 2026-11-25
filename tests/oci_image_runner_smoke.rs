@@ -352,7 +352,7 @@ fn image_pull_prod_builds_a_sealed_rootfs_with_verity_sidecars() {
         );
         return;
     }
-    if which::which("cosign").is_err() {
+    if mvm_core::util::which("cosign").is_none() {
         eprintln!("[oci_image_runner_prod_smoke] skipped - cosign is not on PATH");
         return;
     }

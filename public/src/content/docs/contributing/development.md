@@ -26,7 +26,7 @@ boundaries, is [Repository Layout](/contributing/repository-layout/).
   `CONFORMANCE.md` connects claims to scenarios and witnesses.
 - `assets/` holds the macOS signing entitlement profiles used in builds and
   installation. `features/` and `tests/` hold behavioral and integration tests.
-- `Justfile` provides common commands; `just/` contains its recipe modules.
+- `Justfile` provides the common commands, all in that one file.
   `scripts/` contains supporting scripts and `xtask/` contains Rust maintenance
   and validation commands.
 - `nix/` contains Nix build definitions as well as packaging, operational
@@ -109,7 +109,7 @@ socket-custody fix in #4808. This entrypoint alone does not complete #4764.
   directory as plain Cargo; there is no separate Cranelift development build.
   Excluded browser/example Cargo projects inherit this root compiler too.
   Embedded Linux payloads use the same version through the reproducibility
-  metadata installed by `just payload::toolchain`; the toolchain check rejects
+  metadata installed by `just setup toolchain`; the toolchain check rejects
   divergence. Fuzzing retains nightly for sanitizer flags, and eBPF retains
   nightly for building the core library for BPF targets. Those tooling exceptions
   are not ordinary stable builds. Cargo package `rust-version` declarations
@@ -121,10 +121,9 @@ socket-custody fix in #4808. This entrypoint alone does not complete #4764.
   separate. An uncached overlay requires its immutable, hash-verified source
   download during evaluation. There is no fallback to an ambient compiler.
 - **macOS 26+ Apple Silicon or Linux** — standard source-checkout development
-  uses native HVF on macOS and native `/dev/kvm` on Linux. Downloaded releases
-  also carry an explicitly selected libkrun preview for macOS 13–25 Apple
-  Silicon; contributors rebuilding that tier need its integration toolchain.
-- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which a release `cargo build` embeds and a debug `mvmctl` builds on first use. `just payload::toolchain` installs the pinned Zig package into `~/.local/share/mvm/toolchains/zig/<version>` rather than system Python, so it works with externally managed Python on Ubuntu and Debian; the build detects the pinned binary there. End-users running a downloaded `mvmctl` don't need them.
+  uses native HVF on macOS and native `/dev/kvm` on Linux. macOS 25 and older
+  is not supported.
+- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which a release `cargo build` embeds and a debug `mvmctl` builds on first use. `just setup toolchain` installs the pinned Zig package into `~/.local/share/mvm/toolchains/zig/<version>` rather than system Python, so it works with externally managed Python on Ubuntu and Debian; the build detects the pinned binary there. End-users running a downloaded `mvmctl` don't need them.
 - **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
 
 Direct Nix recipe sources must include `rust-toolchain.toml` and `nix/flake.lock`.
@@ -136,14 +135,12 @@ Third-party nixpkgs/libkrun builds are not part of this first-party compiler pin
 
 ### Do I need to install libkrun?
 
-Downloaded releases need no separate libkrun installation. The Apple Silicon
-archive includes the signed compatibility tier for macOS 13–25, while standard
-source builds do not install, link, or auto-select it:
+No. Neither a downloaded release nor a standard source build installs, links,
+or auto-selects it:
 
 | Host | libkrun (`slp/krun/*`) needed? |
 |---|---|
 | macOS 26+ Apple Silicon | **No** — auto-detect picks the native **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps). |
-| macOS 13–25 Apple Silicon | **No for a downloaded release** — its signed archive includes the preview tier; select it explicitly with `--hypervisor libkrun`. Source-checkout integration work still needs the development prerequisites below. |
 | Linux + `/dev/kvm` | **No** — auto-detect picks the **Firecracker** builder, so libkrun is not part of the default builder path on native Linux hosts. |
 
 The libkrun Cargo features remain for explicit source-checkout integration
@@ -162,7 +159,7 @@ development prerequisites explicitly.
 If you use Nix for contributor tools, `nix develop` opens the lean shell with
 the Rust toolchain pinned by `rust-toolchain.toml` and the tools for normal
 editing, checking, and testing. `nix develop .#full` adds Zig, libclang, release,
-lint, and documentation tools. Run `just payload::toolchain` in the full shell
+lint, and documentation tools. Run `just setup toolchain` in the full shell
 before payload or release builds; it installs the exact Zig and cargo-zigbuild
 pins used by this checkout. These shells do not build or publish images; that
 work belongs to `mvm-images`.
@@ -194,7 +191,7 @@ cd mvm
 # cross-targets for the active toolchain and the pinned cargo-zigbuild. Do NOT
 # `brew install zig` — Homebrew's zig drifts off the pinned cargo-zigbuild and
 # fails with a cryptic CacheCheckFailed.
-just payload::toolchain
+just setup toolchain
 
 cargo build
 cargo run -- doctor     # reports the builder backend + anything missing
@@ -218,7 +215,7 @@ cargo run -- bootstrap
 > compiling it. An `mvmctl` that still has none builds it in-process the first
 > time it needs a builder VM, into the same store — one status line on stderr
 > first, the compiler output with `-v` — so the next `cargo build` embeds it.
-> It never compiles a second `mvmctl`. `just embed` (or `just embed --release`)
+> It never compiles a second `mvmctl`. `just build embed` (or `just build embed --release`)
 > builds the whole set up front, per-VM helpers included. Released binaries
 > always carry the payload.
 
@@ -233,24 +230,24 @@ to a build, so use it deliberately.
 | Editing, running `cargo check`, clippy or the tests | No | None of these need the payload, and the cross-compile would sit in every iteration. |
 | Running `mvmctl` from your own checkout, including the demo | No | An unembedded `mvmctl` builds the payload from its checkout the first time it needs a builder VM and caches it. Or use an installed release, which already carries it. |
 | Building a release, or anything you hand to someone else | Yes | The recipient has no checkout to build the payload from. The tag-push release workflow passes the feature, so a downloaded binary is self-sufficient. |
-| Running `just embed` | Already on | The recipe passes it, and also builds the per-VM helpers next to the binary. |
+| Running `just build embed` | Already on | The recipe passes it, and also builds the per-VM helpers next to the binary. |
 | A CI lane that needs a builder VM and has no checkout to build from | Yes | Add `--features embed-host-bins` to its build. |
 | Testing the cross-compile itself | Yes | `cargo nextest run -p mvm-cli --features embed-host-bins` is the lane that covers it. |
 
 ```sh
 cargo build --release                                  # fast; no payload compiled
 cargo build --release --features embed-host-bins       # slow; carries the payload
-just embed --release                                   # the same, plus the per-VM helpers
+just build embed --release                                   # the same, plus the per-VM helpers
 ```
 
 The pinned zig and `cargo-zigbuild` must be installed for the feature
-(`just payload::toolchain`); without them the build fails and names the fix.
+(`just setup toolchain`); without them the build fails and names the fix.
 
 For live development, `bin/dev <command>` builds the `dev`-feature CLI and native
 host helpers together before running it, with state isolated to the checkout
 (and selected image checkout). Launch commands deliberately do not compile
 missing host helpers, so the wrapper prepares them instead. It does not embed
-the Linux builder payload; use `just embed` when you explicitly want the full
+the Linux builder payload; use `just build embed` when you explicitly want the full
 embedded build ready before running a command (set
 `MVM_EMBED_FEATURES=embed-host-bins,dev` for the same contributor surface).
 Keep the same target directory and feature selection for repeated edits to
@@ -268,9 +265,9 @@ reuse Cargo artifacts.
 > **Note — after a toolchain-version change.** `rust-toolchain.toml` pins an
 > exact Rust version, and rustup keys installed cross-targets per toolchain
 > *name*. When that pin changes (a version bump), rustup resolves a fresh
-> toolchain that carries none of the Linux cross-targets, so `just check::linux`
+> toolchain that carries none of the Linux cross-targets, so `just check linux`
 > or an `mvmctl` build fails with `error[E0463]: can't find crate for core …
-> target may not be installed`. Re-run `just payload::toolchain` to reinstall the
+> target may not be installed`. Re-run `just setup toolchain` to reinstall the
 > targets for the new toolchain.
 
 Or run the bootstrap script on a fresh machine:
@@ -287,18 +284,18 @@ just build
 
 # Prepare published runtime/image artifacts and the signed host helpers built
 # for this exact clean source commit.
-just check::run -- bootstrap
-just check::run -- image pull alpine
-just check::run -- pool warm 1 --image alpine
+just run -- bootstrap
+just run -- image pull alpine
+just run -- pool warm 1 --image alpine
 
 # Run CLI
-just check::run -- --help
+just run -- --help
 
 # Boot a prepared throwaway workload without compiling or downloading.
-just check::run -- machine run --image alpine -- uname -a
+just run -- machine run --image alpine -- uname -a
 
 # Release build (stripped, LTO)
-just release-build
+just build release
 ```
 
 CI publishes signed host-helper bundles for each `main` commit in the prerelease
@@ -358,7 +355,7 @@ a matching runtime from the default home cache, verifying its archive, member
 digests and executable modes before publishing the isolated copy. It never
 shares Cargo output, keys or VM state between homes.
 
-The live BDD harness (`just bdd::live-ci`) prewarms this source runtime once in
+The live BDD harness (`just e2e live-ci`) prewarms this source runtime once in
 the suite's cache (`MVM_E2E_HOME/cache` when configured, otherwise the invoking
 process's mvm cache). Scenario-declared isolated homes still take precedence
 over the warm home; the harness seeds only a verified runtime archive into
@@ -386,13 +383,13 @@ prebuilding it is useful when you want the first interactive run to be warm:
 ```bash
 # Compile the builder kernel once into the cache + persistent nix store.
 # The next build reuses it (substituted, not rebuilt).
-just check::run -- dev kernel build --which builder
+just run -- dev kernel build --which builder
 
 # Or both kernels:
-just check::run -- dev kernel build --all
+just run -- dev kernel build --all
 
 # The same policy applies to the direct kernel recipe:
-MVM_KERNEL_SOURCE=download just kernel::workload
+MVM_KERNEL_SOURCE=download just build kernel
 ```
 
 To skip the kernel compile entirely on a fresh machine, boot the builder
@@ -400,7 +397,7 @@ VM on a published kernel (once a release has shipped one):
 
 ```bash
 # Build only the rootfs locally; fetch + hash-verify the kernel.
-just check::run -- --kernel-source download bootstrap
+just run -- --kernel-source download bootstrap
 # `auto` downloads if available, else compiles in-image (the default).
 ```
 
@@ -421,13 +418,13 @@ effect? The loop is build → boot-smoke → measure:
 
 ```bash
 # 1. Build the variant you touched (compiles your edited config in Stage 0).
-just check::run -- dev kernel build --which workload
+just run -- dev kernel build --which workload
 
 # 2. Boot-smoke it — a kernel that builds isn't proof it boots. Boot a
 #    throwaway VM and confirm the in-guest agent answers over vsock.
-just check::run -- machine run --flake examples/sleeper --hypervisor libkrun --name smoke -d
-just check::run -- machine boot-report smoke   # "control plane  ready" == good
-just check::run -- machine stop smoke
+just run -- machine run --flake examples/sleeper --hypervisor libkrun --name smoke -d
+just run -- machine boot-report smoke   # "control plane  ready" == good
+just run -- machine stop smoke
 ```
 
 Two sharp edges worth knowing:
@@ -456,7 +453,7 @@ Two sharp edges worth knowing:
 just test
 
 # Test a single crate
-just tests::crate mvm-core
+just test scoped mvm-core
 
 # Run tests matching a filter
 just test "test_snapshot"
@@ -506,8 +503,8 @@ other integration targets; `--lib` and `--test` avoid that work:
 
 ```bash
 source scripts/dev-env.sh
-just tests::scoped mvm-cli roundtrip --lib
-just tests::scoped mvmctl "" --test workspace_shard_isolation
+just test scoped mvm-cli roundtrip --lib
+just test scoped mvmctl "" --test workspace_shard_isolation
 ```
 
 Omitting the target flags preserves the existing whole-crate selection. The
@@ -545,7 +542,7 @@ can make turnaround worse.
 
 Ordinary workspace tests do not compile Cucumber. The existing `bdd` feature
 enables both the conformance runner and its framework dependency; use
-`just bdd::run` for that suite. The conformance library's unit tests and
+`just test bdd` for that suite. The conformance library's unit tests and
 documentation-example checks remain part of ordinary workspace validation.
 
 ## Profiling
@@ -649,19 +646,21 @@ is an analysis aid; the chain-signed audit log remains the record of what ran.
 
 ## Discovering development commands
 
-Run `just` to list the top-level recipes and command modules. Invoking a
-module without a subcommand lists its available recipes and descriptions;
-it does not build, install, test, or publish anything.
+Run `just` to list the recipes. There is one per job — `build`, `check`,
+`test`, `lint`, `fmt`, `ci`, `run`, `e2e`, `docs`, `release`, `clean`,
+`setup`, `mem` — and a variant is the recipe's first argument:
+`just check gated`, `just test scoped mvm-core`, `just lint clippy`. The
+comment above each recipe in the `Justfile` describes its variants.
 
-`just docs` lists the documentation site's subcommands. Choose
-`just site::dev` to start the preview server or `just site::build` to build
-the site. Use the same explicit `module::recipe` form for other modules.
+`e2e`, `docs`, `setup` and `mem` only make sense with a variant, so run bare
+they print their variants and do nothing else: `just docs` prints the usage,
+`just docs dev` starts the preview server and `just docs build` builds the site.
 
 ## Linting and Formatting
 
 ```bash
-just lints::fmt          # Format all code
-just lints::clippy       # Lint (zero warnings required)
+just fmt          # Format all code
+just lint clippy  # Lint (zero warnings required)
 just lint         # Both format check + clippy
 ```
 
@@ -712,29 +711,29 @@ Beyond the standard build/test/lint cycle, mvmctl provides commands for managing
 
 ```bash
 # First-time host setup (installs deps, stages the builder VM image)
-just check::run -- bootstrap
+just run -- bootstrap
 # `init` is a different verb: it scaffolds mvm.toml + flake.nix in a project dir
-just check::run -- init ./my-app
+just run -- init ./my-app
 
 # Bundled image catalog — browse the entries `init --catalog` can scaffold from
-just check::run -- catalog list            # browse bundled catalog
-just check::run -- catalog search http     # search by name/tag
-just check::run -- catalog info minimal    # show one entry
+just run -- catalog list            # browse bundled catalog
+just run -- catalog search http     # search by name/tag
+just run -- catalog info minimal    # show one entry
 # (`mvmctl image` is a different namespace: pull/ls/inspect/rm of cached OCI images.)
 
 # Named dev networks
-just check::run -- network create isolated # create a named network
-just check::run -- network list            # list all networks
-just check::run -- machine run --flake .  # attach VM to a network
+just run -- network create isolated # create a named network
+just run -- network list            # list all networks
+just run -- machine run --flake .  # attach VM to a network
 
 # Interactive console (PTY-over-vsock, no SSH) — `console` lives under `machine`
-just check::run -- machine console myvm            # interactive shell
-just check::run -- machine console myvm --command "uname -a"  # one-shot exec
+just run -- machine console myvm            # interactive shell
+just run -- machine console myvm --command "uname -a"  # one-shot exec
 
 # Cache and diagnostics
-just check::run -- cache info              # show cache dir and disk usage
-just check::run -- cache prune             # clean stale temp files
-just check::run -- doctor                  # dependency checks + security posture
+just run -- cache info              # show cache dir and disk usage
+just run -- cache prune             # clean stale temp files
+just run -- doctor                  # dependency checks + security posture
 # There is no `security` verb — plan 40 folded it into `doctor`.
 ```
 
@@ -770,7 +769,7 @@ with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 | `merge-queue-watch.yml` | Merge-group CI completion, every five minutes, manual dispatch | Re-runs a failed merge-group CI once only when it scheduled zero jobs; opens or updates a `Merge queue stalled` issue if the queue head has waited over 30 minutes |
 | `ci-main.yml` | Push to main, manual dispatch | The slow lanes (feature suites, BDD, aarch64, release-profile and musl witnesses, eBPF, Linux coverage, Nix evaluation, boot ceiling), gated by `Test (main)`; a pull request and the merge queue never list them |
 | `release.yml` | Tags matching `v*` | Builds 3 platform binaries (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), creates GitHub Release |
-| `publish-crates.yml` | Dispatched by `release.yml` on a tag | Publishes the public crates (`mvm-contract`) to crates.io; every other crate is `publish = false` |
+| `publish-crates.yml` | Manual dispatch with a tag (dry run by default); pull requests that change the publish machinery run the dry run | Publishes the public crates (`mvm-contract` and `runmvm-client`) to crates.io; every other crate is `publish = false` |
 | `workers.yml` | Website change merged to main, release, version tag, or manual dispatch | Deploys docs to Cloudflare Workers Static Assets |
 
 The `main merge queue` ruleset allows 40 minutes for checks (longer than the
@@ -796,17 +795,17 @@ out of `check-all` without a recorded reason.
 
 | Coverage | Owning job | Local command |
 |----------|------------|---------------|
-| Policy gates | `ci.yml` `lint-policy` | `just lints::policy` |
+| Policy gates | `ci.yml` `lint-policy` | `just lint policy` |
 | Gates outside `check-all` | `ci.yml` (`check-declared-backing`), `ci-main.yml` (`check-nextest-groups`), `release.yml` (`check-binary-size`), `claim-witness-freshness.yml`, `e2e-docs.yml` (`check-release-evidence`) | `cargo run -p xtask -- <gate>` |
 | aarch64 tests | `ci-main.yml` `test-workspace-aarch64` (native runner) | `cargo nextest run --workspace --exclude mvm-fs --all-targets` on an aarch64 Linux host |
-| wasm32 / no_std `mvm-contract` | `ci-main.yml` `test-linux`, via `scripts/ci-linux-coverage.sh` | `just check::embedded` for the riscv32 build; the wasm32 build and wasmtime test steps are in the script |
+| wasm32 / no_std `mvm-contract` | `ci-main.yml` `test-linux`, via `scripts/ci-linux-coverage.sh` | `just check embedded` for the riscv32 build; the wasm32 build and wasmtime test steps are in the script |
 | Windows portability | `ci.yml` `lint-windows` | `cargo check --target x86_64-pc-windows-gnu -p mvm-contract -p mvm-core -p mvm-net -p mvm-bundler -p mvm-backends` |
 | Fuzz targets compile | `ci.yml` `lint-policy` (when a manifest or fuzz dir changes) | `cargo check --locked --manifest-path crates/<crate>/fuzz/Cargo.toml --all-targets` |
-| Fuzz runs | `security.yml` `fuzz` (nightly, tags) | `just audit::fuzz-guest-request`, or `cargo +nightly fuzz run <target>` in the fuzz directory |
-| eBPF telemetry | `ci-main.yml` `test-ebpf-telemetry` | `just check::ebpf`, then `cargo test -p mvm-hostd --features ebpf-telemetry --lib` |
-| Supply chain | `security.yml` `cargo-deny`, `cargo-audit` (nightly, tags) | `just audit::supply-chain` |
-| Release build | `release.yml` `build` | `just release-build` |
-| Linux-gated and feature-gated type checks | `ci.yml` `test-workspace-build` | `just check::gated` |
+| Fuzz runs | `security.yml` `fuzz` (nightly, tags) | `just test fuzz fuzz_guest_request`, or `cargo +nightly fuzz run <target>` in the fuzz directory |
+| eBPF telemetry | `ci-main.yml` `test-ebpf-telemetry` | `just check ebpf`, then `cargo test -p mvm-hostd --features ebpf-telemetry --lib` |
+| Supply chain | `security.yml` `cargo-deny`, `cargo-audit` (nightly, tags) | `just lint supply-chain` |
+| Release build | `release.yml` `build` | `just build release` |
+| Linux-gated and feature-gated type checks | `ci.yml` `test-workspace-build` | `just check gated` |
 
 The pre-commit hook runs fmt and scoped clippy only; everything above is a
 manual or CI step.

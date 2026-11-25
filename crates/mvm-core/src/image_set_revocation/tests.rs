@@ -1,7 +1,5 @@
 use std::fs;
 
-use chrono::TimeZone;
-
 use super::*;
 use crate::pack_trust::RevokedPack;
 use crate::plan::bundle::key_id_from_identity;
@@ -31,13 +29,16 @@ fn fake_signer(_document: &[u8], bundle: &[u8]) -> Result<VerifiedSigner, String
     })
 }
 
-fn at(day: u32) -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 10, day, 0, 0, 0)
-        .single()
-        .expect("valid date")
+fn at(day: u32) -> UtcTimestamp {
+    // 2026-10-01T00:00:00Z plus whole days.
+    UtcTimestamp::from_unix(1_790_812_800 + (i64::from(day) - 1) * 86_400, 0).expect("valid date")
 }
 
-fn list(issued_at: DateTime<Utc>, not_after: DateTime<Utc>) -> PackRevocationList {
+fn plus(at: UtcTimestamp, secs: i64) -> UtcTimestamp {
+    at.checked_add_secs(secs).expect("in range")
+}
+
+fn list(issued_at: UtcTimestamp, not_after: UtcTimestamp) -> PackRevocationList {
     PackRevocationList {
         schema_version: PACK_REVOCATION_SCHEMA_VERSION,
         revocations: Vec::new(),
@@ -53,7 +54,7 @@ fn document(list: &PackRevocationList) -> Vec<u8> {
 fn verify(
     document: &[u8],
     bundle: &[u8],
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     previous: Option<&ImageSetRevocationCheckpoint>,
 ) -> Result<VerifiedImageSetRevocations, ImageSetRevocationError> {
     verify_image_set_revocations_with(document, bundle, now, previous, fake_signer)
@@ -61,10 +62,10 @@ fn verify(
 
 fn accepted(
     publication: u64,
-    issued_at: DateTime<Utc>,
+    issued_at: UtcTimestamp,
     entries: Vec<RevokedPack>,
 ) -> (Vec<u8>, ImageSetRevocationCheckpoint) {
-    let mut body = list(issued_at, issued_at + Duration::days(30));
+    let mut body = list(issued_at, plus(issued_at, 30 * 86_400));
     body.revocations = entries;
     let bytes = document(&body);
     let verified = verify(
@@ -174,7 +175,7 @@ fn a_registry_pack_revocation_document_is_not_an_image_set_list() {
     let err = verify(
         registry_document.as_bytes(),
         &bundle_for_publication(1),
-        at(1) + Duration::hours(1),
+        plus(at(1), 3_600),
         None,
     )
     .expect_err("a different feed's format is refused");
@@ -204,7 +205,7 @@ fn a_list_is_usable_only_inside_its_own_window() {
         Err(ImageSetRevocationError::IssuedInFuture { .. })
     ));
     assert!(verify(&bytes, &bundle, at(5), None).is_ok());
-    assert!(verify(&bytes, &bundle, at(10) - Duration::seconds(1), None).is_ok());
+    assert!(verify(&bytes, &bundle, plus(at(10), -1), None).is_ok());
     let err = verify(&bytes, &bundle, at(10), None).expect_err("expired at not_after");
     assert!(matches!(err, ImageSetRevocationError::Expired { .. }));
     assert!(
@@ -222,13 +223,19 @@ fn an_inverted_or_overlong_window_is_refused() {
     );
     let overlong = list(
         at(1),
-        at(1) + MAX_IMAGE_SET_REVOCATION_VALIDITY + Duration::seconds(1),
+        plus(
+            at(1),
+            MAX_IMAGE_SET_REVOCATION_VALIDITY.as_secs() as i64 + 1,
+        ),
     );
     assert_eq!(
         verify(&document(&overlong), &bundle, at(2), None).expect_err("overlong"),
         ImageSetRevocationError::ValidityTooLong
     );
-    let longest = list(at(1), at(1) + MAX_IMAGE_SET_REVOCATION_VALIDITY);
+    let longest = list(
+        at(1),
+        plus(at(1), MAX_IMAGE_SET_REVOCATION_VALIDITY.as_secs() as i64),
+    );
     assert!(verify(&document(&longest), &bundle, at(2), None).is_ok());
 }
 
@@ -654,7 +661,7 @@ mod published {
     );
 
     /// Inside the published list's window (2026-09-24 to 2026-11-08).
-    fn inside_window() -> DateTime<Utc> {
+    fn inside_window() -> UtcTimestamp {
         at(1)
     }
 
@@ -721,10 +728,7 @@ mod published {
 
     #[test]
     fn the_published_list_is_refused_once_stale_or_rolled_back() {
-        let after = Utc
-            .with_ymd_and_hms(2026, 11, 8, 14, 35, 3)
-            .single()
-            .expect("date");
+        let after: UtcTimestamp = "2026-11-08T14:35:03Z".parse().expect("date");
         assert!(matches!(
             verify_image_set_revocations(DOCUMENT, BUNDLE, after, None),
             Err(ImageSetRevocationError::Expired { .. })
@@ -751,5 +755,15 @@ mod published {
             store.load(inside_window()).expect("load").checkpoint(),
             &checkpoint
         );
+    }
+}
+
+#[test]
+fn checkpoint_serialization_bytes_are_pinned() {
+    let digest = "a".repeat(64);
+    for issued in ["2026-10-01T00:00:00Z", "2026-10-01T00:00:00.123Z"] {
+        let json = format!(r#"{{"publication":7,"issued_at":"{issued}","sha256":"{digest}"}}"#);
+        let checkpoint: ImageSetRevocationCheckpoint = serde_json::from_str(&json).expect("parse");
+        assert_eq!(serde_json::to_string(&checkpoint).expect("ser"), json);
     }
 }

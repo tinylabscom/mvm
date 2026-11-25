@@ -4,4 +4,4 @@ pub mod linux_env;
 #[allow(clippy::module_inception)]
 pub mod platform;
 
-pub use self::platform::{LIBKRUN_LIB_PATHS, Platform, current};
+pub use self::platform::{LIBKRUN_LIB_PATHS, Platform, UNSUPPORTED_HOST_MESSAGE, current};

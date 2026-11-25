@@ -297,9 +297,7 @@ use super::machine;
 use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
 use super::trust;
-use super::vm::{
-    checkpoint, console, cp, exec, forward, group, sandbox, session, snapshot, volume,
-};
+use super::vm::{checkpoint, console, cp, exec, group, sandbox, session, snapshot, volume};
 
 use audit::{AssetAction, AuditAction};
 use cache::CacheAction;
@@ -2083,129 +2081,6 @@ fn down_removed() {
     );
 }
 
-// ---- Forward command tests ----
-
-#[test]
-fn test_forward_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "machine", "forward", "swift", "3000"]).unwrap();
-    let Commands::Machine(mg) = cli.command else {
-        panic!("expected vm group")
-    };
-    let machine::MachineAction::Vm(vmg) = mg.action else {
-        panic!("expected Vm action under machine")
-    };
-    match vmg {
-        group::VmCmd::Forward(forward::Args { name, port, ports }) => {
-            assert_eq!(name, "swift");
-            // Positional ports land in `ports`, flag ports in `port`.
-            assert!(port.is_empty());
-            assert_eq!(ports, vec!["3000"]);
-        }
-        _ => panic!("Expected Forward command"),
-    }
-}
-
-#[test]
-fn test_forward_with_port_mapping() {
-    let cli = Cli::try_parse_from(["mvmctl", "machine", "forward", "swift", "8080:3000"]).unwrap();
-    let Commands::Machine(mg) = cli.command else {
-        panic!("expected vm group")
-    };
-    let machine::MachineAction::Vm(vmg) = mg.action else {
-        panic!("expected Vm action under machine")
-    };
-    match vmg {
-        group::VmCmd::Forward(forward::Args { name, port, ports }) => {
-            assert_eq!(name, "swift");
-            assert!(port.is_empty());
-            assert_eq!(ports, vec!["8080:3000"]);
-        }
-        _ => panic!("Expected Forward command"),
-    }
-}
-
-#[test]
-fn test_forward_with_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "machine", "forward", "swift", "-p", "3000"]).unwrap();
-    let Commands::Machine(mg) = cli.command else {
-        panic!("expected vm group")
-    };
-    let machine::MachineAction::Vm(vmg) = mg.action else {
-        panic!("expected Vm action under machine")
-    };
-    match vmg {
-        group::VmCmd::Forward(forward::Args { name, port, ports }) => {
-            assert_eq!(name, "swift");
-            assert_eq!(port, vec!["3000"]);
-            assert!(ports.is_empty());
-        }
-        _ => panic!("Expected Forward command"),
-    }
-}
-
-#[test]
-fn test_forward_multiple_ports() {
-    let cli = Cli::try_parse_from([
-        "mvmctl", "machine", "forward", "swift", "-p", "3000", "-p", "8080:443",
-    ])
-    .unwrap();
-    let Commands::Machine(mg) = cli.command else {
-        panic!("expected vm group")
-    };
-    let machine::MachineAction::Vm(vmg) = mg.action else {
-        panic!("expected Vm action under machine")
-    };
-    match vmg {
-        group::VmCmd::Forward(forward::Args { name, port, ports }) => {
-            assert_eq!(name, "swift");
-            assert_eq!(port, vec!["3000", "8080:443"]);
-            assert!(ports.is_empty());
-        }
-        _ => panic!("Expected Forward command"),
-    }
-}
-
-#[test]
-fn test_forward_multiple_positional() {
-    let cli =
-        Cli::try_parse_from(["mvmctl", "machine", "forward", "swift", "3000", "8080:443"]).unwrap();
-    let Commands::Machine(mg) = cli.command else {
-        panic!("expected vm group")
-    };
-    let machine::MachineAction::Vm(vmg) = mg.action else {
-        panic!("expected Vm action under machine")
-    };
-    match vmg {
-        group::VmCmd::Forward(forward::Args { name, port, ports }) => {
-            assert_eq!(name, "swift");
-            assert!(port.is_empty());
-            assert_eq!(ports, vec!["3000", "8080:443"]);
-        }
-        _ => panic!("Expected Forward command"),
-    }
-}
-
-#[test]
-fn test_forward_no_ports_parses() {
-    // Stale invocations still parse so execution can return the targeted
-    // signed-ingress migration error.
-    let cli = Cli::try_parse_from(["mvmctl", "machine", "forward", "swift"]).unwrap();
-    let Commands::Machine(mg) = cli.command else {
-        panic!("expected vm group")
-    };
-    let machine::MachineAction::Vm(vmg) = mg.action else {
-        panic!("expected Vm action under machine")
-    };
-    match vmg {
-        group::VmCmd::Forward(forward::Args { name, port, ports }) => {
-            assert_eq!(name, "swift");
-            assert!(port.is_empty());
-            assert!(ports.is_empty());
-        }
-        _ => panic!("Expected Forward command"),
-    }
-}
-
 // -------------------------------------------------------------------------
 // Top-level verb tests. `ps`, `start`, `flake`, `image`, `setup`,
 // `completions`, and `security` were dropped — `ls`/`validate`/
@@ -3158,7 +3033,7 @@ fn test_audit_show_filters_parse() {
                 }),
         }) => {
             assert_eq!(kind.as_deref(), Some("plan.*"));
-            assert_eq!(since.unwrap().to_rfc3339(), "2026-09-01T00:00:00+00:00");
+            assert_eq!(since.unwrap().to_string(), "2026-09-01T00:00:00Z");
             assert!(until.is_some());
         }
         _ => panic!("Expected Audit::Show"),
@@ -6838,7 +6713,6 @@ fn sdk_live_mode_shelled_commands_keep_parsing() {
         &["machine", "proc", "wait", "vm", "tok", "--timeout", "30"],
         &["machine", "fs", "write", "vm", "/app/x"],
         &["machine", "cp", "host.txt", "vm:/guest.txt"],
-        &["machine", "forward", "vm", "--port", "8080:80"],
         &["machine", "stop", "vm"],
         &[
             "machine",

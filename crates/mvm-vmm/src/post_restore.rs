@@ -810,7 +810,7 @@ mod tests {
             grant: VerbGrant {
                 session_id: "child-final".into(),
                 plan_nonce: nonce,
-                not_after: mvm_core::time::parse_iso8601("2099-01-01T00:00:00Z").unwrap(),
+                not_after: "2099-01-01T00:00:00Z".parse().unwrap(),
                 verbs: vec![VerbId::new("run-entrypoint").unwrap()],
                 drive: None,
                 application_terminal: None,

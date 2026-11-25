@@ -179,9 +179,18 @@ fn require_activation_ack(response: GuestResponse, env: &ActivateEnvironment) ->
         GuestResponse::ActivateEnvironmentError { message } => {
             bail!("guest activation failed: {message}")
         }
-        GuestResponse::VerbNotAuthorized { verb } => Err(anyhow::anyhow!(
-            verb_refusal_explanation(&verb, env.verb_grant_envelope.as_ref(), chrono::Utc::now())
-        )),
+        GuestResponse::VerbNotAuthorized { verb } => {
+            Err(match mvm_core::util::time::try_utc_timestamp_now() {
+                Ok(now) => anyhow::anyhow!(verb_refusal_explanation(
+                    &verb,
+                    env.verb_grant_envelope.as_ref(),
+                    now
+                )),
+                Err(e) => anyhow::anyhow!(
+                    "guest denied activation verb {verb} (host clock unusable: {e})"
+                ),
+            })
+        }
         other => bail!("unexpected response to ActivateEnvironment: {other:?}"),
     }
 }
@@ -192,7 +201,7 @@ fn require_activation_ack(response: GuestResponse, env: &ActivateEnvironment) ->
 fn verb_refusal_explanation(
     verb: &str,
     envelope: Option<&mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
-    now: chrono::DateTime<chrono::Utc>,
+    now: mvm_contract::timestamp::UtcTimestamp,
 ) -> String {
     if verb != "activate-environment" {
         return format!("guest denied activation verb {verb}");
@@ -205,7 +214,7 @@ fn verb_refusal_explanation(
     };
     let not_after = envelope.grant.not_after;
     if now >= not_after {
-        let late = (now - not_after).num_seconds();
+        let late = now.whole_secs_since(not_after);
         return format!(
             "the guest refused `{verb}` because the verb grant expired before activation: \
              the grant for session {} expired at {not_after}, {late}s before activation \
@@ -440,7 +449,7 @@ mod tests {
     };
     use mvm_vmm::host::boot_config::booted_with_universal_initramfs;
 
-    fn grant_until(not_after: chrono::DateTime<chrono::Utc>) -> VerbGrantEnvelope {
+    fn grant_until(not_after: mvm_contract::timestamp::UtcTimestamp) -> VerbGrantEnvelope {
         VerbGrantEnvelope {
             pubkey_hex: "ab".repeat(32),
             plan_nonce_hex: "00".repeat(16),
@@ -463,8 +472,8 @@ mod tests {
     /// `VerbNotAuthorized`.
     #[test]
     fn an_expired_grant_is_named_as_expired_with_its_deadline() {
-        let now = chrono::Utc::now();
-        let expired = grant_until(now - chrono::Duration::seconds(90));
+        let now = mvm_core::util::time::utc_timestamp_now();
+        let expired = grant_until(now.checked_add_secs(-90).unwrap());
         let message = verb_refusal_explanation("activate-environment", Some(&expired), now);
         assert!(message.contains("expired at"), "{message}");
         assert!(message.contains("90s before activation"), "{message}");
@@ -474,8 +483,8 @@ mod tests {
 
     #[test]
     fn a_live_grant_refusal_points_at_the_guest_log_not_at_expiry() {
-        let now = chrono::Utc::now();
-        let live = grant_until(now + chrono::Duration::minutes(5));
+        let now = mvm_core::util::time::utc_timestamp_now();
+        let live = grant_until(now.checked_add_secs(300).unwrap());
         let message = verb_refusal_explanation("activate-environment", Some(&live), now);
         assert!(!message.contains("expired"), "{message}");
         assert!(message.contains("console log"), "{message}");
@@ -483,13 +492,18 @@ mod tests {
 
     #[test]
     fn a_missing_grant_says_none_was_sent() {
-        let message = verb_refusal_explanation("activate-environment", None, chrono::Utc::now());
+        let message = verb_refusal_explanation(
+            "activate-environment",
+            None,
+            mvm_core::util::time::utc_timestamp_now(),
+        );
         assert!(message.contains("sent none"), "{message}");
     }
 
     #[test]
     fn an_unexpected_verb_is_named_without_guessing_its_grant_state() {
-        let message = verb_refusal_explanation("exec", None, chrono::Utc::now());
+        let message =
+            verb_refusal_explanation("exec", None, mvm_core::util::time::utc_timestamp_now());
         assert_eq!(message, "guest denied activation verb exec");
     }
     use mvm_core::net::session::SessionError;
@@ -841,7 +855,7 @@ mod tests {
             session_id: "session-1".into(),
             plan_nonce: mvm_core::plan::Nonce::from_hex("0123456789abcdef0123456789abcdef")
                 .unwrap(),
-            not_after: chrono::Utc::now(),
+            not_after: mvm_core::util::time::utc_timestamp_now(),
             verbs: vec![mvm_core::plan::VerbId::new("ping").unwrap()],
             drive: None,
             application_terminal: None,
@@ -966,7 +980,9 @@ mod tests {
                 session_id: vm_name.into(),
                 plan_nonce: mvm_core::plan::Nonce::from_hex("0123456789abcdef0123456789abcdef")
                     .unwrap(),
-                not_after: chrono::Utc::now() - chrono::Duration::seconds(1),
+                not_after: mvm_core::util::time::utc_timestamp_now()
+                    .checked_add_secs(-1)
+                    .unwrap(),
                 verbs: vec![mvm_core::plan::VerbId::new("activate-environment").unwrap()],
                 drive: None,
                 application_terminal: None,

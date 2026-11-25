@@ -241,6 +241,21 @@ fn whole_secs_since_truncates_toward_zero_like_chrono() {
     );
 }
 
+#[test]
+fn duration_since_keeps_nanoseconds_and_refuses_a_later_earlier() {
+    use core::time::Duration;
+    assert_eq!(
+        ours(301, 100).duration_since(ours(0, 900)),
+        Some(Duration::new(300, 999_999_200))
+    );
+    assert_eq!(ours(5, 0).duration_since(ours(5, 0)), Some(Duration::ZERO));
+    assert_eq!(ours(0, 900).duration_since(ours(301, 100)), None);
+    assert_eq!(
+        ours(MAX_SECS, 0).duration_since(ours(MIN_SECS, 0)),
+        Some(Duration::from_secs((MAX_SECS - MIN_SECS) as u64))
+    );
+}
+
 #[cfg(feature = "protocol")]
 #[test]
 fn the_chrono_bridge_keeps_the_instant_and_refuses_what_it_cannot_hold() {
@@ -279,4 +294,13 @@ fn the_chrono_grant_bridge_round_trips_at_the_range_edges() {
         assert_eq!(dt, chrono_at(secs, nanos));
         assert_eq!(UtcTimestamp::try_from(dt), Ok(t));
     }
+}
+
+#[test]
+fn the_epoch_constant_is_the_chrono_epoch() {
+    assert_eq!(
+        serde_json::to_string(&UtcTimestamp::UNIX_EPOCH).unwrap(),
+        serde_json::to_string(&DateTime::<Utc>::UNIX_EPOCH).unwrap()
+    );
+    assert_eq!(UtcTimestamp::UNIX_EPOCH, ours(0, 0));
 }

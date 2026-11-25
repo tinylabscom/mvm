@@ -15,6 +15,7 @@ use mvm_vmm::host::shell::shell_quote;
 
 use mvm_client::entrypoint::verb_audit::audit_verb_refusal;
 use mvm_client::entrypoint::{EntrypointAdmission, EntrypointVm, SessionVmName, WorkloadSource};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::audit::{LocalAuditKind, emit as audit_emit};
 use mvm_core::session::{self, MAX_IDLE_TIMEOUT_SECS, SessionId, SessionState};
 use mvm_core::user_config::MvmConfig;
@@ -316,7 +317,9 @@ const LONG_LIVED_DEV_THRESHOLD_SECS: i64 = 3600;
 /// skipped silently. The classification is read-only — no record
 /// mutation, no VM teardown.
 fn emit_stale_warnings(sessions: &[mvm_core::session::SessionRecord]) {
-    let now = chrono::Utc::now();
+    let Ok(now) = mvm_core::util::time::try_utc_timestamp_now() else {
+        return;
+    };
     let mut stale_running: Vec<&mvm_core::session::SessionRecord> = Vec::new();
     let mut long_lived_dev: Vec<&mvm_core::session::SessionRecord> = Vec::new();
 
@@ -328,12 +331,10 @@ fn emit_stale_warnings(sessions: &[mvm_core::session::SessionRecord]) {
             .last_invoke_at
             .as_deref()
             .unwrap_or(&record.started_at);
-        let Ok(last_dt) = chrono::DateTime::parse_from_rfc3339(last_str) else {
+        let Ok(last_dt) = last_str.parse::<UtcTimestamp>() else {
             continue;
         };
-        let elapsed_since_used = now
-            .signed_duration_since(last_dt.with_timezone(&chrono::Utc))
-            .num_seconds();
+        let elapsed_since_used = now.whole_secs_since(last_dt);
         if elapsed_since_used > 0 && (elapsed_since_used as u64) > record.idle_timeout_secs {
             stale_running.push(record);
             // A session can be both stale-Running AND long-lived-dev,
@@ -343,12 +344,10 @@ fn emit_stale_warnings(sessions: &[mvm_core::session::SessionRecord]) {
         }
 
         if record.mode == mvm_core::session::SessionMode::Dev {
-            let Ok(started_dt) = chrono::DateTime::parse_from_rfc3339(&record.started_at) else {
+            let Ok(started_dt) = record.started_at.parse::<UtcTimestamp>() else {
                 continue;
             };
-            let age = now
-                .signed_duration_since(started_dt.with_timezone(&chrono::Utc))
-                .num_seconds();
+            let age = now.whole_secs_since(started_dt);
             if age > LONG_LIVED_DEV_THRESHOLD_SECS {
                 long_lived_dev.push(record);
             }
@@ -663,8 +662,7 @@ fn run_in_session(
 }
 
 fn rfc3339_now() -> String {
-    use chrono::SecondsFormat;
-    chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+    mvm_core::util::time::utc_now()
 }
 
 /// Boot a session VM and register a session record, but **don't** dispatch
@@ -1147,9 +1145,11 @@ mod tests {
         // Stale: started_at well past idle_timeout — should be reaped.
         let mut stale =
             session::SessionRecord::new_running("vm-stale", "wl", session::SessionMode::Prod);
-        let stale_ts = chrono::Utc::now() - chrono::Duration::seconds(900);
         stale.idle_timeout_secs = 60;
-        stale.started_at = stale_ts.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        stale.started_at = mvm_core::util::time::utc_timestamp_now()
+            .checked_add_secs(-900)
+            .unwrap()
+            .to_string();
         let stale_id = stale.id.clone();
         session::write_session(&stale).unwrap();
 
@@ -1175,8 +1175,10 @@ mod tests {
         let mut rec = session::SessionRecord::new_running("vm-1", "wl", session::SessionMode::Prod);
         rec.state = session::SessionState::Killed;
         rec.idle_timeout_secs = 60;
-        rec.started_at = (chrono::Utc::now() - chrono::Duration::seconds(900))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        rec.started_at = mvm_core::util::time::utc_timestamp_now()
+            .checked_add_secs(-900)
+            .unwrap()
+            .to_string();
         session::write_session(&rec).unwrap();
 
         let reaped = reap_expired_sessions(false);

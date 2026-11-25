@@ -957,11 +957,17 @@ fn main() {
     // `Arc::clone` — the inner Mutex serialises the few writes
     // (`set_entrypoint`, `set_warm_pool`, …) without measurable
     // contention because writes only fire at boot completion events.
-    let pinned_verb_grant = load_pinned_verb_grant(
-        std::path::Path::new("/run/mvm/verb-grant.json"),
-        std::path::Path::new(HOST_SIGNER_PUBKEY_PATH),
-        chrono::Utc::now(),
-    );
+    let pinned_verb_grant = match mvm_core::util::time::try_utc_timestamp_now() {
+        Ok(now) => load_pinned_verb_grant(
+            std::path::Path::new("/run/mvm/verb-grant.json"),
+            std::path::Path::new(HOST_SIGNER_PUBKEY_PATH),
+            now,
+        ),
+        Err(e) => {
+            eprintln!("mvm-guest-agent: clock unusable ({e}), booting without grant");
+            None
+        }
+    };
     // Resolve the host-signer trust anchor once at boot and hold it for the
     // agent's lifetime. PostRestore re-pin verifies incoming envelopes against
     // this anchor, never against the self-attested key inside the envelope.

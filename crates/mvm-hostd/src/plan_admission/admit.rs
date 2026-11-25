@@ -364,9 +364,18 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
     // must refuse before the nonce below is spent.
     let unit = super::topology_binding::admit_topology_binding(&verified, host_signer_keys_dir)?;
     // Also before the nonce: a plan refused for want of cores it can be
-    // confined to keeps its replay allowance.
+    // confined to, or of an owner for its unit's liveness deadline, keeps its
+    // replay allowance.
+    let home = mvm_core::config::mvm_home_strict()?;
+    super::liveness_owner::admit_liveness_owner(
+        &home,
+        &verified,
+        unit.as_ref(),
+        backend,
+        host_signer_keys_dir,
+    )?;
     let placement = super::placement::admit_core_placement(
-        &mvm_core::config::mvm_home_strict()?,
+        &home,
         &verified,
         unit.as_ref(),
         backend,

@@ -45,13 +45,27 @@ impl Host {
     /// Admit on a host whose scope carries a CPU set, so exclusive placement
     /// is served.
     fn admit_topology_on(&self, topology: &Topology, scope_cpuset: bool) {
+        self.admit_topology_for(
+            topology,
+            mvm_core::vm_backend::BackendKind::Firecracker,
+            scope_cpuset,
+        );
+    }
+
+    /// Admit for a host that boots units on `backend`.
+    fn admit_topology_for(
+        &self,
+        topology: &Topology,
+        backend: mvm_core::vm_backend::BackendKind,
+        scope_cpuset: bool,
+    ) {
         let keys = self.keys();
         let signed = sign_topology_as_host(topology, Some(&keys)).expect("signs");
         let emitter = emitter(self.home.path(), &keys);
         admit_topology(&TopologyAdmissionRequest {
             tenant: &topology.tenant,
             signed: &signed,
-            backend: mvm_core::vm_backend::BackendKind::Firecracker,
+            backend,
             measured_failover: None,
             host_cpus: &crate::topology_admission::HostCpus {
                 scope_cpuset,
@@ -75,6 +89,23 @@ impl Host {
             None,
             None,
             RunPosture::without_backend(Variant::Dev),
+        )
+    }
+
+    /// Admit `plan` for a launch on `backend`.
+    fn admit_on(
+        &self,
+        plan: &ExecutionPlan,
+        backend: mvm_core::vm_backend::BackendKind,
+    ) -> Result<AdmittedPlan> {
+        admit_plan_for_run(
+            plan,
+            &SystemClock,
+            &self.ledger,
+            Some(&self.keys()),
+            None,
+            None,
+            RunPosture::on_backend(Variant::Dev, backend),
         )
     }
 
@@ -722,4 +753,76 @@ fn a_synthesized_plan_sized_differently_from_its_unit_is_refused() {
             "{site:?}"
         );
     }
+}
+
+/// The fixture plan's unit, declaring a liveness period.
+fn watched_topology(plan: &ExecutionPlan) -> Topology {
+    let mut topology = topology_for(plan, 1);
+    topology.units[0].liveness_period_ms = std::num::NonZeroU32::new(5_000);
+    topology
+}
+
+#[test]
+fn a_unit_with_a_liveness_period_launches_only_where_its_deadline_has_an_owner() {
+    use mvm_core::vm_backend::BackendKind;
+
+    let host = Host::new();
+    let first = plan();
+    let topology = watched_topology(&first);
+    host.admit_topology_for(&topology, BackendKind::Libkrun, false);
+    let bound = bind(first, &topology, UNIT);
+
+    // The topology was admitted for a backend with a supervisor, and this
+    // launch is on one without: refused, audited, nonce kept.
+    let err = host
+        .admit_on(&bound, BackendKind::Firecracker)
+        .expect_err("Firecracker has no process to hold the deadline");
+    assert_eq!(
+        err.downcast_ref::<LivenessOwnerRefusal>(),
+        Some(&LivenessOwnerRefusal::BackendHoldsNoDeadline {
+            unit: WorkloadId(UNIT.to_string()),
+            period_ms: std::num::NonZeroU32::new(5_000).unwrap(),
+            backend: BackendKind::Firecracker,
+        }),
+        "{err:#}"
+    );
+    assert!(
+        err.downcast_ref::<super::topology_binding::TopologyRefusalAudited>()
+            .is_some(),
+        "the refusal is recorded by the check itself"
+    );
+    let entry = host.last_entry(&bound.tenant.0);
+    assert_eq!(entry["event"], "plan.admission_refused");
+    assert_eq!(entry["labels"]["stage"], LIVENESS_OWNER_STAGE);
+
+    // No backend named: nothing can be said to hold it either.
+    let err = host.admit(&bound).expect_err("no backend, no owner");
+    assert!(
+        matches!(
+            err.downcast_ref::<LivenessOwnerRefusal>(),
+            Some(LivenessOwnerRefusal::NoBackend { .. })
+        ),
+        "{err:#}"
+    );
+
+    // The refusals spent nothing, and each supervised tier admits the unit.
+    host.admit_on(&bound, BackendKind::Libkrun)
+        .expect("the nonce was never spent, and libkrun holds the deadline");
+    for backend in [BackendKind::Hvf, BackendKind::AppleContainer] {
+        host.admit_on(&bind(plan(), &topology, UNIT), backend)
+            .unwrap_or_else(|e| panic!("{backend:?} holds the deadline: {e:#}"));
+    }
+}
+
+#[test]
+fn a_unit_without_a_liveness_period_still_launches_on_firecracker() {
+    let host = Host::new();
+    let plan = plan();
+    let topology = topology_for(&plan, 1);
+    host.admit_topology(&topology);
+    host.admit_on(
+        &bind(plan, &topology, UNIT),
+        mvm_core::vm_backend::BackendKind::Firecracker,
+    )
+    .expect("no period, nothing to own");
 }

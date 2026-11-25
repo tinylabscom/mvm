@@ -618,7 +618,7 @@ mod tests {
         assert_eq!(job_if(linux), "inputs.run_linux");
         for required in [
             "shard: [\"0/2\", \"1/2\"]",
-            "run: just e2e::docs",
+            "run: just e2e docs",
             "uses: actions/checkout@",
             "MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP: ${{ inputs.allow_runtime_candidate_skip }}",
         ] {
@@ -704,7 +704,7 @@ mod tests {
             "runs-on: [self-hosted, macOS, ARM64, m1]",
             "shard: [\"0/2\", \"1/2\"]",
             "MVM_BDD_SNAPSHOT: \"1\"",
-            "just e2e::docs",
+            "just e2e docs",
             "uses: actions/checkout@",
         ] {
             assert!(mac.contains(required), "missing {required}");
@@ -1441,7 +1441,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            !linux_commands.contains("just bdd"),
+            !linux_commands.contains("just test bdd"),
             "the Gherkin suite belongs to bdd-conformance; running it here too \
              is the duplicate that made this the slowest lane in the workflow"
         );
@@ -1452,7 +1452,7 @@ mod tests {
         )
         .expect("BDD workflow must be readable");
         assert!(
-            bdd_workflow.contains("just bdd"),
+            bdd_workflow.contains("just test bdd"),
             "bdd-conformance must still run the Gherkin suite"
         );
         // ...and it has to run on every push to main, the Linux lane's tier.
@@ -2336,6 +2336,10 @@ mod tests {
                 // dev-dependency, so their test lanes compile and run it.
                 "crates/mvm-hostd/src/seal_gate.rs",
                 "crates/mvm-hostd/src/mailbox_service.rs",
+                "crates/mvm-hostd/src/plan_admission/cli_cold.rs",
+                // Enabled through mvm-client's dev-dependency so its retained
+                // fork containment tests exercise the private test restorer.
+                "crates/mvm-hostd/src/plan_admission/retained_vm_full.rs",
                 "tests/audit_emissions_live.rs",
             ]
             .iter()

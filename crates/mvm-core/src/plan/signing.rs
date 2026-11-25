@@ -193,19 +193,18 @@ pub fn verify_plan(
 pub mod test_support {
     use super::*;
     use crate::plan::types::*;
-    use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
 
     /// A minimal valid `ExecutionPlan` with a fixed validity window + nonce.
     /// Callers override `valid_from`/`valid_until`/`nonce` for their scenario.
     pub fn sample_plan() -> ExecutionPlan {
-        let from = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
+        let from: mvm_contract::timestamp::UtcTimestamp = "2026-05-01T00:00:00Z".parse().unwrap();
         let mut plan = crate::plan::test_support::PlanFixture::new()
             .plan_id("01HXTESTPLAN000000000000")
             .tenant("tenant-a")
             .workload("workload-1")
             .nonce([0xab; 16])
-            .validity(from, from + chrono::Duration::hours(1))
+            .validity(from, from.checked_add_secs(3_600).unwrap())
             .audit_labels(BTreeMap::from([("workflow".into(), "etl-1".into())]))
             .build();
         plan.image.name = "tenant-worker-aarch64".into();

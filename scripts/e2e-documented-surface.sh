@@ -367,7 +367,7 @@ release_lock() { [[ -f "$LOCK" ]] && [[ "$(cat "$LOCK" 2>/dev/null)" == "$$" ]] 
 # meant to fix.
 e2e_phase build
 echo "==> refreshing embedded aux helpers"
-just payload::refresh
+just clean payload
 
 # Preserve a feature-off binary first. Its SDK-sidecar warm is the regression
 # for the contributor path: a binary that carries no host payload must still
@@ -410,7 +410,7 @@ fi
 # cargo makes this a no-op when they are already current, so the cost of always
 # doing it is a fingerprint check.
 echo "==> building the per-VM host helpers"
-just payload::supervisors --profile "$E2E_PROFILE"
+just build supervisors --profile "$E2E_PROFILE"
 
 # The language SDKs drive machines in-process through the host library and find
 # it beside the `mvmctl` on PATH, which the live steps put first. `cargo build
@@ -495,9 +495,9 @@ start_watcher
 e2e_phase typescript-sdk
 echo "==> building the TypeScript SDK"
 if [[ ! -d crates/mvm-sdk/sdks/typescript/node_modules ]]; then
-  just sdk::install-typescript
+  just setup typescript
 fi
-just sdk::build-typescript
+just build sdk typescript
 
 # ---------------------------------------------------------------------------
 # 2. Warm the shared artifact home.

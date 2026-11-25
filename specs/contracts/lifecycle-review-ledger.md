@@ -340,6 +340,197 @@ Firecracker or HVF restore, broaden ADR-001 claims, establish formal cold/warm
 performance, or migrate same-identity sealed resume, warm claim, operator trial
 or the final architecture gate.
 
+## Planless warm-parent preparation
+
+The warm-parent preparation slice under
+[#5520](https://github.com/tinylabscom/mvm/issues/5520) moves pool warming and
+detached refill behind one opaque `mvm-client` capability. The capability owns
+the resolved backend, boot shape, canonical `StandbyCompat`, release-runtime
+evidence and built-runtime custody. Its constructor refuses plan JSON, tenant,
+CPU grants and placement, secrets, services, mailbox, ports, caller
+registration and admission durability. The runner remains the owner of runtime
+lifecycle binding, runtime metadata-before-boot, parent boot, capture and
+backend-specific saved-state versus resident-HVF retention.
+
+A factory parent is host capacity, not a workload. No `AdmittedPlan` is minted
+for it and no workload audit chain is borrowed to publish it. After capture,
+the client signs the checkpoint metadata digest with the host snapshot
+identity; saved-state claim lookup authenticates that bounded source evidence.
+Legacy parents carrying only their authenticated audit-chain creation record
+remain claimable during the transition; fallback applies only when the new
+signature is absent, never when present evidence is malformed or fails
+verification.
+Capture/evidence failure discards the unpublished checkpoint, while individual
+spawn failures remain best-effort and ownership-uncertain native failures
+retain their guards. A failed stop while discarding an unpublished resident
+parent likewise returns an uncertain cleanup error retaining the refill lock
+and checkpoint instead of continuing or reporting cleanup. Multi-image warming
+classifies both native boot custody and cleanup custody, propagating either
+intact before attempting another source. Existing runner source and mock tests
+cover metadata before boot/capture,
+plan/tenant/grant/channel stripping, no NIC/workload channel, failed capture
+cleanup, stale-parent quarantine and refill counting.
+These are source and hermetic-mock witnesses only: they do not qualify a live
+HVF or Firecracker parent, a child claim, cloud/GCP, or cold/warm performance.
+
+## Template transient snapshot acceleration remains disabled
+
+The template-transient source slice under
+[#5520](https://github.com/tinylabscom/mvm/issues/5520) retires the CLI's raw
+snapshot-directory, slot and `FlakeRunConfig` assembler. A mechanically
+eligible template source with snapshot metadata is classified as having a
+disabled accelerator. A compatible authenticated warm claim still runs first;
+after a warm miss, the source selects the existing cold path without allocating
+a slot, creating partial restore state or calling a runtime restore primitive.
+An admitted CLI source remains explicitly template-restore-ineligible while
+retaining its existing warm-claim eligibility. The cold launch mode, warm-miss
+reason and audit outcome are unchanged; no failed restore is fabricated.
+
+Template restore remains disabled because no approved capability yet enforces
+strict HMAC, signature, epoch, retained-runtime binding, and paused no-NIC
+verification before resume. The unauthenticated public runtime entry point is
+removed, and an architecture gate rejects direct template-restore calls or raw
+CLI/client snapshot path/config assembly. Same-identity `vm_full` restore and
+sealed instance resume remain separate authenticated sources with their
+existing lineage, HMAC/epoch/runtime and no-NIC checks. This source-only
+retirement does not promote or broaden any ADR-001 claim and provides no live
+backend or performance evidence.
+
+## Admitted warm-child claim ownership
+
+The admitted warm-child slice under
+[#5520](https://github.com/tinylabscom/mvm/issues/5520) keeps the CLI at the
+selection and Optional/Required policy boundary. The CLI computes the canonical
+`StandbyCompat`, selects one compatible parent and maps a miss, ineligible
+shape, unsupported backend or reservation loss to the existing cold reason or
+required refusal. Grant ceilings are not compatibility-key material. The CLI
+does not construct a claim context, take authority from its `RefCell`, invoke
+the host runner, or recover authority from signed-plan JSON.
+
+`CliAdmission` remains the client-owned one-shot slot. An eligible admitted CLI
+launch contains only hostd's private `PreparedCliCold`: the exact lowered
+config, launch-scoped runtime evidence, policy, durable admission obligation
+and `AdmittedPlan`. The client facade consumes that owner with the selected
+`StandbyHandle`, authenticates the parent checkpoint source, constructs the
+runner claim context and calls the hostd claim facade. Hostd rechecks backend,
+source/runtime/config/plan and policy binding, then spends admission before the
+runner can fork or resume. The runner remains the only owner of retained-parent
+runtime and digest validation, child policy/endpoint/broker construction,
+no-NIC-before-resume, fresh identity/genid/clock, seccomp/grant/late-volume
+handshakes, and claim commit.
+
+The exact states are **prepared**, **selected**, **dispatched**, and
+**claimed/refused/uncertain**. A pool miss or selection-time incompatibility
+never leaves `prepared`. `ReservationLost` is the sole dispatched attempt that
+restores the exact prepared allocation, plan identity and runtime evidence;
+Optional may cold-dispatch it, while Required refuses without doing so. Every
+final-gate or runner refusal leaves only the deferred audit continuation and
+cannot cold retry. A successful claim transfers the lifecycle lock with the
+child and removes the consumed pool entry. Healthy-parent reservation rollback
+and failed-parent quarantine remain runner-owned.
+
+`StopUnconfirmed` is nonterminal even though launch authority is spent. It
+retains parent reservation/cleanup custody, child lifecycle state, runtime and
+writable artifacts for reconciliation; the CLI neither cold-falls back nor
+seals a terminal completion. In particular, a failed identity/seccomp/grant
+handshake followed by a failed child stop returns the typed
+`StopUnconfirmed`/CLI `UncertainStop` path rather than an ordinary claim
+refusal. Required audit synchronization may still overlap selection and
+isolated initialization, but hostd waits before claim authority is released.
+The CLI's existing deferred `plan.launched`, posture, exit and seal sequence
+remains unchanged.
+
+Focused source gates prove that CLI production code cannot name hostd's
+prepared authority, `ClaimContext`, or direct backend/hostd claim functions.
+A selected record already marked `Claimed`, or confirmed absent because the
+winner consumed and removed it, is reservation loss and restores the exact
+capability. An unreadable or malformed record is not evidence of a winner and
+remains a terminal refusal. Production client-facade tests with test-support
+backends cover successful transfer and success-only pool removal, exact
+slot/plan/nonce/runtime-evidence and continuation restoration across both
+claimed-record and removed-record races, subsequent Optional cold dispatch,
+terminal preparation spending, deferred audit shape, and uncertain-stop
+retention/classification. CLI policy tests cover Optional cold versus Required
+refusal and prohibit uncertain cold fallback. Existing runner tests cover
+malformed-record refusal, pre-claim identity/runtime/config refusals,
+retained-parent mismatch, policy/grant/seccomp delivery, rollback/quarantine
+and uncertain-stop custody. These are compile, source and hermetic-mock
+witnesses only. They do not qualify a native HVF or Firecracker claim, Linux
+confinement, cloud/GCP behavior, formal cold/warm performance, operator trial,
+or same-identity restore.
+
+## Operator-admitted trial preparation capability
+
+The operator trial now keeps operator-owned campaign/session joining,
+attestation posture, backend and artifact digest checks, signed extension
+promotion, authority attenuation, declaration/network/audit labels and
+controller lifecycle assembly in `operator_admitted_trial_booter`. The
+attach-if-absent → one launch-scoped selected-release verification → signed
+admission with Required durability → final gates/assurance bind → dispatch
+sequence is owned by a private, one-shot hostd capability over the shared
+`prepare_launch` and admitted-start tail. The same `Arc<VerifiedRuntimeSet>`
+reaches admission and dispatch; assurance compares that retained release
+identity and the selected config/rootfs/kernel/verity observations rather than
+authenticating a second release archive.
+
+This is deliberately a structural, no-behavior-change migration. An
+operator-selected legacy bundle remains on the existing authenticated legacy
+branch and has no release `RuntimeIdentity`; portable runtime selection is not
+exposed by the operator configuration. This source and mock evidence does
+**not** qualify the legacy format as a current release artifact or justify a
+release-only production claim. Retiring it requires separate compatibility
+evidence and policy approval.
+
+Required audit synchronization retains its overlap contract: isolated
+initialization may overlap the sync, but workload activation, controller,
+secret, writable-volume, egress and mailbox authority remain behind its
+successful completion. If the controller plane is missing after start, a
+confirmed stop produces the ordinary terminal refusal. A failed stop returns
+typed uncertain custody retaining the exact backend, VM identity, admission,
+available enforced-grant state and audit owner, without a terminal failure
+audit or cleanup claim. The same owned policy applies to post-start grant,
+budget, assurance-session and mailbox rollback uncertainty. The campaign
+runner propagates that custody and stops instead of converting it to missing
+evidence and advancing to another trial.
+
+Focused source and hermetic tests cover source ordering, retained runtime
+identity, tamper/refusal-before-start behavior, authority attenuation, audit
+labels and controller rollback classification. They do not qualify a live
+Firecracker/HVF trial, hardware attestation, cloud/GCP behavior, native
+backend custody, Nix artifacts or formal launch performance.
+
+## Final workload dispatch source boundary
+
+The final [#5520](https://github.com/tinylabscom/mvm/issues/5520) source gate
+classifies workload dispatch into fresh-authority and same-identity owners.
+Fresh authority remains with the private hostd admitted tail, typed client
+facades for CLI cold, warm claim, filesystem quick fork, operator trial and
+full-VM fresh-child fork, explicit native/actor ownership, and named lower
+runtime/backend implementations. A cold-tier durable-session resume stages a
+retained filesystem into a fresh boot under a newly signed plan; it is not a
+same-identity restore exception.
+
+Same identity has exactly two owners. `mvmctl vm checkpoint restore` enters the
+client facade and then one runtime vm_full transaction. One authenticated
+metadata value selects the target identity, backend restorer, content, tenant
+and retained-runtime checks, so a catalog replacement cannot mix generations.
+Sealed instance resume enters `verify_and_resume*` and its guarded no-NIC
+load/resume implementation. Neither path is forced through fresh admission.
+
+The generic public client prepared-start functions and raw checkpoint restore
+reexports are removed. Full-VM fresh-child dispatch accepts only the concrete
+Firecracker and HVF restorers selected from authenticated checkpoint origin;
+the hostd boundary no longer accepts an arbitrary callback hidden behind a
+backend tag. The production-source gate strips comments, strings and test-only
+items, retains the raw-template checks, rejects additional same-identity owners
+or fresh dispatch in those modules, and pins the exact typed seams.
+
+Fixture and compile-fail evidence covers the source/API boundary. Existing
+HMAC, epoch, runtime, no-NIC and vm_full lineage witnesses remain the behavioral
+evidence. This source classification does not qualify a live Firecracker/HVF
+restore or launch, cloud/GCP behavior, Nix artifacts, or formal cold/warm
+performance.
+
 ## Signed application HVF startup diagnostics
 
 Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone
@@ -764,11 +955,35 @@ helper is parked on the guest, with nothing due, ends it with the retention
 pass and a permission-denied exit. A second test quarantines with a message
 already past expiry: the helper reads the ledger again after its wait on the
 guest and before its ordinary maintenance, so the pass expires the message and
-the destination's tip advances. Records whose retention ends
-later, a helper whose ordinary maintenance commit raced the quarantine between
-that read and the commit, an already-exited helper,
-and actor journals are not covered, and their ciphertext can outlive its
-retention until the store is removed by hand. An actor endpoint's
+the destination's tip advances. Stopping a VM sends its helper SIGTERM; the
+helper ends its loop on that signal and, when the workload is quarantined, runs
+the same pass before it exits, so a quarantine followed by a stop still expires
+what is due. The stop kills the helper two seconds after the signal, and a pass
+cut off there leaves the remainder unexpired; the pass is bounded in rounds,
+not in time. A third test stops a parked helper after a quarantine and sees the
+overdue message expired, and a test of the helper binary sees it exit with
+status zero on the signal. A quarantined
+workload's store can also be expired with no VM and no helper:
+`expire_quarantined_mailbox` in `mailbox_process/offline.rs`, reached through
+the optional `MvmClient::expire_quarantined_mailbox` that the local backend
+implements and through `mvmctl machine mailbox-expire`. It refuses unless the
+ledger names the workload quarantined at the stored plan's epoch, and while the
+VM or the recorded helper pid is alive. It opens the store under the custody
+manifest the host signed at the production launch rather than a launch posture:
+the stored plan must hash to its own id and the manifest must name that id and
+nonce. It enrolls as the helper does, marks every commit retention-only, and
+commits only expiry and compaction, at most 4096 commits a call. It expires
+what is due at the time of the call; nothing schedules it, so a record whose
+deadline or retention ends later stays until someone calls again. It needs the
+VM's state directory, because the stored plan and the helper's pid file are
+there, so a store whose VM was removed is not reachable this way. The
+journal admits one writer, so a second call at the same time, or a helper that
+has the store open, makes the call refuse as busy. A test stops a helper
+with a message outstanding, quarantines the workload, and sees the call expire
+the message once its deadline passes and the destination's tip advance. A
+helper whose ordinary maintenance commit raced the quarantine between its read
+and the commit, and actor journals, which have no expiry at all, are still not
+covered. An actor endpoint's
 opener takes the ordering choice as a required argument, so a new opener has to
 name it; nothing stops one from naming the unordered choice for a production
 launch. A

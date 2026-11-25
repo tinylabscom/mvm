@@ -1,8 +1,8 @@
 name: Security
 
-# ADR-001 §W6.3 — workflow that hosts the nightly CI-side security
+# Workflow that hosts the nightly CI-side security
 # gate. Lanes correspond to the microVM hardening workstreams and the
-# seven claims in CLAUDE.md::Security model. These lanes provide release,
+# claims in ADR-001's ledger. These lanes provide release,
 # nightly, and manually requested security evidence; they are not PR checks
 # and do not block merge directly.
 #
@@ -51,10 +51,10 @@ env:
 
 jobs:
   # ── Lane 1: Supply chain ──────────────────────────────────────────
-  # Maps to ADR-001 §W5.2 — advisories, license allowlist, multi-
+  # Maps to ADR-001 claim 7 — advisories, license allowlist, multi-
   # version bans, and registry source allowlist.
   cargo-deny:
-    name: Supply chain — cargo-deny (ADR-001 §W5.2)
+    name: Supply chain — cargo-deny (ADR-001 claim 7)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -66,7 +66,7 @@ jobs:
           checker: deny
 
   cargo-audit:
-    name: Supply chain — cargo-audit (ADR-001 §W5.2)
+    name: Supply chain — cargo-audit (ADR-001 claim 7)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -173,7 +173,7 @@ jobs:
       - name: No host-signer / admission symbols in the builder daemon
         run: ./scripts/check-no-authority.sh builderd
 
-  # ── Lane 2b: Seccomp tier functional denial (ADR-001 §W2.4) ───────
+  # ── Lane 2b: Seccomp tier functional denial (ADR-001 claim 1) ──────
   # Tier-structure unit tests in `mvm-security` cover cumulative-subset
   # and serde shapes; they don't exercise the BPF program at runtime.
   # This lane spawns `mvm-seccomp-apply <tier> -- syscall-probe` on
@@ -184,7 +184,7 @@ jobs:
   # but fails to translate to a working seccomp filter (e.g., wrong
   # syscall number, missing arch coverage, NNP not set).
   seccomp-functional:
-    name: Seccomp tier functional denial (ADR-001 §W2.4)
+    name: Seccomp tier functional denial (ADR-001 claim 1)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -208,11 +208,11 @@ jobs:
         run: cargo test -p mvm-agentd --test seccomp_apply
 
   # ── Lane 3: Reproducibility ────────────────────────────────────────
-  # ADR-001 §W5.3 — two clean builds must produce byte-identical
+  # ADR-001 claim 7 — two clean builds must produce byte-identical
   # binaries. Catches build-time non-determinism that could mask
   # supply-chain injection.
   reproducibility:
-    name: Reproducibility (ADR-001 §W5.3)
+    name: Reproducibility (ADR-001 claim 7)
     runs-on: ubuntu-latest
     env:
       SOURCE_DATE_EPOCH: "1700000000"
@@ -260,7 +260,7 @@ jobs:
           echo "ok: matching sha256 across two clean builds: $a"
 
   # ── Lane 4: Parser fuzzing (best-effort, time-boxed) ───────────────
-  # ADR-001 §W4.2 + Plan 85 §R1 — cargo-fuzz harnesses for
+  # ADR-001 claim 5 + Plan 85 §R1 — cargo-fuzz harnesses for
   # GuestRequest, the authenticated-frame envelope, the libkrun
   # SupervisorConfig parser, and the OCI layer-unpack ingress.
   # Per-target durations are the `FUZZ_SECS_*` budget below, deliberately
@@ -378,7 +378,7 @@ jobs:
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
-        # Plan 88 W6 / ADR-055 §"New untrusted-input surfaces" — the
+        # Plan 88 W6 / ADR-001 claim 5 — the
         # `mvm-libkrun-supervisor` binary reads `SupervisorConfig`
         # JSON on stdin before any libkrun call. This target asserts
         # the deserializer never panics on adversarial bytes; same
@@ -551,7 +551,7 @@ jobs:
   # Run them in isolation so a regression is visible here even when
   # the broader test job in ci.yml is skipped.
   hash-verify-tests:
-    name: Hash-verify regression (ADR-001 §W5.1)
+    name: Hash-verify regression (ADR-001 claim 6)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -562,14 +562,14 @@ jobs:
           toolchain: 1.100.0
 
       # build.rs cross-compiles the embedded host-vm binaries (Plan 115 /
-      # ADR-065); without zig + cargo-zigbuild the mvmctl build panics.
+      # ADR-004); without zig + cargo-zigbuild the mvmctl build panics.
       - uses: ./.github/actions/install-zigbuild
 
       - name: Run hash-verify tests
         run: "cargo test -p mvm-build --lib published_image_set::tests::"
 
   # ── Lane 6: Verified boot artifact gate ────────────────────────────
-  # ADR-001 §W3.4 — the production verity-sealed image must ship its
+  # ADR-001 claim 3 — the production verity-sealed image must ship its
   # ext4 + `*.verity` + `*.roothash` sidecars, and the roothash must
   # actually authenticate the ext4 through that hash tree. If the seal is
   # disabled or broken on the prod path, this gate fails before the
@@ -581,7 +581,7 @@ jobs:
   # and asserts on those bytes. The rootfs/OCI seal itself is unit-tested
   # in `mvm_build::oci_to_rootfs::verity`.
   verified-boot-artifacts:
-    name: Verified boot artifacts (ADR-001 §W3.4)
+    name: Verified boot artifacts (ADR-001 claim 3)
     runs-on: ubuntu-latest
     env:
       # A home of the job's own, so the overlay asserted on is the one this
@@ -639,7 +639,7 @@ jobs:
           for f in overlay.ext4 overlay.verity overlay.roothash; do
             if [ ! -s "$out/$f" ]; then
               echo "::error::missing $f in the assembled runtime overlay" >&2
-              echo "ADR-001 §W3.4 requires the production verity-sealed image" >&2
+              echo "ADR-001 claim 3 requires the production verity-sealed image" >&2
               echo "to ship {ext4,verity,roothash}; a missing sidecar usually" >&2
               echo "means the dm-verity seal was disabled on the prod path." >&2
               exit 1
@@ -681,7 +681,7 @@ jobs:
           echo "ok: overlay.{ext4,verity,roothash} present and consistent, roothash=${hash:0:12}…"
 
   # ── Lane 6b: Sealed-prod rootfs has no SSH (plan 76 Phase 8) ──────
-  # Plan 76 §Phase 8 + ADR-001 §"No SSH inside microVMs". The vsock-
+  # Plan 76 §Phase 8 + ADR-001 claim 15. The vsock-
   # only claim is enforced at runtime by the `mvm-guest-agent`
   # dispatcher (Plan 76 Phase 1 + the `sealed-prod-allowlist` CI
   # lane in `ci.yml`). This lane is the static counterpart: it
@@ -775,7 +775,7 @@ jobs:
           fi
 
           # SSH host keys (ssh_host_*), anywhere — a ready-to-serve SSH
-          # leak per ADR-001 §"No SSH inside microVMs".
+          # leak per ADR-001 claim 15.
           if sudo find "$mnt" -type f -name 'ssh_host_*' -print -quit | grep -q .; then
             echo "::error::SSH host keys present in the sealed image:" >&2
             sudo find "$mnt" -type f -name 'ssh_host_*' >&2 || true
@@ -880,7 +880,7 @@ jobs:
   # already lives, and because a nightly is the only trigger that makes a
   # lane's silence detectable.
   app-deps-audit:
-    name: app-deps-audit (ADR-047 claim 9 / Plan 73 Followup D)
+    name: app-deps-audit (ADR-001 claim 11 / Plan 73 Followup D)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

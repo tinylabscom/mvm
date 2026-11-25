@@ -29,7 +29,7 @@ use mvm_core::arch::GuestArch;
 
 use super::{
     GuestBinsError, GuestBinsManifest, GuestBinsMember, guest_bins_archive_name,
-    verify_guest_bins_archive,
+    read_release_manifest, verify_guest_bins_archive,
 };
 use crate::runtime_overlay::{RuntimeOverlayError, fetch_cli_release_archive};
 
@@ -205,11 +205,16 @@ pub fn check_release_archive(
     archive: &Path,
     version: &str,
 ) -> Result<GuestBinsManifest, ReleaseGuestRuntimeError> {
-    let manifest =
-        verify_guest_bins_archive(archive).map_err(|source| ReleaseGuestRuntimeError::Archive {
-            path: archive.to_path_buf(),
-            source,
-        })?;
+    let archive_error = |source| ReleaseGuestRuntimeError::Archive {
+        path: archive.to_path_buf(),
+        source,
+    };
+    // The manifest must be the first entry: a launch reads it from there.
+    std::fs::File::open(archive)
+        .map_err(GuestBinsError::from)
+        .and_then(read_release_manifest)
+        .map_err(archive_error)?;
+    let manifest = verify_guest_bins_archive(archive).map_err(archive_error)?;
     check_release_manifest(&manifest, archive, version)?;
     Ok(manifest)
 }
@@ -469,6 +474,76 @@ mod tests {
                 if member.starts_with("x86_64/")),
             "{err:?}"
         );
+    }
+
+    /// Rewrite `archive` with its entries (in archive order) edited by `edit`.
+    fn rewrite_entries(archive: &Path, edit: impl FnOnce(&mut Vec<(String, Vec<u8>)>)) {
+        let mut members = Vec::new();
+        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(
+            std::fs::File::open(archive).unwrap(),
+        ));
+        for entry in tar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().to_string_lossy().into_owned();
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+            members.push((path, bytes));
+        }
+        edit(&mut members);
+        let mut out = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        for (path, bytes) in &members {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(path).unwrap();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            out.append(&header, &bytes[..]).unwrap();
+        }
+        std::fs::write(archive, out.into_inner().unwrap().finish().unwrap()).unwrap();
+    }
+
+    /// An archive that is consistent in every way except that the manifest
+    /// is the last entry rather than the first.
+    #[test]
+    fn an_archive_whose_manifest_is_not_first_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let archive = write_archive(dir.path(), VERSION, &RELEASE_GUEST_RUNTIME_ARCHES);
+        check_release_archive(&archive, VERSION).unwrap();
+        rewrite_entries(&archive, |members| members.rotate_left(1));
+
+        // The full walk still passes: only the order changed.
+        verify_guest_bins_archive(&archive).unwrap();
+        assert!(matches!(
+            check_release_archive(&archive, VERSION),
+            Err(ReleaseGuestRuntimeError::Archive {
+                source: GuestBinsError::ManifestNotFirst(_),
+                ..
+            })
+        ));
+    }
+
+    /// The first-entry reader accepts a manifest-first archive whatever
+    /// follows, so a second `manifest.json` later on is refused only by the
+    /// full walk. A launch that used the reader alone would not see it.
+    #[test]
+    fn a_duplicate_later_manifest_is_accepted_by_the_reader_and_refused_by_the_walk() {
+        let dir = TempDir::new().unwrap();
+        let archive = write_archive(dir.path(), VERSION, &RELEASE_GUEST_RUNTIME_ARCHES);
+        rewrite_entries(&archive, |members| {
+            let manifest = members[0].clone();
+            members.push(manifest);
+        });
+        read_release_manifest(std::fs::File::open(&archive).unwrap()).unwrap();
+        assert!(matches!(
+            check_release_archive(&archive, VERSION),
+            Err(ReleaseGuestRuntimeError::Archive {
+                source: GuestBinsError::DuplicateMember(_),
+                ..
+            })
+        ));
     }
 
     #[test]

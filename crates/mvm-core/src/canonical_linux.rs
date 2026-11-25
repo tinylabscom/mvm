@@ -8,7 +8,7 @@ use crate as mvm_core;
 use anyhow::Context;
 use anyhow::{Result, ensure};
 #[cfg(feature = "host-state")]
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::arch::GuestArch;
 #[cfg(feature = "host-state")]
 use mvm_core::image_set::HostProtocolSupport;
@@ -137,7 +137,9 @@ impl PreparedCanonicalLinux {
         host: &HostProtocolSupport,
     ) -> Result<()> {
         self.check_native_binding(config, backend, host)?;
-        let policy = self.store.load(Utc::now())?;
+        let policy = self
+            .store
+            .load(crate::util::time::try_utc_timestamp_now()?)?;
         ensure!(
             select_canonical_kernel(&self.inputs, self.backend, &policy, &self.host_protocols)?
                 == self.declaration,
@@ -230,11 +232,11 @@ impl PreparedCanonicalLinux {
     /// This returns checked bytes, not launch permission or a teardown receipt.
     #[cfg(feature = "host-state")]
     pub fn kernel_file(&self) -> Result<File> {
-        self.kernel_file_at(Utc::now())
+        self.kernel_file_at(crate::util::time::utc_timestamp_now())
     }
 
     #[cfg(feature = "host-state")]
-    fn kernel_file_at(&self, now: DateTime<Utc>) -> Result<File> {
+    fn kernel_file_at(&self, now: UtcTimestamp) -> Result<File> {
         let policy = self.store.load(now)?;
         let declaration =
             select_canonical_kernel(&self.inputs, self.backend, &policy, &self.host_protocols)?;
@@ -317,7 +319,12 @@ pub fn prepare_canonical_linux(
     trust: &dyn TrustStore,
 ) -> Result<PreparedCanonicalLinux> {
     let inputs = capture_canonical_linux_inputs(archive, pin, trust)?;
-    prepare_with_clock(inputs, backend, host_protocols, Utc::now)
+    prepare_with_clock(
+        inputs,
+        backend,
+        host_protocols,
+        crate::util::time::utc_timestamp_now,
+    )
 }
 
 #[cfg(feature = "host-state")]
@@ -325,7 +332,7 @@ fn prepare_with_clock(
     inputs: CapturedCanonicalLinuxInputs,
     backend: BackendKind,
     host_protocols: HostProtocolSupport,
-    now: impl Fn() -> DateTime<Utc>,
+    now: impl Fn() -> UtcTimestamp,
 ) -> Result<PreparedCanonicalLinux> {
     let arch = GuestArch::require_host(&inputs.manifest().arch)?;
     let proof = inputs.proof();
@@ -513,7 +520,7 @@ mod tests {
     const FEED_SIGNATURE: &[u8] = include_bytes!(
         "../tests/fixtures/image-set-revocations/revocation-list-v1/revocations.json.bundle"
     );
-    fn inside_window() -> DateTime<Utc> {
+    fn inside_window() -> UtcTimestamp {
         "2026-10-15T12:00:00Z".parse().unwrap()
     }
     fn test_host() -> HostProtocolSupport {
@@ -527,7 +534,7 @@ mod tests {
     fn prepare_with_clock(
         inputs: CapturedCanonicalLinuxInputs,
         backend: BackendKind,
-        now: impl Fn() -> DateTime<Utc>,
+        now: impl Fn() -> UtcTimestamp,
     ) -> Result<PreparedCanonicalLinux> {
         super::prepare_with_clock(inputs, backend, test_host(), now)
     }
@@ -984,7 +991,7 @@ mod tests {
             .checkpoint()
             .clone();
         newer.publication += 1;
-        newer.issued_at += chrono::Duration::seconds(1);
+        newer.issued_at = newer.issued_at.checked_add_secs(1).unwrap();
         newer.sha256 = Sha256Hex::from_bytes(b"synthetic checkpoint-first advance");
         let checkpoint_bytes = serde_json::to_vec(&newer).unwrap();
         std::fs::write(&checkpoint_path, &checkpoint_bytes).unwrap();

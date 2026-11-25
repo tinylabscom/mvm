@@ -94,6 +94,10 @@ pub struct CollectorConfig<S, C, F> {
     host_anchor: VerifyingKey,
     connector: C,
     signer: F,
+    /// The signer's socket, when the signer is reached through one. An attempt
+    /// made while nothing answers on it could only fail after the guest had
+    /// answered.
+    signer_socket: Option<PathBuf>,
     // A fn-pointer marker: streams are only ever created inside the worker
     // thread, so the config itself never holds one and stays `Send`
     // regardless of the stream type.
@@ -124,8 +128,16 @@ where
             host_anchor,
             connector,
             signer,
+            signer_socket: None,
             _stream: std::marker::PhantomData,
         }
+    }
+
+    /// Dial the guest only while something accepts on `socket`, the signer's.
+    #[must_use]
+    pub fn with_signer_socket(mut self, socket: PathBuf) -> Self {
+        self.signer_socket = Some(socket);
+        self
     }
 }
 
@@ -332,6 +344,16 @@ where
         // A superseded expectation is the re-registration signal: the next
         // attempt's resolve reads the new boot.
         return AttemptEnd::Failed("registration-stale");
+    }
+    // Without its signer a dial wakes the guest, which reports the failed
+    // session on its console, every backoff for the life of the VM. A socket
+    // file a dead signer left behind still exists, so connect, not stat.
+    if config
+        .signer_socket
+        .as_ref()
+        .is_some_and(|s| std::os::unix::net::UnixStream::connect(s).is_err())
+    {
+        return AttemptEnd::Failed("signer-unavailable");
     }
     let mut stream = match (config.connector)() {
         Ok(stream) => stream,
@@ -921,6 +943,101 @@ mod tests {
     }
 
     #[test]
+    fn an_unchanged_status_refreshes_its_age_without_replacing_the_file() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status.json");
+        let mut last = None;
+        let collecting = status_snapshot(
+            "vm",
+            &CoverageStatus::Collecting { generation: 1 },
+            HostLosses::default(),
+        );
+        write_status(&path, &collecting, &mut last);
+        let first = std::fs::metadata(&path).unwrap();
+        let long_ago = std::time::UNIX_EPOCH + Duration::from_secs(1);
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+
+        write_status(&path, &collecting, &mut last);
+        let refreshed = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            refreshed.ino(),
+            first.ino(),
+            "an unchanged snapshot keeps its directory entry"
+        );
+        assert!(refreshed.modified().unwrap() > long_ago, "its age is reset");
+
+        let degraded = status_snapshot(
+            "vm",
+            &CoverageStatus::Degraded { code: "x" },
+            HostLosses::default(),
+        );
+        write_status(&path, &degraded, &mut last);
+        let read: CollectorStatusSnapshot =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(read.status, "degraded:x", "a change is written");
+    }
+
+    #[test]
+    fn an_absent_or_dead_signer_is_reported_without_dialing_the_guest_until_one_listens() {
+        use std::sync::atomic::AtomicUsize;
+        let state = tempfile::tempdir().unwrap();
+        let (guest_key, anchor_key) = keys();
+        register(state.path(), "vm-s", &guest_key);
+        let dials = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&dials);
+        let connector = move || -> std::io::Result<UnixStream> {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::other("no guest in this test"))
+        };
+        let signer_socket = state.path().join("signer.sock");
+
+        let (sink_tx, _sink_rx) = sync_channel(1);
+        let handle = spawn_collector(
+            CollectorConfig::new(
+                state.path().to_path_buf(),
+                "vm-s",
+                anchor_key.verifying_key(),
+                connector,
+                direct_signer(anchor_key.clone()),
+            )
+            .with_signer_socket(signer_socket.clone()),
+            ChannelSink(sink_tx),
+        )
+        .unwrap();
+        wait_until("a signer-unavailable status", || {
+            handle.status()
+                == CoverageStatus::Degraded {
+                    code: "signer-unavailable",
+                }
+        });
+        assert_eq!(dials.load(Ordering::SeqCst), 0, "the guest is never dialed");
+
+        // A signer that died leaves its socket file behind; nothing accepts
+        // on it, so the guest is still not dialed.
+        drop(std::os::unix::net::UnixListener::bind(&signer_socket).unwrap());
+        assert!(signer_socket.exists());
+        // Long enough for several more attempts on the backoff.
+        std::thread::sleep(BACKOFF_BASE * 15);
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            0,
+            "a dead signer is not dialed past"
+        );
+
+        // A signer that comes up later is used: the next attempt dials.
+        std::fs::remove_file(&signer_socket).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(&signer_socket).unwrap();
+        wait_until("a dial once the signer exists", || {
+            dials.load(Ordering::SeqCst) > 0
+        });
+        handle.stop();
+    }
+
+    #[test]
     fn a_sibling_vms_registered_guest_cannot_feed_this_vms_collector() {
         // Two VMs, each with its own registered guest key. VM B's genuine
         // guest reaching VM A's collector is a forged identity from A's side:
@@ -1056,13 +1173,33 @@ fn status_snapshot(
     }
 }
 
-/// Atomically replace the status file with the current snapshot.
-fn write_status(path: &std::path::Path, snapshot: &CollectorStatusSnapshot) {
-    let tmp = path.with_extension("json.tmp");
-    if let Ok(bytes) = serde_json::to_vec_pretty(snapshot)
-        && std::fs::write(&tmp, bytes).is_ok()
+/// Persist the current snapshot; `last` holds the bytes last persisted.
+///
+/// A changed snapshot atomically replaces the file. An unchanged one is
+/// rewritten in place with the same bytes: readers take the file's age as the
+/// collector's heartbeat, and a rewrite refreshes it without creating or
+/// renaming a directory entry, which the VM's console follower would wake for.
+fn write_status(
+    path: &std::path::Path,
+    snapshot: &CollectorStatusSnapshot,
+    last: &mut Option<Vec<u8>>,
+) {
+    use std::io::Write as _;
+    let Ok(bytes) = serde_json::to_vec_pretty(snapshot) else {
+        return;
+    };
+    if last.as_deref() == Some(bytes.as_slice())
+        && std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|mut file| file.write_all(&bytes))
+            .is_ok()
     {
-        let _ = std::fs::rename(&tmp, path);
+        return;
+    }
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, &bytes).is_ok() && std::fs::rename(&tmp, path).is_ok() {
+        *last = Some(bytes);
     }
 }
 
@@ -1244,9 +1381,11 @@ pub fn start_embedded(
     use anyhow::Context as _;
 
     let status_file = status_path(config);
+    let mut last_status = None;
     write_status(
         &status_file,
         &status_snapshot(vm_name, &CoverageStatus::Connecting, HostLosses::default()),
+        &mut last_status,
     );
 
     let anchor_bytes: [u8; 32] = std::fs::read(&config.host_anchor_path)
@@ -1323,7 +1462,8 @@ pub fn start_embedded(
             host_anchor,
             connector,
             signer,
-        ),
+        )
+        .with_signer_socket(config.signer_sock.clone()),
         sink,
         losses,
     )?;
@@ -1346,6 +1486,7 @@ pub fn start_embedded(
                     write_status(
                         &status_file,
                         &status_snapshot(&vm_name, &current, losses.snapshot()),
+                        &mut last_status,
                     );
                 }
             })?

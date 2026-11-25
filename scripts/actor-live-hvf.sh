@@ -12,7 +12,7 @@ fi
     exit 65
 }
 command -v cargo-zigbuild >/dev/null || {
-    echo "the pinned cargo-zigbuild/Zig toolchain must already be installed (see just payload::toolchain)" >&2
+    echo "the pinned cargo-zigbuild/Zig toolchain must already be installed (see just setup toolchain)" >&2
     exit 65
 }
 

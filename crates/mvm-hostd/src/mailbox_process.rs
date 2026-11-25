@@ -54,8 +54,11 @@ use crate::mailbox_service::{MailboxService, UnitGate};
 use crate::plan_admission::{MailboxLaunchPosture, MailboxPostureHandoff};
 use crate::vm_lifetime::{endpoint_needed, launcher_is_alive};
 
+mod offline;
 mod reader;
 mod restart;
+
+pub use offline::{MailboxExpiry, expire_quarantined_mailbox};
 
 /// The helper binary this module spawns.
 pub const MAILBOX_BIN: &str = "mvm-mailbox";
@@ -150,23 +153,28 @@ pub fn serve(config: MailboxProcessConfig) -> i32 {
 }
 
 fn serve_verified(config: MailboxProcessConfig) -> Result<()> {
-    serve_restarting(config, restart::Backoff::default())
+    serve_restarting(config, restart::Backoff::default(), &STOP_REQUESTED)
 }
 
 /// Serve, reopening from disk when a run ends only because a commit's outcome
 /// stayed unknown. Every reopen repeats the whole start, checks included.
-fn serve_restarting(config: MailboxProcessConfig, backoff: restart::Backoff) -> Result<()> {
+fn serve_restarting(
+    config: MailboxProcessConfig,
+    backoff: restart::Backoff,
+    stop: &'static AtomicBool,
+) -> Result<()> {
     // SAFETY: `getppid` is async-signal-safe and infallible. Read once: after
     // the launcher exits the helper is reparented and the id changes.
     let launcher = unsafe { libc::getppid() };
+    let life = Lifetime { launcher, stop };
     let vm_state_dir = config.vm_state_dir.clone();
     let ready = restart::Readiness::default();
-    let keep = || keep_serving(launcher, &vm_state_dir);
+    let keep = || keep_serving(life, &vm_state_dir);
     let began = std::time::Instant::now();
     restart::run_restarting(
         || {
             let flags = OrderingFlags::default();
-            serve_once(launcher, config.clone(), &ready, &flags)
+            serve_once(life, config.clone(), &ready, &flags)
                 .map_err(|error| restart::classify(error, &ready, &flags, keep()))
         },
         keep,
@@ -182,7 +190,7 @@ fn serve_restarting(config: MailboxProcessConfig, backoff: restart::Backoff) -> 
 }
 
 fn serve_once(
-    launcher: libc::pid_t,
+    life: Lifetime,
     config: MailboxProcessConfig,
     ready: &restart::Readiness,
     flags: &OrderingFlags,
@@ -232,7 +240,7 @@ fn serve_once(
     }
     if let Some(material) = actor {
         return serve_actor(
-            launcher,
+            life,
             ready,
             flags,
             &plan,
@@ -260,7 +268,7 @@ fn serve_once(
     }
     if posture.variant() == Variant::Prod {
         return serve_local(
-            launcher,
+            life,
             ready,
             flags,
             &plan,
@@ -295,11 +303,9 @@ fn serve_once(
     )?;
     ready.announce()?;
     let mut sealer = sealer;
-    while keep_serving(launcher, &vm_state_dir) {
+    while keep_serving(life, &vm_state_dir) {
         if service
-            .serve_guest_while(&route, &mut sealer, || {
-                keep_serving(launcher, &vm_state_dir)
-            })
+            .serve_guest_while(&route, &mut sealer, || keep_serving(life, &vm_state_dir))
             .is_err()
         {
             std::thread::sleep(POLL_INTERVAL);
@@ -309,7 +315,7 @@ fn serve_once(
 }
 
 fn serve_actor(
-    launcher: libc::pid_t,
+    life: Lifetime,
     ready: &restart::Readiness,
     flags: &OrderingFlags,
     plan: &ExecutionPlan,
@@ -433,9 +439,8 @@ fn serve_actor(
             stop_if_unordered(&ordering.flags.refused, &ordering.flags.unknown).is_ok()
         })
     };
-    let active = || {
-        started.elapsed() < remaining && keep_serving(launcher, &config.vm_state_dir) && ordered()
-    };
+    let active =
+        || started.elapsed() < remaining && keep_serving(life, &config.vm_state_dir) && ordered();
     service.install_guest_reader(reader)?;
     service.install_conversation(binding, owner)?;
     ready.announce()?;
@@ -467,7 +472,7 @@ fn serve_actor(
 }
 
 fn serve_local(
-    launcher: libc::pid_t,
+    life: Lifetime,
     ready: &restart::Readiness,
     flags: &OrderingFlags,
     plan: &ExecutionPlan,
@@ -602,13 +607,13 @@ fn serve_local(
     ready.announce()?;
     let still_ordered = || stop_if_unordered(&refused, &unknown).is_ok();
     let unit = plan.workload.0.as_str();
-    while keep_serving(launcher, &vm_state_dir) && still_ordered() {
+    while keep_serving(life, &vm_state_dir) && still_ordered() {
         if workload_is_quarantined(&home, unit, current_epoch) {
             return Err(run_retention_pass(&service, &retention_flag));
         }
         if service
             .serve_guest_while(&route, &mut sealer, || {
-                keep_serving(launcher, &vm_state_dir) && still_ordered()
+                keep_serving(life, &vm_state_dir) && still_ordered()
             })
             .is_err()
         {
@@ -625,7 +630,13 @@ fn serve_local(
             Err(error) => return Err(Error::other(error)),
         }
     }
-    stop_if_unordered(&refused, &unknown)
+    stop_if_unordered(&refused, &unknown)?;
+    // The loop also ends on a stop request or a dead VM, and an operator stops
+    // the VM right after quarantining it.
+    if workload_is_quarantined(&home, unit, current_epoch) {
+        return Err(run_retention_pass(&service, &retention_flag));
+    }
+    Ok(())
 }
 
 /// Does the ledger name this helper's workload quarantined? Any other gate
@@ -667,8 +678,35 @@ fn vm_is_alive(state_dir: &Path) -> bool {
     mvm_vmm::host::process_liveness::state_dir_has_live_process(state_dir)
 }
 
-fn keep_serving(launcher: libc::pid_t, state_dir: &Path) -> bool {
-    state_dir.exists() && endpoint_needed(launcher_is_alive(launcher), vm_is_alive(state_dir))
+/// Set by SIGTERM in the helper process.
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_stop_signal(_: libc::c_int) {
+    STOP_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// Make SIGTERM end the serving loop instead of the process, so a helper that
+/// is stopped with its VM still runs its exit path. The helper binary calls
+/// this once before it serves.
+pub fn stop_on_sigterm() {
+    // SAFETY: the handler is one atomic store, which is async-signal-safe.
+    unsafe {
+        let handler = on_stop_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        libc::signal(libc::SIGTERM, handler);
+    }
+}
+
+/// What bounds one helper's serving: its launcher and a request to stop.
+#[derive(Clone, Copy)]
+struct Lifetime {
+    launcher: libc::pid_t,
+    stop: &'static AtomicBool,
+}
+
+fn keep_serving(life: Lifetime, state_dir: &Path) -> bool {
+    !life.stop.load(Ordering::SeqCst)
+        && state_dir.exists()
+        && endpoint_needed(launcher_is_alive(life.launcher), vm_is_alive(state_dir))
 }
 
 /// The process config for `grant` on the VM at `state_dir`, with keys derived
@@ -2229,12 +2267,19 @@ mod tests {
     /// connection; closing that connection wakes the loop after the
     /// quarantine.
     fn run_loop_through_a_quarantine(overdue: bool) -> QuarantinedLoop {
+        quarantine_a_parked_helper(overdue, false)
+    }
+
+    /// As above; with `stop` the helper is woken by a stop request, as when
+    /// its VM is stopped, instead of by a guest connection.
+    fn quarantine_a_parked_helper(overdue: bool, stop: bool) -> QuarantinedLoop {
         let expires_in_ms: i64 = if overdue { 3_000 } else { 60_000 };
         let fixture = production_loop(expires_in_ms);
         let config = fixture.config.clone();
         let (stopped_tx, stopped_rx) = sync_channel(1);
+        let stop_request: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
         let helper = std::thread::spawn(move || {
-            let outcome = serve_verified(config);
+            let outcome = serve_restarting(config, restart::Backoff::default(), stop_request);
             let _ = stopped_tx.send(());
             outcome
         });
@@ -2259,7 +2304,11 @@ mod tests {
             !helper.is_finished(),
             "the helper does not stop on a ledger change alone"
         );
-        drop(accept_guest(&fixture.listener));
+        if stop {
+            stop_request.store(true, Ordering::SeqCst);
+        } else {
+            drop(accept_guest(&fixture.listener));
+        }
         let stopped = stopped_rx.recv_timeout(Duration::from_secs(20));
         let outcome = if stopped.is_ok() {
             helper.join().expect("helper task")
@@ -2282,6 +2331,119 @@ mod tests {
             "{:?}",
             run.outcome
         );
+    }
+
+    #[test]
+    fn a_helper_stopped_after_a_quarantine_still_expires_an_overdue_message() {
+        let run = quarantine_a_parked_helper(true, true);
+        assert_eq!(
+            run.outcome.kind(),
+            ErrorKind::PermissionDenied,
+            "{:?}",
+            run.outcome
+        );
+        assert!(
+            run.after > run.before,
+            "the expiry reached the ledger after the stop request: {} -> {}",
+            run.before,
+            run.after
+        );
+    }
+
+    /// A helper that served one message due in `expires_in_ms` and was then
+    /// stopped, as when its VM is stopped; the fixture it ran against.
+    fn stopped_helper_with_a_message(expires_in_ms: i64) -> ProductionLoop {
+        let fixture = production_loop(expires_in_ms);
+        let config = fixture.config.clone();
+        let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let (done_tx, done_rx) = sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = done_tx.send(serve_restarting(config, restart::Backoff::default(), stop));
+        });
+        guest_sends(&fixture, b"left behind");
+        stop.store(true, Ordering::SeqCst);
+        done_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the helper stops on request")
+            .expect("a clean stop");
+        fixture
+    }
+
+    fn offline_expiry(fixture: &ProductionLoop) -> Result<offline::MailboxExpiry> {
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        offline::expire(&offline::Store {
+            keys_dir: &keys_dir,
+            home: fixture.home.path(),
+            state_dir: &fixture.state_path,
+            coordinator: fixture.coordinator.clone(),
+        })
+    }
+
+    fn quarantine(fixture: &ProductionLoop) {
+        crate::policy_generation::coordinator::commit_workload(
+            &fixture.coordinator,
+            &mvm_core::host_interface::workload::WorkloadChange::Quarantine {
+                workload: fixture.plan.workload.0.clone(),
+            },
+        )
+        .expect("quarantine");
+    }
+
+    #[test]
+    fn a_quarantined_store_with_no_helper_is_expired_offline() {
+        let fixture = stopped_helper_with_a_message(2_000);
+        quarantine(&fixture);
+        let early = offline_expiry(&fixture).expect("nothing is due yet");
+        assert_eq!((early.expired, early.complete), (0, true), "{early:?}");
+        let before = destination_cursor(&fixture);
+        std::thread::sleep(Duration::from_millis(2_500));
+        let due = offline_expiry(&fixture).expect("the overdue message expires");
+        assert_eq!((due.expired, due.complete), (1, true), "{due:?}");
+        assert!(
+            destination_cursor(&fixture) > before,
+            "the expiry is ordered by the ledger"
+        );
+        let again = offline_expiry(&fixture).expect("a repeat finds nothing due");
+        assert_eq!(again.expired, 0, "{again:?}");
+    }
+
+    #[test]
+    fn offline_expiry_refuses_a_workload_that_is_not_quarantined() {
+        let fixture = stopped_helper_with_a_message(60_000);
+        let refused = offline_expiry(&fixture).expect_err("not quarantined");
+        assert_eq!(refused.kind(), ErrorKind::PermissionDenied, "{refused:?}");
+    }
+
+    #[test]
+    fn offline_expiry_refuses_while_the_mailbox_helper_is_alive() {
+        let fixture = stopped_helper_with_a_message(60_000);
+        quarantine(&fixture);
+        std::fs::write(
+            fixture
+                .state_path
+                .join(mvm_vmm::host::vm_helpers::MAILBOX_PID_FILE),
+            std::process::id().to_string(),
+        )
+        .expect("a live helper's pid");
+        let refused = offline_expiry(&fixture).expect_err("a live helper owns the store");
+        assert_eq!(refused.kind(), ErrorKind::ResourceBusy, "{refused:?}");
+    }
+
+    #[test]
+    fn a_stop_request_ends_an_unquarantined_helper_cleanly() {
+        let fixture = production_loop(60_000);
+        let config = fixture.config.clone();
+        let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let (done_tx, done_rx) = sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = done_tx.send(serve_restarting(config, restart::Backoff::default(), stop));
+        });
+        guest_sends(&fixture, b"served before the stop");
+        stop.store(true, Ordering::SeqCst);
+        done_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the helper stops on request")
+            .expect("a stop request alone is a clean end");
     }
 
     #[test]
@@ -2373,7 +2535,7 @@ mod tests {
                 floor: Duration::from_millis(50),
                 cap: Duration::from_millis(200),
             };
-            let _ = done.send(serve_restarting(config, backoff));
+            let _ = done.send(serve_restarting(config, backoff, &STOP_REQUESTED));
         });
         helper
     }

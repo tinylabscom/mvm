@@ -4,6 +4,11 @@
 
 Accepted.
 
+**Amended 2026-11-24** ([#4839](https://github.com/tinylabscom/mvm/issues/4839)).
+macOS below 26 is no longer supported, so decision 1's "macOS 13–25 default"
+no longer applies: `install.sh` and `mvmctl` refuse on that tier. libkrun
+remains an explicit opt-in for source builds on macOS 26+ and Linux.
+
 **Amended 2026-10-05 by ADR-054**
 (`specs/adrs/054-image-boundary-linux-layer.md`,
 [#4100](https://github.com/tinylabscom/mvm/issues/4100)). Decision 4 is

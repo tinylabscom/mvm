@@ -15,7 +15,6 @@ const SOURCE_HELPER_COMMIT_MARKER: &str = ".mvm-host-helpers-source-commit";
 const RELEASE_HOST_BINS: &[&str] = &[
     "mvm-hvf-supervisor",
     "mvm-hvf-run-owner",
-    "mvm-libkrun-supervisor",
     "mvm-network-endpoint",
 ];
 

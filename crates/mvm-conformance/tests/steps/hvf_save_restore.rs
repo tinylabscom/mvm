@@ -14,8 +14,8 @@ use mvm_core::checkpoint::{
     CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta, ContentBlob, DeviceAnchors,
     HVF_FRAME_BLOB, MEMORY_BLOB, ROOTFS_BLOB, SUPERVISOR_CONFIG_BLOB, VmFullOrigin, vm_full_origin,
 };
-use mvm_runtime::checkpoint::{CheckpointChainAnchor, CheckpointStore, RestoreParams};
-use mvm_runtime::hvf_restore::{HvfRestoreRequest, hvf_child_restore_config};
+use mvm_runtime::checkpoint::{CheckpointChainAnchor, CheckpointStore};
+use mvm_runtime::hvf_restore::{HvfRestoreMode, HvfRestoreRequest, hvf_child_restore_config};
 use mvm_vmm::host::hvf_supervisor::{HostDialSocket, HvfDisk, HvfSupervisorConfig};
 
 use crate::world::CliWorld;
@@ -36,24 +36,6 @@ impl CheckpointChainAnchor for FixedAnchor {
         _meta: &CheckpointMeta,
     ) -> anyhow::Result<Option<CheckpointDigest>> {
         Ok(self.0.clone())
-    }
-}
-
-/// A restore seam that records nothing and does nothing. Every scenario here
-/// asserts a refusal, so reaching this double at all is the failure.
-struct NeverReachedRestore;
-
-impl mvm_runtime::checkpoint::VmFullRestore for NeverReachedRestore {
-    fn restore(
-        &self,
-        _target_vm: &str,
-        _rootfs_src: &std::path::Path,
-        _memory: &std::path::Path,
-        _machine_id: &std::path::Path,
-        _config_src: Option<&std::path::Path>,
-        _content: &[mvm_core::checkpoint::ContentBlob],
-    ) -> anyhow::Result<()> {
-        panic!("the VMM must not be started for a checkpoint that failed its gate");
     }
 }
 
@@ -171,7 +153,9 @@ fn rewrite_for_child(world: &mut CliWorld) {
             state_dir: &dir,
             cpu_grant: None,
             content: &[],
-            plan_json: None,
+            mode: HvfRestoreMode::FreshChild {
+                plan_json: r#"{"child":"plan"}"#,
+            },
         },
     )
     .expect("rewrite the captured config for a restored child");
@@ -359,20 +343,14 @@ fn restore_is_refused(world: &mut CliWorld) {
     let store = world.hvf_ckpt_store.as_ref().expect("a seeded checkpoint");
     let meta = world.hvf_ckpt_meta.as_ref().expect("a seeded checkpoint");
     let anchor = FixedAnchor(world.hvf_anchor.clone().expect("a scenario anchor"));
-    let error = mvm_runtime::checkpoint::vm_full_restorer_for(meta)
-        .and_then(|_| {
-            mvm_runtime::checkpoint::restore_checkpoint(
-                store,
-                RestoreParams {
-                    checkpoint: meta.id.clone(),
-                    target_vm: meta.vm_name.clone(),
-                    tenant: "local".into(),
-                },
-                &NeverReachedRestore,
-                &anchor,
-            )
-        })
-        .expect_err("the restore must be refused");
+    let error = mvm_runtime::checkpoint::restore_same_identity_checkpoint(
+        store,
+        meta.id.clone(),
+        &meta.vm_name,
+        "local".into(),
+        &anchor,
+    )
+    .expect_err("the restore must be refused");
     let rendered = format!("{error:#}");
     assert!(
         rendered.contains("drift")

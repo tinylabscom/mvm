@@ -805,7 +805,7 @@ After each eventual source change, run the applicable compile/test matrix
 and claim/closure gates. `check-all` includes claim catalog, witness
 citations, single-network-path, one-guest-protocol, runtime-free and closure
 checks. `--all-targets` alone skips required-feature and foreign-target
-code; retain `just check::gated` and the relevant platform witnesses.
+code; retain `just check gated` and the relevant platform witnesses.
 Graph checks do not replace behaviour or lifecycle evidence.
 
 ## Consequences

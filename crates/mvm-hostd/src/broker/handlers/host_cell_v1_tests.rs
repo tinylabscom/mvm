@@ -25,7 +25,7 @@ use crate::topology_admission::{
 };
 
 const TENANT: &str = "acme";
-const PERIOD_MS: u32 = 1_000;
+const PERIOD_MS: u32 = 2_000;
 
 struct TestClock(Mutex<DateTime<Utc>>);
 

@@ -143,25 +143,40 @@ pub(crate) fn remove_transient_state_dir(staging_dir: &str) {
     }
 }
 
-/// Decide whether snapshot restore is safe for this request.
+/// How the transient source classifies template snapshot acceleration.
 ///
-/// Only enabled for the trivial case: a registered template (so the image
-/// has a snapshot at all), no live directory shares (so the device layout
-/// matches the snapshot's recorded layout), and a backend that advertises
-/// snapshot support.
-pub fn snapshot_eligible(
+/// Template restore is deliberately cold-only until an authenticated
+/// HMAC, signature, epoch, runtime-binding, and paused no-NIC capability is
+/// approved and implemented. This classification records why the launch did
+/// not use that accelerator without pretending a restore was attempted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateAcceleration {
+    /// The source could otherwise use a template snapshot, but restore is disabled.
+    Disabled,
+    /// The selected backend does not support memory snapshot restore.
+    Unsupported,
+    /// The source shape is not a template-only snapshot candidate.
+    Ineligible,
+    /// Signed CLI admission disables template restore; warm claim remains available.
+    AdmittedRestoreDisabled,
+    /// Host CPU placement disables template restore; warm policy is evaluated separately.
+    PlacedRestoreDisabled,
+}
+
+/// Classify template acceleration for a transient source.
+pub fn template_acceleration(
     image: &ImageSource,
     dir_shares: &[DirShareSpec],
-    snap_present: bool,
+    snapshot_available: bool,
     snapshot_capability: SnapshotCapability,
-) -> bool {
-    if snapshot_capability == SnapshotCapability::Unsupported
-        || !snap_present
-        || !dir_shares.is_empty()
-    {
-        return false;
+) -> TemplateAcceleration {
+    if !matches!(image, ImageSource::Template(_)) || !dir_shares.is_empty() || !snapshot_available {
+        return TemplateAcceleration::Ineligible;
     }
-    matches!(image, ImageSource::Template(_))
+    if snapshot_capability == SnapshotCapability::Unsupported {
+        return TemplateAcceleration::Unsupported;
+    }
+    TemplateAcceleration::Disabled
 }
 
 /// Captured stdout/stderr/exit-code from a one-shot exec.
@@ -544,50 +559,46 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_eligible_true_for_template_no_extras_with_snapshot() {
-        assert!(snapshot_eligible(
-            &template("t"),
-            &[],
-            true,
-            SnapshotCapability::LiveMemory
-        ));
+    fn template_acceleration_is_explicitly_disabled_for_an_eligible_source() {
+        assert_eq!(
+            template_acceleration(&template("t"), &[], true, SnapshotCapability::LiveMemory),
+            TemplateAcceleration::Disabled
+        );
     }
 
     #[test]
-    fn snapshot_eligible_false_when_backend_lacks_support() {
-        assert!(!snapshot_eligible(
-            &template("t"),
-            &[],
-            true,
-            SnapshotCapability::Unsupported
-        ));
+    fn template_acceleration_names_an_unsupported_backend() {
+        assert_eq!(
+            template_acceleration(&template("t"), &[], true, SnapshotCapability::Unsupported),
+            TemplateAcceleration::Unsupported
+        );
     }
 
     #[test]
-    fn snapshot_eligible_false_when_no_snapshot_present() {
-        assert!(!snapshot_eligible(
-            &template("t"),
-            &[],
-            false,
-            SnapshotCapability::LiveMemory
-        ));
+    fn template_acceleration_is_ineligible_with_directory_shares() {
+        assert_eq!(
+            template_acceleration(
+                &template("t"),
+                &[DirShareSpec {
+                    host_dir: "/h".into(),
+                    guest_mount: "/g".into(),
+                    read_only: true,
+                    include: Vec::new(),
+                    exclude: Vec::new(),
+                }],
+                true,
+                SnapshotCapability::LiveMemory
+            ),
+            TemplateAcceleration::Ineligible
+        );
     }
 
     #[test]
-    fn snapshot_eligible_false_with_directory_shares() {
-        // A live share changes the device layout; snapshot would fail.
-        assert!(!snapshot_eligible(
-            &template("t"),
-            &[DirShareSpec {
-                host_dir: "/h".into(),
-                guest_mount: "/g".into(),
-                read_only: true,
-                include: Vec::new(),
-                exclude: Vec::new(),
-            }],
-            true,
-            SnapshotCapability::LiveMemory
-        ));
+    fn template_acceleration_is_ineligible_without_snapshot_metadata() {
+        assert_eq!(
+            template_acceleration(&template("t"), &[], false, SnapshotCapability::LiveMemory),
+            TemplateAcceleration::Ineligible
+        );
     }
 
     #[test]

@@ -60,7 +60,7 @@ fn staging_finding(workflow: &str) -> Option<String> {
 
 /// Trees whose files could name a Firecracker download. Documentation and specs
 /// are excluded: prose about a release is a record, not a fetch.
-const SCANNED_DIRS: [&str; 5] = [".github", "scripts", "crates", "just", "nix"];
+const SCANNED_DIRS: [&str; 4] = [".github", "scripts", "crates", "nix"];
 
 /// What a download from the upstream release page looks like in a file.
 const DOWNLOAD_PATTERN: &str = "firecracker-microvm/firecracker/releases/download";

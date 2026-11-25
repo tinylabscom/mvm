@@ -13,6 +13,8 @@ authors.workspace = true
 # The bundle format itself: manifest types, canonical signing, and the archive
 # writer. This crate decides what goes into a bundle; it does not define one.
 mvm-core = { workspace = true, features = ["host-state"] }
+# The time `export` verifies the revocation feed against.
+mvm-contract = { workspace = true }
 # The signer hands over the key the archive writer signs the manifest under.
 ed25519-dalek = { workspace = true }
 anyhow = { workspace = true }

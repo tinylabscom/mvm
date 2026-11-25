@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use sha2::{Digest, Sha256};
 
 use crate::arch::GuestArch;
@@ -243,7 +243,7 @@ impl BuiltPackBootContract {
             pin,
             host,
             &ImageSetRevocationStore::in_mvm_home(),
-            Utc::now(),
+            crate::util::time::try_utc_timestamp_now()?,
         )
     }
 
@@ -251,7 +251,7 @@ impl BuiltPackBootContract {
         pin: &PackPin,
         host: &HostProtocolSupport,
         store: &ImageSetRevocationStore,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<Self> {
         let revocations = store
             .load(now)

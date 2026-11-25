@@ -167,25 +167,19 @@ Tools can still interpret user input, load application configuration or
 plugins, execute explicit paths, or change their own environment. Admit tools
 and their arguments with those behaviors in mind.
 
-## Snapshot restore (registered templates)
+## Template snapshot acceleration is disabled
 
-When you pass `--manifest <name>` and that template has a compatible recovery
-artifact, `mvmctl machine run` may use the backend's advertised recovery tier
-instead of cold-booting. The tier is backend-specific; inspect `mvmctl doctor`
-before relying on its latency or fidelity.
+Passing `--manifest <name>` can still claim a compatible authenticated warm
+parent. After a warm-pool miss, it cold-boots the registered template directly.
+Template snapshot acceleration is disabled until restore has an authenticated
+capability that strictly binds HMAC, signature, epoch, runtime identity, and the
+paused no-NIC check. The CLI does not assemble or attempt a raw template
+snapshot restore and then fall back; it classifies the accelerator as
+unavailable and selects cold boot directly for that fallback.
 
-The snapshot path activates only when:
-
-- the image source is a registered template (an OCI image or ad-hoc flake has no
-  template snapshot to restore from), AND
-- the request has **no** `--mount` extras (extra drives would mismatch
-  the snapshot's recorded layout), AND
-- the active backend reports snapshot support.
-
-Unsupported recovery requests return an actionable typed error. `mvm` does not
-silently downgrade a live-memory or machine-state request to disk-only recovery
-or cold boot. The harder branch -- parameterized snapshots that allow
-`--mount` -- is tracked in [issue #7](https://github.com/tinylabscom/mvm/issues/7).
+This does not change authenticated same-identity checkpoint resume or
+`vm_full` fork/restore. Those operations use their own explicit commands,
+source evidence, and backend capability checks.
 
 ## Resource controls
 

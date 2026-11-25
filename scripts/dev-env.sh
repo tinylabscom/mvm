@@ -63,8 +63,6 @@ _mvm_dev_env_claim MVM_HOME "${dev_state_root}"
 _mvm_dev_env_claim CARGO_TARGET_DIR "${dev_state_root}/target"
 _mvm_dev_env_claim CARGO_HOME "${dev_state_root}/cargo"
 
-export MVM_NO_LEGACY_BANNER="${MVM_NO_LEGACY_BANNER:-1}"
-
 unset -f _mvm_dev_env_claim
 unset _mvm_name _mvm_want _mvm_have
 

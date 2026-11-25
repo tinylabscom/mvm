@@ -3777,6 +3777,8 @@ fn machine_vm_op_uses_per_op_audit_verb() {
     assert_eq!(action.verb_name(), "snapshot");
     let action = parse(&["set-ttl", "myvm", "5m"]).unwrap();
     assert_eq!(action.verb_name(), "set-ttl");
+    let action = parse(&["mailbox-expire", "myvm", "--json"]).unwrap();
+    assert_eq!(action.verb_name(), "mailbox-expire");
 }
 
 #[test]
@@ -4011,11 +4013,10 @@ fn rewind_parses_as_its_own_verb() {
     assert_eq!(machine_subcommand(&action), "rewind");
 }
 
-/// The lineage forward-step is `advance`, deliberately NOT `forward` — the
-/// latter remains a parsing-compatible migration boundary. Both must parse to
-/// distinct, non-colliding actions.
+/// The lineage forward-step is `advance`, deliberately NOT `forward`, which
+/// was the dynamic port-forward verb and no longer parses.
 #[test]
-fn advance_does_not_collide_with_the_port_forward_verb() {
+fn advance_is_the_lineage_step_and_forward_is_not_a_verb() {
     let advance = parse(&["advance", "ckpt-x", "--to", "sha256:child"]).expect("parse advance");
     match advance {
         MachineAction::Advance(a) => {
@@ -4024,9 +4025,7 @@ fn advance_does_not_collide_with_the_port_forward_verb() {
         }
         other => panic!("expected advance, got {other:?}"),
     }
-    // `forward` still routes to the folded migration boundary.
-    let forward = parse(&["forward", "myvm", "8080:80"]).expect("parse forward");
-    assert!(matches!(forward, MachineAction::Vm(VmCmd::Forward(_))));
+    assert!(parse(&["forward", "myvm", "8080:80"]).is_err());
 }
 
 // ── post-start behaviour: attach unless told otherwise ────────────────────

@@ -215,7 +215,9 @@ fn figure(
                 for (stat, sv) in stats {
                     let reading = match sv {
                         Value::Number(n) => Reading::Measured(n.as_f64().unwrap_or(f64::NAN)),
-                        Value::Null => Reading::Unmeasured("no samples".to_owned()),
+                        Value::Null => {
+                            Reading::Unmeasured("too few samples for this percentile".to_owned())
+                        }
                         _ => bail!("{name}: {at}.value.{stat} is not a number"),
                     };
                     out.push(Figure {
@@ -525,6 +527,10 @@ mod tests {
             .find(|x| x.figure == "latencies.cold_launch_ms.p99")
             .unwrap();
         assert_eq!(p99.status, "unmeasured");
+        assert_eq!(
+            p99.reason.as_deref(),
+            Some("too few samples for this percentile")
+        );
         assert!(rows.iter().all(|x| x.source == "t.json"));
     }
 

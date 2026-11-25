@@ -97,6 +97,7 @@ impl MvmRuntimeBinaries {
         h.update([0u8]);
 
         for (name, path) in self.artifacts() {
+            let started = std::time::Instant::now();
             let bytes = std::fs::read(path).map_err(|e| {
                 io::Error::new(
                     e.kind(),
@@ -119,6 +120,7 @@ impl MvmRuntimeBinaries {
             h.update((bytes.len() as u64).to_le_bytes());
             h.update(&bytes);
             h.update([0u8]);
+            mvm_core::launch_trace::record_artifact_hash_time(started.elapsed());
         }
 
         h.update(shape);

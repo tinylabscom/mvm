@@ -30,7 +30,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
+use mvm_core::util::time::try_utc_timestamp_now;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -102,7 +103,7 @@ pub struct AuditFields {
     /// blocked on the host string).
     pub resolved_ip: Option<IpAddr>,
     pub duration_ms: u32,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: UtcTimestamp,
 }
 
 #[derive(Debug, Clone)]
@@ -432,14 +433,14 @@ impl L7EgressProxy {
             transforms.push(note.clone());
         }
         if verdict_1.is_deny() {
-            return Ok(self.deny(verdict_1, name_1, &ctx, transforms, started, None));
+            return self.deny(verdict_1, name_1, &ctx, transforms, started, None);
         }
 
         // If the host parsed as an IP literal in pass 1, SsrfGuard
         // already classified it; skip DNS resolution entirely.
         let needs_dns = host.parse::<IpAddr>().is_err();
         if !needs_dns {
-            return Ok(self.allow_or_transform(name_1, &ctx, transforms, started, None));
+            return self.allow_or_transform(name_1, &ctx, transforms, started, None);
         }
 
         // Second pass: resolve, pin, re-run. SsrfGuard now sees the
@@ -461,9 +462,9 @@ impl L7EgressProxy {
             }
         }
         if verdict_2.is_deny() {
-            return Ok(self.deny(verdict_2, name_2, &ctx, transforms, started, Some(resolved)));
+            return self.deny(verdict_2, name_2, &ctx, transforms, started, Some(resolved));
         }
-        Ok(self.allow_or_transform(name_2, &ctx, transforms, started, Some(resolved)))
+        self.allow_or_transform(name_2, &ctx, transforms, started, Some(resolved))
     }
 
     /// Build a Deny `EvaluationResult` from a chain verdict.
@@ -475,14 +476,14 @@ impl L7EgressProxy {
         transforms: Vec<String>,
         started: Instant,
         resolved_ip: Option<IpAddr>,
-    ) -> EvaluationResult {
+    ) -> Result<EvaluationResult, EgressError> {
         let reason = match verdict {
             InspectorVerdict::Deny { reason } => reason,
             // Shouldn't happen — we only call deny() when is_deny()
             // is true — but keep the match exhaustive.
             other => format!("internal: unexpected verdict {other:?}"),
         };
-        EvaluationResult {
+        Ok(EvaluationResult {
             decision: EgressDecision::Deny {
                 reason: reason.clone(),
             },
@@ -496,9 +497,9 @@ impl L7EgressProxy {
                 reason: Some(reason),
                 resolved_ip,
                 duration_ms: elapsed_ms(started),
-                timestamp: Utc::now(),
+                timestamp: audit_timestamp()?,
             },
-        }
+        })
     }
 
     /// Build an Allow / Transform `EvaluationResult` from chain
@@ -511,13 +512,13 @@ impl L7EgressProxy {
         transforms: Vec<String>,
         started: Instant,
         resolved_ip: Option<IpAddr>,
-    ) -> EvaluationResult {
+    ) -> Result<EvaluationResult, EgressError> {
         let outcome = if transforms.is_empty() {
             EgressOutcome::Allow
         } else {
             EgressOutcome::Transform
         };
-        EvaluationResult {
+        Ok(EvaluationResult {
             decision: EgressDecision::Allow,
             audit: AuditFields {
                 outcome,
@@ -529,10 +530,18 @@ impl L7EgressProxy {
                 reason: None,
                 resolved_ip,
                 duration_ms: elapsed_ms(started),
-                timestamp: Utc::now(),
+                timestamp: audit_timestamp()?,
             },
-        }
+        })
     }
+}
+
+/// The audit stamp for a decision. A host clock the timestamp cannot hold
+/// refuses the request instead of emitting an unstamped or invented entry.
+fn audit_timestamp() -> Result<mvm_contract::timestamp::UtcTimestamp, EgressError> {
+    try_utc_timestamp_now().map_err(|e| EgressError::Rejected {
+        reason: format!("host clock unusable: {e}"),
+    })
 }
 
 fn elapsed_ms(started: Instant) -> u32 {

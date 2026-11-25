@@ -31,7 +31,7 @@ keep a workflow documented as planned.
 | File write | Shipped | Shipped | Shipped | SDK supports `files.write(...)`; live mode calls `guest.fs.write` in `libmvm_hostlib`. |
 | File read/list/remove | Shipped | Shipped | Shipped | `files.read/list/stat/mkdir/remove/move(...)`, live mode only. |
 | Logs | Shipped | Shipped | Shipped | `Machine.logs(...)` returns the captured console; with `follow` it is a stream over `machine.logs.stream.*`, the reader `mvmctl machine logs --follow` uses. |
-| Port forwarding | Not claimed | Not claimed | Not claimed | Dynamic forwarding is retired. Ingress is declared before boot with `machine run --port HOST:GUEST`, or `network(ports=[...])` in a declaration; `mvmctl machine forward` and `sandbox.forward(...)` only explain the migration. |
+| Port forwarding | Not claimed | Not claimed | Not claimed | Dynamic forwarding is retired. Ingress is declared before boot with `machine run --port HOST:GUEST`, or `network(ports=[...])` in a declaration; `sandbox.forward(...)` only explains the migration. |
 | Snapshot save/restore | Shipped | Target | Target | Backend behavior differs; SDK type model needs to expose that. |
 | Cold mode | Shipped | Target | Target | SDK should make running, cold, restoring, stopped, and destroyed states explicit. |
 | Stop/down | Shipped | Partial | Partial | Python context managers, TypeScript `using`, and explicit `kill()` clean up live sandboxes. |
