@@ -15,7 +15,7 @@ use crate::host_binaries::backend_components::{
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
-    /// The backend to remove, by its stable label (e.g. `libkrun`)
+    /// The backend to remove, by its stable label (e.g. `firecracker`)
     pub name: String,
 }
 

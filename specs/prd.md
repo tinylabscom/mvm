@@ -468,7 +468,7 @@ C ABI (requirement 14). A Kotlin tree for pack authoring exists in
 | Host | Workload backend | Status |
 | --- | --- | --- |
 | macOS 26+ Apple Silicon | In-house HVF VMM (default) | Shipped, Tier 2 |
-| macOS 13–25 Apple Silicon | libkrun | Preview, Tier 2 (live hardware witness open) |
+| macOS 25 and older | None | Unsupported: `install.sh` and `mvmctl` refuse |
 | Linux with `/dev/kvm`, x86-64 and aarch64 | Firecracker | Shipped, Tier 1 (aarch64 builder untested) |
 | Linux without KVM | QEMU/TCG, dev and test only | Tier 2, not an isolation target |
 | Browser | WebLinux, direct WASI | Claim-free: no numbered claim applies |

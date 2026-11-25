@@ -841,15 +841,15 @@ fn resolve_from(spec: &AuxBin, lookup: &Lookup) -> Result<PathBuf> {
 }
 
 /// The error for a helper that resolved nowhere. A release download ships a
-/// fixed set of helpers, so for one the remedy is adding the signed component
-/// set or choosing another backend, never a `cargo build`.
+/// fixed set of helpers, so for one the remedy is choosing a backend it
+/// carries, never a `cargo build`.
 fn missing_message(spec: &AuxBin, release_binary: bool) -> String {
     if release_binary && spec.bin == LIBKRUN_SUPERVISOR_BIN {
         return format!(
-            "{} not found. This release install can fetch the signed libkrun component \
-             set: run `mvmctl backend add libkrun` (macOS 13-25 Apple Silicon); no \
-             separate libkrun install is needed. On macOS 26+ the default HVF backend \
-             needs no libkrun files. See https://runmvm.com/reference/platform-support/.",
+            "{} not found. A release install does not carry the libkrun backend; it \
+             is an opt-in for source builds. Use the default backend instead: HVF on \
+             macOS 26+ Apple Silicon, Firecracker on Linux with KVM. See \
+             https://runmvm.com/reference/platform-support/.",
             spec.bin
         );
     }
@@ -2010,15 +2010,16 @@ mod tests {
     }
 
     #[test]
-    fn a_release_binary_names_the_backend_add_and_hvf_remedies() {
+    fn a_release_binary_names_the_default_backends_as_the_remedy() {
         let spec = AuxBin::new(
             "mvm-libkrun-supervisor",
             "MVM_LIBKRUN_SUPERVISOR",
             "mvm-hostd",
         );
         let message = missing_message(&spec, true);
-        assert!(message.contains("mvmctl backend add libkrun"), "{message}");
+        assert!(!message.contains("backend add"), "{message}");
         assert!(message.contains("HVF"), "{message}");
+        assert!(message.contains("Firecracker"), "{message}");
         assert!(!message.contains("cargo build"), "{message}");
         // A release install never prints a Homebrew instruction.
         assert!(!message.to_lowercase().contains("brew"), "{message}");

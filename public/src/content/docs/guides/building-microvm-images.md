@@ -209,7 +209,7 @@ can hide a slow launch. A backend that cannot meet it is not release-ready.
 |---|---|---|---|
 | Firecracker (Linux/KVM) | < 200 ms | ≤ 30 ms | Hard prepared-cold requirement; every measured dispatch must pass. |
 | HVF (macOS 26+, Apple Silicon) | < 200 ms | ≤ 60 ms | In-house Hypervisor.framework VMM; macOS default. |
-| libkrun (explicit macOS 13–25 preview) | < 200 ms | ≤ 30 ms | Bundled in the signed Apple Silicon release; the real packaged guest-launch witness is still required. |
+| libkrun (explicit, source builds only) | < 200 ms | ≤ 30 ms | Opt-in on macOS 26+ and Linux with KVM; not part of a release install. |
 | QEMU (Linux dev/test) | — | — | Opt-in dev/test substrate; no snapshot support. |
 
 The artifact expectation is surfaced on every `mkGuest` derivation as
@@ -245,7 +245,7 @@ nix flake check --no-build
 mvm runs Nix builds inside the project builder VM and copies the finished kernel/rootfs artifacts back to the host cache. You don't need host-side Nix, and you don't need to enter a dev shell before building.
 
 - **Linux**: the builder VM provides the Linux build boundary and cache policy. Firecracker is the default runtime backend when `/dev/kvm` is available.
-- **macOS**: the host `mvmctl machine build` command orchestrates a Linux builder VM. On supported Apple Silicon hosts running macOS 26+, both the builder and resulting runtime use native HVF (Hypervisor.framework, vsock-only) without libkrun. macOS 13–25 has a bundled libkrun preview selected explicitly with `--builder libkrun` and `--hypervisor libkrun`.
+- **macOS**: the host `mvmctl machine build` command orchestrates a Linux builder VM. On supported Apple Silicon hosts running macOS 26+, both the builder and resulting runtime use native HVF (Hypervisor.framework, vsock-only) without libkrun. macOS 25 and older is not supported.
 - **Windows**: Tauri-only (the `mvm-studio` desktop app packages a WSL2-backed builder + runtime). See [ADR-009](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/009-cross-platform-strategy.md).
 
 ## Rootless workloads

@@ -121,9 +121,8 @@ socket-custody fix in #4808. This entrypoint alone does not complete #4764.
   separate. An uncached overlay requires its immutable, hash-verified source
   download during evaluation. There is no fallback to an ambient compiler.
 - **macOS 26+ Apple Silicon or Linux** — standard source-checkout development
-  uses native HVF on macOS and native `/dev/kvm` on Linux. Downloaded releases
-  also carry an explicitly selected libkrun preview for macOS 13–25 Apple
-  Silicon; contributors rebuilding that tier need its integration toolchain.
+  uses native HVF on macOS and native `/dev/kvm` on Linux. macOS 25 and older
+  is not supported.
 - **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which a release `cargo build` embeds and a debug `mvmctl` builds on first use. `just setup toolchain` installs the pinned Zig package into `~/.local/share/mvm/toolchains/zig/<version>` rather than system Python, so it works with externally managed Python on Ubuntu and Debian; the build detects the pinned binary there. End-users running a downloaded `mvmctl` don't need them.
 - **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
 
@@ -136,14 +135,12 @@ Third-party nixpkgs/libkrun builds are not part of this first-party compiler pin
 
 ### Do I need to install libkrun?
 
-Downloaded releases need no separate libkrun installation. The Apple Silicon
-archive includes the signed compatibility tier for macOS 13–25, while standard
-source builds do not install, link, or auto-select it:
+No. Neither a downloaded release nor a standard source build installs, links,
+or auto-selects it:
 
 | Host | libkrun (`slp/krun/*`) needed? |
 |---|---|
 | macOS 26+ Apple Silicon | **No** — auto-detect picks the native **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps). |
-| macOS 13–25 Apple Silicon | **No for a downloaded release** — its signed archive includes the preview tier; select it explicitly with `--hypervisor libkrun`. Source-checkout integration work still needs the development prerequisites below. |
 | Linux + `/dev/kvm` | **No** — auto-detect picks the **Firecracker** builder, so libkrun is not part of the default builder path on native Linux hosts. |
 
 The libkrun Cargo features remain for explicit source-checkout integration

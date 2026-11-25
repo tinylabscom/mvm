@@ -4,8 +4,8 @@ description: Current host, architecture, backend, and support-status matrix for 
 ---
 
 `mvm` supports local microVM workflows on native Linux with KVM and on Apple
-Silicon macOS 13–25 through the explicitly selected bundled libkrun preview or
-macOS 26+ through native HVF. Native Windows is still future host work. Linux hosts without `/dev/kvm`
+Silicon macOS 26+ through native HVF. macOS 25 and older is not supported:
+`install.sh` and `mvmctl` refuse there and name the supported hosts. Native Windows is still future host work. Linux hosts without `/dev/kvm`
 can run the dev/test QEMU/TCG backend (`--hypervisor qemu`); there is no
 container fallback.
 
@@ -18,7 +18,7 @@ and which backend limitations apply.
 | ------------------------- | --------------- | -------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Linux with `/dev/kvm`     | x86_64, aarch64 | Firecracker                | Supported               | Strongest local target; direct KVM microVM path.                                                                                                                                                                           |
 | macOS 26+ Apple Silicon   | aarch64         | HVF                        | Supported               | Auto-detect default on this tier; Hypervisor.framework with no Homebrew or libkrun prerequisites. OCI `--allow-host` runs use the HVF no-guest-NIC host-vsock-proxy path when `mvm-hvf-supervisor` is available; otherwise the CLI fails closed before pull/boot work. |
-| macOS 13–25 Apple Silicon | aarch64         | libkrun                    | Preview                 | Select explicitly with `--hypervisor libkrun`. The signed Apple Silicon archive includes the supervisor, relocatable dylibs, exact source pins, corresponding-source directions, and license texts; no Homebrew libkrun installation is required. Package loading is CI-verified on macOS 15; the real guest-launch witness remains tracked in [mvm#4577](https://github.com/tinylabscom/mvm/issues/4577). |
+| macOS 25 and older        | aarch64         | None                       | Unsupported             | `install.sh` and `mvmctl` refuse and name the supported hosts. Update to macOS 26 or use a Linux KVM host. |
 | Linux without `/dev/kvm`  | x86_64, aarch64 | QEMU (TCG)                 | Dev/test                | Software-emulated microVM (`--hypervisor qemu`); Tier 2 dev/test — slower, not for production.                                                                                                                             |
 | Browser (Chromium/Chrome) | Any             | WebLinux                   | Dev/test                | Browser-tier backend (`--hypervisor web-linux`); boots a real Nix-built Linux kernel under QEMU-Wasm inside the browser's WebAssembly engine. No hypervisor boundary, so it is a claim-free tier for demos and browser-local development.                                                                          |
 | Windows native            | x86_64, aarch64 | None                       | Future                  | Use WSL2 for the supported Windows-adjacent workload path; native Windows runtime support is still tracked in [mvm#428](https://github.com/tinylabscom/mvm/issues/428).                                                    |

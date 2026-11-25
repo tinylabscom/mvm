@@ -33,7 +33,7 @@ genuinely backend-specific:
 | --------------- | --------------------------------------------------------------- | ------------------------------------------------------------------ |
 | Firecracker     | Auto on Linux with native KVM                                   | Production Tier 1 backend                                          |
 | HVF             | Auto on supported macOS 26+ hosts (alias `hypervisor`)          | Preferred macOS local backend (Hypervisor.framework, vsock-only)   |
-| libkrun         | Explicit on macOS 13–25 Apple Silicon (`libkrun` or `krun`)      | Signed compatibility preview bundled in the Apple Silicon archive  |
+| libkrun         | Explicit in a source build (`libkrun` or `krun`)                | Opt-in on macOS 26+ and Linux with KVM; not in a release install    |
 | QEMU            | Explicit opt-in (`--hypervisor qemu`)                           | Linux dev/test backend                                             |
 | apple-container | Explicit opt-in (`--hypervisor apple-container`, alias `container`) | The HVF runner with Apple's prebuilt container kernel substituted |
 | wasm            | Explicit opt-in (`--hypervisor wasm`)                           | Host `wasmtime` tier — no guest kernel, no guest network           |

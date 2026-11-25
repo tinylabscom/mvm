@@ -19,6 +19,7 @@ mod deps;
 mod dispatch;
 pub(crate) mod env;
 mod generate;
+mod host_support;
 mod image;
 mod machine;
 mod manifest;
@@ -415,6 +416,10 @@ fn run_command() -> Result<()> {
             crate::observability::exit(exit_code);
         }
     };
+    host_support::refuse_unsupported_host(
+        &cli.command,
+        mvm_core::platform::current().unsupported_host_message(),
+    )?;
     // Offline proofs and coordinator observation bypass telemetry and update
     // checks as well as configuration, command recording and signer creation.
     if cli.command.skips_startup() {

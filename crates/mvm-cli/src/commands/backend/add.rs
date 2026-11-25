@@ -21,7 +21,7 @@ use crate::ui;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
-    /// The backend to add, by its stable label (e.g. `libkrun`)
+    /// The backend to add, by its stable label (e.g. `firecracker`)
     pub name: String,
 }
 

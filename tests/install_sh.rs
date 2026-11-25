@@ -62,17 +62,6 @@ fn host_target() -> &'static str {
     }
 }
 
-fn host_uses_libkrun_tier() -> bool {
-    cfg!(target_os = "macos")
-        && Command::new("sw_vers")
-            .arg("-productVersion")
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(|version| version.split('.').next()?.parse::<u32>().ok())
-            .is_some_and(|major| major < 26)
-}
-
 use mvm_contract::hash::sha256_hex;
 
 fn repo_root() -> PathBuf {
@@ -226,7 +215,7 @@ struct Release {
     hostbin_bytes: Vec<(String, Vec<u8>)>,
     /// Synthetic trap proving the owner is preserved even if a profile appears.
     owner_entitlement_profile: bool,
-    /// Whether the archive carries the macOS 13–25 libkrun runtime payload.
+    /// Whether the archive carries the libkrun runtime payload older releases shipped.
     libkrun_tier: bool,
     /// Write the libkrun payload with different bytes than the honest build —
     /// the fixture for "the archive digest covers every lib/ entry".
@@ -1568,17 +1557,14 @@ fn install_sh_installs_every_host_binary_the_release_job_requires() {
 
     for hostbin in &hostbins {
         let beside_mvmctl = host.bin().join(hostbin);
-        if cfg!(target_os = "macos")
-            && hostbin == "mvm-libkrun-supervisor"
-            && !host_uses_libkrun_tier()
-        {
+        if cfg!(target_os = "macos") && hostbin == "mvm-libkrun-supervisor" {
             assert!(
                 !beside_mvmctl.exists(),
-                "the libkrun supervisor must stay off PATH outside its macOS tier"
+                "an install never puts the libkrun supervisor on PATH"
             );
             assert!(
                 !host.current_target().join(hostbin).exists(),
-                "the libkrun supervisor must not be staged outside its macOS tier"
+                "an install never stages the libkrun supervisor"
             );
             continue;
         }
@@ -1620,16 +1606,12 @@ fn install_sh_selects_the_host_native_backend_tier() {
     host.install_ok(&base, "v9.9.9");
 
     assert!(host.bin().join("mvm-hvf-supervisor").is_file());
-    let libkrun_expected = host_uses_libkrun_tier();
-    assert_eq!(
-        host.bin().join("mvm-libkrun-supervisor").exists(),
-        libkrun_expected
-    );
-    assert_eq!(
-        host.current_target()
+    assert!(!host.bin().join("mvm-libkrun-supervisor").exists());
+    assert!(
+        !host
+            .current_target()
             .join("mvm-libkrun-supervisor")
-            .exists(),
-        libkrun_expected
+            .exists()
     );
 }
 
@@ -1922,10 +1904,9 @@ fn install_sh_adopts_an_unversioned_install_so_its_upgrade_can_roll_back() {
     host.install_ok(&base, "v3.0.0");
     assert_eq!(host.mvmctl_version(), "mvmctl v3.0.0");
     assert_eq!(host.release_dirs(), vec!["1-unversioned", "2-v3.0.0"]);
-    assert_eq!(
-        host.bin().join("mvm-libkrun-supervisor").exists(),
-        host_uses_libkrun_tier(),
-        "the upgrade must replace or remove the old libkrun payload for this host tier"
+    assert!(
+        !host.bin().join("mvm-libkrun-supervisor").exists(),
+        "the upgrade must remove the old libkrun payload"
     );
     assert!(
         host.lib()
@@ -2155,13 +2136,20 @@ fn fake_sw_vers(host: &Host, version: &str) {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn install_sh_keeps_libkrun_before_macos_26_and_omits_it_afterward() {
+fn install_sh_refuses_macos_below_26_and_never_stages_libkrun_at_or_above_it() {
+    // A release that predates components.tsv and carries the libkrun payload.
     let release = Release::new("v9.9.9")
         .with_hostbins(required_hostbins(host_target()))
         .with_libkrun_tier();
     let (base, _stop) = serve_releases(&[&release]);
 
-    for (version, expected) in [("25.9", true), ("26.0", false)] {
+    for (version, supported) in [
+        ("13.6", false),
+        ("15.7", false),
+        ("25.9", false),
+        ("26.0", true),
+        ("27.1", true),
+    ] {
         let host = Host::new();
         let (path, _log) = fake_codesign(&host);
         fake_sw_vers(&host, version);
@@ -2171,12 +2159,22 @@ fn install_sh_keeps_libkrun_before_macos_26_and_omits_it_afterward() {
             .env("PATH", path)
             .output()
             .unwrap();
+        if !supported {
+            assert!(!output.status.success(), "macOS {version} must be refused");
+            assert_eq!(
+                stderr(&output).trim(),
+                format!(
+                    "[mvm] ERROR: {}",
+                    mvm_core::platform::UNSUPPORTED_HOST_MESSAGE
+                ),
+                "macOS {version} gets the one sentence mvmctl prints"
+            );
+            assert!(!host.bin().join("mvmctl").exists(), "nothing is installed");
+            continue;
+        }
         assert!(output.status.success(), "{}", stderr(&output));
-        assert_eq!(
-            host.bin().join("mvm-libkrun-supervisor").exists(),
-            expected,
-            "macOS {version} selected the wrong native backend tier"
-        );
+        assert!(host.bin().join("mvm-hvf-supervisor").exists());
+        assert!(!host.bin().join("mvm-libkrun-supervisor").exists());
         for payload in [
             "lib/libkrun.1.dylib",
             "lib/libkrunfw.5.dylib",
@@ -2185,10 +2183,9 @@ fn install_sh_keeps_libkrun_before_macos_26_and_omits_it_afterward() {
             "SOURCE-OFFER.txt",
             "SOURCE-PINS",
         ] {
-            assert_eq!(
-                host.current_target().join(payload).exists(),
-                expected,
-                "macOS {version} selected the wrong state for {payload}"
+            assert!(
+                !host.current_target().join(payload).exists(),
+                "macOS {version} must not stage {payload}"
             );
         }
     }
@@ -2230,37 +2227,6 @@ fn table_install(host: &Host, base: &str, version: &str, macos: &str, detect: &s
 fn install_sh_table_stages_only_the_selected_backend() {
     let release = table_release("v9.9.9");
     let (base, _stop) = serve_releases(&[&release]);
-
-    // macOS 13–25 selects libkrun: its component set is staged, and the hvf
-    // supervisor — the other native backend's only file — is not.
-    let host = Host::new();
-    let output = table_install(&host, &base, "v9.9.9", "25.9", "libkrun");
-    assert!(output.status.success(), "{}", stderr(&output));
-    for payload in [
-        "mvm-libkrun-supervisor",
-        "lib/libkrun.1.dylib",
-        "licenses/libkrun-APACHE-2.0.txt",
-        "SOURCE-OFFER.txt",
-        "SOURCE-PINS",
-    ] {
-        assert!(
-            host.current_target().join(payload).exists(),
-            "the libkrun tier must stage {payload} on macOS 13–25"
-        );
-    }
-    assert!(
-        !host.current_target().join("mvm-hvf-supervisor").exists(),
-        "the hvf supervisor is the unselected backend's file on macOS 13–25"
-    );
-    assert!(
-        !host.bin().join("mvm-hvf-supervisor").exists(),
-        "and it must stay off PATH"
-    );
-    assert!(
-        stdout(&output).contains("Installed backend: libkrun (macOS 25, Apple Silicon)"),
-        "the printed line names the choice: {}",
-        stdout(&output)
-    );
 
     // macOS 26+ selects hvf and stages no libkrun file.
     let host = Host::new();
@@ -2367,24 +2333,14 @@ fn install_sh_backend_flag_stages_the_requested_tier() {
         .env("MVM_TEST_BACKEND_DETECT", "hvf")
         .output()
         .unwrap();
-    // No fake sw_vers: the host's real macOS decides the window. hvf is
-    // valid exactly when this host is on the 26+ tier.
-    if host_uses_libkrun_tier() {
-        assert!(
-            !output.status.success(),
-            "hvf is outside its window on macOS 13–25"
-        );
-        assert!(stderr(&output).contains("libkrun"), "{}", stderr(&output));
-    } else {
-        assert!(output.status.success(), "{}", stderr(&output));
-        assert!(host.current_target().join("mvm-hvf-supervisor").is_file());
-        assert!(
-            !host
-                .current_target()
-                .join("mvm-libkrun-supervisor")
-                .exists()
-        );
-    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(host.current_target().join("mvm-hvf-supervisor").is_file());
+    assert!(
+        !host
+            .current_target()
+            .join("mvm-libkrun-supervisor")
+            .exists()
+    );
 }
 
 /// A synthetic viable row for this host's target, so the picker has a real
@@ -2475,20 +2431,19 @@ fn install_sh_upgrade_removes_the_files_the_table_no_longer_owns() {
     let legacy = Release::new("v1.0.0")
         .with_hostbins(required_hostbins(host_target()))
         .with_libkrun_tier();
-    let current = table_release("v2.0.0");
+    let current = table_release("v2.0.0").with_components_tsv_rows(&[&testalt_row()]);
     let (base, _stop) = serve_releases(&[&legacy, &current]);
 
-    // v1 predates components.tsv, so on this pinned macOS 13–25 host it
-    // stages both native supervisors — the rule it was published with.
+    // v1 predates components.tsv, so it stages the hvf supervisor.
     let host = Host::new();
-    let output = table_install(&host, &base, "v1.0.0", "25.9", "libkrun");
+    let output = table_install(&host, &base, "v1.0.0", "26.0", "hvf");
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(host.bin().join("mvm-hvf-supervisor").exists());
 
-    // The table-driven upgrade selects libkrun on the same host: the hvf
+    // The table-driven upgrade selects a backend that owns no files: the hvf
     // supervisor is not the selected backend's file, so the new release drops
     // it and its PATH entry goes with it. The kept v1 release is untouched.
-    let output = table_install(&host, &base, "v2.0.0", "25.9", "libkrun");
+    let output = table_install(&host, &base, "v2.0.0", "26.0", "testalt");
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
         !host.bin().join("mvm-hvf-supervisor").exists(),
@@ -2505,7 +2460,6 @@ fn install_sh_upgrade_removes_the_files_the_table_no_longer_owns() {
             .exists(),
         "the preserved release keeps its own set"
     );
-    assert!(host.bin().join("mvm-libkrun-supervisor").exists());
 }
 
 #[cfg(target_os = "macos")]
@@ -2626,10 +2580,9 @@ fn install_sh_codesigns_each_binary_with_its_role_profile() {
             "{hostbin} needs no entitlement and must keep its own signature: {log}"
         );
     }
-    assert_eq!(
-        host.bin().join("mvm-libkrun-supervisor").exists(),
-        host_uses_libkrun_tier(),
-        "the installer selected the wrong native backend tier for this macOS host"
+    assert!(
+        !host.bin().join("mvm-libkrun-supervisor").exists(),
+        "an install never stages the libkrun supervisor"
     );
 }
 

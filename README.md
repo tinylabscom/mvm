@@ -2,8 +2,7 @@
 
 mvm runs workloads in microVMs on macOS and Linux. Each workload gets its own
 Linux kernel under a hypervisor: the in-house HVF backend on macOS 26+ Apple
-Silicon, the bundled libkrun preview on macOS 13–25 Apple Silicon, and Firecracker
-on Linux with `/dev/kvm`. You can start one from an OCI
+Silicon, and Firecracker on Linux with `/dev/kvm`. Older macOS is not supported. You can start one from an OCI
 image, a Nix flake, or a decorated Python or TypeScript function. The CLI is
 `mvmctl`. Python, TypeScript and Rust libraries drive the same operations from
 code.
@@ -24,8 +23,7 @@ There is no SSH server in any guest.
 ## Install
 
 ```bash
-# Release binary: macOS 26+ Apple Silicon (HVF), macOS 13–25 (libkrun tier packaged in the archive;
-# live hardware witness still open), or Linux x86_64/aarch64 with /dev/kvm
+# Release binary: macOS 26+ Apple Silicon (HVF) or Linux x86_64/aarch64 with /dev/kvm
 curl -fsSL https://runmvm.com/install.sh | sh
 
 # From source (run ./target/release/mvmctl from the checkout)
@@ -38,10 +36,8 @@ npm install @runmvm/mvm
 ```
 
 Nothing else is required for a release install: no Docker, no host Nix, no
-Homebrew packages. On macOS 13–25 that rests on the libkrun tier packaged in
-the signed archive; a guest boot from that archive on macOS 13–25 hardware has
-no recorded witness yet. A source build on macOS 13–25 still needs the Homebrew
-libkrun packages.
+Homebrew packages. On macOS below 26 the installer and `mvmctl` refuse and
+name the supported hosts.
 `mvmctl doctor` checks the host and says what is missing. Source builds have a
 few extra steps, covered in
 [Building from source](public/src/content/docs/guides/building-from-source.md).
