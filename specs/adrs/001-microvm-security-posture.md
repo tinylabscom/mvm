@@ -462,6 +462,39 @@ not paraphrase this row without them.
   confidential-computing workload backend exists and after this ADR's
   threat model is revised to bring a malicious host partly in scope.
 
+### Post-quantum status
+
+Today, mvm uses Ed25519 for execution-plan and audit signing. Our proposed
+post-quantum roadmap prioritizes long-lived audit evidence: versioned,
+algorithm-explicit formats first, then dual Ed25519/ML-DSA signatures,
+followed by execution plans. Algorithm identifiers alone do not provide
+post-quantum protection. For cross-host traffic, we plan to evaluate hybrid
+X25519/ML-KEM key establishment within our existing networking architecture.
+These post-quantum extensions are not implemented today.
+
+Nothing in that paragraph is a claim in the ledger below: the roadmap is
+proposed, and no part of it is implemented, demonstrated or witnessed.
+`xtask check-pq-claims` holds its last sentence to the lockfile. The gate fails
+when `Cargo.lock` gains a post-quantum implementation crate (ML-KEM, ML-DSA,
+SLH-DSA, liboqs, pqcrypto and their pre-standard names) while the sentence still
+stands, and fails when the sentence is removed with no such crate behind it. So
+when the work lands, the build tells whoever lands it to rewrite this section:
+say what shipped and what witnesses it, and leave only what is still ahead as
+proposed. It is a signal, not a proof: a vendored or renamed implementation
+would pass unnoticed.
+
+The order of that roadmap is not settled. ADR-062 section 7 puts hybrid
+X25519 + ML-KEM-768 for mailbox key agreement and cross-host transport first,
+because recorded traffic can be decrypted later, and hybrid Ed25519 + ML-DSA-65
+for audit and epoch seals, evidence archives, packs and plans second. If that
+order is the intended one, the priorities in the first paragraph swap; its last
+sentence stands either way.
+
+CNSA 2.0 alignment is a requirements-led direction, not a current compliance
+claim. The algorithms, cryptographic modules, deployment configuration and
+supporting evidence would be scoped against a deployment's requirements. No
+qualified FIPS deployment is claimed.
+
 ### Design principles
 
 - **Defaults are safe.** Every option whose value affects security

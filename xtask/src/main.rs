@@ -762,7 +762,7 @@ fn main() -> Result<()> {
                 "  check-asserted-absence                 Prose that says a name was never written must stay right about that"
             );
             println!(
-                "  check-pq-claims                        The presenter notes' \"not implemented\" post-quantum sentence must match Cargo.lock"
+                "  check-pq-claims                        The security posture's \"not implemented\" post-quantum sentence must match Cargo.lock"
             );
             println!(
                 "  check-agent-notes                      Committed agent findings parse, are dated, and link to notes that exist"
