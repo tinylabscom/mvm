@@ -52,28 +52,6 @@ fn release_recipe() -> String {
     justfile[start..].to_string()
 }
 
-/// The macOS libkrunfw kernel build runs `make LLVM=1 LD=ld.lld`. Homebrew's
-/// `llvm` formula no longer ships `ld.lld`; it is the separate `lld` formula. The
-/// install step must name it and the build step must put its `bin` on PATH, or
-/// the Kconfig probe stops with "linker 'ld.lld' not found" (the v0.25.0 tag run).
-#[test]
-fn macos_libkrun_tier_installs_lld_and_puts_it_on_path() {
-    let workflow = release_workflow();
-    let install = workflow
-        .lines()
-        .find(|line| line.contains("brew install") && line.contains("llvm"))
-        .expect("the macOS libkrun dependency install step must exist");
-    assert!(
-        install.split_whitespace().any(|word| word == "lld"),
-        "the libkrunfw kernel build needs ld.lld, the separate `lld` formula: {install}"
-    );
-    assert!(
-        workflow.contains("lld_prefix=\"$(brew --prefix lld)\"")
-            && workflow.contains("${lld_prefix}/bin"),
-        "the libkrun tier build step must put the lld formula's bin on PATH"
-    );
-}
-
 /// Manual validation cannot issue tag-bound proof or create a release.
 ///
 /// Candidate proof requires the real tag-push identity and successful input
@@ -966,7 +944,7 @@ fn every_release_archive_is_installed_and_its_hostlib_loaded_natively() {
     ] {
         assert!(smoke.contains(target), "{target} needs an installed smoke");
     }
-    for runner in ["ubuntu-24.04", "ubuntu-24.04-arm", "macos-15"] {
+    for runner in ["ubuntu-24.04", "ubuntu-24.04-arm", "macos-26"] {
         assert!(
             smoke.contains(runner),
             "{runner} must run its native payload"

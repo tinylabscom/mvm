@@ -1,8 +1,8 @@
 //! Per-backend host-component lines: for every installable backend whose
 //! component files are staged beside this `mvmctl`, report presence, the
 //! supervisor signature state, and whether the host OS fits the row's
-//! support window. Rows with no files (firecracker, qemu, wasm) ship their
-//! whole component set inside `mvmctl` itself, so there is nothing to check.
+//! support window. Rows with no files (qemu, wasm) ship their whole
+//! component set inside `mvmctl` itself, so there is nothing to check.
 
 use mvm_core::vm_backend::BackendKind;
 
@@ -105,10 +105,10 @@ mod tests {
     /// beside the exe; both current file-bearing rows must be named.
     #[test]
     fn file_bearing_rows_have_distinct_check_names() {
-        let libkrun = row_for(BackendKind::Libkrun);
+        let firecracker = row_for(BackendKind::Firecracker);
         let hvf = row_for(BackendKind::Hvf);
-        assert!(!libkrun.files.is_empty());
+        assert!(!firecracker.files.is_empty());
         assert!(!hvf.files.is_empty());
-        assert_ne!(check_name(libkrun.backend), check_name(hvf.backend));
+        assert_ne!(check_name(firecracker.backend), check_name(hvf.backend));
     }
 }

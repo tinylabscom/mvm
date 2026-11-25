@@ -1557,17 +1557,6 @@ fn install_sh_installs_every_host_binary_the_release_job_requires() {
 
     for hostbin in &hostbins {
         let beside_mvmctl = host.bin().join(hostbin);
-        if cfg!(target_os = "macos") && hostbin == "mvm-libkrun-supervisor" {
-            assert!(
-                !beside_mvmctl.exists(),
-                "an install never puts the libkrun supervisor on PATH"
-            );
-            assert!(
-                !host.current_target().join(hostbin).exists(),
-                "an install never stages the libkrun supervisor"
-            );
-            continue;
-        }
         assert!(
             beside_mvmctl.is_file(),
             "{hostbin} is required by release.yml for {target} but is not beside {}",
@@ -2199,16 +2188,18 @@ fn install_sh_refuses_macos_below_26_and_never_stages_libkrun_at_or_above_it() {
 // host default by default); `fake_sw_vers` pins the macOS window cases on
 // any macOS host.
 
-/// A release shaped like one the workflow publishes today: the host binaries,
-/// the libkrun tier payload on macOS, and the generated component table.
+/// A release shaped like one the workflow publishes today: the host binaries
+/// and the generated component table.
 fn table_release(version: &str) -> Release {
-    let release = Release::new(version)
+    Release::new(version)
         .with_hostbins(required_hostbins(host_target()))
-        .with_components_tsv();
-    #[cfg(target_os = "macos")]
-    let release = release.with_libkrun_tier();
-    release
+        .with_components_tsv()
 }
+
+/// The libkrun row releases published before the tier was dropped carry in
+/// their own `components.tsv`.
+#[cfg(target_os = "macos")]
+const PUBLISHED_LIBKRUN_ROW: &str = "libkrun\taarch64-apple-darwin\t13\t26\tno\tyes\tyes\tbin:mvm-libkrun-supervisor dir:lib dir:licenses dir:sources file:SOURCE-OFFER.txt file:SOURCE-PINS";
 
 #[cfg(target_os = "macos")]
 fn table_install(host: &Host, base: &str, version: &str, macos: &str, detect: &str) -> Output {
@@ -2225,7 +2216,15 @@ fn table_install(host: &Host, base: &str, version: &str, macos: &str, detect: &s
 #[cfg(target_os = "macos")]
 #[test]
 fn install_sh_table_stages_only_the_selected_backend() {
-    let release = table_release("v9.9.9");
+    // An already-published release: its archive carries the libkrun payload
+    // and its own table names those files.
+    let mut hostbins = required_hostbins(host_target());
+    hostbins.push("mvm-libkrun-supervisor".to_owned());
+    let release = Release::new("v9.9.9")
+        .with_hostbins(hostbins)
+        .with_components_tsv()
+        .with_components_tsv_rows(&[PUBLISHED_LIBKRUN_ROW])
+        .with_libkrun_tier();
     let (base, _stop) = serve_releases(&[&release]);
 
     // macOS 26+ selects hvf and stages no libkrun file.

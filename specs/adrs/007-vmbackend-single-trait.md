@@ -171,15 +171,11 @@ tier, and removes the temporary archive. `backend add` later downloads that
 same release archive again; it does not introduce a second asset, package
 manager, update channel, or trust root.
 
-The libkrun tier's kernel source of truth is the explicit kernel version and
-digest in `scripts/release/build-libkrun-tier.sh`, combined with the immutable
-`libkrunfw` commit's patches and configuration. Both appear in the release's
-`SOURCE-PINS`, and the repository's kernel freshness gate watches this pin. It
-is deliberately not the kernel in an `mvm-images` image set: the tier is a host
-release component built and signed with `mvmctl`, while `mvm-images` owns Linux
-image layers. Changing the kernel, libkrunfw, or libkrun pin requires updating
-the source offer and passing the packaged tier's relocation, signing, and
-launch witnesses again.
+The release no longer builds or ships a libkrun tier (owner decision,
+2026-11-24, [#4839](https://github.com/tinylabscom/mvm/issues/4839)): macOS
+below 26 is unsupported, and libkrun is a source-build opt-in that uses the
+host's own libkrun installation. The Nix `libkrunfw` recipe is the one kernel
+pin left in this repository, and the kernel freshness gate watches it.
 
 ### Installer selection
 

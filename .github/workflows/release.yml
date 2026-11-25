@@ -269,11 +269,10 @@ jobs:
             os: ubuntu-24.04
 
     runs-on: ${{ matrix.os }}
-    # Backstop: the pre-libkrun cold macOS release plus host binaries took 43
-    # min before the size check began on 2026-10-08. The source-built libkrun
-    # tier adds a kernel, firmware and dylib build; the size check and man-page
-    # generation also compile xtask separately. Keep a bounded cap with enough
-    # room for a healthy cold build and packaging.
+    # Backstop: a cold macOS release plus host binaries took 43 min before the
+    # size check began on 2026-10-08; the size check and man-page generation
+    # also compile xtask separately. Keep a bounded cap with enough room for a
+    # healthy cold build and packaging.
     timeout-minutes: 135
 
     steps:
@@ -376,9 +375,7 @@ jobs:
       # `mvm-client/release-channel` would otherwise change mvm-hostd's
       # mvm-build features.
       #
-      # Apple Silicon macOS additionally gets the native HVF supervisor. The
-      # libkrun supervisor and its dylibs are built from immutable upstream
-      # sources by the dedicated release-tier step below.
+      # Apple Silicon macOS additionally gets the native HVF supervisor.
       - name: Build per-VM host binaries
         env:
           BUILD_TARGET: ${{ matrix.build_target }}
@@ -434,67 +431,6 @@ jobs:
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostlib \
               --features mvm-client/release-channel
           fi
-
-      - name: Install libkrun build dependencies
-        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
-        shell: bash
-        run: brew install make llvm lld flex bison gnu-sed gnu-tar xz
-
-      # The kernel source tarball is checked against the SHA-256 pinned in the
-      # build script after it is restored, exactly like a download, so this
-      # cache is used by every run, tag pushes included.
-      - name: Restore the pinned kernel source tarball
-        id: kernel_cache
-        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ runner.temp }}/libkrunfw-kernel
-          key: libkrunfw-kernel-${{ hashFiles('scripts/release/build-libkrun-tier.sh') }}
-
-      # The built upstream tree (libkrun and libkrunfw) is restored only for a
-      # manual rehearsal. A tag push builds it from source: the integrity
-      # record lives inside the cache entry, so it cannot vouch against a
-      # poisoned entry, and a signed release must not depend on one.
-      - name: Restore the libkrun upstream tree (rehearsal only)
-        id: libkrun_cache
-        if: ${{ matrix.target == 'aarch64-apple-darwin' && github.event_name == 'workflow_dispatch' }}
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ runner.temp }}/libkrun-upstream
-          key: libkrun-upstream-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}-${{ hashFiles('scripts/release/build-libkrun-tier.sh', 'scripts/release/libkrunfw-macos-host.patch') }}
-
-      - name: Build libkrun release tier
-        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
-        env:
-          BUILD_TARGET: ${{ matrix.build_target }}
-          MVM_GNU_MAKE: gmake
-          MVM_LIBKRUN_UPSTREAM_CACHE: ${{ github.event_name == 'workflow_dispatch' && format('{0}/libkrun-upstream', runner.temp) || '' }}
-          MVM_LIBKRUNFW_KERNEL_CACHE: ${{ runner.temp }}/libkrunfw-kernel
-        shell: bash
-        run: |
-          llvm_prefix="$(brew --prefix llvm)"
-          lld_prefix="$(brew --prefix lld)"
-          flex_prefix="$(brew --prefix flex)"
-          bison_prefix="$(brew --prefix bison)"
-          gnu_sed_prefix="$(brew --prefix gnu-sed)"
-          gnu_tar_prefix="$(brew --prefix gnu-tar)"
-          export PATH="${llvm_prefix}/bin:${lld_prefix}/bin:${flex_prefix}/bin:${bison_prefix}/bin:${gnu_sed_prefix}/libexec/gnubin:${gnu_tar_prefix}/libexec/gnubin:${PATH}"
-          scripts/release/build-libkrun-tier.sh \
-            "target/${BUILD_TARGET}/release/libkrun-tier" "${BUILD_TARGET}"
-
-      - name: Save the pinned kernel source tarball
-        if: ${{ matrix.target == 'aarch64-apple-darwin' && github.event_name == 'workflow_dispatch' && steps.kernel_cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ runner.temp }}/libkrunfw-kernel
-          key: ${{ steps.kernel_cache.outputs.cache-primary-key }}
-
-      - name: Save the libkrun upstream tree
-        if: ${{ matrix.target == 'aarch64-apple-darwin' && github.event_name == 'workflow_dispatch' && steps.libkrun_cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ runner.temp }}/libkrun-upstream
-          key: ${{ steps.libkrun_cache.outputs.cache-primary-key }}
 
       # Attribution only: which packages the builds above compile more than once
       # and what differs (profile, features, target), so a long release is
@@ -612,13 +548,10 @@ jobs:
           # surface much later as a spawn failure on a user's machine.
           REQUIRED_HOSTBINS="mvm-host-agent mvm-policy-coordinator mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer mvm-mailbox mvm-actor-holder mvm-actor-controller mvm-gpu-endpoint"
           if [[ "${TARGET}" == *apple-darwin ]]; then
-            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-hvf-run-owner mvm-libkrun-supervisor"
+            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-hvf-run-owner"
           fi
           for hostbin in ${REQUIRED_HOSTBINS}; do
             src="target/${BUILD_TARGET}/release/${hostbin}"
-            if [[ "${hostbin}" == mvm-libkrun-supervisor ]]; then
-              src="target/${BUILD_TARGET}/release/libkrun-tier/${hostbin}"
-            fi
             if [ ! -f "$src" ]; then
               echo "::error::${hostbin} was not built for ${TARGET}; mvmctl spawns it at run time and the adjacent-to-exe resolver has no fallback on a downloaded install" >&2
               exit 1
@@ -626,25 +559,6 @@ jobs:
             cp "$src" "staging/${ARCHIVE_NAME}/"
             echo "bundled ${hostbin}"
           done
-          if [[ "${TARGET}" == *apple-darwin ]]; then
-            LIBKRUN_TIER="target/${BUILD_TARGET}/release/libkrun-tier"
-            for required in lib/libkrun.1.dylib lib/libkrunfw.5.dylib \
-              lib/libkrunfw.dylib \
-              licenses/libkrun-APACHE-2.0.txt \
-              licenses/libkrunfw-LGPL-2.1-only.txt \
-              licenses/linux-GPL-2.0-only.txt \
-              sources/libkrunfw-macos-host.patch SOURCE-OFFER.txt SOURCE-PINS; do
-              if [[ ! -e "${LIBKRUN_TIER}/${required}" ]]; then
-                echo "::error::libkrun release tier is missing ${required}" >&2
-                exit 1
-              fi
-            done
-            cp -R "${LIBKRUN_TIER}/lib" "staging/${ARCHIVE_NAME}/"
-            cp -R "${LIBKRUN_TIER}/licenses" "staging/${ARCHIVE_NAME}/"
-            cp -R "${LIBKRUN_TIER}/sources" "staging/${ARCHIVE_NAME}/"
-            cp "${LIBKRUN_TIER}/SOURCE-OFFER.txt" \
-              "${LIBKRUN_TIER}/SOURCE-PINS" "staging/${ARCHIVE_NAME}/"
-          fi
           # The pinned Firecracker, beside mvmctl: a Linux first run boots with
           # it, and a downloaded install has no other source. The script
           # refuses any tarball or binary that is not the one
@@ -814,15 +728,14 @@ jobs:
             staging/*.sha256
 
       # The cache save runs after the last step. The nested cross-compile
-      # target and the libkrun tier output hold workspace-built binaries that
-      # the dependency-only cache must not carry, so drop them first.
+      # target holds workspace-built binaries that the dependency-only cache
+      # must not carry, so drop it first.
       - name: Drop workspace-built outputs before the cache is saved
         if: ${{ always() && github.event_name == 'workflow_dispatch' }}
         shell: bash
         run: |
           rm -rf target/*/build/mvm-cli-nested-target \
-            target/*/*/build/mvm-cli-nested-target \
-            target/*/release/libkrun-tier
+            target/*/*/build/mvm-cli-nested-target
 
   archive-install-smoke:
     needs: build
@@ -838,9 +751,8 @@ jobs:
             runner: ubuntu-24.04-arm
             library: libmvm_hostlib.so
           - target: aarch64-apple-darwin
-            # Exercise the packaged compatibility tier on a supported pre-HVF
-            # host instead of the moving latest image.
-            runner: macos-15
+            # A named supported image rather than the moving latest one.
+            runner: macos-26
             library: libmvm_hostlib.dylib
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
@@ -869,14 +781,6 @@ jobs:
             test "${installed}" = "mvmctl ${EXPECT_VERSION#v}"
           fi
           "${prefix}/bin/mvmctl" --help
-          if [[ "${TARGET}" == *apple-darwin ]]; then
-            payload="${prefix}/lib/mvmctl-${TARGET}"
-            answer="$("${payload}/mvm-libkrun-supervisor" --contract-version)"
-            [[ "${answer}" == "mvm-libkrun-supervisor contract-version="* ]] || {
-              echo "::error::packaged libkrun supervisor did not answer its contract probe" >&2
-              exit 1
-            }
-          fi
           python3 - "${prefix}/lib/mvmctl-${TARGET}/${LIBRARY}" <<'PY'
           import ctypes
           import json
