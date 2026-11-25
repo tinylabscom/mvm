@@ -625,6 +625,60 @@ mod tests {
             .to_string()
     }
 
+    fn policy_host(host: &str) -> Option<String> {
+        destination_host(&format!("https://{host}/v1")).ok()
+    }
+
+    #[test]
+    fn established_host_names_keep_their_ascii_form() {
+        for (written, ascii) in [
+            ("api.openai.com", "api.openai.com"),
+            ("API.OpenAI.com", "api.openai.com"),
+            ("b\u{fc}cher.example", "xn--bcher-kva.example"),
+            ("B\u{dc}CHER.example", "xn--bcher-kva.example"),
+            ("xn--bcher-kva.example", "xn--bcher-kva.example"),
+            ("\u{4f8b}\u{3048}.jp", "xn--r8jz45g.jp"),
+            ("\u{5d0}\u{5d1}.example", "xn--4dbc.example"),
+        ] {
+            assert_eq!(policy_host(written).as_deref(), Some(ascii), "{written:?}");
+        }
+    }
+
+    /// The host-name tables stop at Unicode 16.0, so a label using a code
+    /// point assigned later has no policy host: the request is refused as an
+    /// unparseable destination instead of reaching a policy match.
+    #[test]
+    fn a_label_using_a_code_point_assigned_in_unicode_17_is_refused() {
+        for host in [
+            "\u{88f}.example",
+            "a\u{c5c}.example",
+            "\u{323b0}.example",
+            // The same three labels already in their ASCII form.
+            "xn--7xb.example",
+            "xn--a-s7e.example",
+            "xn--031o.example",
+        ] {
+            assert_eq!(policy_host(host), None, "{host:?}");
+            assert!(matches!(
+                destination_host(&format!("https://{host}/")),
+                Err(ProxyError::BadUrl(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn invalid_labels_stay_refused() {
+        for host in [
+            "\u{301}a.example",  // leading combining mark
+            "a\u{5d0}.example",  // left-to-right and right-to-left letters in one label
+            "a\u{e000}.example", // private-use code point
+            "a\u{378}.example",  // never assigned
+            "xn--a-ecp.example", // ASCII form that does not round-trip
+        ] {
+            assert_eq!(policy_host(host), None, "{host:?}");
+        }
+    }
+
     #[test]
     fn substituted_metadata_covers_headers_basic_auth_and_url_positions() {
         let (_dir, resolver) = resolver_with("openai", "sk-live-zzz");
