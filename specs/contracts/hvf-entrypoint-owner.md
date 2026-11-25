@@ -286,8 +286,25 @@ loads the distinct native and provider-stop roots from the fixed protected
 commissioning receipt, and a pure adapter can construct the typed control roots
 without opening a connection. The open-only journal seam requires both journal
 and lock to preexist and never creates or repairs either.
+The source-only installer seam may create exactly one fixed
+`/private/var/db/mvm/owner-commissioning-intent.json` containing bounded public
+role and approved-code-cohort metadata. It walks the protected root by
+descriptors, requires root-owned secure ancestry, exact deployment modes and no
+extended ACLs, and uses exclusive descriptor-relative creation followed by file
+and directory synchronization. Existing intent, deployment receipt,
+commissioning completion, authority-ready, journal or lock artifacts refuse
+before creation. An error after exclusive creation is publication-unknown and
+the retained object is never repaired or overwritten by retry.
+The v1 preflight checks only these fixed sibling conflict names; it does not
+claim to discover arbitrary state beneath a future authority-owned
+subdirectory. Trusted installation and state mutation must be serialized across
+preflight and publication. Exclusive create linearizes competing intent
+publishers only.
 These seams remain disconnected: no protected authority/runtime IPC, service,
 native operation or positive factory consumes them in production.
+The future initializer still owns intent authentication and consumption, key
+creation, deployment-receipt and completion publication, and journal
+initialization. This slice supplies none of those operations.
 
 ## Recovery authorization
 

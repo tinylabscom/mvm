@@ -55,7 +55,7 @@ pub mod extension_controller;
 /// How a thread following a file blocks until it may have changed.
 pub mod file_wait;
 pub mod hvf_owner_audit_signer;
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", test))]
 pub mod hvf_owner_deployment;
 pub mod hvf_owner_native_control_signer;
 /// Shared length-prefixed framing for same-UID host control channels.
