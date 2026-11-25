@@ -94,6 +94,9 @@ pub struct CollectorConfig<S, C, F> {
     host_anchor: VerifyingKey,
     connector: C,
     signer: F,
+    /// The signer's socket, when the signer is reached through one. An attempt
+    /// made while it is absent could only fail after the guest had answered.
+    signer_socket: Option<PathBuf>,
     // A fn-pointer marker: streams are only ever created inside the worker
     // thread, so the config itself never holds one and stays `Send`
     // regardless of the stream type.
@@ -124,8 +127,16 @@ where
             host_anchor,
             connector,
             signer,
+            signer_socket: None,
             _stream: std::marker::PhantomData,
         }
+    }
+
+    /// Dial the guest only while `socket`, the signer's, exists.
+    #[must_use]
+    pub fn with_signer_socket(mut self, socket: PathBuf) -> Self {
+        self.signer_socket = Some(socket);
+        self
     }
 }
 
@@ -332,6 +343,11 @@ where
         // A superseded expectation is the re-registration signal: the next
         // attempt's resolve reads the new boot.
         return AttemptEnd::Failed("registration-stale");
+    }
+    // Without its signer a dial wakes the guest, which reports the failed
+    // session on its console, every backoff for the life of the VM.
+    if config.signer_socket.as_ref().is_some_and(|s| !s.exists()) {
+        return AttemptEnd::Failed("signer-unavailable");
     }
     let mut stream = match (config.connector)() {
         Ok(stream) => stream,
@@ -921,6 +937,49 @@ mod tests {
     }
 
     #[test]
+    fn an_absent_signer_is_reported_without_dialing_the_guest_until_it_appears() {
+        use std::sync::atomic::AtomicUsize;
+        let state = tempfile::tempdir().unwrap();
+        let (guest_key, anchor_key) = keys();
+        register(state.path(), "vm-s", &guest_key);
+        let dials = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&dials);
+        let connector = move || -> std::io::Result<UnixStream> {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::other("no guest in this test"))
+        };
+        let signer_socket = state.path().join("signer.sock");
+
+        let (sink_tx, _sink_rx) = sync_channel(1);
+        let handle = spawn_collector(
+            CollectorConfig::new(
+                state.path().to_path_buf(),
+                "vm-s",
+                anchor_key.verifying_key(),
+                connector,
+                direct_signer(anchor_key.clone()),
+            )
+            .with_signer_socket(signer_socket.clone()),
+            ChannelSink(sink_tx),
+        )
+        .unwrap();
+        wait_until("a signer-unavailable status", || {
+            handle.status()
+                == CoverageStatus::Degraded {
+                    code: "signer-unavailable",
+                }
+        });
+        assert_eq!(dials.load(Ordering::SeqCst), 0, "the guest is never dialed");
+
+        // A signer that comes up later is used: the next attempt dials.
+        std::fs::write(&signer_socket, b"").unwrap();
+        wait_until("a dial once the signer exists", || {
+            dials.load(Ordering::SeqCst) > 0
+        });
+        handle.stop();
+    }
+
+    #[test]
     fn a_sibling_vms_registered_guest_cannot_feed_this_vms_collector() {
         // Two VMs, each with its own registered guest key. VM B's genuine
         // guest reaching VM A's collector is a forged identity from A's side:
@@ -1323,7 +1382,8 @@ pub fn start_embedded(
             host_anchor,
             connector,
             signer,
-        ),
+        )
+        .with_signer_socket(config.signer_sock.clone()),
         sink,
         losses,
     )?;
