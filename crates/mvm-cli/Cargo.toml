@@ -58,7 +58,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
 tar.workspace = true
-flate2.workspace = true
 hex.workspace = true
 # Decodes OTLP exporter header values, which the OpenTelemetry environment
 # convention percent-encodes (the observability module's exporter config).

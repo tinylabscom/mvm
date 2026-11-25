@@ -3804,7 +3804,6 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "ext4-view",
- "flate2",
  "hex",
  "libc",
  "libkrun-sys",
