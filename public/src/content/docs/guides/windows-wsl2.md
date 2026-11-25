@@ -1,11 +1,12 @@
 ---
 title: "WSL2 notes for mvm"
-description: "WSL2 workload-host notes for mvm. WSL2 with nested KVM is supported for the libkrun-backed workload path."
+description: "WSL2 notes for mvm. WSL2 is not a supported local microVM host today; mvmctl refuses the libkrun workload backend there."
 ---
 
-This page documents the supported Windows-adjacent runtime path: run `mvm`
-inside a **WSL2 distro** that exposes nested `/dev/kvm`, install libkrun in the
-distro, and keep both the repo and runtime state on the WSL ext4 filesystem.
+WSL2 is **not a supported workload path today**: `mvmctl` detects WSL2 and
+refuses the libkrun workload backend there even when the distro exposes nested
+`/dev/kvm` (see [Install on Windows](/install/windows)). The rest of this page
+is kept as research into that path and describes nothing that currently runs.
 Native Windows host support is still tracked separately in
 [mvm#428](https://github.com/tinylabscom/mvm/issues/428).
 

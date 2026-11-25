@@ -707,7 +707,7 @@ mod tests {
                 .claims
                 .iter()
                 .all(|c| matches!(c, ClaimStatus::DoesNotHold)),
-            "mock backend must not claim any ADR-002 guarantees"
+            "mock backend must not claim any ADR-001 guarantees"
         );
     }
 

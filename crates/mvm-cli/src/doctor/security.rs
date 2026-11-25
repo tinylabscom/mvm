@@ -158,7 +158,7 @@ pub(super) fn render_security_posture(p: &SecurityPostureReport) {
     if !p.is_microvm {
         ui::warn(
             "\n  ⚠ This backend is not a hardware-isolated microVM. The L1-L3\n   \
-             layers collapse to the host kernel; ADR-002 claims 1, 2, 3 do NOT\n   \
+             layers collapse to the host kernel; ADR-001 claims 1, 2, 3 do NOT\n   \
              hold. See https://docs.mvm.dev/security/matryoshka.",
         );
     }

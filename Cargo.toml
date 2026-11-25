@@ -85,7 +85,7 @@ exclude = [
     # virtio-fs FUSE-server request-parser fuzz harness. Same libfuzzer-sys
     # linker constraints; CI gate at `.github/workflows/security.yml::fuzz`.
     "crates/mvm-runtime/fuzz-backend",
-    # Plan 88 W6 / ADR-003 §"New untrusted-input surfaces" —
+    # Plan 88 W6 / ADR-001 claim 5 —
     # supervisor-config JSON fuzz harness. CI gate at
     # `.github/workflows/security.yml::fuzz`.
     "crates/deps/libkrun-sys/fuzz",

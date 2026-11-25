@@ -296,7 +296,7 @@ jobs:
           BUILD_TARGET: ${{ matrix.build_target }}
         run: rustup target add "${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}"
 
-      # ADR-065: mvm-cli's build.rs cross-compiles the embedded host-vm
+      # ADR-004: mvm-cli's build.rs cross-compiles the embedded host-vm
       # binaries (mvm-host-vm-init, mvm-builderd, mvm-setpriv) as static
       # aarch64-unknown-linux-musl via cargo-zigbuild — so zig +
       # cargo-zigbuild must be present at `cargo build`-of-mvmctl time, the

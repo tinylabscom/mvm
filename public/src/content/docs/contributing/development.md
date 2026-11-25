@@ -770,7 +770,7 @@ with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 | `merge-queue-watch.yml` | Merge-group CI completion, every five minutes, manual dispatch | Re-runs a failed merge-group CI once only when it scheduled zero jobs; opens or updates a `Merge queue stalled` issue if the queue head has waited over 30 minutes |
 | `ci-main.yml` | Push to main, manual dispatch | The slow lanes (feature suites, BDD, aarch64, release-profile and musl witnesses, eBPF, Linux coverage, Nix evaluation, boot ceiling), gated by `Test (main)`; a pull request and the merge queue never list them |
 | `release.yml` | Tags matching `v*` | Builds 3 platform binaries (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), creates GitHub Release |
-| `publish-crates.yml` | Dispatched by `release.yml` on a tag | Publishes the public crates (`mvm-contract`) to crates.io; every other crate is `publish = false` |
+| `publish-crates.yml` | Manual dispatch with a tag (dry run by default); pull requests that change the publish machinery run the dry run | Publishes the public crates (`mvm-contract` and `runmvm-client`) to crates.io; every other crate is `publish = false` |
 | `workers.yml` | Website change merged to main, release, version tag, or manual dispatch | Deploys docs to Cloudflare Workers Static Assets |
 
 The `main merge queue` ruleset allows 40 minutes for checks (longer than the
