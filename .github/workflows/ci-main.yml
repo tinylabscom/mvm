@@ -1046,6 +1046,39 @@ jobs:
           cargo test --test runtime_boot_bench \
             prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
 
+      - name: Delegate the cpuset controller to the runner's user manager
+        # systemd hands a user manager cpu, memory and pids by default; a scope
+        # can only carry `AllowedCPUs=` once cpuset is delegated too. Restarting
+        # the manager applies it, so this runs after the boot gate, which has
+        # no use for the scope's cpuset.
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"
+          sudo mkdir -p /etc/systemd/system/user@.service.d
+          printf '[Service]\nDelegate=cpu cpuset io memory pids\n' \
+            | sudo tee /etc/systemd/system/user@.service.d/mvm-cpuset.conf >/dev/null
+          sudo systemctl daemon-reload
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl restart "user@${uid}.service"
+
+      - name: Start a systemd user session for the placement scope
+        uses: ./.github/actions/user-session
+
+      - name: Witness exclusive core placement on a real VMM
+        # The witness panics, rather than skipping, when the scope cannot carry
+        # a cpuset, so a runner that loses the delegation fails here. The
+        # grep fails the step if the filter ever matches nothing, which cargo
+        # reports as success.
+        env:
+          MVM_LIVE_GUEST_MIB: "512"
+        run: |
+          set -euo pipefail
+          export MVM_LIVE_VMM_ARGV="${MVM_FIRECRACKER_BIN} --api-sock ${RUNNER_TEMP}/placed-vmm.sock"
+          cargo test -p mvm-hostd --test spawn_ceiling_audit_live \
+            a_placed_vmm_reads_back_its_cpuset_and_runs_only_there \
+            -- --ignored --exact --nocapture --test-threads 1 | tee "${RUNNER_TEMP}/placed-witness.log"
+          grep -Eq 'test result: ok\. 1 passed' "${RUNNER_TEMP}/placed-witness.log"
+
       - name: Dump VMM diagnostics on failure
         if: failure()
         # Firecracker's stderr goes to `firecracker.log` in the per-VM state
