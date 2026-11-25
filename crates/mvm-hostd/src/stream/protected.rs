@@ -289,8 +289,9 @@ pub(super) fn record_opening(
     );
     entry.labels = evidence::opening_labels(seed)?;
     emitter.emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)?;
-    // Verification also syncs the matching segment and directory. Visibility
-    // alone must not expose a producer whose opening is lost after a crash.
+    // The emit above synced the segment, as a barrier on an emitter no batch
+    // is open on; verification syncs the directory. Visibility alone must not
+    // expose a producer whose opening is lost after a crash.
     // This runs before every boot announces itself and inside every warm
     // claim, so it confirms the append just made rather than re-walking the
     // whole chain, whose cost grows with every launch the host has run.
