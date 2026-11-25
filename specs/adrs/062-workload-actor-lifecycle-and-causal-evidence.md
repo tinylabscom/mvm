@@ -442,10 +442,14 @@ an evidence archive (ADR-110).
   envelope's `EncryptionContext` and signature fields already do. Plans, audit
   records, checkpoint metadata and trace records gain the same fields, so an old
   record verifies under the algorithm it was written with.
-- **First:** hybrid X25519 + ML-KEM-768 for mailbox key agreement and cross-host
-  transport, because recorded traffic can be decrypted later.
-- **Second:** hybrid Ed25519 + ML-DSA-65 for long-lived artifacts: audit and
-  epoch seals, evidence archives, packs and plans.
+- Two tracks, not ranked against each other:
+  - **Authenticity:** hybrid Ed25519 + ML-DSA-65 for long-lived artifacts, audit
+    and epoch seals and evidence archives first, then plans and packs, because
+    that evidence has to stay verifiable for years.
+  - **Confidentiality:** hybrid X25519 + ML-KEM-768 for mailbox key agreement,
+    the connections the host originates and cross-host transport, evaluated in
+    parallel and not queued behind signatures, because recorded traffic can be
+    decrypted later.
 - **Deferred:** post-quantum signatures on each message. About 3.3 KB per
   signature costs density and mailbox bounds before the threat requires it.
 - Symmetric keys are 256-bit everywhere; hashes are unchanged.

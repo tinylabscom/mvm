@@ -1,28 +1,28 @@
 //! `xtask check-pq-claims`
 //!
-//! The mission demo's presenter notes tell an audience that no post-quantum
-//! cryptography is implemented. That sentence is true today and stops being true
-//! the day someone adds an implementation, at which point the notes would be
-//! telling a customer something false. This ties the two together: while the
-//! notes carry the "not implemented" sentence, the lockfile must hold no
+//! The security posture document says that no post-quantum cryptography is
+//! implemented. That sentence is true today and stops being true the day
+//! someone adds an implementation, at which point the document would be telling
+//! a reader something false. This ties the two together: while the document
+//! carries the "not implemented" sentence, the lockfile must hold no
 //! post-quantum implementation crate, and when a crate appears the build fails
-//! until the notes are rewritten to match.
+//! until the section is rewritten to match.
 //!
 //! The other direction is held too: dropping the sentence without an
 //! implementation behind it is a claim someone should make on purpose.
 //!
 //! A crate in the lockfile is the signal because an implementation needs one:
 //! ML-KEM and ML-DSA are not written by hand here. It is not a proof: a
-//! vendored or renamed implementation passes unnoticed, which is why the notes
-//! also say what is proposed, not just what is absent.
+//! vendored or renamed implementation passes unnoticed, which is why the
+//! section also says what is proposed, not just what is absent.
 
 use anyhow::{Result, bail};
 use std::path::Path;
 
-/// The notes whose "not implemented" sentence this holds to the lockfile.
-const NOTES: &str = "scripts/mission-demo-presenter-notes.md";
+/// The document whose "not implemented" sentence this holds to the lockfile.
+const STATEMENT: &str = "specs/adrs/001-microvm-security-posture.md";
 
-/// The sentence in the notes that says no post-quantum extension exists.
+/// The sentence in the document that says no post-quantum extension exists.
 const NOT_IMPLEMENTED: &str = "These post-quantum extensions are not implemented today.";
 
 /// Lockfile package names that implement ML-KEM, ML-DSA, SLH-DSA or the
@@ -61,28 +61,30 @@ fn post_quantum_packages(lock: &str) -> Vec<String> {
     found
 }
 
-/// What the lockfile and the notes together say.
-fn evaluate(lock: &str, notes: &str) -> Result<String> {
+/// What the lockfile and the document together say.
+fn evaluate(lock: &str, statement: &str) -> Result<String> {
     let packages = post_quantum_packages(lock);
-    let says_none = notes.contains(NOT_IMPLEMENTED);
+    let says_none = statement.contains(NOT_IMPLEMENTED);
     match (packages.is_empty(), says_none) {
-        (true, true) => Ok("no post-quantum implementation crate in Cargo.lock, and the presenter notes say none is implemented".to_string()),
+        (true, true) => Ok(format!(
+            "no post-quantum implementation crate in Cargo.lock, and {STATEMENT} says none is implemented"
+        )),
         (false, true) => bail!(
-            "Cargo.lock now holds post-quantum crate(s) {packages:?}, but {NOTES} still says \"{NOT_IMPLEMENTED}\". Rewrite the notes to say what is implemented, what the demo shows and what is still proposed, then remove or change that sentence."
+            "Cargo.lock now holds post-quantum crate(s) {packages:?}, but {STATEMENT} still says \"{NOT_IMPLEMENTED}\". Rewrite its post-quantum section to say what is implemented, what witnesses it and what is still proposed, then remove or change that sentence."
         ),
         (true, false) => bail!(
-            "{NOTES} no longer says \"{NOT_IMPLEMENTED}\" but Cargo.lock holds no post-quantum implementation crate. Restore the sentence, or add the implementation the notes now describe."
+            "{STATEMENT} no longer says \"{NOT_IMPLEMENTED}\" but Cargo.lock holds no post-quantum implementation crate. Restore the sentence, or add the implementation the section now describes."
         ),
         (false, false) => Ok(format!(
-            "post-quantum crate(s) {packages:?} are in Cargo.lock and the presenter notes no longer claim none is implemented"
+            "post-quantum crate(s) {packages:?} are in Cargo.lock and {STATEMENT} no longer claims none is implemented"
         )),
     }
 }
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {
     let lock = std::fs::read_to_string(workspace.join("Cargo.lock"))?;
-    let notes = std::fs::read_to_string(workspace.join(NOTES))?;
-    let verdict = evaluate(&lock, &notes)?;
+    let statement = std::fs::read_to_string(workspace.join(STATEMENT))?;
+    let verdict = evaluate(&lock, &statement)?;
     println!("check-pq-claims: {verdict}");
     Ok(())
 }
@@ -100,14 +102,14 @@ mod tests {
     }
 
     #[test]
-    fn a_tree_with_no_post_quantum_crate_and_notes_that_say_so_passes() {
-        let notes = format!("text. {NOT_IMPLEMENTED} more.");
-        assert!(evaluate(&lock(&["ring", "rustls", "ed25519-dalek"]), &notes).is_ok());
+    fn a_tree_with_no_post_quantum_crate_and_a_statement_that_says_so_passes() {
+        let statement = format!("text. {NOT_IMPLEMENTED} more.");
+        assert!(evaluate(&lock(&["ring", "rustls", "ed25519-dalek"]), &statement).is_ok());
     }
 
     #[test]
     fn a_post_quantum_crate_makes_the_not_implemented_sentence_fail() {
-        let notes = NOT_IMPLEMENTED;
+        let statement = NOT_IMPLEMENTED;
         for name in [
             "ml-dsa",
             "ml-kem",
@@ -115,21 +117,21 @@ mod tests {
             "libcrux-ml-kem",
             "oqs-sys",
         ] {
-            let error = evaluate(&lock(&["ring", name]), notes)
+            let error = evaluate(&lock(&["ring", name]), statement)
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(name), "{name}: {error}");
-            assert!(error.contains("presenter-notes"), "{error}");
+            assert!(error.contains(STATEMENT), "{error}");
         }
     }
 
     #[test]
     fn dropping_the_sentence_without_an_implementation_fails() {
-        assert!(evaluate(&lock(&["ring"]), "the notes were rewritten").is_err());
+        assert!(evaluate(&lock(&["ring"]), "the section was rewritten").is_err());
     }
 
     #[test]
-    fn rewritten_notes_with_an_implementation_behind_them_pass() {
+    fn a_rewritten_statement_with_an_implementation_behind_it_passes() {
         assert!(evaluate(&lock(&["ml-dsa"]), "now implemented").is_ok());
     }
 
@@ -149,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn the_real_workspace_holds_the_notes_to_the_lockfile() {
+    fn the_real_workspace_holds_the_statement_to_the_lockfile() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         run(workspace).unwrap();
     }
