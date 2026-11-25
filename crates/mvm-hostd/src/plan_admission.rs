@@ -117,8 +117,7 @@ pub use nonce_ledger::InMemoryNonceLedger;
 pub(crate) use operator_trial::OperatorTrialDispatchUncertain;
 pub use registry_pack::{BuiltPackBootCheck, PreparedBuiltPackRuntime, prepare_built_pack_start};
 pub use restore::{
-    RetainedVmFullFork, VerifiedVmFullForkSource, VmFullForkDispatch, VmFullForkRestorer,
-    verify_vm_full_fork_source,
+    RetainedVmFullFork, VerifiedVmFullForkSource, VmFullForkDispatch, verify_vm_full_fork_source,
 };
 pub use rollback::{
     UndoLaunchFailure, apply_admitted_grants_or_undo_launch,

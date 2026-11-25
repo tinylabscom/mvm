@@ -8,7 +8,7 @@
 use anyhow::{Context, Result, ensure};
 use mvm_core::checkpoint::{CheckpointDigest, CheckpointId, CheckpointMeta, VmFullOrigin};
 use mvm_runtime::checkpoint::{
-    CheckpointChainAnchor, CheckpointStore, ForkParams, ForkRestore, VerifiedRetainedRuntime,
+    CheckpointChainAnchor, CheckpointStore, ForkParams, ForkRestorer, VerifiedRetainedRuntime,
 };
 
 use super::AdmittedPlan;
@@ -94,25 +94,44 @@ pub fn verify_vm_full_fork_source(
 }
 
 /// Typed backend alternatives for a retained full-VM fork.
-pub enum VmFullForkRestorer<'a> {
+enum VmFullForkRestorer<'a> {
     /// Firecracker snapshot load with Firecracker runtime/device evidence.
-    Firecracker(&'a ForkRestore<'a>),
+    Firecracker(&'a mvm_runtime::firecracker::FcForkRestorer),
     /// Native HVF restore with private RAM/frame ownership.
-    Hvf(&'a ForkRestore<'a>),
+    Hvf(&'a mvm_runtime::hvf_restore::HvfForkRestorer),
+    /// Injected HVF restorer for cross-crate containment tests only.
+    #[cfg(feature = "test-support")]
+    TestHvf(&'a dyn ForkRestorer),
 }
 
 impl VmFullForkRestorer<'_> {
     fn matches(&self, origin: Option<VmFullOrigin>) -> bool {
-        matches!(
-            (self, origin),
+        match (self, origin) {
             (Self::Firecracker(_), Some(VmFullOrigin::Firecracker))
-                | (Self::Hvf(_), Some(VmFullOrigin::Hvf))
-        )
+            | (Self::Hvf(_), Some(VmFullOrigin::Hvf)) => true,
+            #[cfg(feature = "test-support")]
+            (Self::TestHvf(_), Some(VmFullOrigin::Hvf)) => true,
+            _ => false,
+        }
+    }
+}
+
+impl ForkRestorer for VmFullForkRestorer<'_> {
+    fn verifies_on_load(&self) -> &'static [&'static str] {
+        match self {
+            Self::Firecracker(restorer) => restorer.verifies_on_load(),
+            Self::Hvf(restorer) => restorer.verifies_on_load(),
+            #[cfg(feature = "test-support")]
+            Self::TestHvf(restorer) => restorer.verifies_on_load(),
+        }
     }
 
-    fn restorer(&self) -> &ForkRestore<'_> {
+    fn restore(&self, child: &mvm_runtime::checkpoint::RestoredChild<'_>) -> Result<()> {
         match self {
-            Self::Firecracker(restorer) | Self::Hvf(restorer) => *restorer,
+            Self::Firecracker(restorer) => restorer.restore(child),
+            Self::Hvf(restorer) => restorer.restore(child),
+            #[cfg(feature = "test-support")]
+            Self::TestHvf(restorer) => restorer.restore(child),
         }
     }
 }
@@ -131,8 +150,53 @@ pub struct VmFullForkDispatch {
 }
 
 impl RetainedVmFullFork {
+    /// Spend admission on the authenticated Firecracker restore implementation.
+    pub fn dispatch_firecracker(
+        self,
+        store: &CheckpointStore,
+        restorer: &mvm_runtime::firecracker::FcForkRestorer,
+        anchor: &dyn CheckpointChainAnchor,
+        stop_child: &dyn Fn(&str) -> Result<()>,
+    ) -> VmFullForkDispatch {
+        self.dispatch(
+            store,
+            VmFullForkRestorer::Firecracker(restorer),
+            anchor,
+            stop_child,
+        )
+    }
+
+    /// Spend admission on the authenticated HVF restore implementation.
+    pub fn dispatch_hvf(
+        self,
+        store: &CheckpointStore,
+        restorer: &mvm_runtime::hvf_restore::HvfForkRestorer,
+        anchor: &dyn CheckpointChainAnchor,
+        stop_child: &dyn Fn(&str) -> Result<()>,
+    ) -> VmFullForkDispatch {
+        self.dispatch(store, VmFullForkRestorer::Hvf(restorer), anchor, stop_child)
+    }
+
+    /// Inject an HVF-compatible restorer for cross-crate containment tests.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn dispatch_test_hvf(
+        self,
+        store: &CheckpointStore,
+        restorer: &dyn ForkRestorer,
+        anchor: &dyn CheckpointChainAnchor,
+        stop_child: &dyn Fn(&str) -> Result<()>,
+    ) -> VmFullForkDispatch {
+        self.dispatch(
+            store,
+            VmFullForkRestorer::TestHvf(restorer),
+            anchor,
+            stop_child,
+        )
+    }
+
     /// Spend admission before clone/restore and select exactly one typed restorer.
-    pub fn dispatch(
+    fn dispatch(
         mut self,
         store: &CheckpointStore,
         restorer: VmFullForkRestorer<'_>,
@@ -196,7 +260,7 @@ impl RetainedVmFullFork {
             let meta = mvm_runtime::checkpoint::fork_vm_full_verified_with_rollback(
                 store,
                 self.params,
-                restorer.restorer(),
+                &restorer,
                 anchor,
                 &self.source.runtime,
                 &self.source.restored_rootfs_sha256,
@@ -319,12 +383,12 @@ mod tests {
 
     #[test]
     fn backend_restorer_variants_match_only_their_authenticated_origin() {
-        let restore = |_child: &mvm_runtime::checkpoint::RestoredChild<'_>| Ok(());
-        let firecracker = VmFullForkRestorer::Firecracker(&restore);
+        let firecracker =
+            VmFullForkRestorer::Firecracker(&mvm_runtime::firecracker::FcForkRestorer);
         assert!(firecracker.matches(Some(VmFullOrigin::Firecracker)));
         assert!(!firecracker.matches(Some(VmFullOrigin::Hvf)));
 
-        let hvf = VmFullForkRestorer::Hvf(&restore);
+        let hvf = VmFullForkRestorer::Hvf(&mvm_runtime::hvf_restore::HvfForkRestorer);
         assert!(hvf.matches(Some(VmFullOrigin::Hvf)));
         assert!(!hvf.matches(Some(VmFullOrigin::Firecracker)));
         assert!(!hvf.matches(None));

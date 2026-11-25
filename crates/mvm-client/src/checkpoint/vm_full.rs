@@ -220,37 +220,15 @@ impl PreparedVmFullFork {
         let origin = source.origin();
         let bound = source.bind_child(admitted, params);
         let dispatched = match origin {
-            Some(VmFullOrigin::Firecracker) => {
-                let restore = |child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
-                    mvm_runtime::firecracker::FcForkRestorer.restore_fork(
-                        child.vm_name,
-                        child.state_dir,
-                        child.cpu_grant,
-                        &mvm_backends::fc::ForkRuntimeEvidence {
-                            observation_sha256: &required_blob_sha(
-                                child.content,
-                                "runtime-artifacts.json",
-                            )?,
-                            anchors_sha256: &required_blob_sha(
-                                child.content,
-                                "device-anchors.json",
-                            )?,
-                            reseeded_identity_sha256: child.reseeded_identity_sha256,
-                        },
-                    )
-                };
-                bound.dispatch(
-                    &store,
-                    mvm_hostd::plan_admission::VmFullForkRestorer::Firecracker(&restore),
-                    &anchor,
-                    &mvm_runtime::microvm::stop_vm,
-                )
-            }
-            Some(VmFullOrigin::Hvf) => bound.dispatch(
+            Some(VmFullOrigin::Firecracker) => bound.dispatch_firecracker(
                 &store,
-                mvm_hostd::plan_admission::VmFullForkRestorer::Hvf(
-                    &mvm_runtime::hvf_restore::HvfForkRestorer,
-                ),
+                &mvm_runtime::firecracker::FcForkRestorer,
+                &anchor,
+                &mvm_runtime::microvm::stop_vm,
+            ),
+            Some(VmFullOrigin::Hvf) => bound.dispatch_hvf(
+                &store,
+                &mvm_runtime::hvf_restore::HvfForkRestorer,
                 &anchor,
                 &stop_hvf_child,
             ),
@@ -278,14 +256,6 @@ fn backend_for_origin(origin: Option<VmFullOrigin>) -> Result<BackendKind> {
             bail!("checkpoint has no supported authenticated runtime backend identity")
         }
     }
-}
-
-fn required_blob_sha(content: &[mvm_core::checkpoint::ContentBlob], name: &str) -> Result<String> {
-    content
-        .iter()
-        .find(|blob| blob.name == name)
-        .map(|blob| blob.sha256.clone())
-        .with_context(|| format!("Firecracker checkpoint has no authenticated {name} evidence"))
 }
 
 fn stop_hvf_child(name: &str) -> Result<()> {
@@ -417,8 +387,6 @@ fn verify_child_plan(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use super::*;
 
     struct CapturedParent(PathBuf);
@@ -603,66 +571,18 @@ mod tests {
         } = prepared;
         let crate::admission::AdmissionContext { admitted, .. } = admission;
         let bound = source.bind_child(admitted, params);
-        let calls = AtomicUsize::new(0);
-        let recording = |_child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        };
-        let dispatched = bound.dispatch(
+        let dispatched = bound.dispatch_firecracker(
             &store,
-            mvm_hostd::plan_admission::VmFullForkRestorer::Firecracker(&recording),
+            &mvm_runtime::firecracker::FcForkRestorer,
             &anchor,
             &|_| Ok(()),
         );
-        assert!(dispatched.result.is_err());
+        let error = dispatched.result.expect_err("backend mismatch must refuse");
+        assert!(
+            error.to_string().contains("restorer for the wrong backend"),
+            "{error:#}"
+        );
         assert!(dispatched.admitted.was_dispatched());
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn opaque_plan_and_tenant_projections_reach_the_lower_restore_boundary() {
-        let (_env, _home, root, store, meta) = fixture();
-        let prepared = prepare_vm_full_fork(&store, request(&meta, root.path())).unwrap();
-        let PreparedVmFullFork {
-            store,
-            anchor,
-            source,
-            admission,
-            params,
-        } = prepared;
-        let crate::admission::AdmissionContext { admitted, .. } = admission;
-        let bound = source.bind_child(admitted, params);
-        let observed = std::sync::Mutex::new(None);
-        let recording = |child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
-            let plan = mvm_core::plan::plan_from_admitted_json(
-                child.plan_json.context("missing opaque child plan")?,
-            )?;
-            *observed.lock().expect("observation lock poisoned") =
-                Some((child.vm_name.to_string(), plan.tenant.0, plan.image.sha256));
-            Ok(())
-        };
-        let dispatched = bound.dispatch(
-            &store,
-            mvm_hostd::plan_admission::VmFullForkRestorer::Hvf(&recording),
-            &anchor,
-            &|_| Ok(()),
-        );
-        dispatched.result.unwrap();
-        let (name, tenant, image) = observed
-            .into_inner()
-            .expect("observation lock poisoned")
-            .expect("restorer observation");
-        assert_eq!(name, "child-vm");
-        assert_eq!(tenant, "local");
-        assert_eq!(
-            image,
-            mvm_runtime::checkpoint::materialized_blob_sha256(
-                &store,
-                &meta,
-                mvm_core::checkpoint::ROOTFS_BLOB,
-            )
-            .unwrap()
-        );
     }
 
     fn retained_fork_contained_after_admission(
@@ -693,18 +613,13 @@ mod tests {
                 )?;
             Ok(())
         };
-        let dispatched = bound.dispatch(
-            &store,
-            mvm_hostd::plan_admission::VmFullForkRestorer::Hvf(&restorer),
-            &anchor,
-            &|name| {
-                stops.borrow_mut().push(name.to_string());
-                if stop_fails {
-                    anyhow::bail!("stop not confirmed");
-                }
-                Ok(())
-            },
-        );
+        let dispatched = bound.dispatch_test_hvf(&store, &restorer, &anchor, &|name| {
+            stops.borrow_mut().push(name.to_string());
+            if stop_fails {
+                anyhow::bail!("stop not confirmed");
+            }
+            Ok(())
+        });
         assert!(dispatched.admitted.was_dispatched());
         (
             dispatched

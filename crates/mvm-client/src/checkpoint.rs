@@ -26,14 +26,11 @@ pub use mvm_runtime::base::runtime_meta;
 pub use mvm_runtime::base::runtime_meta::{VmRuntimeMeta, read as read_runtime_meta};
 pub use mvm_runtime::checkpoint::{
     BlobStatus, CaptureFsQuickParams, CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore,
-    ForkParams, ForkParentLiveness, ForkStopUncertain, LineageRelation, RestoreParams,
-    RestoredChild, VerifiedRetainedRuntime, WorkspaceVolume, capture_fs_quick, capture_vm_full,
-    checkpoint_ancestry, checkpoint_children, diff_checkpoints, fork_vm_full,
-    materialized_blob_sha256, materialized_source, restore_checkpoint, verify_checkpoint_runtime,
-    verify_lineage, vm_full_restorer_for, vm_is_running,
+    ForkParentLiveness, ForkStopUncertain, LineageRelation, VerifiedRetainedRuntime,
+    WorkspaceVolume, capture_fs_quick, capture_vm_full, checkpoint_ancestry, checkpoint_children,
+    diff_checkpoints, materialized_blob_sha256, materialized_source, verify_checkpoint_runtime,
+    verify_lineage, vm_is_running,
 };
-pub use mvm_runtime::firecracker::FcForkRestorer;
-pub use mvm_runtime::hvf_restore::HvfForkRestorer;
 pub use mvm_runtime::image_lineage::{
     ImageChainAnchor, ImageStore, image_ancestry, image_children, verify_image_lineage,
 };
@@ -49,6 +46,29 @@ pub use mvm_runtime::vm::instance_snapshot::lock_resume;
 pub use mvm_hostd::liveness::refuse_unwatched_resume;
 pub use mvm_runtime::vm::snapshot_key::SNAPSHOT_TENANT_KEY_ENV;
 pub use mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot_revision;
+
+/// Resume an authenticated vm_full checkpoint under its existing VM identity.
+///
+/// This is the sole client owner for same-identity checkpoint restore. The
+/// runtime transaction authenticates one metadata value, then derives its target
+/// and backend restorer before verifying content, retained runtime, and tenant.
+/// `expected_vm_name` binds that authenticated target to the caller's lifecycle
+/// lock; it does not select or rename the restore target.
+pub fn restore_vm_full_checkpoint(
+    store: &CheckpointStore,
+    checkpoint: CheckpointId,
+    expected_vm_name: &str,
+    tenant: String,
+    anchor: &dyn CheckpointChainAnchor,
+) -> Result<()> {
+    mvm_runtime::checkpoint::restore_same_identity_checkpoint(
+        store,
+        checkpoint,
+        expected_vm_name,
+        tenant,
+        anchor,
+    )
+}
 
 /// Host-local checkpoint catalog, lineage verification, removal and workspace images.
 pub struct Checkpoints {

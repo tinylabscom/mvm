@@ -63,6 +63,11 @@ holds state refuses a cold boot rather than discarding it. If the admitted
 plan pins a kernel digest, `--boot` also needs `--kernel <path>` so the file
 can be checked against that digest.
 
+A cold-tier resume stages the retained filesystem into a fresh boot and grants
+fresh authority from that newly signed plan. It is not a same-identity
+memory-checkpoint exception and does not inherit the previous sandbox's
+authority.
+
 `--expected-generation` fences a park or non-boot resume against another
 transition. Repeating an identical transition after losing the first response
 returns a replay marker without writing a second record or audit entry.

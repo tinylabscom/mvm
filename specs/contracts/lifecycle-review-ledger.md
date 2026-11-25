@@ -499,6 +499,38 @@ labels and controller rollback classification. They do not qualify a live
 Firecracker/HVF trial, hardware attestation, cloud/GCP behavior, native
 backend custody, Nix artifacts or formal launch performance.
 
+## Final workload dispatch source boundary
+
+The final [#5520](https://github.com/tinylabscom/mvm/issues/5520) source gate
+classifies workload dispatch into fresh-authority and same-identity owners.
+Fresh authority remains with the private hostd admitted tail, typed client
+facades for CLI cold, warm claim, filesystem quick fork, operator trial and
+full-VM fresh-child fork, explicit native/actor ownership, and named lower
+runtime/backend implementations. A cold-tier durable-session resume stages a
+retained filesystem into a fresh boot under a newly signed plan; it is not a
+same-identity restore exception.
+
+Same identity has exactly two owners. `mvmctl vm checkpoint restore` enters the
+client facade and then one runtime vm_full transaction. One authenticated
+metadata value selects the target identity, backend restorer, content, tenant
+and retained-runtime checks, so a catalog replacement cannot mix generations.
+Sealed instance resume enters `verify_and_resume*` and its guarded no-NIC
+load/resume implementation. Neither path is forced through fresh admission.
+
+The generic public client prepared-start functions and raw checkpoint restore
+reexports are removed. Full-VM fresh-child dispatch accepts only the concrete
+Firecracker and HVF restorers selected from authenticated checkpoint origin;
+the hostd boundary no longer accepts an arbitrary callback hidden behind a
+backend tag. The production-source gate strips comments, strings and test-only
+items, retains the raw-template checks, rejects additional same-identity owners
+or fresh dispatch in those modules, and pins the exact typed seams.
+
+Fixture and compile-fail evidence covers the source/API boundary. Existing
+HMAC, epoch, runtime, no-NIC and vm_full lineage witnesses remain the behavioral
+evidence. This source classification does not qualify a live Firecracker/HVF
+restore or launch, cloud/GCP behavior, Nix artifacts, or formal cold/warm
+performance.
+
 ## Signed application HVF startup diagnostics
 
 Reviewed in [#5681](https://github.com/tinylabscom/mvm/pull/5681): standalone

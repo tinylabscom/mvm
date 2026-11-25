@@ -95,7 +95,6 @@ mod check_spec_hygiene;
 mod check_stream_redaction_seam;
 mod check_telemetry_inventory;
 mod check_telemetry_sources;
-mod check_template_restore_boundary;
 mod check_test_home_isolation;
 mod check_text_reading_tests;
 mod check_thin_cli;
@@ -106,6 +105,8 @@ mod check_vcpu_ceilings;
 mod check_verified_kernel_reads;
 mod check_witness_citations;
 mod check_workflow_paths;
+#[path = "check_template_restore_boundary.rs"]
+mod check_workload_dispatch;
 mod check_workspace_dep_inheritance;
 mod claims_ledger;
 mod cli_self_reach;
@@ -347,9 +348,9 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_single_exec_secs_writer::run(&workspace)
         }
-        Some("check-template-restore-boundary") => {
+        Some("check-workload-dispatch" | "check-template-restore-boundary") => {
             let workspace = workspace_root();
-            check_template_restore_boundary::run(&workspace)
+            check_workload_dispatch::run(&workspace)
         }
         Some("check-single-host-predicate") => {
             let workspace = workspace_root();
@@ -812,7 +813,7 @@ fn main() -> Result<()> {
                 "  check-single-workspace-write-path      assert the workspace apply store is reached only through the signed apply engine"
             );
             eprintln!(
-                "  check-template-restore-boundary        reject raw CLI/client template restore assembly while preserving authenticated restore sources"
+                "  check-workload-dispatch                enforce typed fresh authority and exactly two same-identity owners"
             );
             eprintln!(
                 "  check-vcpu-ceilings                    assert no backend derives its declared vCPU ceiling from a wire type's MAX"
