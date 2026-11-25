@@ -276,7 +276,7 @@ Work is tracked in GitHub issues. Start with the
 
 ```bash
 git clone https://github.com/tinylabscom/mvm.git && cd mvm
-just maint::hooks   # pre-commit hook that runs cargo fmt --all
+just setup hooks   # pre-commit hook that runs cargo fmt --all
 nix develop         # optional: pinned toolchain
 just ci             # lint, tests and doctests; run before opening a PR
 ```
@@ -289,39 +289,28 @@ PRs merge through the merge queue.
 
 ### Releasing a version
 
-Releases use the `release` module's recipes rather than a top-level recipe.
-You need `git-cliff`, `cargo-nextest`, an authenticated GitHub CLI (`gh`),
-and push access to `origin`.
-
-Start from an up-to-date `main` with a clean working tree, then prepare the
-release from the checkout where you run release operations:
+One command cuts a release. You need `git-cliff`, `cargo-nextest`, an
+authenticated GitHub CLI (`gh`), and push access to `origin`. Start from a
+clean, up-to-date `main`:
 
 ```bash
-git switch main
-git pull --ff-only
-# Example: if the current version is 0.28.0, prepare the next release:
-just release::pr 0.29.0
+just release --dry-run 0.29.0   # print every step, change nothing
+just release 0.29.0
 ```
 
-Pass the version explicitly, without a `v` prefix. Omitting it
-(`just release::pr`) lets `git-cliff` choose the next version from
-conventional commits, which may not be the version you intend.
+Pass the version explicitly, without a `v` prefix; a release candidate is
+`0.29.0-rc.1`. The recipe runs Clippy, creates `release/v0.29.0`, updates the
+version pins, lockfiles and changelog, runs the workspace tests against the
+bumped tree, pushes the branch and opens the release PR. It then enables
+auto-merge, waits for the checks and the merge queue, tags the merged commit on
+`origin/main` as `v0.29.0` and pushes the tag, which starts the release
+build/publish pipeline. It ends by printing the follow-ups it leaves to you:
+merging the prebuilt-pin PR, publishing the crates and running the installer
+compatibility lanes.
 
-The recipe runs formatting, Clippy fixes/checks, and workspace tests, creates
-`release/v0.29.0`, updates version pins, lockfiles, and the changelog, then
-reruns workspace tests against the bumped tree. It commits and pushes the
-branch and opens a release PR.
-
-Merge that PR through the merge queue, then publish the tag:
-
-```bash
-just release::tag 0.29.0
-```
-
-The tag recipe fetches `origin/main` and refuses unless it carries the
-requested version. It tags that commit as `v0.29.0` and pushes the tag,
-triggering the release build/publish pipeline. Use the same version for
-both commands; do not tag before the release PR merges.
+It is safe to re-run. Each run reads what is already done — the tag on origin,
+the version on `main`, the release PR — and continues from there, so if the
+wait times out or a check needs a fix, run the same command again.
 
 ## License
 

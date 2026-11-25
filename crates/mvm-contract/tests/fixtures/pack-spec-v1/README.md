@@ -86,7 +86,7 @@ codes (`missing`, `identity`, `package`, `path`, `entrypoint`, `resources`).
 | SDK | Builder | Spec schema | Golden check |
 | --- | --- | --- | --- |
 | Rust | `mvm_sdk::pack::pack` | `mvm.pack-spec/v1` | `cargo test -p mvm-sdk pack::` |
-| Kotlin (JVM) | `com.runmvm.packs.pack` | `mvm.pack-spec/v1` | `just sdk::test-kotlin` |
+| Kotlin (JVM) | `com.runmvm.packs.pack` | `mvm.pack-spec/v1` | `just test sdk kotlin` |
 | Python | in progress | `mvm.pack-spec/v1` | not yet |
 | TypeScript | in progress | `mvm.pack-spec/v1` | not yet |
 

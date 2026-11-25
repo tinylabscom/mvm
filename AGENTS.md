@@ -159,13 +159,13 @@ builder VM or GitHub-hosted runners have one repository-owned remote lifecycle.
 Run the requested test from its worktree:
 
 ```bash
-just lab::gcp-kvm just bdd::live-ci
+just e2e gcp-kvm just e2e live-ci
 ```
 
 The command creates an Intel C3 Spot VM with nested KVM, uploads only files
 tracked by git from the current worktree, prepares the pinned
 Rust/Zig/Firecracker
-toolchain, runs the exact argument vector after `lab::gcp-kvm`, downloads a
+toolchain, runs the exact argument vector after `gcp-kvm`, downloads a
 result archive under the printed `/tmp` path, and deletes the outer VM on
 success or failure. Compute Engine also deletes it after a two-hour maximum
 runtime if the local runner disappears before its cleanup trap can run.
@@ -184,8 +184,8 @@ already authorized.
 Issue #3655's destructive witness is the pinned preset:
 
 ```bash
-just lab::cve-3655-gcp --dry-run
-just lab::cve-3655-gcp
+just e2e cve-3655-gcp --dry-run
+just e2e cve-3655-gcp
 ```
 
 It delegates host ownership to the generic runner and supplies only the pinned
@@ -267,7 +267,7 @@ above is what keeps these safe), the builder VM's `/var/lib/mvm/`; the Nix store
 it). The builder VM itself is shared across worktrees — **never fork a
 per-worktree VM** (boot cost, duplicated tens-of-GB store, warm-cache loss).
 
-One-time per clone: `just maint::hooks` points `core.hooksPath` at
+One-time per clone: `just setup hooks` points `core.hooksPath` at
 `.githooks/`. The pre-commit hook runs `cargo fmt --all` (auto-restaging),
 scoped stable clippy `-D warnings`, and `actionlint` for workflow changes —
 never Nix on the host or the full test suite. Nix flake checks run in CI;
@@ -305,7 +305,7 @@ No task is complete without all of:
 1. **Tests first**: Write or update tests covering the new/changed behavior before marking a task done. Unit tests for logic, integration tests for CLI and cross-crate interactions.
 2. **All tests green**: Run `cargo test --workspace` and confirm zero failures. New tests must pass alongside all existing tests.
 3. **Zero clippy warnings/errors**: Run `cargo clippy --workspace -- -D warnings` and fix all findings before calling a feature done. Never suppress a clippy lint with `#[allow(...)]` — fix the underlying issue instead.
-4. **Compiling workspace**: Run `cargo check --workspace` (or full `cargo test`/`cargo build`) and fix any errors before you finish. Never leave the workspace in a non-compiling state. **`--all-targets` is not exhaustive**: it silently skips targets behind `required-features` (the `mvm-conformance` cucumber runner needs `--features bdd`), and on macOS it cannot compile `cfg(target_os = "linux")` files at all — including Linux-gated _test_ files, which `just check::linux` also misses because that recipe is `--lib` only. Changing the shape of a shared type (adding a struct field, a trait method, an enum variant) therefore needs `just check::gated` before pushing. Skipping it costs a CI round trip: the break surfaces there as a compile error in the "Build workspace tests" job.
+4. **Compiling workspace**: Run `cargo check --workspace` (or full `cargo test`/`cargo build`) and fix any errors before you finish. Never leave the workspace in a non-compiling state. **`--all-targets` is not exhaustive**: it silently skips targets behind `required-features` (the `mvm-conformance` cucumber runner needs `--features bdd`), and on macOS it cannot compile `cfg(target_os = "linux")` files at all — including Linux-gated _test_ files, which `just check linux` also misses because that recipe is `--lib` only. Changing the shape of a shared type (adding a struct field, a trait method, an enum variant) therefore needs `just check gated` before pushing. Skipping it costs a CI round trip: the break surfaces there as a compile error in the "Build workspace tests" job.
 5. **Keep the issue authoritative**: GitHub issues own work status, remaining
    scope, dependencies, and acceptance criteria. Every PR for issue-related
    work must link to each issue it addresses in its description, including
@@ -386,7 +386,7 @@ do not extend a foreground timeout and rerun the same command.
 
 ## Scoped feedback and worktree shell
 
-Debug with `just tests::scoped <crate> <filter>`: read the failure, make one
+Debug with `just test scoped <crate> <filter>`: read the failure, make one
 change, and rerun that scoped test. Append `--lib` for a library unit test or
 `--test <name>` for one integration target, avoiding compilation of unrelated
 test binaries. Use an empty filter (`""`) to run every test in that target.

@@ -56,7 +56,7 @@ feature fails the build hard when the pinned toolchain is missing, because it
 was asked for by name.
 
 Use the feature when the `mvmctl` you build has to carry the Linux host
-binaries itself: `just embed` (which also builds the per-VM helpers beside it),
+binaries itself: `just build embed` (which also builds the per-VM helpers beside it),
 the tag-push release workflow (so a downloaded binary is self-sufficient), and
 any CI lane that needs a builder VM without a checkout to build the payload
 from. Do not use it for the edit, check and test loop, or to run `mvmctl` from
@@ -80,11 +80,11 @@ or other consumer of `mvm-cli` gets the refusal from `host_binaries::extract`
 instead — and only in a source checkout: an official release binary always
 carries its payload.
 
-`just embed` remains for building every host binary in one go:
+`just build embed` remains for building every host binary in one go:
 
 ```sh
-just embed                    # build and invoke ./target/debug/mvmctl
-just embed --release          # build and invoke ./target/release/mvmctl
+just build embed                    # build and invoke ./target/debug/mvmctl
+just build embed --release          # build and invoke ./target/release/mvmctl
 ```
 
 On macOS the recipe also replaces any globally configured compiler-cache
@@ -143,7 +143,7 @@ Provision the toolchain with one command — it installs the exact pinned zig
 cargo-zigbuild:
 
 ```sh
-just payload::toolchain
+just setup toolchain
 ```
 
 Do **not** `brew install zig`: Homebrew's zig drifts to newer releases that are
@@ -920,7 +920,7 @@ cargo clippy --workspace -- -D warnings  # zero warnings
 `cargo nextest run --workspace` (what `just test` and CI run) is the named
 test gate — it's process-parallel and faster than `cargo test` on this
 ~4,350-test suite. The one gap: **nextest skips doctests**, so the
-`cargo test --workspace --doc` line above (wrapped as `just tests::doc`, and
+`cargo test --workspace --doc` line above (wrapped as `just test doc`, and
 folded into `just ci`) keeps doc-fence coverage gated. `cargo test
 --workspace` still works as a fallback if nextest isn't installed.
 
@@ -929,8 +929,8 @@ folded into `just ci`) keeps doc-fence coverage gated. `cargo test
 any target behind `required-features` — `mvm-conformance`'s cucumber runner
 needs `--features bdd`, and without it the same broken tree reports zero
 errors — and on macOS it cannot compile `cfg(target_os = "linux")` files at
-all, including Linux-gated _test_ files, which `just check::linux` misses too
-because that recipe is `--lib` only. `just check::gated` covers both. Skipping
+all, including Linux-gated _test_ files, which `just check linux` misses too
+because that recipe is `--lib` only. `just check gated` covers both. Skipping
 it costs a CI round trip: the break surfaces there as a compile error in the
 "Build workspace tests" job, which compiles every workspace test target on
 Linux.
@@ -940,11 +940,11 @@ manifest crate (whichever one the manifest points at), silently missing
 drift in every other workspace member. CI runs `cargo fmt --all --
 --check`; if you only check the local crate, the merge will still fail.
 The pre-commit hook at `.githooks/pre-commit` auto-fixes with `cargo
-fmt --all` and re-stages — `just maint::hooks` wires
+fmt --all` and re-stages — `just setup hooks` wires
 `core.hooksPath` to `.githooks/` so it fires on every commit.
 
-The Justfile recipes wrap this correctly: `just lints::fmt-check`, `just
-lints::clippy`, `just lint` (both), `just ci` (lint + test + doctests). Prefer
+The Justfile recipes wrap this correctly: `just lint fmt`, `just
+lint clippy`, `just lint` (both), `just ci` (lint + test + doctests). Prefer
 those over raw cargo invocations.
 
 Every new module, type, or function needs test coverage:
@@ -971,8 +971,8 @@ local-only again. Nothing here is reviewed, shared, or carried to another clone,
 and a note you write is a note only you will read.
 
 One finding per file under `.agent-memory/notes/<slug>.md`, with `title`,
-`date` and `tags` frontmatter. `just mem::recall <terms>` searches them, `just
-mem::notes` lists them, `just mem::remember <slug>` scaffolds one. `xtask
+`date` and `tags` frontmatter. `just mem recall <terms>` searches them, `just
+mem notes` lists them, `just mem remember <slug>` scaffolds one. `xtask
 check-agent-notes` holds the shape and refuses a `[[link]]` to a note that does
 not exist — run it yourself; it is not in `check-all`, because in CI the
 directory does not exist and the gate has nothing to check.

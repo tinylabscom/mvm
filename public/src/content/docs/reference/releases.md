@@ -48,7 +48,7 @@ Until then nothing moves a user onto the tag: `install.sh` installs the newest
 full release, `mvmctl env update` follows GitHub's latest marker, and the
 served installer's fallback still names the previous release. A red smoke
 leaves the tag staged; the fix ships as a new tag. The same check runs locally
-with `just e2e::smoke-fresh-install [version]`, leaving `~/.mvm` and `~/.local`
+with `just e2e smoke-fresh-install [version]`, leaving `~/.mvm` and `~/.local`
 alone.
 
 The lanes live in `.github/workflows/first-run-smoke.yml`, which `release.yml`
@@ -270,15 +270,25 @@ neither waits on the other.
 ### CLI (`v*`, this repository)
 
 ```bash
-just release::pr          # next version from conventional commits
-just release::pr 0.18.4   # or name it
+just release --dry-run 0.29.0   # print every step, change nothing
+just release 0.29.0             # or 0.29.0-rc.1 for a release candidate
 ```
 
-Either form runs the local release gates, bumps the workspace version,
-prepends the changelog and opens a `release/v<version>` pull request. Once it
-merges, `just release::tag 0.18.4` tags `origin/main` and pushes the tag, which
+The one recipe runs Clippy, bumps the workspace version, prepends the
+changelog, runs the workspace suite against the bumped tree and opens a
+`release/v<version>` pull request with auto-merge enabled. It waits for the
+checks and the merge queue, then tags `origin/main` and pushes the tag, which
 starts `release.yml` (see
 [Promotion](#promotion-a-release-reaches-users-only-after-a-fresh-install-boots)).
+It refuses to tag unless `origin/main` carries the version.
+
+It is safe to re-run from any point: each run reads the tag on origin, the
+version on `main` and the state of the release PR, and continues from there.
+Three steps stay manual, and the recipe prints the exact command for each when
+it finishes: merging the `chore/prebuilt-pin-v<version>` PR that
+`promote-release` opens, dispatching `publish-crates.yml` with
+`dry_run=false`, and dispatching `installer-compat.yml`. A release candidate
+is never promoted, so it has only the last of those.
 
 Source builds also use a separate, commit-addressed channel:
 `source-host-helpers.yml` publishes Sigstore-signed helper bundles for each

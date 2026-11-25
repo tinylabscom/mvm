@@ -1,7 +1,7 @@
 # Offline recovery decisions
 
 Backing: preview
-Validation: `just tests::scoped mvm-core host_interface --lib`
+Validation: `just test scoped mvm-core host_interface --lib`
 
 This is the bounded A1 contract for [#5120](https://github.com/tinylabscom/mvm/issues/5120)
 and [#5097](https://github.com/tinylabscom/mvm/issues/5097). It adopts the
