@@ -22,7 +22,13 @@ let
       sha256 = lock.narHash;
     };
   # Executables run on the build machine; the platform below retains the target stdenv.
-  buildPkgs = pkgs.buildPackages.extend (import overlaySource);
+  # A static (musl) `pkgs` has a musl `buildPackages`, which would select the musl cargo
+  # whose dynamic libgcc_s.so.1 no static gcc provides. Take the build machine's own
+  # glibc package set instead; the target std still comes from `targets`.
+  buildPkgs = import pkgs.path {
+    system = pkgs.stdenv.buildPlatform.system;
+    overlays = [ (import overlaySource) ];
+  };
   toolchain = buildPkgs.rust-bin.stable.${version}.minimal.override {
     targets = [ target ];
     inherit extensions;

@@ -154,7 +154,7 @@ pub(crate) fn is_production_source(rel: &str) -> bool {
 /// `#[cfg(test)]` whose item is a `mod` with "test" in its name.
 pub(crate) fn production_part(text: &str) -> &str {
     let re = regex::Regex::new(
-        r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([a-z]+\))?\s+)?mod\s+\w*test",
+        r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([a-z]+\))?\s+)?mod\s+\w*test\w*\s*\{",
     )
     .expect("static regex");
     re.find(text).map_or(text, |m| &text[..m.start()])
