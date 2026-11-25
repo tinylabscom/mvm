@@ -38,7 +38,6 @@ REQUIRED_CLI_BINARIES = {
     "mvmctl",
     "mvm-hvf-supervisor",
     "mvm-hvf-run-owner",
-    "mvm-libkrun-supervisor",
 }
 # codesign treats a requirement argument without '=' as a filename.
 DEVELOPER_ID_REQUIREMENT = (
@@ -279,7 +278,7 @@ def main():
     parser.add_argument("--producer-adhoc", action="store_true",
                         help="sign and verify new staged Mach-O without Apple credentials")
     parser.add_argument("--require-cli-inventory", action="store_true",
-                        help="require mvmctl plus the HVF and libkrun supervisors")
+                        help="require mvmctl, the HVF supervisor and the HVF run owner")
     parser.add_argument(
         "--skip-unconfigured", action="store_true",
         help="exit 0 with an Unconfigured report when no Apple credential is set")

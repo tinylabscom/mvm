@@ -1455,43 +1455,20 @@ fn root_manifest_keeps_libkrun_opt_in_on_macos() {
     );
 }
 
-// Owned gate: release.yml macOS libkrun tier.
+// Owned gate: release.yml macOS payload.
 #[test]
-fn macos_release_build_carries_isolated_libkrun_tier() {
+fn macos_release_build_carries_no_libkrun_tier() {
     let workflow =
         fs::read_to_string(".github/workflows/release.yml").expect("read release workflow");
     let build = job_block(&workflow, "build");
-    let archive_smoke = job_block(&workflow, "archive-install-smoke");
 
     assert!(
-        build.contains("scripts/release/build-libkrun-tier.sh"),
-        "the macOS release must build the pinned libkrun tier"
+        build.contains("mvm-hvf-supervisor") && build.contains("mvm-hvf-run-owner"),
+        "the macOS archive must package the HVF supervisor and the refusal-only owner"
     );
     assert!(
-        build.contains("gnu-sed") && build.contains("gnu-tar"),
-        "the native kernel build must select GNU-compatible archive and text tools"
-    );
-    assert!(
-        build.contains("mvm-hvf-supervisor")
-            && build.contains("mvm-hvf-run-owner")
-            && build.contains("mvm-libkrun-supervisor"),
-        "the macOS archive must package both native supervisors and the refusal-only owner"
-    );
-    assert!(
-        build.contains("lib/libkrunfw.dylib"),
-        "the archive must require libkrunfw's bare-name compatibility link"
-    );
-    assert!(
-        build.contains("SOURCE-OFFER.txt"),
-        "the libkrun release tier must ship corresponding-source directions"
-    );
-    assert!(
-        build.contains("libkrunfw-LGPL-2.1-only.txt"),
-        "the libkrun release tier must ship its license inventory"
-    );
-    assert!(
-        archive_smoke.contains("mvm-libkrun-supervisor\" --contract-version"),
-        "the archive-install lane must load and probe the packaged supervisor"
+        !workflow.to_lowercase().contains("krun"),
+        "no release job may build, package or probe libkrun: it is a source-build opt-in"
     );
     assert!(
         build.contains("--features \"${MVMCTL_RELEASE_FEATURES}\""),

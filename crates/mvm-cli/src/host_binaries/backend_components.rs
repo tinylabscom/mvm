@@ -135,14 +135,14 @@ pub struct BackendComponentSet {
     /// The same `BackendKind` the `VmBackend`/`VmmDriver` implementations
     /// report — never a parallel string.
     pub backend: BackendKind,
-    /// Host windows this backend supports. Empty when the backend never runs
-    /// on a native host (browser tier, test-only mock).
+    /// Host windows this backend supports. Empty when no release archive
+    /// carries the backend (browser tier, test-only mock, source-build opt-in).
     pub hosts: &'static [HostWindow],
     /// The archive paths this backend needs; empty when it has none.
     pub files: &'static [ComponentFile],
     /// One-line capability summary for `backend list`.
     pub summary: &'static str,
-    /// Why the backend is off the native-host surface, when `hosts` is empty.
+    /// Why install never offers the backend, when `hosts` is empty.
     pub unavailable: &'static str,
 }
 
@@ -193,35 +193,6 @@ const HVF_HOSTS: &[HostWindow] = &[HostWindow {
     selectable: true,
 }];
 
-/// libkrun runs where a source build names it. Install never offers it, so
-/// no window is selectable.
-const LIBKRUN_HOSTS: &[HostWindow] = &[
-    HostWindow {
-        target: "aarch64-apple-darwin",
-        macos_min: Some(26),
-        macos_max_exclusive: None,
-        needs_kvm: false,
-        install_default: false,
-        selectable: false,
-    },
-    HostWindow {
-        target: "x86_64-unknown-linux-gnu",
-        macos_min: None,
-        macos_max_exclusive: None,
-        needs_kvm: true,
-        install_default: false,
-        selectable: false,
-    },
-    HostWindow {
-        target: "aarch64-unknown-linux-gnu",
-        macos_min: None,
-        macos_max_exclusive: None,
-        needs_kvm: true,
-        install_default: false,
-        selectable: false,
-    },
-];
-
 const WASM_HOSTS: &[HostWindow] = &[
     HostWindow {
         target: "x86_64-unknown-linux-gnu",
@@ -258,33 +229,6 @@ const APPLE_CONTAINER_HOSTS: &[HostWindow] = &[HostWindow {
     selectable: false,
 }];
 
-const LIBKRUN_FILES: &[ComponentFile] = &[
-    ComponentFile {
-        path: "mvm-libkrun-supervisor",
-        kind: ComponentKind::Binary,
-    },
-    ComponentFile {
-        path: "lib",
-        kind: ComponentKind::Directory,
-    },
-    ComponentFile {
-        path: "licenses",
-        kind: ComponentKind::Directory,
-    },
-    ComponentFile {
-        path: "sources",
-        kind: ComponentKind::Directory,
-    },
-    ComponentFile {
-        path: "SOURCE-OFFER.txt",
-        kind: ComponentKind::Data,
-    },
-    ComponentFile {
-        path: "SOURCE-PINS",
-        kind: ComponentKind::Data,
-    },
-];
-
 const HVF_FILES: &[ComponentFile] = &[ComponentFile {
     path: "mvm-hvf-supervisor",
     kind: ComponentKind::Binary,
@@ -319,10 +263,10 @@ pub const BACKEND_COMPONENT_TABLE: &[BackendComponentSet] = &[
     },
     BackendComponentSet {
         backend: BackendKind::Libkrun,
-        hosts: LIBKRUN_HOSTS,
-        files: LIBKRUN_FILES,
+        hosts: &[],
+        files: &[],
         summary: "libkrun; explicit opt-in for source builds (`--hypervisor libkrun`)",
-        unavailable: "",
+        unavailable: "source builds only; no release archive carries it",
     },
     BackendComponentSet {
         backend: BackendKind::Qemu,
@@ -730,26 +674,14 @@ mod tests {
     }
 
     #[test]
-    fn the_tsv_carries_the_libkrun_component_set() {
+    fn the_tsv_lists_libkrun_with_no_host_window_and_no_files() {
         let text = render_components_tsv();
-        let line = text
+        let rows: Vec<&str> = text
             .lines()
-            .find(|line| line.starts_with("libkrun\t"))
-            .expect("a libkrun row");
-        for path in [
-            "bin:mvm-libkrun-supervisor",
-            "dir:lib",
-            "dir:licenses",
-            "dir:sources",
-            "file:SOURCE-OFFER.txt",
-            "file:SOURCE-PINS",
-        ] {
-            assert!(line.contains(path), "the libkrun row must name {path}");
-        }
-        assert!(
-            line.contains("\t26\t-\tno\tno\tno\t"),
-            "install neither defaults to nor offers libkrun: {line}"
-        );
+            .filter(|line| line.starts_with("libkrun\t"))
+            .collect();
+        assert_eq!(rows, ["libkrun\t-\t-\t-\tno\tno\tno\t-"]);
+        assert!(!text.contains("mvm-libkrun-supervisor"), "{text}");
     }
 
     /// Install links every top-level executable onto PATH, so a Firecracker
@@ -886,6 +818,12 @@ mod tests {
             Some("requires macOS Apple Silicon 26+")
         );
         let linux = facts("x86_64-unknown-linux-gnu", None, true);
+        for host in [&host, &linux] {
+            assert_eq!(
+                not_available_reason(row_for(BackendKind::Libkrun), host).as_deref(),
+                Some("source builds only; no release archive carries it")
+            );
+        }
         assert_eq!(
             not_available_reason(row_for(BackendKind::Hvf), &linux).as_deref(),
             Some("requires macOS Apple Silicon 26+")
@@ -936,7 +874,7 @@ mod tests {
     /// not read as installed.
     #[test]
     fn presence_requires_every_listed_file() {
-        let row = row_for(BackendKind::Libkrun);
+        let row = row_for(BackendKind::Hvf);
         let dir = tempfile::tempdir().unwrap();
         assert!(!component_files_present(row, &[dir.path().to_path_buf()]));
         for file in row.files {

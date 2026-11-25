@@ -2,8 +2,8 @@
 //!
 //! CI lint — asserts the canonical `PER_VM_HOST_BINARIES` registry in
 //! `crates/mvm-cli/src/host_binaries/manifest.rs`, the build commands in the
-//! release workflow and its release-tier scripts, and the tarball's
-//! `REQUIRED_HOSTBINS` list name the same binaries; that the per-backend
+//! release workflow, and the tarball's `REQUIRED_HOSTBINS` list name the same
+//! binaries; that the per-backend
 //! component table in `crates/mvm-cli/src/host_binaries/backend_components.rs`
 //! names only registered per-VM binaries as its `Binary` components and keeps
 //! its data files in the release staging step; and that the workflow stages
@@ -35,10 +35,7 @@ pub(crate) fn run(workspace: &Path) -> Result<()> {
     let src =
         std::fs::read_to_string(&release).with_context(|| format!("read {}", release.display()))?;
 
-    let libkrun_builder = workspace.join("scripts/release/build-libkrun-tier.sh");
-    let libkrun_src = std::fs::read_to_string(&libkrun_builder)
-        .with_context(|| format!("read {}", libkrun_builder.display()))?;
-    let built: BTreeSet<String> = bin_flags(&format!("{src}\n{libkrun_src}"));
+    let built: BTreeSet<String> = bin_flags(&src);
     let packaged: BTreeSet<String> = required_hostbins(&src);
 
     let mut problems = Vec::new();
