@@ -593,9 +593,12 @@ and durable result inboxes likewise must not be conflated.
 
 #### Running the factory-edge demo
 
-`scripts/factory-edge-demo.sh` runs the three workloads against one installed
-release and prints what the host recorded; `scripts/factory-edge-demo.md`
-covers one-time setup and how the same steps map to `mvm-client`. The demo
+`crates/mvm-client/examples/factory_edge.rs` launches the three workloads
+through `mvm-client` and prints what the host recorded: the inventory, the
+maintenance workload's refused request and whether the audit chain verified.
+The shell script that drove the same steps through `mvmctl` for the
+presentation, and its setup guide, were deleted once the presentation was
+given; the measurements below were taken through the command line. The demo
 uses synthetic traffic and scripted `curl` loops, so it does not depend on a
 model choosing to misbehave. It does not show Studio's own readback, the real
 maintenance and inspection tasks, hot replacement, a production-profile run,

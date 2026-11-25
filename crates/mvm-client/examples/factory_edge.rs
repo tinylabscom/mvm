@@ -1,15 +1,19 @@
-//! The factory-edge demo through the library, the same steps as
-//! `scripts/factory-edge-demo.sh`.
+//! Three workloads, one refused request, read back through the library.
 //!
 //! Three small workloads start at the same time, each allowed one destination.
 //! The maintenance workload asks for a destination it was not given; the host
 //! refuses it, records that, and the other two carry on.
 //!
-//! Needs a prepared home (see `scripts/factory-edge-demo.md`):
+//! Needs working internet and DNS, because each allowed destination is looked
+//! up when its workload starts. The first run in a home also prepares shared
+//! artifacts and pulls the image, so it is slower than later ones.
 //!
 //! ```sh
-//! MVM_HOME=$HOME/.mvm-demo cargo run -p mvm-client --example factory_edge
+//! cargo run -p mvm-client --example factory_edge
 //! ```
+//!
+//! A launch blocks the thread that calls it, so the three launches below run
+//! one after another; start them from separate threads to overlap them.
 
 use std::time::{Duration, Instant};
 
@@ -93,6 +97,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run.chain_verified
         );
     }
-    println!("\nRemove them with: scripts/factory-edge-demo.sh --down");
+    println!(
+        "\nRemove each with `mvmctl machine stop <name> --yes`, then `mvmctl machine rm <name> --yes`:"
+    );
+    println!("{a} {b} {m}");
     Ok(())
 }
