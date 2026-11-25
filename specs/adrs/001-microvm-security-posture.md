@@ -483,17 +483,25 @@ say what shipped and what witnesses it, and leave only what is still ahead as
 proposed. It is a signal, not a proof: a vendored or renamed implementation
 would pass unnoticed.
 
-The order of that roadmap is not settled. ADR-062 section 7 puts hybrid
-X25519 + ML-KEM-768 for mailbox key agreement and cross-host transport first,
-because recorded traffic can be decrypted later, and hybrid Ed25519 + ML-DSA-65
-for audit and epoch seals, evidence archives, packs and plans second. If that
-order is the intended one, the priorities in the first paragraph swap; its last
-sentence stands either way.
+The roadmap has two tracks, and they are not ranked against each other.
+Authenticity comes first for what mvm itself produces: audit and epoch seals,
+then execution plans, because audit evidence has to stay verifiable for years.
+Confidentiality is evaluated in parallel wherever the host carries traffic:
+hybrid X25519 + ML-KEM key establishment for the connections the host
+originates and for cross-host transport, because recorded traffic can be
+decrypted later and that exposure exists from the day the traffic is sent. That
+applies on a single host as much as across a fleet; the guest has no network
+device, but the host still makes outbound connections on a workload's behalf.
+ADR-062 section 7 states the same two tracks.
 
-CNSA 2.0 alignment is a requirements-led direction, not a current compliance
-claim. The algorithms, cryptographic modules, deployment configuration and
-supporting evidence would be scoped against a deployment's requirements. No
-qualified FIPS deployment is claimed.
+The roadmap is written so that a FIPS-qualified deployment stays reachable
+later. That is a constraint on every cryptographic operation the host performs,
+signing and verification as well as the connections it originates, and on the
+modules that perform them, not only on the algorithm names. CNSA 2.0 alignment
+is likewise a requirements-led direction, not a current compliance claim. The
+algorithms, cryptographic modules, deployment configuration and supporting
+evidence would be scoped against a deployment's requirements. No qualified FIPS
+deployment is claimed.
 
 ### Design principles
 
