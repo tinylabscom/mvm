@@ -44,7 +44,6 @@ const ALLOWED: &[&str] = &[
     "flake.lock",
     "flake.nix",
     "install.sh",
-    "just",
     "model",
     "nix",
     "public",

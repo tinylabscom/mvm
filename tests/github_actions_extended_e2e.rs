@@ -874,11 +874,11 @@ fn local_launch_gate_uses_the_published_workload_kernel() {
 
     assert!(
         script.contains("cargo build --bin mvmctl --features user,embed-host-bins"),
-        "`just e2e::launch` must build the manifest verifier through the standard linker before it downloads a published workload kernel"
+        "`just e2e launch` must build the manifest verifier through the standard linker before it downloads a published workload kernel"
     );
     assert!(
         script.contains("export MVM_KERNEL_SOURCE=download"),
-        "`just e2e::launch` must not route a cold source checkout through the optional libkrun Stage 0 backend"
+        "`just e2e launch` must not route a cold source checkout through the optional libkrun Stage 0 backend"
     );
 }
 
@@ -892,7 +892,7 @@ fn local_launch_gate_runs_only_launch_features() {
         script.contains(
             "s31_launch_e2e/{cli_launch_modes,launch_budget,sdk_and_library_modes}.feature"
         ),
-        "`just e2e::launch` must name its three launch feature files explicitly"
+        "`just e2e launch` must name its three launch feature files explicitly"
     );
     assert!(
         !script.contains("s31_launch_e2e/*.feature"),
@@ -1323,7 +1323,7 @@ fn macos_documented_surface_uploads_its_log() {
     let macos = job_block(&workflow, "e2e-docs-macos");
 
     let run = macos
-        .find("just e2e::docs 2>&1 | tee")
+        .find("just e2e docs 2>&1 | tee")
         .expect("the macOS lane must tee the suite output to a file it keeps");
     let pipefail = macos
         .find("set -o pipefail")
@@ -1569,7 +1569,7 @@ fn the_ceiling_enforcing_macos_lane_builds_every_binary_under_test_optimized() {
 
     let script = documented_surface_script();
     assert!(script.contains("MVMCTL=\"$TARGET_DIR/$E2E_PROFILE_DIR/mvmctl\""));
-    assert!(script.contains("just payload::supervisors --profile \"$E2E_PROFILE\""));
+    assert!(script.contains("just build supervisors --profile \"$E2E_PROFILE\""));
     assert!(script.contains("build_sdk_hostlib \"$MVMCTL\" \"$E2E_PROFILE\""));
     for line in script.lines().filter(|line| {
         let line = line.trim_start();
@@ -1695,13 +1695,14 @@ fn documented_surface_revalidates_the_source_matched_initramfs() {
 // Owned gate: e2e-docs.yml / release.yml supervisor build features.
 #[test]
 fn standard_supervisor_build_never_enables_libkrun() {
-    let just = fs::read_to_string("just/payload/mod.just").expect("read embed module");
+    let just = fs::read_to_string("Justfile").expect("read the justfile");
     let recipe = just
-        .split_once("\nsupervisors")
-        .expect("supervisors recipe")
+        .split_once("\n    supervisors() {")
+        .expect("supervisors helper")
         .1
-        .split_once("\n# ")
-        .map_or_else(|| just.as_str(), |(recipe, _)| recipe);
+        .split_once("\n    }")
+        .expect("supervisors helper body")
+        .0;
 
     assert!(
         recipe.contains("build -p mvm-hostd --bins"),
@@ -1713,11 +1714,12 @@ fn standard_supervisor_build_never_enables_libkrun() {
     );
 
     let optional = just
-        .split_once("\nlibkrun-supervisor")
-        .expect("explicit libkrun integration recipe")
+        .split_once("\n      libkrun-supervisor)")
+        .expect("explicit libkrun integration arm")
         .1
-        .split_once("\n# ")
-        .map_or_else(|| just.as_str(), |(recipe, _)| recipe);
+        .split_once(";;")
+        .expect("explicit libkrun integration arm body")
+        .0;
     assert!(
         optional.contains("--bin mvm-libkrun-supervisor --features libkrun-sys"),
         "the optional integration must remain explicitly buildable"

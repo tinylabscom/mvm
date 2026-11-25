@@ -484,8 +484,8 @@ class PackageTests(unittest.TestCase):
             )
             self.assertIsNotNone(match, "Linux must install a pinned interpreter before the suite")
             self.assertGreaterEqual(int(match[2]), 12)
-            self.assertIn("        run: just e2e::docs", step)
-            return "just e2e::docs"
+            self.assertIn("        run: just e2e docs", step)
+            return "just e2e docs"
         self.assertEqual(job, "e2e-docs-macos")
         self.assertNotIn("uses: actions/setup-python@", setup,
                          "the macOS installer requires the hosted /Users/runner path")
@@ -497,7 +497,7 @@ class PackageTests(unittest.TestCase):
         run = textwrap.dedent(step.split("        run: |\n", 1)[1])
         self.assertIn("set -o pipefail", run)
         match = re.search(
-            r'^uv run --no-project --python (3)\.(\d+) -- just e2e::docs'
+            r'^uv run --no-project --python (3)\.(\d+) -- just e2e docs'
             r' 2>&1 \| tee "\$RUNNER_TEMP/e2e-docs\.log"$', run, re.MULTILINE,
         )
         self.assertIsNotNone(match, "installing uv alone does not select Python for the suite")
@@ -509,8 +509,8 @@ class PackageTests(unittest.TestCase):
         source = (root / ".github/workflows/e2e-docs.yml").read_text()
         for job in ["e2e-docs-linux", "e2e-docs-macos"]:
             self.assert_live_python_contract(source, job)
-        recipe = (root / "just/e2e/mod.just").read_text()
-        self.assertIn("docs:\n    ./scripts/e2e-documented-surface.sh", recipe)
+        recipe = (root / "Justfile").read_text()
+        self.assertIn("      docs) ./scripts/e2e-documented-surface.sh ;;\n", recipe)
         script = (root / "scripts/e2e-documented-surface.sh").read_text()
         for assignment in re.findall(r"^\s*(?:export )?PATH=(.*)$", script, re.MULTILINE):
             self.assertIn("$PATH", assignment, "suite must preserve the selected interpreter PATH")
@@ -522,9 +522,9 @@ class PackageTests(unittest.TestCase):
             for job in ["e2e-docs-linux", "e2e-docs-macos"]:
                 with self.subTest(version=version, job=job), self.assertRaises(AssertionError):
                     self.assert_live_python_contract(source.replace("3.12", version), job)
-        for replacement in ["just e2e::docs", "uv run -- just e2e::docs"]:
+        for replacement in ["just e2e docs", "uv run -- just e2e docs"]:
             changed = source.replace(
-                "uv run --no-project --python 3.12 -- just e2e::docs", replacement,
+                "uv run --no-project --python 3.12 -- just e2e docs", replacement,
             )
             with self.subTest(replacement=replacement), self.assertRaises(AssertionError):
                 self.assert_live_python_contract(changed, "e2e-docs-macos")
@@ -563,7 +563,7 @@ class PackageTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, status, result.stderr)
             self.assertEqual((self.root / "uv-args").read_text().splitlines(),
-                             ["run", "--no-project", "--python", "3.12", "--", "just", "e2e::docs"])
+                             ["run", "--no-project", "--python", "3.12", "--", "just", "e2e", "docs"])
 
 
 if __name__ == "__main__":

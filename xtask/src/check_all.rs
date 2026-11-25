@@ -495,9 +495,16 @@ mod tests {
     #[test]
     fn local_lint_runs_check_all() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let lints = std::fs::read_to_string(root.join("just/lints/mod.just")).unwrap();
         let justfile = std::fs::read_to_string(root.join("Justfile")).unwrap();
-        assert!(lints.contains("xtask -- check-all"));
-        assert!(justfile.contains("just lints::policy"));
+        let lint = justfile
+            .split_once("\nlint SUBSET=\"all\":")
+            .expect("lint recipe")
+            .1
+            .split_once("\n    esac")
+            .expect("lint recipe body")
+            .0;
+        assert!(lint.contains("policy() { cargo run -p xtask -- check-all; }"));
+        let all = lint.split_once("\n      all)").expect("lint all arm").1;
+        assert!(all.contains("\n        policy\n"));
     }
 }

@@ -8,7 +8,7 @@
 //!
 //! Classification (each test reads a workflow, recipe or script as text):
 //! - Owned gate: `release.yml`, `first-run-smoke.yml`, `distro-packages.yml`,
-//!   `workers.yml`, `update-image-pin.yml` and `just/*/mod.just` run only on a
+//!   `workers.yml`, `update-image-pin.yml` and the `Justfile` run only on a
 //!   tag, a cron or a dispatch. Nothing executes them on a pull request, so
 //!   this file is the PR-time check that their wiring (job order, signing
 //!   flags, what a publication waits for) still holds. A test is deleted with
@@ -38,9 +38,18 @@ fn first_run_smoke_workflow() -> String {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
 
-fn just_module(name: &str) -> String {
-    let path = format!("just/{name}/mod.just");
-    fs::read_to_string(&path).unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
+fn justfile() -> String {
+    fs::read_to_string("Justfile")
+        .unwrap_or_else(|error| panic!("failed to read Justfile: {error}"))
+}
+
+/// The body of the `release` recipe, where the version bump is prepared.
+fn release_recipe() -> String {
+    let justfile = justfile();
+    let start = justfile
+        .find("\nrelease *ARGS:")
+        .expect("the release recipe must exist");
+    justfile[start..].to_string()
 }
 
 /// The macOS libkrunfw kernel build runs `make LLVM=1 LD=ld.lld`. Homebrew's
@@ -238,31 +247,27 @@ fn the_release_asset_list_cannot_upload_one_file_twice() {
 
 /// The release prep must test the tree it pushes, not the tree before it.
 ///
-/// `just release::pr` runs the workspace suite and *then* calls `release::_prep`,
-/// which is where the version actually changes. So the suite green-lights the
-/// pre-bump tree while the bumped tree — the one that becomes the release — was
-/// never run.
+/// The recipe once ran the workspace suite and only *then* changed the
+/// version, so the suite green-lit the pre-bump tree while the bumped tree — the
+/// one that becomes the release — was never run.
 ///
 /// That is not hypothetical: a version parser that could not read a
 /// pre-release suffix reached CI on v0.18.0-rc.1 because no published version
 /// had ever carried one, making the defect unreachable until the bump.
 #[test]
 fn the_release_prep_runs_the_suite_after_the_version_is_bumped() {
-    let justfile = just_module("release");
-    let prep = justfile
-        .find("_prep VERSION:")
-        .expect("the shared release prep recipe must exist");
-    let body = &justfile[prep..];
+    let recipe = release_recipe();
+    let body = recipe.as_str();
 
     let bump = body
-        .find("version = \\\"$V\\\"")
-        .expect("_release-prep must rewrite the workspace version");
+        .find("/version = \\\"$V\\\"/")
+        .expect("the release recipe must rewrite the workspace version");
     let suite = body
         .find("cargo nextest run --workspace")
-        .expect("_release-prep must run the workspace suite against the bumped tree");
+        .expect("the release recipe must run the workspace suite against the bumped tree");
     let commit = body
         .find(r#"git commit -m "release: v$V""#)
-        .expect("_release-prep must commit the bump");
+        .expect("the release recipe must commit the bump");
 
     assert!(
         bump < suite,
@@ -285,15 +290,12 @@ fn the_release_prep_runs_the_suite_after_the_version_is_bumped() {
 /// on its PR and was evicted from the merge queue three times.
 #[test]
 fn the_release_prep_refreshes_the_detached_fuzz_lockfiles() {
-    let justfile = just_module("release");
-    let prep = justfile
-        .find("_prep VERSION:")
-        .expect("the shared release prep recipe must exist");
-    let body = &justfile[prep..];
+    let recipe = release_recipe();
+    let body = recipe.as_str();
 
     assert!(
         body.contains("crates/*/fuzz*/Cargo.toml"),
-        "_release-prep must walk the fuzz manifests, or their locks keep naming \
+        "the release recipe must walk the fuzz manifests, or their locks keep naming \
          the previous version and the merge queue rejects the release"
     );
     assert!(
@@ -304,10 +306,10 @@ fn the_release_prep_refreshes_the_detached_fuzz_lockfiles() {
 
     let refresh = body
         .find("cargo metadata --manifest-path")
-        .expect("_release-prep must re-resolve each fuzz lock");
+        .expect("the release recipe must re-resolve each fuzz lock");
     let commit = body
         .find(r#"git commit -m "release: v$V""#)
-        .expect("_release-prep must commit the bump");
+        .expect("the release recipe must commit the bump");
     assert!(
         refresh < commit,
         "the locks must be refreshed before the commit, or the release PR \
@@ -1182,7 +1184,7 @@ fn promoted_prebuilt_pin_pr_dispatches_ci_for_its_branch() {
 
 /// The installer's offline fallback has one writer.
 ///
-/// `release::_prep` used to set `DEFAULT_VERSION` to the version it was
+/// The release recipe used to set `DEFAULT_VERSION` to the version it was
 /// preparing — a tag that did not exist yet — while leaving the previous
 /// release's archive hashes beside it, so a fresh install falling back to it
 /// either found no release or refused the archive as a hash mismatch. The pin
@@ -1190,12 +1192,8 @@ fn promoted_prebuilt_pin_pr_dispatches_ci_for_its_branch() {
 /// release's signed manifest, and nothing else touches those lines.
 #[test]
 fn the_installer_default_is_written_only_by_the_pin_script() {
-    let justfile = just_module("release");
-    let prep = justfile
-        .find("_prep VERSION:")
-        .expect("the shared release prep recipe must exist");
-    let body = &justfile[prep..];
-    let body = &body[..body.find("\ntag VERSION:").unwrap_or(body.len())];
+    let recipe = release_recipe();
+    let body = recipe.as_str();
     assert!(
         body.contains("./scripts/pin-installer-default.sh --newest install.sh"),
         "the release PR must pin the newest promoted release, not the one it prepares"
@@ -1210,10 +1208,7 @@ fn the_installer_default_is_written_only_by_the_pin_script() {
                 && (line.contains("DEFAULT_VERSION") || line.contains("DEFAULT_ARCHIVE_SHA256"))
         })
     };
-    let mut files = vec![
-        Path::new("Justfile").to_path_buf(),
-        Path::new("just/release/mod.just").to_path_buf(),
-    ];
+    let mut files = vec![Path::new("Justfile").to_path_buf()];
     for dir in [".github/workflows", "scripts", "scripts/installer-compat"] {
         files.extend(
             fs::read_dir(dir)
@@ -1449,10 +1444,10 @@ fn qemu_wasm_site_pack_is_fetched_from_the_image_set_not_rebuilt() {
     );
 }
 
-// Owned gate: just/ qemu-wasm local tools recipes.
+// Owned gate: the Justfile's qemu-wasm local tools recipes.
 #[test]
 fn qemu_wasm_local_tools_use_the_published_pack_and_maintained_harness() {
-    let recipes = just_module("site");
+    let recipes = justfile();
     let downloader = fs::read_to_string("scripts/download-qemu-wasm-smoke-pack.sh")
         .expect("read QEMU-WASM pack downloader");
     let harness = fs::read_to_string("scripts/run-qemu-wasm-smoke-chromium.py")
@@ -1469,11 +1464,11 @@ fn qemu_wasm_local_tools_use_the_published_pack_and_maintained_harness() {
         );
     }
     assert!(
-        !recipes.contains("qemu-wasm-pack *ARGS:"),
-        "the site module must not offer the retired Lima-backed build recipe"
+        !recipes.contains("qemu-wasm-pack"),
+        "the docs recipe must not offer the retired Lima-backed build recipe"
     );
     assert!(
-        recipes.contains("qemu-pack *ARGS:")
+        recipes.contains("qemu-pack) ./scripts/download-qemu-wasm-smoke-pack.sh")
             && downloader.contains("locked-image-tag.sh")
             && downloader.contains("qemu-wasm-smoke-pack.tar.gz"),
         "local QEMU-WASM setup must use the tree-pinned published pack"
@@ -2095,14 +2090,12 @@ fn pull_requests_compile_mvmctl_with_the_release_feature_set() {
     );
 }
 
-/// `just e2e::smoke-fresh-install` runs the same script the release gate runs, so a
+/// `just e2e smoke-fresh-install` runs the same script the release gate runs, so a
 /// maintainer can reproduce a red first-run lane locally.
 #[test]
 fn the_fresh_install_smoke_recipe_runs_the_release_gate_script() {
     assert!(
-        just_module("e2e").contains(
-            "smoke-fresh-install VERSION=\"\":\n    ./scripts/smoke-fresh-install.sh {{ VERSION }}\n"
-        ),
+        justfile().contains("smoke-fresh-install) ./scripts/smoke-fresh-install.sh \"$@\" ;;\n"),
         "the recipe must run the release gate's script with an optional version"
     );
 }

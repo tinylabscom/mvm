@@ -1,10 +1,10 @@
-//! The root justfile is a deliberately small, CI-mirroring surface; the
-//! modules under `just/` carry everything else. These guards pin that
-//! shape so the surface cannot quietly grow back, and check that what the
-//! surface promises can run: every recipe a justfile or a contributor doc
+//! The justfile is one file with a deliberately small set of recipes; a
+//! variant is a recipe's first argument, not another recipe. These guards pin
+//! that shape so the surface cannot quietly grow back, and check that what the
+//! surface promises can run: every recipe the justfile or a contributor doc
 //! names exists, and every recipe body is something the shell can parse.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 
 const JUSTFILE: &str = include_str!("../Justfile");
@@ -107,77 +107,19 @@ fn split_compound_line<'a>(recipe: &Recipe<'a>) -> Option<&'a str> {
     })
 }
 
-/// `mod <name> '<path>'` declarations in the root justfile.
-fn declared_modules() -> BTreeMap<&'static str, String> {
-    JUSTFILE
-        .lines()
-        .filter_map(|line| line.strip_prefix("mod "))
-        .map(|decl| {
-            let mut parts = decl.split_whitespace();
-            let name = parts.next().expect("mod name");
-            let path = parts
-                .next()
-                .expect("mod path")
-                .trim_matches(|c| c == '\'' || c == '"')
-                .to_string();
-            (name, path)
-        })
-        .collect()
+/// Why `target` does not name a recipe, or `None` when it does. There are no
+/// modules, so a namespaced `module::recipe` never resolves.
+fn unresolved(root: &BTreeSet<&str>, target: &str) -> Option<String> {
+    if target.contains("::") {
+        return Some(
+            "there are no modules; the variant is the recipe's first argument".to_string(),
+        );
+    }
+    (!root.contains(target)).then(|| format!("no recipe `{target}`"))
 }
 
-/// The root justfile and every declared module, keyed by path.
-fn justfile_sources() -> Vec<(String, String)> {
-    let mut sources = vec![("Justfile".to_string(), JUSTFILE.to_string())];
-    for path in declared_modules().into_values() {
-        let text = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {path}: {error}"));
-        sources.push((path, text));
-    }
-    sources
-}
-
-/// The recipes callable as `just <name>`, and as `just <module>::<name>`.
-struct Callable {
-    root: BTreeSet<String>,
-    modules: BTreeMap<String, BTreeSet<String>>,
-}
-
-impl Callable {
-    fn load() -> Self {
-        let names = |text: &str| -> BTreeSet<String> {
-            recipes(text)
-                .iter()
-                .map(|recipe| recipe.name.to_string())
-                .collect()
-        };
-        let modules = declared_modules()
-            .into_iter()
-            .map(|(module, path)| {
-                let text = fs::read_to_string(&path)
-                    .unwrap_or_else(|error| panic!("failed to read {path}: {error}"));
-                (module.to_string(), names(&text))
-            })
-            .collect();
-        Self {
-            root: names(JUSTFILE),
-            modules,
-        }
-    }
-
-    /// Why `target` does not name a recipe, or `None` when it does.
-    fn unresolved(&self, target: &str) -> Option<String> {
-        match target.split_once("::") {
-            Some((module, recipe)) => match self.modules.get(module) {
-                None => Some(format!("no module `{module}`")),
-                Some(names) if !names.contains(recipe) => {
-                    Some(format!("module `{module}` has no recipe `{recipe}`"))
-                }
-                Some(_) => None,
-            },
-            None if self.root.contains(target) => None,
-            None => Some(format!("no top-level recipe `{target}`")),
-        }
-    }
+fn root_recipes() -> BTreeSet<&'static str> {
+    recipes(JUSTFILE).iter().map(|recipe| recipe.name).collect()
 }
 
 /// One `just` invocation found in text: the recipe token after it, and
@@ -218,41 +160,39 @@ fn just_calls(text: &str) -> Vec<JustCall<'_>> {
     calls
 }
 
-/// Recipe and module names share one namespace, so the top level is exactly
-/// this set — no more, no fewer.
+/// The whole surface is exactly this set — no more, no fewer — and it lives
+/// in one file.
 #[test]
-fn root_recipes_are_exactly_the_ci_mirror_set() {
-    let names: BTreeSet<&str> = recipes(JUSTFILE).iter().map(|recipe| recipe.name).collect();
+fn the_recipes_are_exactly_the_contributor_set_in_one_file() {
     assert_eq!(
-        names.into_iter().collect::<Vec<_>>(),
+        root_recipes().into_iter().collect::<Vec<_>>(),
         [
-            "build",
-            "ci",
-            "default",
-            "docs",
-            "embed",
-            "lint",
-            "release-build",
-            "test"
+            "build", "check", "ci", "clean", "default", "docs", "e2e", "fmt", "lint", "mem",
+            "release", "run", "setup", "test"
         ],
-        "the root justfile surface changed — update this guard and the docs deliberately"
+        "the justfile surface changed — update this guard and the docs deliberately"
+    );
+    assert!(
+        !JUSTFILE.lines().any(|line| line.starts_with("mod ")),
+        "a variant is a recipe's first argument, not a module"
+    );
+    assert!(
+        !std::path::Path::new("just").exists(),
+        "recipes live in the root Justfile, not under just/"
     );
 }
 
-/// `lint`, `tests::ci` and `tests::cargo` each shipped a multi-line `if` or
-/// `case` without a shebang, so every invocation died on `sh: syntax error:
-/// unexpected end of file` — and `ci` depends on `lint`, so the whole local
-/// gate did too. A compound command spread over lines needs a shebang recipe.
+/// A multi-line `if` or `case` without a shebang dies on `sh: syntax error:
+/// unexpected end of file` on every invocation, because each line runs in its
+/// own shell. A compound command spread over lines needs a shebang recipe.
 #[test]
 fn compound_shell_commands_only_span_lines_in_shebang_recipes() {
-    let mut broken = Vec::new();
-    for (path, text) in justfile_sources() {
-        for recipe in recipes(&text) {
-            if let Some(line) = split_compound_line(&recipe) {
-                broken.push(format!("{path}: `{}`: {line}", recipe.name));
-            }
-        }
-    }
+    let broken: Vec<String> = recipes(JUSTFILE)
+        .iter()
+        .filter_map(|recipe| {
+            split_compound_line(recipe).map(|line| format!("`{}`: {line}", recipe.name))
+        })
+        .collect();
     assert!(
         broken.is_empty(),
         "these recipes split a shell compound command across lines without a \
@@ -262,25 +202,23 @@ fn compound_shell_commands_only_span_lines_in_shebang_recipes() {
     );
 }
 
-/// `lint` called `just lint::clippy` while the module is `lints`, which fails
-/// only when that arm runs. Resolve every call statically: namespaced calls
-/// anywhere in the justfiles, bare ones that start a body line or a code span.
+/// A recipe that calls another by a name that does not exist fails only when
+/// that arm runs. Resolve every call statically: namespaced calls anywhere in
+/// the justfile, bare ones that start a body line or a code span.
 #[test]
-fn every_just_call_in_the_justfiles_names_a_real_recipe() {
-    let callable = Callable::load();
+fn every_just_call_in_the_justfile_names_a_real_recipe() {
+    let root = root_recipes();
     let mut stale = Vec::new();
-    for (path, text) in justfile_sources() {
-        for line in text.lines() {
-            let trimmed = line.trim_start();
-            let body_command = line.starts_with(char::is_whitespace)
-                && (trimmed.starts_with("just ") || trimmed.starts_with("@just "));
-            for call in just_calls(line) {
-                if !call.target.contains("::") && !body_command && !call.backticked {
-                    continue;
-                }
-                if let Some(reason) = callable.unresolved(call.target) {
-                    stale.push(format!("{path}: `just {}`: {reason}", call.target));
-                }
+    for line in JUSTFILE.lines() {
+        let trimmed = line.trim_start();
+        let body_command = line.starts_with(char::is_whitespace)
+            && (trimmed.starts_with("just ") || trimmed.starts_with("@just "));
+        for call in just_calls(line) {
+            if !call.target.contains("::") && !body_command && !call.backticked {
+                continue;
+            }
+            if let Some(reason) = unresolved(&root, call.target) {
+                stale.push(format!("`just {}`: {reason}", call.target));
             }
         }
     }
@@ -291,12 +229,11 @@ fn every_just_call_in_the_justfiles_names_a_real_recipe() {
     );
 }
 
-/// The docs kept naming recipes from before the surface was namespaced
-/// (`just fmt`, `just check-gated`, `just bdd`). A bare name must be a
-/// top-level recipe; a namespaced one must exist in its module.
+/// The docs kept naming recipes from an earlier layout (`just check-gated`,
+/// `just tests::scoped`). A name after `just` must be a recipe.
 #[test]
 fn contributor_docs_name_real_recipes() {
-    let callable = Callable::load();
+    let root = root_recipes();
     let mut stale = Vec::new();
     for path in RECIPE_DOCS {
         let text = fs::read_to_string(path)
@@ -307,7 +244,7 @@ fn contributor_docs_name_real_recipes() {
             {
                 continue;
             }
-            if let Some(reason) = callable.unresolved(call.target) {
+            if let Some(reason) = unresolved(&root, call.target) {
                 stale.push(format!("{path}: `just {}`: {reason}", call.target));
             }
         }
@@ -335,16 +272,11 @@ fn the_call_scanner_reads_namespaced_bare_and_flag_invocations() {
 }
 
 #[test]
-fn a_misspelled_module_or_recipe_is_unresolved() {
-    let callable = Callable {
-        root: ["lint".to_string()].into(),
-        modules: [("lints".to_string(), ["clippy".to_string()].into())].into(),
-    };
-    assert_eq!(callable.unresolved("lints::clippy"), None);
-    assert_eq!(callable.unresolved("lint"), None);
-    assert!(callable.unresolved("lint::clippy").is_some());
-    assert!(callable.unresolved("lints::fmt").is_some());
-    assert!(callable.unresolved("clippy").is_some());
+fn a_namespaced_or_misspelled_recipe_is_unresolved() {
+    let root: BTreeSet<&str> = ["lint"].into();
+    assert_eq!(unresolved(&root, "lint"), None);
+    assert!(unresolved(&root, "lints::clippy").is_some());
+    assert!(unresolved(&root, "clippy").is_some());
 }
 
 #[test]

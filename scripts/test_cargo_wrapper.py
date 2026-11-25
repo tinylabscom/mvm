@@ -115,7 +115,6 @@ class ToolchainPolicy(unittest.TestCase):
             "crates/mvm-conformance/tests/steps/cli.rs",
             "crates/mvm-hostd/ebpf/rust-toolchain.toml",
         ]
-        paths += [str(p.relative_to(ROOT)) for p in (ROOT / "just").glob("*/mod.just")]
         paths += [str(p.relative_to(ROOT)) for p in (ROOT / "nix/packages").glob("*.nix")]
         for extension in ("yml", "yaml"):
             paths += [

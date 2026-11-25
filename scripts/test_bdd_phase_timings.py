@@ -22,8 +22,8 @@ COMMANDS = [
      "--bin", "emit_broker_schema"],
     ["cargo.sh", "build", "-p", "mvm-sdk", "--bin", "emit_sdk_env",
      "--bin", "emit_sdk_errors", "--bin", "emit_sdk_ctors"],
-    ["just", "sdk::install-typescript"],
-    ["just", "sdk::build-typescript"],
+    ["just", "setup", "typescript"],
+    ["just", "build", "sdk", "typescript"],
     ["cargo.sh", "test", "-p", "mvm-conformance", "--test", "conformance",
      "--features", "bdd"],
 ]
@@ -39,10 +39,7 @@ class BddPhaseTimings(unittest.TestCase):
         directory = tempfile.TemporaryDirectory(prefix="mvm-bdd-timing-", dir="/tmp")
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
-        module = self.root / "just/bdd"
-        module.mkdir(parents=True)
-        shutil.copyfile(ROOT / "just/bdd/mod.just", module / "mod.just")
-        (self.root / "justfile").write_text("mod bdd 'just/bdd/mod.just'\n")
+        shutil.copyfile(ROOT / "Justfile", self.root / "justfile")
         scripts = self.root / "scripts"
         scripts.mkdir()
         shutil.copyfile(ROOT / "scripts/e2e-phase-timings.sh",
@@ -75,7 +72,7 @@ class BddPhaseTimings(unittest.TestCase):
             env["GITHUB_STEP_SUMMARY"] = str(
                 self.root if broken_summary else self.root / "summary.md")
         return subprocess.run(
-            [self.just, "--justfile", str(self.root / "justfile"), "bdd::run"],
+            [self.just, "--justfile", str(self.root / "justfile"), "test", "bdd"],
             cwd=self.root, env=env, capture_output=True, text=True, check=False,
         )
 

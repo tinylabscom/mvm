@@ -45,7 +45,7 @@ jobs:
         with:
           packages: libcap-ng-dev lld
 
-      # No zig here: `just bdd::run` builds mvmctl without `embed-host-bins`, and the
+      # No zig here: `just test bdd` builds mvmctl without `embed-host-bins`, and the
       # scenarios that would need the payload are `@live`-tagged, which this
       # hermetic lane skips. The live job below does need it.
       - name: Install just
@@ -72,7 +72,7 @@ jobs:
       - uses: ./.github/actions/rust-cache
 
       - name: Run BDD conformance suite
-        run: just bdd::run
+        run: just test bdd
 
       # The Python and TypeScript SDKs each carry a unit suite that no cargo
       # target reaches, so until now nothing in CI ran either. They belong on
@@ -84,7 +84,7 @@ jobs:
         run: crates/mvm-sdk/sdks/kotlin/scripts/install-kotlinc.sh >> "$GITHUB_PATH"
 
       - name: Run the language SDK unit suites
-        run: just sdk::test
+        run: just test sdk
 
   ps11-live:
     name: BDD live PS-11 frozen volume (Linux, Firecracker)
@@ -123,7 +123,7 @@ jobs:
           sudo chmod 666 /dev/kvm
           ls -la /dev/kvm
       - name: Prepare the pinned workload kernel
-        run: just kernel::workload
+        run: just build kernel
       - name: Build the pinned guest binaries
         run: |
           cargo run --locked -p mvmctl -- dev guest-bins --arch x86_64 --out dist
@@ -136,4 +136,4 @@ jobs:
             --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint
           "${CARGO_TARGET_DIR:-target}/debug/mvm-network-endpoint" --contract-version
       - name: Run the PS-11 live witness
-        run: just bdd::live-ci ps11_live
+        run: just e2e live-ci ps11_live
