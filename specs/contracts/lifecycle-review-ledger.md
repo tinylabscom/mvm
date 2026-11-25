@@ -930,11 +930,28 @@ what is due. The stop kills the helper two seconds after the signal, and a pass
 cut off there leaves the remainder unexpired; the pass is bounded in rounds,
 not in time. A third test stops a parked helper after a quarantine and sees the
 overdue message expired, and a test of the helper binary sees it exit with
-status zero on the signal. Records whose retention ends
-later, a helper whose ordinary maintenance commit raced the quarantine between
-that read and the commit, an already-exited helper,
-and actor journals are not covered, and their ciphertext can outlive its
-retention until the store is removed by hand. An actor endpoint's
+status zero on the signal. A quarantined
+workload's store can also be expired with no VM and no helper:
+`expire_quarantined_mailbox` in `mailbox_process/offline.rs`, reached through
+the optional `MvmClient::expire_quarantined_mailbox` that the local backend
+implements and through `mvmctl machine mailbox-expire`. It refuses unless the
+ledger names the workload quarantined at the stored plan's epoch, and while the
+VM or the recorded helper pid is alive. It opens the store under the custody
+manifest the host signed at the production launch rather than a launch posture:
+the stored plan must hash to its own id and the manifest must name that id and
+nonce. It enrolls as the helper does, marks every commit retention-only, and
+commits only expiry and compaction, at most 4096 commits a call. It expires
+what is due at the time of the call; nothing schedules it, so a record whose
+deadline or retention ends later stays until someone calls again. It needs the
+VM's state directory, because the stored plan and the helper's pid file are
+there, so a store whose VM was removed is not reachable this way. The
+journal admits one writer, so a second call at the same time, or a helper that
+has the store open, makes the call refuse as busy. A test stops a helper
+with a message outstanding, quarantines the workload, and sees the call expire
+the message once its deadline passes and the destination's tip advance. A
+helper whose ordinary maintenance commit raced the quarantine between its read
+and the commit, and actor journals, which have no expiry at all, are still not
+covered. An actor endpoint's
 opener takes the ordering choice as a required argument, so a new opener has to
 name it; nothing stops one from naming the unordered choice for a production
 launch. A

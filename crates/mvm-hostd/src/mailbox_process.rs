@@ -54,8 +54,11 @@ use crate::mailbox_service::{MailboxService, UnitGate};
 use crate::plan_admission::{MailboxLaunchPosture, MailboxPostureHandoff};
 use crate::vm_lifetime::{endpoint_needed, launcher_is_alive};
 
+mod offline;
 mod reader;
 mod restart;
+
+pub use offline::{MailboxExpiry, expire_quarantined_mailbox};
 
 /// The helper binary this module spawns.
 pub const MAILBOX_BIN: &str = "mvm-mailbox";
@@ -2345,6 +2348,85 @@ mod tests {
             run.before,
             run.after
         );
+    }
+
+    /// A helper that served one message due in `expires_in_ms` and was then
+    /// stopped, as when its VM is stopped; the fixture it ran against.
+    fn stopped_helper_with_a_message(expires_in_ms: i64) -> ProductionLoop {
+        let fixture = production_loop(expires_in_ms);
+        let config = fixture.config.clone();
+        let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let (done_tx, done_rx) = sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = done_tx.send(serve_restarting(config, restart::Backoff::default(), stop));
+        });
+        guest_sends(&fixture, b"left behind");
+        stop.store(true, Ordering::SeqCst);
+        done_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the helper stops on request")
+            .expect("a clean stop");
+        fixture
+    }
+
+    fn offline_expiry(fixture: &ProductionLoop) -> Result<offline::MailboxExpiry> {
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        offline::expire(&offline::Store {
+            keys_dir: &keys_dir,
+            home: fixture.home.path(),
+            state_dir: &fixture.state_path,
+            coordinator: fixture.coordinator.clone(),
+        })
+    }
+
+    fn quarantine(fixture: &ProductionLoop) {
+        crate::policy_generation::coordinator::commit_workload(
+            &fixture.coordinator,
+            &mvm_core::host_interface::workload::WorkloadChange::Quarantine {
+                workload: fixture.plan.workload.0.clone(),
+            },
+        )
+        .expect("quarantine");
+    }
+
+    #[test]
+    fn a_quarantined_store_with_no_helper_is_expired_offline() {
+        let fixture = stopped_helper_with_a_message(2_000);
+        quarantine(&fixture);
+        let early = offline_expiry(&fixture).expect("nothing is due yet");
+        assert_eq!((early.expired, early.complete), (0, true), "{early:?}");
+        let before = destination_cursor(&fixture);
+        std::thread::sleep(Duration::from_millis(2_500));
+        let due = offline_expiry(&fixture).expect("the overdue message expires");
+        assert_eq!((due.expired, due.complete), (1, true), "{due:?}");
+        assert!(
+            destination_cursor(&fixture) > before,
+            "the expiry is ordered by the ledger"
+        );
+        let again = offline_expiry(&fixture).expect("a repeat finds nothing due");
+        assert_eq!(again.expired, 0, "{again:?}");
+    }
+
+    #[test]
+    fn offline_expiry_refuses_a_workload_that_is_not_quarantined() {
+        let fixture = stopped_helper_with_a_message(60_000);
+        let refused = offline_expiry(&fixture).expect_err("not quarantined");
+        assert_eq!(refused.kind(), ErrorKind::PermissionDenied, "{refused:?}");
+    }
+
+    #[test]
+    fn offline_expiry_refuses_while_the_mailbox_helper_is_alive() {
+        let fixture = stopped_helper_with_a_message(60_000);
+        quarantine(&fixture);
+        std::fs::write(
+            fixture
+                .state_path
+                .join(mvm_vmm::host::vm_helpers::MAILBOX_PID_FILE),
+            std::process::id().to_string(),
+        )
+        .expect("a live helper's pid");
+        let refused = offline_expiry(&fixture).expect_err("a live helper owns the store");
+        assert_eq!(refused.kind(), ErrorKind::ResourceBusy, "{refused:?}");
     }
 
     #[test]

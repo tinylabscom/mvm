@@ -27,7 +27,7 @@ pub use error::{MvmError, Result};
 
 use dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineStartOptions, MachineState,
-    PauseOpts, PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
+    MailboxExpiry, PauseOpts, PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 
 pub use crate::protocol::telemetry::served::{
@@ -111,6 +111,17 @@ pub trait MvmClient: Send + Sync {
     /// `Some(rfc3339)` arms it, `None` clears it. Errors if the machine is not
     /// registered.
     async fn set_ttl(&self, id: &MachineId, expires_at: Option<String>) -> Result<()>;
+
+    /// Expire and compact what is due in the mailbox store of a stopped
+    /// machine whose workload is quarantined. No helper will ever do it: a
+    /// quarantined workload does not launch again. Optional: a provider that
+    /// keeps no such store leaves this default, which refuses.
+    async fn expire_quarantined_mailbox(&self, id: &MachineId) -> Result<MailboxExpiry> {
+        let _ = id;
+        Err(MvmError::Rejected {
+            reason: "this provider does not expire quarantined mailboxes".into(),
+        })
+    }
 
     /// What the backend behind this client can do.
     ///
@@ -213,6 +224,17 @@ mod tests {
     #[test]
     fn trait_is_object_safe() {
         fn _accepts(_c: &dyn MvmClient) {}
+    }
+
+    /// A provider that does not override the optional method refuses it.
+    #[tokio::test]
+    async fn a_provider_without_mailbox_expiry_refuses_it() {
+        let client: Box<dyn MvmClient> = Box::new(mock::MockBackend::default());
+        let refused = client
+            .expire_quarantined_mailbox(&MachineId("vm".into()))
+            .await
+            .expect_err("the default refuses");
+        assert!(matches!(refused, MvmError::Rejected { .. }), "{refused:?}");
     }
 
     /// The consumer path: hold a `dyn MvmClient`, ask what it can do, and get a

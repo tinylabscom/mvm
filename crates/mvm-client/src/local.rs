@@ -44,7 +44,7 @@ use mvm_runtime::AnyBackend;
 
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
-    PauseOpts, PauseOutcome, ResumeOpts, ResumeOutcome,
+    MailboxExpiry, PauseOpts, PauseOutcome, ResumeOpts, ResumeOutcome,
 };
 use mvm_core::client::{BackendCapabilityReport, ClientOperationCapabilities};
 use mvm_core::client::{
@@ -855,6 +855,40 @@ fn authorize_change(name: &str, mutation: Mutation) -> Result<()> {
     })
 }
 
+/// Expire and compact what is due in the mailbox store of the stopped machine
+/// `name`, whose workload is quarantined. Synchronous, so a caller already
+/// inside a runtime needs no second one. Each commit is ordered by the
+/// workload ledger; this starts the policy coordinator if it is not running.
+pub fn expire_quarantined_mailbox(name: &str) -> Result<MailboxExpiry> {
+    use std::io::ErrorKind;
+
+    mvm_core::naming::validate_vm_name(name).map_err(|e| MvmError::InvalidSpec {
+        reason: format!("{e:#}"),
+    })?;
+    let done = mvm_hostd::mailbox_process::expire_quarantined_mailbox(name).map_err(|error| {
+        let reason = error.to_string();
+        match error.kind() {
+            ErrorKind::NotFound => MvmError::NotFound { id: name.into() },
+            ErrorKind::ResourceBusy => MvmError::Conflict { reason },
+            ErrorKind::PermissionDenied | ErrorKind::Unsupported => MvmError::Rejected { reason },
+            _ => MvmError::Backend { reason },
+        }
+    })?;
+    mvm_core::audit_emit!(
+        MailboxExpired,
+        vm: name,
+        "expired={} compactions={} complete={}",
+        done.expired,
+        done.compactions,
+        done.complete
+    );
+    Ok(MailboxExpiry {
+        expired: done.expired,
+        compactions: done.compactions,
+        complete: done.complete,
+    })
+}
+
 /// Record when `name` expires on its host name-registry entry, or clear it
 /// with `None`; the TTL reaper stops a machine past it. Synchronous, so a
 /// caller already inside a runtime (the host library) sets a TTL without
@@ -1186,6 +1220,10 @@ impl MvmClient for LocalBackend {
         set_machine_expiry(&id.0, expires_at)?;
         mvm_core::audit_emit!(VmTtlSet, vm: &id.0, "{detail}");
         Ok(())
+    }
+
+    async fn expire_quarantined_mailbox(&self, id: &MachineId) -> Result<MailboxExpiry> {
+        expire_quarantined_mailbox(&id.0)
     }
 
     async fn remove_machine(&self, id: &MachineId) -> Result<()> {
@@ -2603,6 +2641,26 @@ mod tests {
     /// Setting or clearing a TTL is recorded by the client, so a TTL set
     /// through the host library is audited like one set by the CLI; an
     /// unregistered machine changes nothing and records nothing.
+    /// Both refusals come before the policy coordinator would be started.
+    #[tokio::test]
+    async fn mailbox_expiry_refuses_an_unsafe_name_and_an_unknown_machine() {
+        let _data = IsolatedDataDir::new();
+        let be = LocalBackend::with_hypervisor("mock");
+        let unsafe_name = be
+            .expire_quarantined_mailbox(&MachineId("../escape".into()))
+            .await
+            .expect_err("a name that is not a VM name");
+        assert!(
+            matches!(unsafe_name, MvmError::InvalidSpec { .. }),
+            "{unsafe_name:?}"
+        );
+        let unknown = be
+            .expire_quarantined_mailbox(&MachineId("never-launched".into()))
+            .await
+            .expect_err("no stored plan");
+        assert!(matches!(unknown, MvmError::NotFound { .. }), "{unknown:?}");
+    }
+
     #[tokio::test]
     #[cfg(feature = "test-support")]
     async fn set_ttl_records_the_expiry_it_set_and_cleared() {
