@@ -15,11 +15,11 @@ use std::time::Duration;
 use cucumber::given;
 use ed25519_dalek::{Signer as _, SigningKey};
 use mvm_agentd::telemetry_capture::session::{SessionDeadlines, serve_capture_session};
-use mvm_agentd::telemetry_capture::{AgentSubscriber, CaptureState, offer_stdio_to};
+use mvm_agentd::telemetry_capture::{AgentSubscriber, CaptureState, ProducerId, offer_stdio_to};
 use mvm_contract::stream::secret_fingerprint::{SecretCategory, SecretFingerprint};
 use mvm_core::net::telemetry::outbox::Outbox;
 use mvm_core::net::telemetry::{TelemetryReceiver, handshake_signing_bytes};
-use mvm_core::protocol::telemetry::MAX_RECORD_BYTES;
+use mvm_core::protocol::telemetry::{MAX_RECORD_BYTES, RecordBody};
 use mvm_hostd::telemetry_collector::{
     CappedJsonlSink, CollectorStatusSnapshot, LossCounters, RecordSink as _, ScrubbingSink,
 };
@@ -57,9 +57,28 @@ fn collect(home: &Path, machine: &str, bound_secret: bool, diagnostics: impl FnO
 /// The guest's capture queue, in records; the agent's own is 128.
 const QUEUE_RECORDS: usize = 64;
 /// How long the host waits for the next record before calling the session
-/// done. Past the capture session's one-second loss-summary clock, so a
-/// session that shed records always reports it before the host stops.
+/// done, once the guest has reported every record it shed.
 const QUIET_FOR: Duration = Duration::from_millis(1500);
+/// How long the host waits for a loss report the guest still owes. The
+/// session sends one on its own clock, which an idle session's backed-off
+/// turns stretch, so the host waits for the report itself and this only
+/// bounds a session that never sends it.
+const LOSS_REPORT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Every record `capture` has counted as lost, across producers and reasons.
+fn records_lost(capture: &CaptureState) -> u64 {
+    ProducerId::ALL
+        .into_iter()
+        .map(|producer| {
+            let lost = capture.losses(producer);
+            lost.capacity.records
+                + lost.contention.records
+                + lost.unavailable.records
+                + lost.rejected.records
+                + lost.truncated.records
+        })
+        .sum()
+}
 
 /// [`collect`], with workload output offered to capture the way the agent's
 /// pipe readers offer it.
@@ -101,6 +120,7 @@ fn collect_into_queue(
     );
     tracing::subscriber::with_default(AgentSubscriber::new(Arc::clone(&capture)), diagnostics);
     output(&capture);
+    let owed = records_lost(&capture);
 
     let guest_key = SigningKey::from_bytes(&[91; 32]);
     let anchor_key = SigningKey::from_bytes(&[92; 32]);
@@ -142,13 +162,29 @@ fn collect_into_queue(
         CappedJsonlSink::create(&state_dir.join(TELEMETRY_RECORDS_FILE), 1 << 20, key).unwrap(),
         Arc::clone(&losses),
     );
-    host.set_read_timeout(Some(QUIET_FOR)).unwrap();
-    while let Ok(record) = receiver.receive(&mut host) {
+    let mut reported = 0;
+    loop {
+        let patience = if reported < owed {
+            LOSS_REPORT_DEADLINE
+        } else {
+            QUIET_FOR
+        };
+        host.set_read_timeout(Some(patience)).unwrap();
+        let Ok(record) = receiver.receive(&mut host) else {
+            break;
+        };
+        if let RecordBody::Loss { records, .. } = record.body() {
+            reported += records;
+        }
         if let mvm_hostd::telemetry_collector::IngestOutcome::Shed(class) = sink.try_ingest(&record)
         {
             losses.record(class);
         }
     }
+    assert!(
+        reported >= owed,
+        "the guest shed {owed} record(s) and reported {reported} before its session went quiet"
+    );
     sink.release_held();
     drop(host);
     let _ = serving.join();
