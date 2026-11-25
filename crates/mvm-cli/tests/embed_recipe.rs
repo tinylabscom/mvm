@@ -7,58 +7,73 @@
 //! that way.
 
 const JUSTFILE: &str = include_str!("../../../Justfile");
-const EMBED_MOD: &str = include_str!("../../../just/payload/mod.just");
 
-/// The body of `name`, up to the recipe that follows it. Recipe bodies are the
-/// unit these guards assert over, and slicing them by hand three times over is
-/// how one of them ends up bounded by the wrong marker.
-fn recipe_body(name: &str, next: &str) -> &'static str {
+/// The body of the `build` recipe, which holds every arm that links host
+/// binaries. Recipe bodies are the unit these guards assert over.
+fn build_recipe() -> &'static str {
     JUSTFILE
-        .split(name)
+        .split("\nbuild WHAT=\"\" *ARGS:")
         .nth(1)
-        .unwrap_or_else(|| panic!("{name} recipe"))
-        .split(next)
+        .expect("build recipe")
+        .split("\n    esac")
         .next()
-        .unwrap_or_else(|| panic!("{name} recipe body"))
+        .expect("build recipe body")
 }
 
-/// The repair moved out of `embed` and into a shared script so a second recipe
-/// could reuse it. Assert the reference, not the mechanism — the mechanism is
+/// The shared helper build the `embed` and `supervisors` arms both call.
+fn supervisors_function() -> &'static str {
+    build_recipe()
+        .split("supervisors() {")
+        .nth(1)
+        .expect("supervisors function")
+        .split("\n    }")
+        .next()
+        .expect("supervisors function body")
+}
+
+/// One arm of the `build` recipe's `case`, up to its `;;`.
+fn build_arm(name: &str) -> &'static str {
+    build_recipe()
+        .split(&format!("\n      {name})"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("{name} arm"))
+        .split(";;")
+        .next()
+        .unwrap_or_else(|| panic!("{name} arm body"))
+}
+
+/// The repair lives in a shared script so every arm that links host binaries
+/// can reuse it. Assert the reference, not the mechanism — the mechanism is
 /// asserted once, against the script, below.
 #[test]
 fn embed_recipe_exposes_the_pinned_rust_sysroot_to_macos_llvm_tools() {
-    let recipe = recipe_body("embed *ARGS:", "\nrelease-build:");
-    assert!(recipe.contains("scripts/macos-objcopy-env.sh"), "{recipe}");
+    assert!(build_recipe().contains("scripts/macos-objcopy-env.sh"));
+    assert!(build_arm("embed").contains("supervisors \"$@\""));
 }
 
-/// `payload::supervisors` links the same `mvm-hostd` binaries `embed` does. It
-/// went without this repair and shipped every supervisor unstripped, which is
-/// what this guard exists to catch a second time.
+/// `build supervisors` links the same `mvm-hostd` binaries `build embed` does.
+/// It went without this repair and shipped every supervisor unstripped, which
+/// is what this guard exists to catch a second time.
 #[test]
 fn build_supervisors_recipe_exposes_the_pinned_rust_sysroot_too() {
-    let recipe = EMBED_MOD
-        .split("supervisors *ARGS:")
-        .nth(1)
-        .unwrap_or_else(|| panic!("supervisors recipe"))
-        .split("\nlibkrun-supervisor *ARGS:")
-        .next()
-        .unwrap_or_else(|| panic!("supervisors recipe body"));
-    assert!(recipe.contains("scripts/macos-objcopy-env.sh"), "{recipe}");
+    let helpers = supervisors_function();
+    assert!(helpers.contains("objcopy_env"), "{helpers}");
     assert!(
-        recipe.contains("build -p mvm-hostd --bins {{ARGS}}"),
-        "{recipe}"
+        helpers.contains("build -p mvm-hostd --bins \"$@\""),
+        "{helpers}"
     );
+    assert!(build_arm("supervisors").contains("supervisors \"$@\""));
 }
 
 #[test]
 fn embed_recipe_builds_native_vm_helpers_in_the_requested_profile() {
-    let recipe = recipe_body("embed *ARGS:", "embed-refresh:");
+    let recipe = build_arm("embed");
 
     let helper_build = recipe
-        .find("build -p mvm-hostd --bins {{ARGS}}")
+        .find("supervisors \"$@\"")
         .expect("embed recipe builds native per-VM helpers");
     let mvmctl_build = recipe
-        .find(r#"./scripts/cargo.sh build --features "$FEATURES" {{ARGS}}"#)
+        .find(r#"./scripts/cargo.sh build --features "$FEATURES" "$@""#)
         .expect("embed recipe builds embedded mvmctl");
     assert!(
         helper_build < mvmctl_build,

@@ -18,10 +18,7 @@ class ScopedTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory(prefix="mvm-scoped-", dir="/tmp")
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        module = self.root / "just/tests"
-        module.mkdir(parents=True)
-        shutil.copyfile(ROOT / "just/tests/mod.just", module / "mod.just")
-        (self.root / "justfile").write_text("mod tests 'just/tests/mod.just'\n")
+        shutil.copyfile(ROOT / "Justfile", self.root / "justfile")
         scripts = self.root / "scripts"
         scripts.mkdir()
         guard = scripts / "require-nextest.sh"
@@ -38,7 +35,7 @@ class ScopedTests(unittest.TestCase):
 
     def run_recipe(self, *arguments, **environment):
         return subprocess.run(
-            ["just", "--justfile", str(self.root / "justfile"), "tests::scoped", *arguments],
+            ["just", "--justfile", str(self.root / "justfile"), "test", "scoped", *arguments],
             cwd=self.root,
             env={**os.environ, **environment},
             capture_output=True,

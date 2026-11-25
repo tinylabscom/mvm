@@ -334,7 +334,7 @@ widens to broad `--net` behavior and never falls back to a guest NIC.
 When the helper path is available and you want a live runtime proof, run:
 
 ```bash
-just kernel::hvf-oci-smoke
+just e2e hvf-oci-smoke
 ```
 
 The script runs one Python OCI workload through the production FlowMux path,

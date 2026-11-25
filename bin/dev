@@ -34,7 +34,7 @@
 #
 # Build the contributor CLI and native helpers together: launch commands do
 # not compile missing helpers. Avoid embedding the Linux builder payload;
-# a full upfront build remains available via `just embed`. Bootstrap against
+# a full upfront build remains available via `just build embed`. Bootstrap against
 # published image sets still has the signature verifier supplied by `dev`.
 
 set -euo pipefail

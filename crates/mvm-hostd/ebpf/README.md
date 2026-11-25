@@ -13,7 +13,7 @@ cd crates/mvm-hostd/ebpf
 cargo +nightly build --release --target bpfel-unknown-none -Z build-std=core
 ```
 
-`just check::ebpf` runs exactly that, and is what the CI lane runs.
+`just check ebpf` runs exactly that, and is what the CI lane runs.
 
 The resulting object file is the one cargo hardlinks into the release
 directory:

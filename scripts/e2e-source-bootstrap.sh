@@ -91,11 +91,11 @@ echo "    images: $IMAGES_DIR"
 echo "    flake: $FLAKE"
 
 e2e_phase build
-just payload::refresh
+just clean payload
 cargo build --bin mvmctl --features "$FEATURES"
 cp "$MVMCTL" "$UNEMBEDDED_MVMCTL"
 cargo build --bin mvmctl --features "$FEATURES,embed-host-bins"
-just payload::supervisors
+just build supervisors
 
 # Against a cold home, the unembedded command packs both sidecar variants from
 # a guest runtime it compiles on the host. It needs neither the image checkout

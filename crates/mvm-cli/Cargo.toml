@@ -128,7 +128,7 @@ native-caller-identity = [
 # makes a build embed. Without it no profile cross-compiles anything: a build
 # restores what the content store proves belongs to this tree and otherwise
 # writes an empty table, and an `mvmctl` with an empty table builds the payload
-# from its checkout on first use (`host_binaries::source`). `just embed` and the
+# from its checkout on first use (`host_binaries::source`). `just build embed` and the
 # release workflow turn it on.
 embed-host-bins = []
 # Forward to `mvm-runtime/wasm-backend`: enables `mvmctl --hypervisor wasm`.

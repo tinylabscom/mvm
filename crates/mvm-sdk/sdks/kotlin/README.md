@@ -44,7 +44,7 @@ string every SDK reports for the same mistake: `missing` (with `field`),
 
 ```sh
 crates/mvm-sdk/sdks/kotlin/scripts/install-kotlinc.sh   # prints the bin dir to add to PATH
-just sdk::test-kotlin
+just test sdk kotlin
 ```
 
 The suite checks the builder against the canonical goldens in

@@ -1,7 +1,7 @@
 //! A debug build without `embed-host-bins` never cross-compiles the Linux host
 //! binaries. What it *ships* is whatever the content store could prove belongs
 //! to this tree: nothing on a cold machine, the restored set once a release
-//! build, a `just embed` or an `mvmctl` producing its own payload has published
+//! build, a `just build embed` or an `mvmctl` producing its own payload has published
 //! one. A test binary is not `mvmctl` and never builds the payload itself, so
 //! the empty arm refuses here exactly as it always has.
 //!
@@ -39,7 +39,7 @@ fn the_default_build_ships_only_a_payload_the_store_could_prove() {
                 EMBEDDED.len()
             );
             assert!(err.contains("embed-host-bins"), "{err}");
-            assert!(err.contains("just embed"), "{err}");
+            assert!(err.contains("just build embed"), "{err}");
             assert!(err.contains("./target/debug/mvmctl"), "{err}");
             assert!(!root.exists(), "refusal must not create {}", root.display());
         }

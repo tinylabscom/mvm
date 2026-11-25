@@ -12,8 +12,8 @@ require_text() {
 }
 
 require_recipe_text() {
-  if ! grep -Fq -- "$1" Justfile just/*/mod.just; then
-    echo "check-cargo-toolchain: recipe tree is missing: $1" >&2
+  if ! grep -Fq -- "$1" Justfile; then
+    echo "check-cargo-toolchain: Justfile is missing: $1" >&2
     exit 1
   fi
 }
@@ -39,7 +39,7 @@ require_text scripts/cargo.sh "if [[ \"\${1:-}\" == \"--direct\" ]]"
 require_recipe_text './scripts/cargo.sh build --workspace'
 require_recipe_text './scripts/cargo.sh nextest run --workspace'
 require_recipe_text './scripts/cargo.sh clippy --workspace --all-targets -- -D warnings'
-require_recipe_text './scripts/cargo.sh --direct cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets'
+require_recipe_text './scripts/cargo.sh --direct cargo-zigbuild check --target "$linux" --workspace --all-targets'
 require_text .githooks/pre-commit "./scripts/cargo.sh clippy \$pass -- -D warnings"
 require_text .githooks/pre-commit 'sweep_args="--workspace"'
 require_text .githooks/pre-commit "focus_args=\"\${pkg_args# } --all-targets\""

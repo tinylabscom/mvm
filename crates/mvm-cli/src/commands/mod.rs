@@ -844,7 +844,7 @@ fn register_inhouse_builder() {
     // the pinned URL is a GitHub release asset, which redirects, and
     // `mvm-http` follows no redirects. Deliberately not `download_kernel`,
     // whose signed-manifest check needs `manifest-verify`, a feature an
-    // ordinary `just embed` build does not carry.
+    // ordinary `just build embed` build does not carry.
     mvm_build::stage0_kernel::register_bootstrap_kernel_fetcher(Box::new(
         |url: &str, dest: &std::path::Path| {
             let dest = dest

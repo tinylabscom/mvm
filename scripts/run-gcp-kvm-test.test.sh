@@ -188,6 +188,6 @@ fi
 
 # The live recipe must prefetch the verified release kernel, never compile a
 # workload kernel on the disposable KVM witness.
-grep -Fq 'kernel build --which workload --source download' "$repo_root/just/bdd/mod.just"
+grep -Fq 'kernel build --which workload --source download' "$repo_root/Justfile"
 
 echo "disposable GCP KVM runner lifecycle tests passed"

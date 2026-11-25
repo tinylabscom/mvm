@@ -20,7 +20,7 @@ issue and read only what it links.
    otherwise link it with `Part of #N`. An issue may only close once every
    checkbox in its body and comments is checked.
 
-`just maint::task-context <issue>` generates a read-only briefing from those
+`python3 scripts/task-context.py <issue>` generates a read-only briefing from those
 sources. The briefing is disposable output, never another work ledger.
 
 ## What belongs here

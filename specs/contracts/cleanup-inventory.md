@@ -63,7 +63,7 @@ Roles (from CLAUDE.md, cross-checked against the table): host CLI `mvmctl`; host
 ### 1.5 Security invariants
 
 - The ADR-001 claims table (`specs/adrs/001-microvm-security-posture.md`, the table headed `| # | Claim | Witnesses | Authority | Status |`) has **21 numbered rows** (re-checked 2026-11-05: rows 1-21 at `specs/adrs/001-microvm-security-posture.md` lines 947-967). CLAUDE.md's text says "rows 1–19" and names claims 1–20; the table is authoritative (and has 21). That prose lag is a doc discrepancy to fix, not a code one.
-- `xtask` registers 88 distinct `check-*` names (`grep -oE '"check-[a-z0-9-]+"' xtask/src/main.rs | sort -u | wc -l`); the CI gate list is derived from the workflows, not from `check-all`. Local entry points: `just ci`, `just check::gated`, `just lints::fmt-check`, `just lints::clippy`, `just tests::doc`.
+- `xtask` registers 88 distinct `check-*` names (`grep -oE '"check-[a-z0-9-]+"' xtask/src/main.rs | sort -u | wc -l`); the CI gate list is derived from the workflows, not from `check-all`. Local entry points: `just ci`, `just check gated`, `just lint fmt`, `just lint clippy`, `just test doc`.
 - Standing invariants: no NIC in any workload or builder VM (`check-single-network-path`); no SSH in microVMs; host Nix never used; vsock-only auditable data plane.
 
 ## 2. Child workstreams
@@ -73,8 +73,8 @@ Owners: the issue has no assignees and the repository has no CODEOWNERS, so an o
 | WS | Owner | Boxes (body line) | Doable now? | Depends on / blocked by | Acceptance | Validation |
 |---|---|---|---|---|---|---|
 | W1 Baseline | maintainer | 369, 370 | yes (this document) | none | §1-§2 re-verified against the current commit; every row cites a command | `cargo metadata --no-deps --format-version 1`; `cargo run -q -p xtask -- check-spec-hygiene` |
-| W2 Slop and duplication | maintainer | 374, 375, 376, 377 | yes, per crate | W1 | no narration or history comments; one authority per helper; narrowed public APIs | `just lints::clippy`; `cargo nextest run --workspace` |
-| W3 Dependencies and crates | maintainer | 386 | yes | W1; #4542 | each first-party crate and feature has a consumer or is removed end to end | `cargo metadata`; `just check::gated` |
+| W2 Slop and duplication | maintainer | 374, 375, 376, 377 | yes, per crate | W1 | no narration or history comments; one authority per helper; narrowed public APIs | `just lint clippy`; `cargo nextest run --workspace` |
+| W3 Dependencies and crates | maintainer | 386 | yes | W1; #4542 | each first-party crate and feature has a consumer or is removed end to end | `cargo metadata`; `just check gated` |
 | W4 Release compilation | maintainer | 394, 396 | needs a release build | W1; a quiet host | cache and rerun causes measured; fix shown in the real release workflow | `cargo build --release --timings`; release workflow run |
 | W5 Toolchain, dev, CI | maintainer | 400, 405 | partly | #4840 (box 400) coordinated with #4657 and #4412; box 405 needs W3 | local validation matches the owning CI gates; platform, WASM, fuzz, eBPF, supply-chain coverage kept | `just ci`; workflow runs |
 | W6a Rust review | maintainer | 412 | yes, per change | W2, W3 | ownership, cancellation, cleanup and panic paths reviewed for touched code | `cargo nextest run --workspace` |
@@ -90,7 +90,7 @@ Owners: the issue has no assignees and the repository has no CODEOWNERS, so an o
 | W14 Studio and MVMD | maintainer | 338, 339 | coordination only | Studio PR 29; MVMD repository | adapter and contract boundaries preserved, nothing duplicated | cross-repository review |
 | W15 Protected goals and security posture | maintainer | 301, 302, 321 | 321 yes; 302 needs a quiet host and a KVM or HVF machine | W1 (321); applicable backends (302) | claims mapped to enforcement and witnesses; cold and warm startup evidence recorded | `check-claim-catalog`; bench commands |
 | W16 Legacy retirement | maintainer | 267, 268, 269 | yes, per interface | W1; consumer proof per item | each removed interface named with callers, docs, fixtures and CI updated together | `rg` of the removed name; `just ci` |
-| W17 Umbrella completion | maintainer | 158, 210, 460, 461, 462 | no | all above | every child complete or linked to a disposition; final before/after evidence | `cargo fmt --all --check`; `cargo test --workspace`; `cargo clippy --workspace -- -D warnings`; `just check::gated` |
+| W17 Umbrella completion | maintainer | 158, 210, 460, 461, 462 | no | all above | every child complete or linked to a disposition; final before/after evidence | `cargo fmt --all --check`; `cargo test --workspace`; `cargo clippy --workspace -- -D warnings`; `just check gated` |
 
 Count: 78 boxes in `/tmp/boxes.txt` at the time of writing; box 158 appears in both W10 and W17 by design.
 

@@ -113,7 +113,7 @@ invocation, without enabling embedded host binaries or building the Linux
 builder payload up front. The earlier CLI-only wrapper experiment was rejected
 by a live smoke: launch commands intentionally cannot compile missing host
 helpers. That capability restriction remains unchanged. The full guest-runtime
-archive is separate, pre-existing first-use work that `just embed` never prepared.
+archive is separate, pre-existing first-use work that `just build embed` never prepared.
 
 Build timings on an Apple Silicon host (16 CPUs, 128 GiB, Rust 1.97.1,
 the repository's two-job default), starting from
