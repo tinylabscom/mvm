@@ -76,6 +76,14 @@ const MAX_MEMBER_BYTES: u64 = 256 * 1024 * 1024;
 /// Largest manifest a verifier will parse.
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 
+/// How much decompressed tar stream the first-entry reader will take in. The
+/// tar layer reads a GNU long-name or PAX extension header's body without a
+/// cap before it yields the entry that header describes, so the manifest cap
+/// alone does not bound the work. 64 KiB covers the 512-byte header, block
+/// padding and any extension header a real manifest entry can carry (a path
+/// of at most a few KiB) with a wide margin.
+const MAX_FIRST_ENTRY_STREAM_BYTES: u64 = MAX_MANIFEST_BYTES + 64 * 1024;
+
 /// The release file name for `version`'s artifact.
 pub fn guest_bins_archive_name(version: &str) -> String {
     format!("mvm-guest-bins-v{version}.tar.gz")
@@ -146,6 +154,8 @@ pub enum GuestBinsError {
         "archive manifest schema {found} is unsupported for this operation (release schema is {GUEST_BINS_MANIFEST_SCHEMA})"
     )]
     UnsupportedSchema { found: u32 },
+    #[error("archive's first entry is {0}, not {GUEST_BINS_MANIFEST_FILE}")]
+    ManifestNotFirst(String),
     #[error("archive manifest lists no binaries")]
     EmptyManifest,
     #[error("archive is missing {0}, which its manifest lists")]
@@ -379,21 +389,52 @@ pub fn verify_guest_bins_archive(path: &Path) -> Result<GuestBinsManifest, Guest
     Ok(manifest)
 }
 
+/// Read the manifest from the first entry of a gzip tarball and stop there.
+///
+/// The release contract puts [`GUEST_BINS_MANIFEST_FILE`] first, so a reader
+/// that has authenticated the bytes elsewhere can learn what the archive
+/// declares without decompressing the members behind it. Refuses an empty
+/// archive, a first entry that is not a regular file named exactly
+/// `manifest.json`, a manifest over the size cap, an unreadable gzip or tar
+/// stream within that first entry, and a manifest whose schema, file list or
+/// member paths the full walk refuses.
+///
+/// The decompressed stream is bounded to [`MAX_FIRST_ENTRY_STREAM_BYTES`]:
+/// the manifest body by its own cap, and the tar headers and long-name or PAX
+/// extension bodies that precede it by that stream limit, so a first entry
+/// that is an oversized extension header ends the read instead of being
+/// decompressed. A GNU long-name or PAX header that names `manifest.json` is
+/// folded by the tar layer into the entry it describes and is accepted as
+/// that entry, exactly as the full walk accepts it.
+///
+/// This does not hash members and does not read past the first entry. Whether
+/// the later members agree with the manifest is owned by
+/// [`verify_guest_bins_archive`], not by this reader: an archive whose first
+/// entry is a good manifest is accepted here whatever follows it.
+pub fn read_release_manifest<R: Read>(source: R) -> Result<GuestBinsManifest, GuestBinsError> {
+    let mut archive = tar::Archive::new(GzDecoder::new(source).take(MAX_FIRST_ENTRY_STREAM_BYTES));
+    let entry = archive
+        .entries()?
+        .next()
+        .ok_or(GuestBinsError::MissingManifest)??;
+    let member = entry.path()?.to_string_lossy().into_owned();
+    if entry.header().entry_type() != EntryType::Regular {
+        return Err(GuestBinsError::NonRegularMember(member));
+    }
+    if member != GUEST_BINS_MANIFEST_FILE {
+        return Err(GuestBinsError::ManifestNotFirst(member));
+    }
+    let manifest: GuestBinsManifest =
+        serde_json::from_slice(&read_capped(entry, MAX_MANIFEST_BYTES, &member)?)?;
+    check_manifest_shape(&manifest)?;
+    Ok(manifest)
+}
+
 fn check_manifest_against(
     manifest: &GuestBinsManifest,
     digests: &BTreeMap<String, String>,
 ) -> Result<(), GuestBinsError> {
-    if !matches!(manifest.schema_version, 1 | GUEST_BINS_MANIFEST_SCHEMA) {
-        return Err(GuestBinsError::UnsupportedSchema {
-            found: manifest.schema_version,
-        });
-    }
-    if manifest.files.is_empty() {
-        return Err(GuestBinsError::EmptyManifest);
-    }
-    for member in manifest.files.keys() {
-        GuestBinsMember::parse(member)?;
-    }
+    check_manifest_shape(manifest)?;
     if let Some(extra) = digests.keys().find(|m| !manifest.files.contains_key(*m)) {
         return Err(GuestBinsError::UnlistedMember(extra.clone()));
     }
@@ -408,6 +449,22 @@ fn check_manifest_against(
                 actual: actual.clone(),
             });
         }
+    }
+    Ok(())
+}
+
+/// What a manifest must satisfy on its own, before any member is compared.
+fn check_manifest_shape(manifest: &GuestBinsManifest) -> Result<(), GuestBinsError> {
+    if !matches!(manifest.schema_version, 1 | GUEST_BINS_MANIFEST_SCHEMA) {
+        return Err(GuestBinsError::UnsupportedSchema {
+            found: manifest.schema_version,
+        });
+    }
+    if manifest.files.is_empty() {
+        return Err(GuestBinsError::EmptyManifest);
+    }
+    for member in manifest.files.keys() {
+        GuestBinsMember::parse(member)?;
     }
     Ok(())
 }
@@ -836,6 +893,345 @@ mod tests {
             verify_guest_bins_archive(&written.archive),
             Err(GuestBinsError::UnsupportedSchema { .. })
         ));
+    }
+
+    /// A gzip tarball with `entries` in exactly the order given.
+    fn ordered_archive(entries: &[(&str, EntryType, &[u8])]) -> Vec<u8> {
+        let gz = flate2::write::GzEncoder::new(Vec::new(), Compression::fast());
+        let mut tar = tar::Builder::new(gz);
+        for (path, kind, bytes) in entries {
+            let mut header = Header::new_gnu();
+            // The name bytes go in verbatim: `set_path` would normalise
+            // "./manifest.json" into "manifest.json".
+            header.as_old_mut().name[..path.len()].copy_from_slice(path.as_bytes());
+            header.set_entry_type(*kind);
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append(&header, *bytes).unwrap();
+        }
+        tar.into_inner().unwrap().finish().unwrap()
+    }
+
+    fn written_bytes(tmp: &Path) -> (Vec<u8>, GuestBinsManifest) {
+        let written = two_arch_artifact(tmp).write(&tmp.join("out")).unwrap();
+        (std::fs::read(&written.archive).unwrap(), written.manifest)
+    }
+
+    /// The first tar entry's name in `bytes`, read independently of the reader.
+    fn first_entry_name(bytes: &[u8]) -> String {
+        let mut tar = tar::Archive::new(GzDecoder::new(bytes));
+        let entry = tar.entries().unwrap().next().unwrap().unwrap();
+        entry.path().unwrap().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn the_writer_puts_the_manifest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bytes, _) = written_bytes(tmp.path());
+        assert_eq!(first_entry_name(&bytes), GUEST_BINS_MANIFEST_FILE);
+        // Members sorting before "manifest.json" must not displace it.
+        let tar_names: Vec<String> = tar::Archive::new(GzDecoder::new(&bytes[..]))
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(tar_names.len() > 1);
+        assert!(tar_names[1..].iter().any(|n| n.as_str() < "manifest.json"));
+    }
+
+    #[test]
+    fn the_first_entry_reader_returns_the_manifest_the_full_walk_returns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let written = two_arch_artifact(tmp.path())
+            .write(&tmp.path().join("out"))
+            .unwrap();
+        let bytes = std::fs::read(&written.archive).unwrap();
+        let walked = verify_guest_bins_archive(&written.archive).unwrap();
+        assert_eq!(read_release_manifest(&bytes[..]).unwrap(), walked);
+    }
+
+    #[test]
+    fn a_manifest_that_is_not_first_is_refused_by_the_reader() {
+        let tmp = tempfile::tempdir().unwrap();
+        let written = two_arch_artifact(tmp.path()).write(tmp.path()).unwrap();
+        // The rewrite helper sorts members, which moves "manifest.json" behind
+        // the architecture directories.
+        rewrite(&written.archive, |_| {});
+        let bytes = std::fs::read(&written.archive).unwrap();
+        assert_ne!(first_entry_name(&bytes), GUEST_BINS_MANIFEST_FILE);
+        assert!(matches!(
+            read_release_manifest(&bytes[..]),
+            Err(GuestBinsError::ManifestNotFirst(_))
+        ));
+        // The full walk does not care about order, which is why the reader
+        // and the publish check exist.
+        verify_guest_bins_archive(&written.archive).unwrap();
+    }
+
+    #[test]
+    fn a_first_entry_that_is_not_a_regular_file_is_refused() {
+        for kind in [EntryType::Directory, EntryType::Symlink, EntryType::Link] {
+            let bytes = ordered_archive(&[(GUEST_BINS_MANIFEST_FILE, kind, b"")]);
+            assert!(
+                matches!(
+                    read_release_manifest(&bytes[..]),
+                    Err(GuestBinsError::NonRegularMember(_))
+                ),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_over_cap_manifest_is_refused() {
+        let big = vec![b' '; MAX_MANIFEST_BYTES as usize + 1];
+        let bytes = ordered_archive(&[(GUEST_BINS_MANIFEST_FILE, EntryType::Regular, &big)]);
+        assert!(matches!(
+            read_release_manifest(&bytes[..]),
+            Err(GuestBinsError::MemberTooLarge(_))
+        ));
+    }
+
+    fn manifest_json(tmp: &Path) -> (Vec<u8>, GuestBinsManifest) {
+        let (_, manifest) = written_bytes(tmp);
+        (serde_json::to_vec(&manifest).unwrap(), manifest)
+    }
+
+    #[test]
+    fn a_regular_first_entry_with_the_wrong_name_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (json, _) = manifest_json(tmp.path());
+        for name in [
+            "Manifest.json",
+            "./manifest.json",
+            "manifest.json/",
+            "a/manifest.json",
+        ] {
+            let bytes = ordered_archive(&[(name, EntryType::Regular, &json)]);
+            assert!(
+                matches!(
+                    read_release_manifest(&bytes[..]),
+                    Err(GuestBinsError::ManifestNotFirst(_))
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    /// The tar layer folds a PAX `path` record into the entry after it, so a
+    /// PAX header spelling `manifest.json` ahead of a regular entry is read as
+    /// that entry named `manifest.json`: accepted, the same as the full walk.
+    #[test]
+    fn a_pax_path_record_naming_the_manifest_is_folded_into_it_and_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (json, manifest) = manifest_json(tmp.path());
+        let bytes = ordered_archive(&[
+            ("pax", EntryType::XHeader, b"22 path=manifest.json\n"),
+            ("placeholder", EntryType::Regular, &json),
+        ]);
+        assert_eq!(read_release_manifest(&bytes[..]).unwrap(), manifest);
+    }
+
+    /// Same folding for a GNU long-name record.
+    #[test]
+    fn a_gnu_longname_naming_the_manifest_is_folded_into_it_and_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (json, manifest) = manifest_json(tmp.path());
+        let bytes = ordered_archive(&[
+            ("././@LongLink", EntryType::GNULongName, b"manifest.json\0"),
+            ("placeholder", EntryType::Regular, &json),
+        ]);
+        assert_eq!(read_release_manifest(&bytes[..]).unwrap(), manifest);
+    }
+
+    /// A PAX header that names some other path folds into a regular entry
+    /// that is then not the manifest.
+    #[test]
+    fn a_pax_path_record_naming_something_else_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (json, _) = manifest_json(tmp.path());
+        let bytes = ordered_archive(&[
+            ("pax", EntryType::XHeader, b"19 path=other.json\n"),
+            (GUEST_BINS_MANIFEST_FILE, EntryType::Regular, &json),
+        ]);
+        assert!(matches!(
+            read_release_manifest(&bytes[..]),
+            Err(GuestBinsError::ManifestNotFirst(_))
+        ));
+    }
+
+    /// A first entry that is a PAX header with a huge, highly compressible
+    /// body must end the read at the stream limit rather than be decompressed.
+    #[test]
+    fn an_oversized_pax_first_entry_is_refused_without_reading_its_body() {
+        let body = vec![0u8; 64 * 1024 * 1024];
+        let bytes = ordered_archive(&[("pax", EntryType::XHeader, &body)]);
+        let mut counting = Counting {
+            inner: &bytes,
+            consumed: 0,
+        };
+        // The stream limit truncates the body, so the tar layer sees the
+        // stream end inside the extension header.
+        let err = read_release_manifest(&mut counting).unwrap_err();
+        assert!(matches!(err, GuestBinsError::Io(_)), "{err}");
+        // Zeros compress about 1000:1, so the 1.06 MiB stream limit costs
+        // roughly a thousand compressed bytes plus the decoder's buffer.
+        assert!(
+            counting.consumed <= 64 * 1024,
+            "read {} of {} bytes",
+            counting.consumed,
+            bytes.len()
+        );
+    }
+
+    /// An oversized GNU long-name body is bounded the same way.
+    #[test]
+    fn an_oversized_gnu_longname_first_entry_is_refused_without_reading_its_body() {
+        let body = vec![b'a'; 64 * 1024 * 1024];
+        let bytes = ordered_archive(&[("././@LongLink", EntryType::GNULongName, &body)]);
+        let mut counting = Counting {
+            inner: &bytes,
+            consumed: 0,
+        };
+        assert!(read_release_manifest(&mut counting).is_err());
+        assert!(counting.consumed <= 64 * 1024, "read {}", counting.consumed);
+    }
+
+    #[test]
+    fn a_truncated_gzip_stream_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bytes, _) = written_bytes(tmp.path());
+        // Cut inside the first entry's compressed data.
+        assert!(matches!(
+            read_release_manifest(&bytes[..64]),
+            Err(GuestBinsError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn empty_corrupt_and_entryless_input_is_refused() {
+        assert!(matches!(
+            read_release_manifest(&[][..]),
+            Err(GuestBinsError::Io(_))
+        ));
+        assert!(matches!(
+            read_release_manifest(&b"this is not gzip data"[..]),
+            Err(GuestBinsError::Io(_))
+        ));
+        let no_entries = ordered_archive(&[]);
+        assert!(matches!(
+            read_release_manifest(&no_entries[..]),
+            Err(GuestBinsError::MissingManifest)
+        ));
+    }
+
+    #[test]
+    fn a_manifest_the_walk_would_refuse_by_schema_or_content_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, manifest) = written_bytes(tmp.path());
+        let archive_of = |m: &GuestBinsManifest| {
+            ordered_archive(&[(
+                GUEST_BINS_MANIFEST_FILE,
+                EntryType::Regular,
+                &serde_json::to_vec(m).unwrap(),
+            )])
+        };
+        let mut schema = manifest.clone();
+        schema.schema_version = GUEST_BINS_MANIFEST_SCHEMA + 1;
+        assert!(matches!(
+            read_release_manifest(&archive_of(&schema)[..]),
+            Err(GuestBinsError::UnsupportedSchema { .. })
+        ));
+        let mut empty = manifest.clone();
+        empty.files.clear();
+        assert!(matches!(
+            read_release_manifest(&archive_of(&empty)[..]),
+            Err(GuestBinsError::EmptyManifest)
+        ));
+        let mut outside = manifest;
+        outside
+            .files
+            .insert("x86_64/etc/profile".into(), "0".repeat(64));
+        assert!(matches!(
+            read_release_manifest(&archive_of(&outside)[..]),
+            Err(GuestBinsError::Member(MemberError::UnknownLayout(_)))
+        ));
+        let not_json = ordered_archive(&[(GUEST_BINS_MANIFEST_FILE, EntryType::Regular, b"{")]);
+        assert!(matches!(
+            read_release_manifest(&not_json[..]),
+            Err(GuestBinsError::Manifest(_))
+        ));
+    }
+
+    /// Member consistency belongs to the walk: the reader accepts a manifest
+    /// first even when what follows it disagrees with it.
+    #[test]
+    fn inconsistent_later_members_are_the_walks_to_refuse_not_the_readers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, manifest) = written_bytes(tmp.path());
+        let json = serde_json::to_vec(&manifest).unwrap();
+        let bytes = ordered_archive(&[
+            (GUEST_BINS_MANIFEST_FILE, EntryType::Regular, &json),
+            (
+                "x86_64/bin/mvm-guest-agent",
+                EntryType::Regular,
+                b"not what was recorded",
+            ),
+        ]);
+        assert_eq!(read_release_manifest(&bytes[..]).unwrap(), manifest);
+        let path = tmp.path().join("inconsistent.tar.gz");
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(verify_guest_bins_archive(&path).is_err());
+    }
+
+    /// Counts the bytes the decoder pulls from the underlying slice.
+    struct Counting<'a> {
+        inner: &'a [u8],
+        consumed: usize,
+    }
+
+    impl Read for Counting<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.consumed += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn the_reader_stops_at_the_first_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, manifest) = written_bytes(tmp.path());
+        let json = serde_json::to_vec(&manifest).unwrap();
+        // Incompressible filler, so the compressed stream stays large.
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let filler: Vec<u8> = (0..8 * 1024 * 1024)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 56) as u8
+            })
+            .collect();
+        let bytes = ordered_archive(&[
+            (GUEST_BINS_MANIFEST_FILE, EntryType::Regular, &json),
+            ("sdk-py/mvm/big.py", EntryType::Regular, &filler),
+        ]);
+        assert!(bytes.len() > 4 * 1024 * 1024);
+        let mut counting = Counting {
+            inner: &bytes,
+            consumed: 0,
+        };
+        assert_eq!(read_release_manifest(&mut counting).unwrap(), manifest);
+        // The decoder buffers in chunks, so allow a few of them; the point is
+        // that the multi-megabyte member behind the manifest is not read.
+        assert!(
+            counting.consumed <= 64 * 1024,
+            "read {} of {} bytes",
+            counting.consumed,
+            bytes.len()
+        );
     }
 
     #[test]
