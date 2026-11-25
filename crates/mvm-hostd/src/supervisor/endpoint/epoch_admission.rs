@@ -708,7 +708,9 @@ mod tests {
     /// Leave the commit marker in place, as a commit that crashed between
     /// its rename and clearing the marker does.
     fn commit_marker(home: &std::path::Path) -> std::path::PathBuf {
-        let marker = canonical_dir_at(home).join(mvm_core::host_interface::workload::PENDING_FILE);
+        let dir = canonical_dir_at(home);
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join(mvm_core::host_interface::workload::PENDING_FILE);
         std::fs::write(&marker, "{}").unwrap();
         marker
     }
@@ -781,6 +783,9 @@ mod tests {
     #[test]
     fn a_landed_quarantine_revokes_as_soon_as_its_commit_marker_clears() {
         let watched = RecordedWatch::start();
+        // The store records its obligation before it lands the ledger; landing
+        // the ledger first would let the watch read the quarantine unfenced.
+        let marker = commit_marker(watched.home());
         write_ledger(
             watched.home(),
             &serde_json::json!({
@@ -789,7 +794,6 @@ mod tests {
             })
             .to_string(),
         );
-        let marker = commit_marker(watched.home());
         assert!(matches!(
             watched.recorded.recv_timeout(Duration::from_millis(1500)),
             Err(mpsc::RecvTimeoutError::Timeout)
