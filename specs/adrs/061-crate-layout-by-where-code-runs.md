@@ -318,7 +318,7 @@ in the workspace.
 | `crates/mvm-build`, `crates/mvm-runtime`, `crates/mvm-cli` | `"crates/build"`, `"crates/runtime"`, `"crates/cli"` |
 | `crates/mvm-client`, `crates/mvm-gpu`, `crates/mvm-conformance`, root package, `xtask` | Unchanged; client relocation awaits coordinated Studio changes |
 | `mvm-net` (folded into `mvm_core::net`), `crates/mvm-bundler` | Fold into core as specified above |
-| `crates/runmvm-client` | Retire with its publish/registry-smoke lane; retain contract publication |
+| `runmvm-client` (deleted) | Retire with its publish/registry-smoke lane; retain contract publication |
 
 Nested fuzz workspaces travel with their owner, except the VMM geometry harness
 at `mvm-runtime/fuzz-backend`: move it to `"crates/vmm/fuzz-backend"` and make its
