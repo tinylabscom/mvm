@@ -812,6 +812,7 @@ impl FileLock {
         }
     }
 
+    #[cfg(any(target_os = "macos", all(unix, feature = "test-support")))]
     pub(crate) fn opened_file(&self) -> &fs::File {
         &self._file
     }
