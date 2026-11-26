@@ -2,11 +2,10 @@
 
 **Status: Accepted**
 **Date: 2026-08-11**
-**Supersedes: ADR-036 (L3 TUN-over-vsock) and ADR-052
-(`052-userspace-socket-datapath.md`) for the production workload networking
-path. Their measurements, threat analysis, and historical rationale stand;
-their implementations stop being a supported production transport.
-Complements ADR-003 (hypervisor egress policy), ADR-014 (signed/audited
+**Supersedes: the earlier L3 TUN-over-vsock design and its userspace socket
+datapath (both ADRs deleted) for the production workload networking path.
+Their implementations are removed; the reasoning worth keeping is under
+"Alternatives considered". Complements ADR-003 (hypervisor egress policy), ADR-014 (signed/audited
 execution plans), ADR-020 (host-services broker), and ADR-023 (secrets
 subsystem / egress substitution).**
 
@@ -18,9 +17,9 @@ That is what makes claim 10 (default-deny egress), claim 13 (no raw secret
 reaches the guest), and the chain-signed audit log enforceable: the host, not
 the guest, is the party that opens sockets.
 
-ADR-036 then added `l3-vsock`, an opt-in compatibility mode that gives the
+An earlier ADR then added `l3-vsock`, an opt-in compatibility mode that gives the
 guest a real IP stack on a `mvm0` TUN and tunnels raw IPv4/IPv6 packets to a
-host forwarder. ADR-052 added a second, unprivileged forwarding backend for
+host forwarder, and a second ADR added an unprivileged forwarding backend for
 it. Both shipped. The tree therefore carries **two** production workload
 networking paths with different policy code, different resource accounting,
 different audit shapes, and different security properties — and
@@ -152,6 +151,41 @@ transformation applies to it.
   alternate network implementation retained for testing is a second production
   path with a different label. Hermetic protocol doubles are allowed; a second
   network stack is not.
+
+- **An L3 TUN-over-vsock compatibility mode** (deleted ADR-036, now removed).
+  The guest got a point-to-point `mvm0` TUN and the agent framed raw IP packets
+  over vsock to a host gateway, so programs that ignore proxy variables (static
+  binaries, their own dialer or resolver, ICMP) worked. Rejected as the second
+  production path described above. The reasons it chose a TUN over the other
+  packet-level options still apply if one is ever reconsidered: a virtio-net
+  NIC deletes "the host originates every flow" and adds a broadcast domain to
+  police; multiplexing packets onto the control RPC ties packet backpressure to
+  control-plane liveness; an L2 TAP needs ARP, DHCP and broadcast policing for a
+  link with two endpoints; slirp or vpnkit style gateways are a second policy
+  engine outside the signed plan and audit chain; and TLS interception needs a
+  host CA in the guest trust store.
+- **A userspace socket datapath for that mode** (deleted ADR-052, now removed).
+  smoltcp terminated guest TCP below the datapath seam, deferred the guest
+  handshake until the host `connect()` succeeded, and was the only forwarding
+  backend that needed no privilege, which is why macOS used it. Retired with the
+  mode. Its choice of smoltcp over hand-written TCP termination stands as
+  reasoning: retransmission, windowing and reassembly are subtle, and a hostile
+  guest drives them directly. ICMP, raw IP protocols and arbitrary IPv4 stayed
+  refused at admission.
+- **A privileged macOS network helper** (deleted ADR-039, rejected 2026-08-03).
+  A root helper creating `utun` interfaces and PF anchors would have given
+  macOS workloads ICMP and raw IP. Nothing needs them, and a permanent root
+  process widens a helper bug from one VM's networking to root on the host, so
+  mvm adds no root-capable component. Reopening needs a workload with a
+  demonstrated need. Such a helper would have to make arbitrary command
+  execution and caller-supplied PF syntax inexpressible in its wire format
+  rather than validated away, and bind each machine to the first caller that
+  created it by peer credentials.
+- **IPv6 as a first-class address family for the raw-packet mode** (deleted
+  ADR-038, proposed and never shipped). The one part that shipped is kernel
+  configuration: the workload kernel builds with `CONFIG_IPV6=y`, about 200 KB
+  larger, with the IPsec-for-v6 options disabled so the build guard that keeps
+  XFRM out still passes.
 
 ## Migration
 

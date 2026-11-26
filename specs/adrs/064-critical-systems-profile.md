@@ -12,7 +12,7 @@ evidence item at the end is met.
 **Extends, if accepted:** ADR-062 (workload actors: epochs, residency,
 supervision, cryptographic agility) and the
 [host interface contract](../contracts/host-interface-distributed-execution.md).
-**Complements:** ADR-001, ADR-014, ADR-022, ADR-025, ADR-042, ADR-052,
+**Complements:** ADR-001, ADR-014, ADR-022, ADR-025, ADR-042,
 ADR-057 and ADR-059.
 **Related issues:** #5097 (host interface), #5544 (workload actors), #5292
 (shared mailbox scheduler), #5510 (density), #5676 (disconnected host
@@ -519,8 +519,7 @@ is therefore computable from one signed document, before boot:
 - queues on every edge are bounded, with the bound in the topology;
 - `explain` renders the graph and marks each edge with its observed traffic.
 
-This adds no path. It is the existing single vsock flow path (ADR-042,
-ADR-052) with its allowed endpoints fixed in advance.
+This adds no path. It is the existing single vsock flow path (ADR-042) with its allowed endpoints fixed in advance.
 
 ### 12. Cryptographic suite
 

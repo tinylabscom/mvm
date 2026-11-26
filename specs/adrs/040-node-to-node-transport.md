@@ -5,10 +5,11 @@ four properties the hop must preserve cannot be preserved today, for
 reasons named below. Nothing here should be built until its prerequisites
 land. Tracked as issue #2119.**
 **Date: 2026-08-04**
-**Complements ADR-036 (L3 TUN-over-vsock) §"Cross-node traffic", which
-described the interface and recorded it as not implemented, and ADR-052
-(the userspace socket datapath), which owns the local forwarding backend
-unchanged.**
+**Complements ADR-042 (one flow-aware vsock networking path). It was
+written against the earlier L3 TUN-over-vsock design, whose cross-node section
+described this interface and recorded it as not implemented; that design and its
+userspace forwarding backend are both deleted, so read "l3-vsock" below as the
+packet-level path ADR-042 retired.**
 
 ## Why this ADR needs to exist before the code
 
@@ -23,7 +24,7 @@ node must act on an assertion made by a peer it does not control, about a
 workload it cannot see, under a policy it did not resolve. That is a new
 trust boundary, and which side of it decides what is the whole design.
 
-ADR-039 was written for the same reason and reached a different answer.
+A privileged macOS network helper was proposed for the same reason and rejected (see ADR-042, Alternatives considered).
 The precedent is the point: a decision that moves the trust boundary gets
 a signature, not an implementation detail buried in a networking feature.
 
@@ -62,9 +63,8 @@ what makes a lease non-transferable, and it is asserted by
 Node A therefore has no way to verify anything Node B says, and no way to
 learn Node B's verifying key. The only object in the system that could
 carry cross-node authority is a lease issued by an authority both nodes
-trust — which is exactly what a control plane is for, and which
-ADR-036 §"Local versus central responsibility" already assigns to the
-central side.
+trust — which is exactly what a control plane is for. A control plane
+authorizes and programs; it does not carry packets.
 
 The tempting shortcut is a node-peer keypair or a shared cluster secret,
 established node-to-node. **That is a second trust root**, sitting beside
@@ -104,7 +104,7 @@ node would route a flow intended for a peer to whichever local VM holds
 that address — a mis-delivery that no admission check would catch, since
 the destination is genuinely admitted and genuinely local.
 
-ADR-036 requires that "the guest cannot tell whether a destination VM is
+The original design required that "the guest cannot tell whether a destination VM is
 local or remote". Under a colliding address plan that requirement is not
 merely unmet, it is unachievable: the two cases are not distinguishable
 from the packet.
@@ -181,9 +181,7 @@ about which decision classes are chain-entries and which stay counters.
 supervisor `Recorder`, under `EventCategory::L3`, with the
 rate-discipline decision this section asked for made explicitly: bounded
 dedup on decision classes, a per-window emission budget, and a teardown
-entry stating what neither admitted. See ADR-036 §"Audit and
-observability" for the served set and the six facts that remain
-unserved.
+entry stating what neither admitted.
 
 ## The design, so far as it can be settled now
 
@@ -253,7 +251,7 @@ fail under its own name.
 
 ## Alternatives rejected
 
-**Stretch AF_VSOCK between machines.** ADR-036 already refuses this. A CID
+**Stretch AF_VSOCK between machines.** The original design refused this. A CID
 is not an authorization input and cannot be made into one; the address
 space is per-host by construction.
 
