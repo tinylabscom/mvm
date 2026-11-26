@@ -310,6 +310,28 @@ mod tests {
     }
 
     #[test]
+    fn an_internationalised_proxy_host_is_held_in_its_ascii_form() {
+        let p = Proxy::parse("http://b\u{fc}cher.example:3128").expect("established name");
+        assert_eq!(p.host, "xn--bcher-kva.example");
+    }
+
+    /// The host-name tables stop at Unicode 16.0; a later code point is a
+    /// parse error, never a host this client dials.
+    #[test]
+    fn a_host_using_a_code_point_assigned_in_unicode_17_is_refused() {
+        for host in ["\u{88f}.example", "a\u{c5c}.example", "\u{323b0}.example"] {
+            assert!(
+                matches!(
+                    Proxy::parse(&format!("http://{host}:3128")),
+                    Err(ProxyError::Url)
+                ),
+                "{host:?}"
+            );
+            assert!(Url::parse(&format!("https://{host}/")).is_err(), "{host:?}");
+        }
+    }
+
+    #[test]
     fn an_unsupported_scheme_is_an_error_not_a_silent_direct_dial() {
         assert!(matches!(
             Proxy::parse("ftp://proxy.corp"),
