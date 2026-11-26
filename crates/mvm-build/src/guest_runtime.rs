@@ -238,6 +238,9 @@ pub fn cached_runtime_release_proof(
 
 /// Locate and authenticate the selected release once, retaining its archive snapshot.
 /// A missing triplet is a source-runtime miss; a partial or invalid triplet refuses.
+///
+/// This is a launch's lookup: it yields the authenticated declaration and
+/// never an extracted tree, so it does not walk the archive's members.
 pub fn cached_verified_release_runtime(
     cache_root: &Path,
     version: &str,
@@ -1917,6 +1920,101 @@ mod tests {
             ),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_launch_reads_the_manifest_of_authenticated_bytes_without_walking_members() {
+        let walks = member_walks();
+        assert_eq!(
+            evidence::read_authenticated_manifest(&raw_archive(&release_entries()), "1.2.3")
+                .unwrap(),
+            release_manifest()
+        );
+        assert_eq!(member_walks(), walks);
+        // The manifest is still held to the release contract.
+        assert!(matches!(
+            evidence::read_authenticated_manifest(&raw_archive(&release_entries()), "1.2.4"),
+            Err(GuestRuntimeError::Version { .. })
+        ));
+    }
+
+    #[test]
+    fn a_launch_refuses_a_manifest_that_is_not_first_with_the_error_publish_uses() {
+        let mut entries = release_entries();
+        entries.rotate_left(1);
+        let bytes = raw_archive(&entries);
+        let launch = evidence::read_authenticated_manifest(&bytes, "1.2.3");
+        assert!(
+            matches!(
+                launch,
+                Err(GuestRuntimeError::Archive(
+                    GuestBinsError::ManifestNotFirst(_)
+                ))
+            ),
+            "{launch:?}"
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("reordered.tar.gz");
+        fs::write(&archive, bytes).unwrap();
+        let publish = guest_bins::release::check_release_archive(&archive, "1.2.3");
+        assert!(
+            matches!(
+                publish,
+                Err(guest_bins::release::ReleaseGuestRuntimeError::Archive {
+                    source: GuestBinsError::ManifestNotFirst(_),
+                    ..
+                })
+            ),
+            "{publish:?}"
+        );
+    }
+
+    #[test]
+    fn a_launch_refuses_an_oversized_manifest_and_an_unbounded_first_entry() {
+        let entry = |name: &str, kind, bytes: Vec<u8>| vec![(name.to_string(), kind, bytes)];
+        let oversized = raw_archive(&entry(
+            GUEST_BINS_MANIFEST_FILE,
+            EntryType::Regular,
+            vec![b' '; 1024 * 1024 + 1],
+        ));
+        let refused = evidence::read_authenticated_manifest(&oversized, "1.2.3");
+        assert!(
+            matches!(
+                refused,
+                Err(GuestRuntimeError::Archive(GuestBinsError::MemberTooLarge(
+                    _
+                )))
+            ),
+            "{refused:?}"
+        );
+        // An extension header whose body inflates to 64 MiB from a few tens of
+        // kilobytes: the read ends inside it instead of decompressing it.
+        let bomb = raw_archive(&entry("pax", EntryType::XHeader, vec![0; 64 * 1024 * 1024]));
+        assert!(bomb.len() < 1024 * 1024);
+        let refused = evidence::read_authenticated_manifest(&bomb, "1.2.3");
+        assert!(
+            matches!(
+                refused,
+                Err(GuestRuntimeError::Archive(GuestBinsError::Io(_)))
+            ),
+            "{refused:?}"
+        );
+    }
+
+    /// The boundary of the launch check, stated as a test: a manifest that
+    /// leads an archive is read whatever follows it. Publish, acquisition and
+    /// installation are what refuse these archives.
+    #[test]
+    fn a_launch_does_not_compare_members_with_the_manifest() {
+        for (case, bytes) in inconsistent_release_archives() {
+            let walks = member_walks();
+            assert_eq!(
+                evidence::read_authenticated_manifest(&bytes, "1.2.3").unwrap(),
+                release_manifest(),
+                "{case}"
+            );
+            assert_eq!(member_walks(), walks, "{case}");
+        }
     }
 
     #[test]

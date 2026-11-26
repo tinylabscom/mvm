@@ -14,6 +14,10 @@ use std::path::{Path, PathBuf};
 
 /// Authenticated declarations plus ownership of the exact signed archive bytes.
 /// Private fields and no Deserialize implementation prevent caller-minted trust.
+///
+/// Holding one means the archive's digest matched the signed checksum, its
+/// signatures verified, and its first entry is a valid release manifest. It
+/// does not mean the archive's members were compared with that manifest.
 #[derive(Debug, Clone)]
 pub struct VerifiedRuntimeManifest {
     archive: std::sync::Arc<tempfile::NamedTempFile>,
@@ -580,8 +584,7 @@ pub(super) fn verify_release_archive(
         mvm_core::release_trust::RELEASE_OIDC_ISSUER,
     )?;
     let snapshot = write_archive_snapshot(&bytes)?;
-    let manifest = crate::guest_bins::verify_guest_bins_archive(snapshot.path())?;
-    super::validate_release_guest_runtime_manifest(&manifest, version)?;
+    let manifest = read_authenticated_manifest(&bytes, version)?;
     let verified = VerifiedRuntimeManifest {
         archive: std::sync::Arc::new(snapshot),
         checksum: checksum_bytes,
@@ -597,6 +600,24 @@ pub(super) fn verify_release_archive(
         launch_scope::remember(key, &verified);
     }
     Ok(verified)
+}
+
+/// What authenticated archive bytes declare, read from their first entry.
+///
+/// `bytes` must be the buffer that was digested against the signed checksum
+/// and checked against the archive signature: the manifest is parsed from
+/// that memory, never from a path, so what is read is what was authenticated.
+/// Members are not decompressed or hashed here. Whether they agree with the
+/// manifest is a property of the signed bytes, established before signing and
+/// again where an archive is acquired or installed; the digest and signatures
+/// are what tie this archive to those verdicts.
+pub(super) fn read_authenticated_manifest(
+    bytes: &[u8],
+    version: &str,
+) -> Result<GuestBinsManifest, GuestRuntimeError> {
+    let manifest = crate::guest_bins::read_release_manifest(bytes)?;
+    super::validate_release_guest_runtime_manifest(&manifest, version)?;
+    Ok(manifest)
 }
 
 #[cfg(test)]
@@ -656,8 +677,8 @@ fn read_and_digest_archive(archive: &Path) -> Result<(Vec<u8>, String), GuestRun
     Ok((bytes, digest))
 }
 
-/// Write the authenticated bytes to a private temporary file, the copy the
-/// member check and any later retention read from.
+/// Write the authenticated bytes to a private temporary file, the copy an
+/// installation's member check and any later retention read from.
 #[tracing::instrument(skip_all)]
 fn write_archive_snapshot(bytes: &[u8]) -> Result<tempfile::NamedTempFile, GuestRuntimeError> {
     let mut snapshot = tempfile::NamedTempFile::new()?;
@@ -1026,23 +1047,39 @@ mod tests {
 
     #[cfg(feature = "manifest-verify")]
     #[test]
-    #[ignore = "requires MVM_SIGNED_RUNTIME_FIXTURE_DIR with the published v0.28.0-rc.2 quartet"]
+    #[ignore = "requires MVM_SIGNED_RUNTIME_FIXTURE_DIR holding one signed release quartet this build accepts"]
     fn signed_release_verification_is_once_per_launch_and_refuses_tampering() {
         let directory = std::path::PathBuf::from(
             std::env::var_os("MVM_SIGNED_RUNTIME_FIXTURE_DIR")
-                .expect("set MVM_SIGNED_RUNTIME_FIXTURE_DIR to the published release quartet"),
+                .expect("set MVM_SIGNED_RUNTIME_FIXTURE_DIR to a signed release quartet"),
         );
-        let asset = "mvm-guest-bins-v0.28.0-rc.2.tar.gz";
+        // The quartet names its own version and digest, so the test follows
+        // whichever release the current member contract still accepts.
+        let asset = std::fs::read_dir(&directory)
+            .expect("fixture directory")
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .find(|name| name.starts_with("mvm-guest-bins-v") && name.ends_with(".tar.gz"))
+            .expect("a guest runtime archive in the fixture directory");
+        let asset = asset.as_str();
+        let version = asset
+            .trim_start_matches("mvm-guest-bins-v")
+            .trim_end_matches(".tar.gz");
+        let checksum = directory.join(format!("{asset}.sha256"));
         let proof = RuntimeReleaseProof {
             archive: directory.join(asset),
-            checksum: directory.join(format!("{asset}.sha256")),
             signature_bundle: directory.join(format!("{asset}.bundle")),
-            archive_sha256: "8a36fae9e7444f92b3beaa1ed7d78c68003ea2f8d2d72320361cfa906a829921"
-                .into(),
-            version: "0.28.0-rc.2".into(),
+            archive_sha256: std::fs::read_to_string(&checksum)
+                .expect("checksum file")
+                .split_whitespace()
+                .next()
+                .expect("a digest in the checksum file")
+                .to_owned(),
+            checksum,
+            version: version.to_owned(),
             arch: GuestArch::host(),
         };
         let before = RELEASE_ARCHIVE_VERIFICATIONS.with(std::cell::Cell::get);
+        let walks = crate::guest_bins::MEMBER_WALKS.with(std::cell::Cell::get);
         for launch in 1..=2 {
             let runtime = verify_release_runtime(proof.clone(), &proof.version, proof.arch)
                 .expect("signed release");
@@ -1072,6 +1109,55 @@ mod tests {
             "seven asks inside one launch scope verify once"
         );
         drop(scope);
+        assert_eq!(
+            crate::guest_bins::MEMBER_WALKS.with(std::cell::Cell::get),
+            walks,
+            "a launch authenticates the archive and reads its manifest without walking members"
+        );
+        let published =
+            crate::guest_bins::release::check_release_archive(&proof.archive, &proof.version)
+                .expect("the published archive passes the member walk");
+        assert_eq!(
+            verify_release_runtime(proof.clone(), &proof.version, proof.arch)
+                .expect("signed release")
+                .manifest()
+                .manifest(),
+            &published,
+            "the manifest a launch reads is the one the member walk admits"
+        );
+
+        // The same signed bytes offered as another tag's runtime: the bundle is
+        // genuine, and its signer is not that tag's release workflow.
+        let other = tempfile::tempdir().expect("foreign tag directory");
+        let foreign = "mvm-guest-bins-v0.0.0-foreign.tar.gz";
+        std::fs::copy(&proof.archive, other.path().join(foreign)).expect("copy archive");
+        std::fs::copy(
+            &proof.signature_bundle,
+            other.path().join(format!("{foreign}.bundle")),
+        )
+        .expect("copy bundle");
+        std::fs::write(
+            other.path().join(format!("{foreign}.sha256")),
+            format!("{}  {foreign}\n", proof.archive_sha256),
+        )
+        .expect("write checksum");
+        let error = verify_release_archive(
+            &other.path().join(foreign),
+            &other.path().join(format!("{foreign}.sha256")),
+            &other.path().join(format!("{foreign}.bundle")),
+            "0.0.0-foreign",
+            proof.arch,
+        )
+        .expect_err("another tag's signer must not authenticate this runtime");
+        assert!(
+            matches!(
+                error,
+                GuestRuntimeError::Release(
+                    crate::runtime_overlay::RuntimeOverlayError::SignatureInvalid { .. }
+                )
+            ),
+            "{error}"
+        );
 
         let scratch = tempfile::tempdir().expect("tampered archive directory");
         let mut edited = std::fs::read(&proof.archive).expect("published archive");
@@ -1082,7 +1168,7 @@ mod tests {
             archive: tampered_archive,
             ..proof
         };
-        let error = verify_release_runtime(tampered, "0.28.0-rc.2", GuestArch::host())
+        let error = verify_release_runtime(tampered, version, GuestArch::host())
             .expect_err("a modified archive must not become a launch handle");
         assert!(error.to_string().contains("checksum"));
     }
