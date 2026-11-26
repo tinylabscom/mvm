@@ -931,7 +931,8 @@ pub(crate) const SKIP_HASH_VERIFY_ENV: &str = "MVM_SKIP_HASH_VERIFY";
 /// digest, then the archive held to the CLI release workflow's signing
 /// identity at exactly `version`. Nothing reads the archive before both pass.
 ///
-/// The guest runtime each CLI release publishes is acquired through here
+/// The guest runtime each CLI release publishes is fetched through here only
+/// when `MVM_SKIP_COSIGN_VERIFY` waives the signature, and is then not cached
 /// ([`crate::guest_bins::release`]).
 pub fn fetch_cli_release_archive(
     release_url: &str,

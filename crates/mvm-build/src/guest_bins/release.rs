@@ -10,15 +10,19 @@
 //!    under `/usr/lib/mvmctl/guest-runtime/`. Both installers authenticated
 //!    it against the release signature before placing it there, the same way
 //!    they authenticated the `mvmctl` next to it.
-//! 2. **Cached.** A previous download, in
-//!    [`release_guest_runtime_cache_dir`].
-//! 3. **Downloaded** from the release through
-//!    [`crate::runtime_overlay::fetch_cli_release_archive`]: the digest its
-//!    `.sha256` sidecar records, then the Sigstore bundle under the CLI release
-//!    workflow's identity at exactly this version. Only then is the archive
-//!    parsed, and only then is it moved into the cache, together with every
-//!    file in [`release_guest_runtime_files`]: a launch reads the cache entry,
-//!    not this module, and authenticates the archive from those files again.
+//! 2. **Cached** in [`release_guest_runtime_cache_dir`], the directory a
+//!    launch authenticates the archive from. The entry is checked with the
+//!    launch's own verifier before it is used.
+//! 3. **Downloaded** from the release: every file in
+//!    [`release_guest_runtime_files`] into a staging directory, checked there
+//!    with that same verifier (the archive's digest against the `.sha256`
+//!    file, the `.sha256` file's signature, and the archive's signature, under
+//!    the CLI release workflow's identity at exactly this version), and only
+//!    then published as the cache entry. The files kept are the files checked.
+//!
+//! `MVM_SKIP_COSIGN_VERIFY` lets a download proceed with the archive held to
+//! its digest and its signature unchecked, but nothing it fetched is cached:
+//! the cache holds only evidence that verified.
 //!
 //! Whichever place answers, the archive must verify against its own manifest
 //! and that manifest must name this version and carry both architectures. A
@@ -34,7 +38,8 @@ use super::{
     GuestBinsError, GuestBinsManifest, GuestBinsMember, guest_bins_archive_name,
     read_release_manifest, verify_guest_bins_archive,
 };
-use crate::runtime_overlay::{RuntimeOverlayError, curl_download, fetch_cli_release_archive};
+use crate::guest_runtime::{self, GuestRuntimeError, ReleaseArchiveCheck};
+use crate::runtime_overlay::{RuntimeOverlayError, fetch_cli_release_archive};
 
 /// The architectures every released guest runtime carries.
 pub const RELEASE_GUEST_RUNTIME_ARCHES: [GuestArch; 2] = [GuestArch::Aarch64, GuestArch::X86_64];
@@ -68,6 +73,9 @@ pub enum ReleaseGuestRuntimeOrigin {
     Installed,
     Cached,
     Downloaded,
+    /// Downloaded with `MVM_SKIP_COSIGN_VERIFY` set: its signature was not
+    /// checked, so it was not cached and no launch will use it.
+    Unverified,
 }
 
 impl std::fmt::Display for ReleaseGuestRuntimeOrigin {
@@ -76,6 +84,9 @@ impl std::fmt::Display for ReleaseGuestRuntimeOrigin {
             Self::Installed => "installed beside mvmctl",
             Self::Cached => "cached",
             Self::Downloaded => "downloaded and verified",
+            Self::Unverified => {
+                "downloaded with its signature unchecked; not cached, so no launch will use it"
+            }
         })
     }
 }
@@ -86,6 +97,9 @@ pub struct ReleaseGuestRuntime {
     pub archive: PathBuf,
     pub manifest: GuestBinsManifest,
     pub origin: ReleaseGuestRuntimeOrigin,
+    /// The private directory holding an [`ReleaseGuestRuntimeOrigin::Unverified`]
+    /// archive, removed when the last clone is dropped.
+    pub unpublished: Option<std::sync::Arc<tempfile::TempDir>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -112,6 +126,18 @@ pub enum ReleaseGuestRuntimeError {
     Incomplete { path: PathBuf, member: String },
     #[error("guest runtime cache: {0}")]
     Io(#[from] std::io::Error),
+    #[error("release guest runtime: {0}")]
+    Release(#[from] GuestRuntimeError),
+    #[error(
+        "the cached release guest runtime in {} cannot be used: {source}; \
+         remove that directory and run `mvmctl bootstrap` again",
+        dir.display()
+    )]
+    Cached {
+        dir: PathBuf,
+        #[source]
+        source: GuestRuntimeError,
+    },
 }
 
 impl From<RuntimeOverlayError> for ReleaseGuestRuntimeError {
@@ -135,8 +161,8 @@ pub fn installed_guest_runtime_dirs(exe: &Path) -> Vec<PathBuf> {
 }
 
 /// The one cache directory for `version`'s release guest runtime: acquisition
-/// writes [`release_guest_runtime_files`] here and a launch re-authenticates
-/// the archive from them.
+/// publishes [`release_guest_runtime_files`] here once they verify, and a
+/// launch authenticates the archive from them again.
 pub fn release_guest_runtime_cache_dir(cache_root: &Path, version: &str) -> PathBuf {
     cache_root
         .join("guest-runtime")
@@ -146,7 +172,8 @@ pub fn release_guest_runtime_cache_dir(cache_root: &Path, version: &str) -> Path
 
 /// The files a release guest runtime is kept as, archive first: the archive,
 /// its `.sha256` sidecar, and the signature bundles of both. A launch needs
-/// every one of them to authenticate the archive again.
+/// the first three; it checks the `.sha256` file's signature when that bundle
+/// is present, and acquisition always keeps it.
 pub fn release_guest_runtime_files(version: &str) -> [String; 4] {
     let archive = guest_bins_archive_name(version);
     [
@@ -162,6 +189,22 @@ pub fn release_guest_runtime_files(version: &str) -> [String; 4] {
 pub fn acquire_release_guest_runtime(
     request: &ReleaseGuestRuntimeRequest<'_>,
 ) -> Result<ReleaseGuestRuntime, ReleaseGuestRuntimeError> {
+    let arch = GuestArch::host();
+    acquire_with(
+        request,
+        arch,
+        &guest_runtime::release_identity_check(request.version, arch),
+    )
+}
+
+/// [`acquire_release_guest_runtime`] with the verifier as a parameter. Crate
+/// private, so no other crate can supply a check of its own.
+pub(crate) fn acquire_with(
+    request: &ReleaseGuestRuntimeRequest<'_>,
+    arch: GuestArch,
+    verify: &ReleaseArchiveCheck<'_>,
+) -> Result<ReleaseGuestRuntime, ReleaseGuestRuntimeError> {
+    guest_runtime::check_release_version(request.version)?;
     let name = guest_bins_archive_name(request.version);
     for dir in request.installed_dirs {
         let candidate = dir.join(&name);
@@ -173,47 +216,67 @@ pub fn acquire_release_guest_runtime(
             );
         }
     }
-    cached_or_downloaded(request, &name)
+    let entry = release_guest_runtime_cache_dir(request.cache_root, request.version);
+    let cached = match std::fs::symlink_metadata(&entry) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if !cached && std::env::var_os(crate::release_signature::SKIP_COSIGN_VERIFY_ENV).is_some() {
+        return download_unpublished(request, &name);
+    }
+    let runtime = guest_runtime::resolve_release_guest_runtime_with(
+        request.cache_root,
+        request.version,
+        arch,
+        &[],
+        request.release_url,
+        true,
+        verify,
+    )
+    .map_err(|source| {
+        if cached {
+            ReleaseGuestRuntimeError::Cached {
+                dir: entry.clone(),
+                source,
+            }
+        } else {
+            source.into()
+        }
+    })?;
+    let proof = runtime
+        .release_proof
+        .ok_or_else(|| std::io::Error::other("verified release runtime carries no proof"))?;
+    Ok(ReleaseGuestRuntime {
+        archive: proof.archive,
+        manifest: runtime.manifest,
+        origin: if cached {
+            ReleaseGuestRuntimeOrigin::Cached
+        } else {
+            ReleaseGuestRuntimeOrigin::Downloaded
+        },
+        unpublished: None,
+    })
 }
 
-/// The cached runtime, or else the archive and the evidence a launch
-/// re-authenticates it from, fetched into a staging directory beside the
-/// cache entry and published as a whole only once the archive checks out.
-/// Serialised with every other writer of the release cache.
-fn cached_or_downloaded(
+/// With the signature check waived, fetch the archive held to its digest
+/// into a private directory that lives as long as the result, never into the
+/// cache a launch reads.
+fn download_unpublished(
     request: &ReleaseGuestRuntimeRequest<'_>,
     name: &str,
 ) -> Result<ReleaseGuestRuntime, ReleaseGuestRuntimeError> {
-    let cache_dir = release_guest_runtime_cache_dir(request.cache_root, request.version);
-    let releases = cache_dir
-        .parent()
-        .ok_or_else(|| std::io::Error::other("release cache directory has no parent"))?;
-    std::fs::create_dir_all(releases)?;
-    let _lock =
-        crate::guest_agent_build::acquire_guest_build_lock(releases, "guest runtime release")
-            .map_err(std::io::Error::other)?;
-    let cached = cache_dir.join(name);
-    if cached.is_file() {
-        return adopt(cached, request.version, ReleaseGuestRuntimeOrigin::Cached);
-    }
     let stage = tempfile::Builder::new()
-        .prefix(".download-")
-        .tempdir_in(releases)?;
-    let staged = stage.path().join(name);
-    fetch_cli_release_archive(request.release_url, request.version, name, &staged)?;
-    for evidence in &release_guest_runtime_files(request.version)[1..] {
-        curl_download(
-            &format!("{}/{evidence}", request.release_url),
-            &stage.path().join(evidence),
-        )?;
-    }
-    let manifest = check_release_archive(&staged, request.version)?;
-    std::fs::rename(stage.path(), &cache_dir)?;
-    let archive = cache_dir.join(name);
+        .prefix("mvm-unverified-guest-runtime-")
+        .tempdir()?;
+    let archive = stage.path().join(name);
+    fetch_cli_release_archive(request.release_url, request.version, name, &archive)?;
+    let manifest = check_release_archive(&archive, request.version)?;
     Ok(ReleaseGuestRuntime {
         archive,
         manifest,
-        origin: ReleaseGuestRuntimeOrigin::Downloaded,
+        origin: ReleaseGuestRuntimeOrigin::Unverified,
+        unpublished: Some(std::sync::Arc::new(stage)),
     })
 }
 
@@ -227,6 +290,7 @@ fn adopt(
         archive,
         manifest,
         origin,
+        unpublished: None,
     })
 }
 
@@ -351,19 +415,6 @@ mod tests {
         format!("file://{}", root.display())
     }
 
-    /// Publish both signature bundles beside a staged release. Their bytes
-    /// are not Sigstore bundles, so a download verifies them only with the
-    /// signature check skipped.
-    fn sign_release(root: &Path) {
-        let name = guest_bins_archive_name(VERSION);
-        std::fs::write(root.join(format!("{name}.bundle")), b"archive bundle").unwrap();
-        std::fs::write(
-            root.join(format!("{name}.sha256.bundle")),
-            b"checksum bundle",
-        )
-        .unwrap();
-    }
-
     fn request<'a>(
         release_url: &'a str,
         cache_root: &'a Path,
@@ -378,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn a_downloaded_runtime_is_verified_and_then_cached() {
+    fn a_download_with_the_signature_hatch_proceeds_but_is_never_cached() {
         let mut env = TestEnv::new();
         env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
         let build = TempDir::new().unwrap();
@@ -390,30 +441,25 @@ mod tests {
         .unwrap();
         let release = TempDir::new().unwrap();
         let url = stage_release(release.path(), &bytes);
-        sign_release(release.path());
         let cache = TempDir::new().unwrap();
 
         let first = acquire_release_guest_runtime(&request(&url, cache.path(), &[])).unwrap();
-        assert_eq!(first.origin, ReleaseGuestRuntimeOrigin::Downloaded);
+        assert_eq!(first.origin, ReleaseGuestRuntimeOrigin::Unverified);
         assert_eq!(first.manifest.version, VERSION);
         assert_eq!(std::fs::read(&first.archive).unwrap(), bytes);
-        // Everything a launch re-authenticates the archive from is kept with
-        // it, byte for byte as the release published it.
-        let entry = release_guest_runtime_cache_dir(cache.path(), VERSION);
-        assert_eq!(first.archive, entry.join(guest_bins_archive_name(VERSION)));
-        for file in release_guest_runtime_files(VERSION) {
-            assert_eq!(
-                std::fs::read(entry.join(&file)).unwrap(),
-                std::fs::read(release.path().join(&file)).unwrap(),
-                "{file}"
-            );
-        }
+        assert!(
+            !release_guest_runtime_cache_dir(cache.path(), VERSION).exists(),
+            "unverified evidence must never reach the cache a launch reads"
+        );
+        assert!(!first.archive.starts_with(cache.path()));
 
-        // The release is gone; the cache answers on its own.
-        std::fs::remove_dir_all(release.path()).unwrap();
+        // Nothing was cached, so the next acquisition downloads again, and
+        // the unverified copy goes when its last holder does.
         let second = acquire_release_guest_runtime(&request(&url, cache.path(), &[])).unwrap();
-        assert_eq!(second.origin, ReleaseGuestRuntimeOrigin::Cached);
-        assert_eq!(second.archive, first.archive);
+        assert_eq!(second.origin, ReleaseGuestRuntimeOrigin::Unverified);
+        let archive = first.archive.clone();
+        drop(first);
+        assert!(!archive.exists());
     }
 
     #[test]
@@ -433,48 +479,13 @@ mod tests {
 
         let err = acquire_release_guest_runtime(&request(&url, cache.path(), &[]))
             .expect_err("an archive with no signature bundle must be refused");
-        assert!(matches!(err, ReleaseGuestRuntimeError::Fetch(_)), "{err:?}");
+        assert!(
+            matches!(err, ReleaseGuestRuntimeError::Release(_)),
+            "{err:?}"
+        );
         assert!(
             !release_guest_runtime_cache_dir(cache.path(), VERSION).exists(),
             "a refused archive must not be cached"
-        );
-    }
-
-    #[test]
-    fn a_release_without_every_launch_file_is_refused_and_nothing_is_cached() {
-        let mut env = TestEnv::new();
-        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
-        let build = TempDir::new().unwrap();
-        let bytes = std::fs::read(write_archive(
-            build.path(),
-            VERSION,
-            &RELEASE_GUEST_RUNTIME_ARCHES,
-        ))
-        .unwrap();
-        let release = TempDir::new().unwrap();
-        let url = stage_release(release.path(), &bytes);
-        sign_release(release.path());
-        std::fs::remove_file(release.path().join(format!(
-            "{}.sha256.bundle",
-            guest_bins_archive_name(VERSION)
-        )))
-        .unwrap();
-        let cache = TempDir::new().unwrap();
-
-        let err = acquire_release_guest_runtime(&request(&url, cache.path(), &[]))
-            .expect_err("a launch could not authenticate what would be cached");
-        assert!(matches!(err, ReleaseGuestRuntimeError::Fetch(_)), "{err:?}");
-        let entry = release_guest_runtime_cache_dir(cache.path(), VERSION);
-        assert!(!entry.exists(), "nothing may be published");
-        assert!(
-            std::fs::read_dir(entry.parent().unwrap())
-                .unwrap()
-                .all(|e| !e
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".download-")),
-            "the staging directory is removed"
         );
     }
 
@@ -551,8 +562,14 @@ mod tests {
         let err = acquire_release_guest_runtime(&request("file:///nowhere", cache.path(), &[]))
             .expect_err("a corrupt cache entry must surface");
         assert!(
-            matches!(err, ReleaseGuestRuntimeError::Archive { .. }),
+            matches!(&err, ReleaseGuestRuntimeError::Cached { dir: entry, .. } if *entry == dir),
             "{err:?}"
+        );
+        assert!(err.to_string().contains("mvmctl bootstrap"), "{err}");
+        assert_eq!(
+            std::fs::read(dir.join(guest_bins_archive_name(VERSION))).unwrap(),
+            b"not a tarball",
+            "the corrupt entry is left as evidence"
         );
     }
 

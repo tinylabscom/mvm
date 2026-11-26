@@ -868,10 +868,13 @@ this row as enforced without it.
     `install.sh` checks it against the checksum manifest and its own bundle
     before staging it beside `mvmctl`, and tolerates only a 404, for releases
     that predate the asset (tested in `tests/install_sh.rs`). A
-    copy found beside `mvmctl` or in the cache is held to its own manifest,
-    not re-verified against the signature when the runtime is assembled, and
+    copy found beside `mvmctl` is held to its own manifest, not re-verified
+    against the signature when the runtime is assembled. A cached copy, and
+    every download before it is cached, is checked with the launch's own
+    verifier, so the cache holds only the files that verified
+    (`the_cached_files_are_the_bytes_that_were_verified`).
     `MVM_SKIP_COSIGN_VERIFY` skips the signature at download time as it does
-    everywhere. The Firecracker launch proof is stricter: it re-verifies the
+    everywhere, and such a download is never cached. The Firecracker launch proof is stricter: it re-verifies the
     archive's signed bundle at every launch and `MVM_SKIP_COSIGN_VERIFY` does
     not waive it, so a locally built archive can be assembled from but never
     launched under Firecracker.
