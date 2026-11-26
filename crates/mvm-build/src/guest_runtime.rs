@@ -182,17 +182,12 @@ pub fn install_signed_guest_runtime_archive(
     arch: GuestArch,
 ) -> Result<GuestRuntime, GuestRuntimeError> {
     let verified = evidence::verify_release_archive(archive, checksum, bundle, version, arch)?;
-    let base = cache_root.join("guest-runtime").join("v1");
-    fs::create_dir_all(&base)?;
-    let _lock = guest_agent_build::acquire_guest_build_lock(&base, "guest runtime")?;
-    let stage = stage_archive(&base, verified.archive_path())?;
-    let mut runtime = promote_staged_archive(
-        &base,
-        stage,
-        verified.manifest().clone(),
-        verified.archive_sha256().to_string(),
+    let mut runtime = install_authenticated_release_archive(
+        cache_root,
+        verified.archive_path(),
+        verified.manifest(),
+        verified.archive_sha256(),
         arch,
-        ArchiveScope::Release,
     )?;
     runtime.release_proof = Some(evidence::RuntimeReleaseProof {
         archive: archive.canonicalize()?,
@@ -203,6 +198,36 @@ pub fn install_signed_guest_runtime_archive(
         arch,
     });
     Ok(runtime)
+}
+
+/// Install an archive whose bytes are already authenticated, holding every
+/// member to `manifest` first. Authentication reads only the manifest, so
+/// this walk is what stands between an archive whose members disagree with
+/// it and the store that pieces are assembled from.
+fn install_authenticated_release_archive(
+    cache_root: &Path,
+    snapshot: &Path,
+    manifest: &GuestBinsManifest,
+    digest: &str,
+    arch: GuestArch,
+) -> Result<GuestRuntime, GuestRuntimeError> {
+    if guest_bins::verify_guest_bins_archive(snapshot)? != *manifest {
+        return Err(GuestRuntimeError::Cache(
+            "authenticated manifest differs from the archive's members".into(),
+        ));
+    }
+    let base = cache_root.join("guest-runtime").join("v1");
+    fs::create_dir_all(&base)?;
+    let _lock = guest_agent_build::acquire_guest_build_lock(&base, "guest runtime")?;
+    let stage = stage_archive(&base, snapshot)?;
+    promote_staged_archive(
+        &base,
+        stage,
+        manifest.clone(),
+        digest.to_string(),
+        arch,
+        ArchiveScope::Release,
+    )
 }
 
 /// Acquire all four signed release files for portable packaging. Unlike the
@@ -2015,6 +2040,46 @@ mod tests {
             );
             assert_eq!(member_walks(), walks, "{case}");
         }
+    }
+
+    #[test]
+    fn installing_an_authenticated_archive_still_walks_its_members() {
+        let manifest = release_manifest();
+        for (case, bytes) in inconsistent_release_archives() {
+            let temp = tempfile::tempdir().unwrap();
+            let snapshot = temp.path().join("snapshot");
+            fs::write(&snapshot, &bytes).unwrap();
+            let cache = temp.path().join("cache");
+            let walks = member_walks();
+            let refused = install_authenticated_release_archive(
+                &cache,
+                &snapshot,
+                &manifest,
+                &file_digest(&snapshot).unwrap(),
+                GuestArch::X86_64,
+            );
+            assert!(
+                matches!(refused, Err(GuestRuntimeError::Archive(_))),
+                "{case}: {refused:?}"
+            );
+            assert_eq!(member_walks(), walks + 1, "{case}");
+            assert!(!cache.exists(), "{case}: refused before anything is staged");
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let snapshot = temp.path().join("snapshot");
+        fs::write(&snapshot, raw_archive(&release_entries())).unwrap();
+        let walks = member_walks();
+        let runtime = install_authenticated_release_archive(
+            &temp.path().join("cache"),
+            &snapshot,
+            &manifest,
+            &file_digest(&snapshot).unwrap(),
+            GuestArch::X86_64,
+        )
+        .unwrap();
+        assert_eq!(member_walks(), walks + 1);
+        assert_eq!(runtime.manifest, manifest);
+        assert!(runtime.root.join("x86_64/bin/mvm-setpriv").is_file());
     }
 
     #[test]
