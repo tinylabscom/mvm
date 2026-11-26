@@ -106,7 +106,6 @@ const SCANNED_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 /// if an entry names a file that no longer exists, so the list cannot rot into
 /// a set of stale names that quietly permits nothing.
 const PENDING: &[&str] = &[
-    "specs/adrs/002-local-mcp-server.md",
     "specs/adrs/003-hypervisor-egress-policy.md",
     "specs/adrs/004-sealed-signed-builder-image.md",
     "specs/adrs/005-function-call-entrypoints.md",

@@ -1,6 +1,6 @@
 """Subprocess emitter for the mvm Python SDK.
 
-Honors the ADR-0002 SDK→host contract:
+Honors the SDK→host emit contract:
 
 - The host invokes ``python -m mvm <entry.py>`` with the environment variable
   ``MVM_IR_OUT`` set to a file path.

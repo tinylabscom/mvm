@@ -103,7 +103,7 @@ Validation runs in two places: in the SDK before emit, and again on the host whe
 
 ## Layer 2 — Producing the IR from an SDK
 
-The SDKs are all generated from the JSON schema for `Workload`, so they cannot drift from the IR. They share one **subprocess contract** (ADR-0002): the SDK runs the user's declaration code, builds an in-memory IR, and writes it out as canonical JSON. It never runs the user's workload on the host.
+The SDKs are all generated from the JSON schema for `Workload`, so they cannot drift from the IR. They share one **subprocess contract**: the SDK runs the user's declaration code, builds an in-memory IR, and writes it out as canonical JSON. It never runs the user's workload on the host.
 
 <Tabs syncKey="sdk-authoring-language">
 <TabItem label="Python">
