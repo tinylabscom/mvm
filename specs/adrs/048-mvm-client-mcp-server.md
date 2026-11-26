@@ -5,11 +5,11 @@ Validation: `cargo test -p mvm-cli --lib mcp::`
 
 **Status:** Accepted
 **Date:** 2026-08-19
-**Supersedes:** ADR-002
+**Supersedes:** the withdrawn first MCP server (`mvmctl ops mcp stdio`, 2026-07-31)
 
 ## Context
 
-ADR-002's first MCP server was withdrawn because it duplicated lifecycle and
+The first MCP server was withdrawn because it duplicated lifecycle and
 session authority, exposed a bespoke `run` environment abstraction, and had no
 named consumer. The later `MvmClient` facade now provides the missing single
 surface: local, remote, and test backends already express machine intent through

@@ -151,8 +151,8 @@ themselves.
 
 On every default and production path, mvm has **no Tier 3** and no container/Docker fallback. A shared-kernel container is not a microVM: its isolation comes from the host kernel's namespace and cgroup machinery, which is shared with the host. In 2024–2025 the container ecosystem produced multiple CVEs (Leaky Vessels, NVIDIAScape, runc race conditions, Docker Desktop priv-esc, runc masked-path) that yielded **host escape** from inside a container — none of which matter inside a microVM, where the guest kernel is isolated by hardware. If a host has no microVM-capable backend, mvm does not silently drop to a weaker boundary; it fails closed.
 
-There is no carve-out. ADR-034 has been retired and the Docker dev-tier
-backend removed (Plan 329). A host without a usable microVM backend fails
+There is no carve-out. The Docker dev-tier
+backend was removed. A host without a usable microVM backend fails
 closed; mvm does not offer a shared-kernel container path on any default,
 production, or explicitly selected runtime path.
 
@@ -179,7 +179,7 @@ Separately, the host-`wasmtime` `wasm` tier runs a user-supplied **WASI Preview 
   a dependency of that path, and macOS 25 and older is not supported. Verified
   boot is the open item.
 - **Linux dev/test without `/dev/kvm`** → Tier 2 QEMU (`--hypervisor qemu`, TCG software emulation). A real microVM, slower; dev/test only.
-- **macOS Intel / native Windows** → unsupported for local microVM isolation today. There is no container fallback on any path: ADR-034 is retired, the Docker backend is removed, and `--hypervisor docker` is hard-refused. The one opt-in container-kernel tier is `apple-container`, which boots Apple's prebuilt container kernel on the in-house HVF VMM — a microVM, not a shared-kernel container. WSL2 has no standard libkrun workload path; a Hyper-V managed Linux builder remains future backend work.
+- **macOS Intel / native Windows** → unsupported for local microVM isolation today. There is no container fallback on any path: the Docker dev tier is retired, the Docker backend is removed, and `--hypervisor docker` is hard-refused. The one opt-in container-kernel tier is `apple-container`, which boots Apple's prebuilt container kernel on the in-house HVF VMM — a microVM, not a shared-kernel container. WSL2 has no standard libkrun workload path; a Hyper-V managed Linux builder remains future backend work.
 
 `mvmctl doctor` reports your current tier on the running host.
 

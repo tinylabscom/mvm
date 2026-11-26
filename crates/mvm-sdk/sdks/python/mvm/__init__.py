@@ -10,7 +10,7 @@ layers (per ADR-0003 / ADR-0004):
 
 Per ADR-0003, the v0 DSL uses keyword-argument style on a decorator. User code
 registers a single-app workload and emits IR via ``mvm.emit_json()`` (or
-by running ``mvm emit entry.py`` from the host, which honors ADR-0002's
+by running ``mvm emit entry.py`` from the host, which honors the SDK→host
 emit contract).
 
 Plan 60 Phase 5 Slice D1: the declarative DSL + ``@mvm.func`` decorator

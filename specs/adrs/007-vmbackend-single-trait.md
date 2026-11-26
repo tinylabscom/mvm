@@ -58,6 +58,18 @@ There is no Docker backend, no Cloud Hypervisor backend, and no
 Apple-framework-based backend on this list — a workload runs on a real,
 directly-driven hypervisor or it does not run.
 
+**A container tier was built and reversed.** An opt-in Docker dev tier once
+existed for KVM-less hosts: never auto-selected, refused by production
+admission, running the same guest agent over a Unix socket. It was removed
+because a shared-kernel container cannot carry the hardware-isolation claims,
+the tier blurred containers and microVMs in the product's positioning, it
+needed a large host-privileged code path, and the seccomp, capability,
+namespace and cgroup hardening that kept it honest still could not reach a
+hardware boundary. A host with no usable hypervisor fails closed with a
+diagnostic. Hardening a container into an isolation boundary, a container tier
+that shares the microVM boot contract, and silently dropping unsupported
+security requirements were each considered and rejected.
+
 **Selection is registry/enum-driven, never string-matched ad hoc.** A
 backend-kind catalog entry backs a dispatch enum; resolving a backend by
 name goes through that catalog, not a scattered `match` on strings.

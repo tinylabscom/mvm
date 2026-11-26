@@ -106,7 +106,6 @@ const SCANNED_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 /// if an entry names a file that no longer exists, so the list cannot rot into
 /// a set of stale names that quietly permits nothing.
 const PENDING: &[&str] = &[
-    "specs/adrs/002-local-mcp-server.md",
     "specs/adrs/003-hypervisor-egress-policy.md",
     "specs/adrs/004-sealed-signed-builder-image.md",
     "specs/adrs/005-function-call-entrypoints.md",
@@ -117,7 +116,6 @@ const PENDING: &[&str] = &[
     "specs/adrs/010-code-quality-enforcement.md",
     "specs/adrs/011-feature-flag-taxonomy.md",
     "specs/adrs/012-ci-execution-policy.md",
-    "specs/adrs/013-usage-billing-model.md",
     "specs/adrs/014-signed-audited-execution-plans.md",
     "specs/adrs/015-hostd-protocol-versioning.md",
     "specs/adrs/016-hermetic-vm-lifecycle-testing.md",
@@ -138,14 +136,9 @@ const PENDING: &[&str] = &[
     "specs/adrs/031-serialization-crypto-storage-selection.md",
     "specs/adrs/032-egress-connect-completion-and-in-seam-dns.md",
     "specs/adrs/033-rust-vmm-virtio-primitives.md",
-    "specs/adrs/034-docker-dev-tier-backend.md",
     "specs/adrs/035-workload-stream-plane.md",
-    "specs/adrs/036-l3-tun-over-vsock.md",
     "specs/adrs/037-mvmd-only-production-launch.md",
-    "specs/adrs/052-userspace-socket-datapath.md",
     "specs/adrs/053-gpu-compute-over-vsock.md",
-    "specs/adrs/038-ipv6-support.md",
-    "specs/adrs/039-macos-network-helper.md",
     "specs/adrs/040-node-to-node-transport.md",
     "specs/adrs/041-node-control-api.md",
     "specs/adrs/042-single-flow-vsock-networking.md",

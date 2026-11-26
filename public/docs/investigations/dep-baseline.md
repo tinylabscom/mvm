@@ -308,11 +308,11 @@ The workspace was simultaneously updated to `aes-gcm = "0.11"` and
 `ed25519-dalek = "3"` in `[workspace.dependencies]`, using the RC releases
 speculatively — but since the `Cargo.lock` resolved to the latest matching
 versions, it was pinned to `0.11.0-rc.4` and `3.0.0-rc.1`, not yet compliant
-with ADR-002's no-RC-crypto rule.
+with the no-RC-crypto rule.
 
 **Now that stable is out:** `cargo update` resolves the lockfile to
 `aes-gcm 0.11.0` and `ed25519-dalek 3.0.0` (both stable). The workspace is
-ADR-002-clean. The full RustCrypto 0.11 line is confirmed stable:
+clean of that rule. The full RustCrypto 0.11 line is confirmed stable:
 
 | Crate | Old | New |
 |---|---|---|
