@@ -39,8 +39,9 @@ pub const GPU_SHIM_GUEST_DIR: &str = "/mvm/runtime/gpu";
 /// The vsock port the guest's shim libraries dial to reach the host GPU
 /// endpoint.
 ///
-/// Lives here rather than in `mvm-net` because both ends need it and the
-/// guest shims link only this crate: `mvm_net::GuestService::Gpu` maps to
+/// Lives here rather than beside `mvm_core::net::channel::GuestService`
+/// because both ends need it and the guest shims link only this crate:
+/// `GuestService::Gpu` maps to
 /// this constant, so host and guest name one value instead of two literals
 /// that can drift — the same arrangement `network_flow::NETWORK_FLOW_PORT`
 /// already uses.

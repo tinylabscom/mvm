@@ -1,6 +1,7 @@
+#![forbid(unsafe_code)]
 //! Resolves an IR `NetworkMode` to a registered [`NetworkProvider`].
 //!
-//! The WireGuard/Tailscale mesh providers themselves are mvmd's — this crate
+//! The WireGuard/Tailscale mesh providers themselves are mvmd's — this module
 //! only exports the registry seam so a `NetworkMode::Custom { provider }`
 //! routes to whatever mvmd registered, without a core edit. The built-in
 //! `None`/`Bridge`/`Host` modes resolve to a provider of the matching kind.
@@ -10,7 +11,7 @@ use std::sync::Arc;
 
 use mvm_contract::ir::NetworkMode;
 
-use crate::provider::{NetworkError, NetworkProvider};
+use crate::net::provider::{NetworkError, NetworkProvider};
 
 /// Maps a `NetworkMode` to its provider. Unregistered kinds fail closed with
 /// [`NetworkError::UnknownProvider`] — never a silent default.
@@ -55,9 +56,9 @@ fn mode_kind(mode: &NetworkMode) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{NetHandle, NetworkSpec};
-    use mvm_core::network_policy::NetworkPolicy;
-    use mvm_core::protocol::vm_backend::VmId;
+    use crate::net::provider::{NetHandle, NetworkSpec};
+    use crate::network_policy::NetworkPolicy;
+    use crate::protocol::vm_backend::VmId;
 
     struct StubProvider {
         kind: String,

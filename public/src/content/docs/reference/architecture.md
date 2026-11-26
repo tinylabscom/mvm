@@ -152,7 +152,7 @@ The workspace is organized by responsibility rather than by platform:
 | Build pipeline             | `mvm-build`                         | Builder VM flow, artifact production, builder backend seams                     |
 | Host policy / supervision  | `mvm-hostd`                         | Admission, audit, policy enforcement, launch preparation, per-VM host processes |
 | Guest / protocol surfaces  | `mvm-agentd`                        | Guest agent and in-guest protocol tooling                                       |
-| Domain-specific subsystems | `mvm-fs`, `mvm-net`, `mvm-contract` | OCI/filesystem handling, networking, audit-log verification                     |
+| Domain-specific subsystems | `mvm-fs`, `mvm-contract`            | OCI/filesystem handling, audit-log verification                                 |
 | CLI / SDK surface          | `mvm-cli`, `mvm-sdk`                | User interface and workload authoring APIs                                      |
 
 The root crate (`mvmctl`) is the facade/runtime integration crate. `mvm-cli` is the binary-facing
@@ -164,7 +164,6 @@ At a high level:
 
 ```text
 mvm-core
-├── mvm-net
 ├── mvm-build
 ├── mvm-runtime
 ├── mvm-hostd
@@ -194,21 +193,20 @@ These are the main behavior seams in the current codebase:
 | `ServiceHandler`      | `mvm-core`    | Protocol service dispatch                      |
 | `BuilderVm`           | `mvm-build`   | High-level builder VM driver                   |
 | `VmBackendForBuilder` | `mvm-build`   | Low-level builder backend seam                 |
-| `NetworkProvider`     | `mvm-net`     | Network provisioning / policy seam             |
+| `NetworkProvider`     | `mvm-core`    | Network provisioning / policy seam             |
 | `VolumeBackend`       | `mvm-contract` | Storage backend seam (re-exported by `mvm-runtime`) |
 
 ### Ownership rule
 
 Reusable, runtime-light seams live in `mvm-core`.
 
-That means traits like `VmBackend`, `KeyProvider`, `SecretStore`, and the build-shell
+That means traits like `VmBackend`, `KeyProvider`, `SecretStore`, `NetworkProvider`, and the build-shell
 abstractions belong in `mvm-core` because many crates depend on them and they do not require
 runtime-heavy backend code.
 
 Backend- or subsystem-specific seams stay in the owning crate:
 
 - `VmBackendForBuilder` belongs in `mvm-build`.
-- `NetworkProvider` belongs in `mvm-net`.
 - `VolumeBackend` is defined in `mvm-contract` (the `no_std` foundation) and re-exported
   through `mvm_runtime::storage::volume`, which is where its `LocalBackend` impl lives.
 

@@ -364,7 +364,7 @@ fn factory_parent_spec_inner(
     let agent = mvm_core::config::vm_hvf_agent_socket_at(state_dir);
     let telemetry = mvm_core::config::vm_hvf_vsock_port_socket_at(
         state_dir,
-        mvm_net::channel::GuestService::Telemetry.port(),
+        mvm_core::net::channel::GuestService::Telemetry.port(),
     );
     let egress = standby_egress_socket(state_dir);
     let exit = state_dir.join("workload.exit");
@@ -392,9 +392,9 @@ mod tests {
 
     use std::sync::MutexGuard;
 
+    use mvm_core::net::channel::GuestService;
     use mvm_core::util::test_env::TestEnv;
     use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
-    use mvm_net::channel::GuestService;
 
     use mvm_vmm::host::spec_map::{WorkloadSockets, WorkloadSpecInputs, workload_spec};
 

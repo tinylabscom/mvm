@@ -5,7 +5,6 @@ members = [
     "crates/mvm-contract",
     "crates/mvm-crypto",
     "crates/mvm-core",
-    "crates/mvm-net",
     "crates/deps/libkrun-sys",
     "crates/deps/mvm-macho-sign",
     "crates/mvm-runtime",
@@ -322,7 +321,6 @@ mvm-vmm = { path = "crates/mvm-vmm", version = "0.28.0-rc.11" }
 mvm-backends = { path = "crates/mvm-backends", version = "0.28.0-rc.11" }
 mvm-fs = { path = "crates/mvm-fs", version = "0.28.0-rc.11" }
 mvm-http = { path = "crates/mvm-http", version = "0.28.0-rc.11" }
-mvm-net = { path = "crates/mvm-net", version = "0.28.0-rc.11" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.28.0-rc.11", default-features = false }
 mvm-hostd = { path = "crates/mvm-hostd", version = "0.28.0-rc.11", default-features = false }
 

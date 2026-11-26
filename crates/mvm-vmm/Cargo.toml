@@ -17,8 +17,6 @@ anyhow.workspace = true
 mvm-core = { workspace = true, features = ["egress-ca", "host-state"] }
 # Reuse the forward client's proxy parsing and credential-safe diagnostics.
 mvm-http = { workspace = true }
-# Well-known vsock port constants for the in-guest agent.
-mvm-net = { workspace = true }
 # Backend-agnostic error handling used by the driver seam.
 mvm-agentd = { workspace = true }
 # Egress-substitution plan decode shared by backends.

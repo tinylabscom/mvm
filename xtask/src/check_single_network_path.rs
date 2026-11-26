@@ -111,7 +111,9 @@ const NIC_GUARDED_PATHS: &[&str] = &[
     ENDPOINT_BIN,
     "crates/mvm-hostd/src/supervisor/endpoint/flowmux.rs",
     "crates/mvm-hostd/src/supervisor/endpoint/flowmux",
-    "crates/mvm-net/src",
+    "crates/mvm-core/src/net/channel.rs",
+    "crates/mvm-core/src/net/provider.rs",
+    "crates/mvm-core/src/net/registry.rs",
 ];
 
 /// The only production mentions of the retired input spelling are strict

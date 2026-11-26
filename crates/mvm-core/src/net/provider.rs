@@ -1,7 +1,8 @@
+#![forbid(unsafe_code)]
 //! The `NetworkProvider` trait and its supporting types.
 
-use mvm_core::network_policy::NetworkPolicy;
-use mvm_core::protocol::vm_backend::VmId;
+use crate::network_policy::NetworkPolicy;
+use crate::protocol::vm_backend::VmId;
 
 /// Host-side description of the network to provision for a VM.
 ///

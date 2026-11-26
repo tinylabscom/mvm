@@ -135,16 +135,16 @@ pub const EGRESS_PORT: u32 = mvm_contract::protocol::network_flow::NETWORK_FLOW_
 pub const DISPLAY_PORT: u32 = mvm_contract::stream::DISPLAY_FRAME_PORT;
 /// GPU compute by API remoting: the guest shims dial this port to reach the
 /// per-VM host GPU endpoint. Mirrored from `mvm-contract` like the ports
-/// above; `mvm_net::GuestService::Gpu` maps to the same constant.
+/// above; `mvm_core::net::channel::GuestService::Gpu` maps to the same constant.
 pub const GPU_PORT: u32 = mvm_contract::protocol::gpu::GPU_RPC_PORT;
 const _: () = assert!(GPU_PORT == 5256);
 
 const _: () = assert!(DISPLAY_PORT == 5255);
 
 // A compile-time proof rather than a test: the guest dials this port and the
-// host binds it from `mvm_net::GuestService::NetworkFlow`. Both derive from the
-// contract constant, so drift is not expressible — this pins the value the
-// derivation must land on.
+// host binds it from `mvm_core::net::channel::GuestService::NetworkFlow`. Both
+// derive from the contract constant, so drift is not expressible — this pins
+// the value the derivation must land on.
 const _: () = assert!(EGRESS_PORT == 5253);
 
 /// vsock port the host-services broker is exposed on. The in-guest broker

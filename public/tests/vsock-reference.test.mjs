@@ -179,7 +179,7 @@ test("FlowMux documents the actual payload types for every typed frame family", 
 
 test("the transport table accounts for every registered service, including raw channels", () => {
   const page = readRepoFile(pagePath);
-  const service = rustDeclaration(readRepoFile("crates/mvm-net/src/channel.rs"), "GuestService");
+  const service = rustDeclaration(readRepoFile("crates/mvm-core/src/net/channel.rs"), "GuestService");
   const names = [...service.code.matchAll(/^    ([A-Z]\w*)(?:,| \{)/gm)].map((m) => m[1]);
   assert.ok(names.length >= 10);
   for (const name of names) assert.ok(page.includes(`\`${name}\``), name);

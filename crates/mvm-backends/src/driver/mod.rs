@@ -45,7 +45,7 @@ pub(crate) fn kill_and_reap(child: &mut std::process::Child) {
 /// Host-dialable workload services. Guest-dialed and builder-only services
 /// must never be exposed through a workload's host connection API.
 fn host_dialable_port(port: u32) -> bool {
-    use mvm_net::channel::GuestService;
+    use mvm_core::net::channel::GuestService;
     port == GuestService::MachineControl.port()
         || port == GuestService::Telemetry.port()
         || mvm_agentd::vsock::dev_console_data_ports().any(|allowed| allowed == port)
@@ -54,7 +54,7 @@ fn host_dialable_port(port: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::host_dialable_port;
-    use mvm_net::channel::GuestService;
+    use mvm_core::net::channel::GuestService;
 
     #[test]
     fn kill_and_reap_leaves_no_zombie() {

@@ -2018,7 +2018,6 @@ dependencies = [
  "mvm-agentd",
  "mvm-contract",
  "mvm-core",
- "mvm-net",
  "mvm-vmm",
  "serde",
  "serde_json",
@@ -2201,14 +2200,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-net"
-version = "0.28.0-rc.11"
-dependencies = [
- "mvm-contract",
- "mvm-core",
-]
-
-[[package]]
 name = "mvm-runtime"
 version = "0.28.0-rc.11"
 dependencies = [
@@ -2229,7 +2220,6 @@ dependencies = [
  "mvm-contract",
  "mvm-core",
  "mvm-fs",
- "mvm-net",
  "mvm-vmm",
  "nix",
  "rand",
@@ -2281,7 +2271,6 @@ dependencies = [
  "mvm-fs",
  "mvm-http",
  "mvm-macho-sign",
- "mvm-net",
  "plist",
  "rand",
  "security-framework",

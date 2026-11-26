@@ -2030,7 +2030,6 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-http",
- "mvm-net",
  "mvm-vmm",
  "serde",
  "serde_jcs",
@@ -2184,14 +2183,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-net"
-version = "0.28.0-rc.11"
-dependencies = [
- "mvm-contract",
- "mvm-core",
-]
-
-[[package]]
 name = "mvm-setpriv"
 version = "0.28.0-rc.11"
 dependencies = [
@@ -2216,7 +2207,6 @@ dependencies = [
  "mvm-fs",
  "mvm-http",
  "mvm-macho-sign",
- "mvm-net",
  "plist",
  "rand",
  "security-framework",

@@ -41,7 +41,7 @@ use mvm_build::builder_vm_runtime::{
 };
 use mvm_build::persistent_builder::PersistentBuilderSupervisor;
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
-use mvm_net::channel::GuestService;
+use mvm_core::net::channel::GuestService;
 
 use super::driver_builder::require_runtime_overlay_ext4;
 use super::spec::{PersistentBuilderSpecInputs, persistent_builder_spec};

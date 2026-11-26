@@ -19,8 +19,7 @@ fn qemu_builder_imports_only_generic_builder_modules() {
 fn libkrun_is_an_optional_backend_not_a_generic_capability_switch() {
     let manifest = std::fs::read_to_string(crate_root().join("Cargo.toml")).unwrap();
     assert!(manifest.contains("libkrun-sys = { workspace = true, optional = true }"));
-    assert!(manifest.contains("mvm-net = { workspace = true, optional = true }"));
-    assert!(manifest.contains("builder-libkrun = [\"dep:libkrun-sys\", \"dep:mvm-net\"]"));
+    assert!(manifest.contains("builder-libkrun = [\"dep:libkrun-sys\"]"));
     assert!(
         !manifest
             .lines()
@@ -44,7 +43,7 @@ fn runtime_implementation_dependencies_are_unix_only() {
     let unix = manifest["target"]["cfg(unix)"]["dependencies"]
         .as_table()
         .unwrap();
-    for dependency in ["mvm-vmm", "mvm-agentd", "mvm-net", "libkrun-sys"] {
+    for dependency in ["mvm-vmm", "mvm-agentd", "libkrun-sys"] {
         assert!(
             !portable.contains_key(dependency),
             "{dependency} must not enter portable builds"
