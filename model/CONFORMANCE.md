@@ -35,7 +35,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-11` | `build` | App-dep volumes are CVE-scanned and SBOM-enumerated when sealed, then hash-locked and reverified at admission | `fn:verify_sealed_volume`, `fn:verify_detects_tampered_content`, `fn:verify_detects_tampered_cve`, `fn:verify_detects_tampered_sbom`, `fn:apply_install_gate`, `fn:prod_rejects_high_cve_finding_pip_audit_shape`, `fn:prod_rejects_stub_sbom_as_missing_sbom`, `ci:app-deps-audit` |
+| `MVM-SEC-11` | `build` | App-dep volumes are CVE-scanned and SBOM-enumerated when sealed and hash-locked, and re-verified when the build cache reuses a volume | `fn:verify_sealed_volume`, `fn:verify_detects_tampered_content`, `fn:verify_detects_tampered_cve`, `fn:verify_detects_tampered_sbom`, `fn:apply_install_gate`, `fn:prod_rejects_high_cve_finding_pip_audit_shape`, `fn:prod_rejects_stub_sbom_as_missing_sbom`, `ci:app-deps-audit` |
 
 ## asset_identity
 

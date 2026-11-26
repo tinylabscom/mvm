@@ -236,7 +236,7 @@ disappears. The shipped claims:
 8. **Every workload runs from a signed, audited execution plan.**
 9. **Every published bundle is content-addressed** and re-verified at fetch and admission.
 10. **No untrusted workload reaches the network** unless policy admits it.
-11. **Dependency volumes are CVE-scanned and SBOM-enumerated when sealed**, then hash-locked and re-verified at admission.
+11. **Dependency volumes are CVE-scanned and SBOM-enumerated when sealed**, then hash-locked; the seal is re-verified on build-cache reuse and by `mvmctl deps inspect` / `deps audit`, and no launch path verifies a dependency volume yet.
 12. **Every host service a workload calls is bound in its signed plan** and audited.
 13. **Secret substitution gives the guest placeholders**, never raw secret values.
 14. **OCI image provenance is recorded** in the audit log.

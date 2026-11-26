@@ -72,11 +72,11 @@ mvmctl deps inspect HASH   # read the sidecars without booting a VM
 mvmctl deps audit
 ```
 
-The supervisor verifies this volume before launch and refuses a tampered one, so
-the dependency set is part of the workload's admitted identity — not a
-convention. The seal-time security lane's prod gate additionally refuses high
-or critical CVE findings and stub SBOM/CVE reports. Production launch rechecks
-the sealed bytes, but does not currently rerun that severity gate.
+The seal is re-verified when the build cache reuses the volume and by
+`mvmctl deps inspect` / `mvmctl deps audit`, which refuse a tampered one. No
+launch path attaches a dependency volume or verifies one at admission yet. The
+seal-time security lane's prod gate additionally refuses high or critical CVE
+findings and stub SBOM/CVE reports.
 
 ## 4. Run it
 
