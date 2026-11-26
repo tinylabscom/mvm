@@ -194,7 +194,6 @@ These are the main behavior seams in the current codebase:
 | `ServiceHandler`      | `mvm-core`    | Protocol service dispatch                      |
 | `BuilderVm`           | `mvm-build`   | High-level builder VM driver                   |
 | `VmBackendForBuilder` | `mvm-build`   | Low-level builder backend seam                 |
-| `BackendLauncher`     | `mvm-hostd`   | Host-side backend launch preparation/execution |
 | `NetworkProvider`     | `mvm-net`     | Network provisioning / policy seam             |
 | `VolumeBackend`       | `mvm-contract` | Storage backend seam (re-exported by `mvm-runtime`) |
 
@@ -209,7 +208,6 @@ runtime-heavy backend code.
 Backend- or subsystem-specific seams stay in the owning crate:
 
 - `VmBackendForBuilder` belongs in `mvm-build`.
-- `BackendLauncher` belongs in `mvm-hostd`.
 - `NetworkProvider` belongs in `mvm-net`.
 - `VolumeBackend` is defined in `mvm-contract` (the `no_std` foundation) and re-exported
   through `mvm_runtime::storage::volume`, which is where its `LocalBackend` impl lives.

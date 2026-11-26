@@ -166,9 +166,7 @@ handing the whole boot to a resident supervisor (ADR-014). Initial activation
 now has a resident publication owner and generation-bound admission, while
 `ResolvedPolicy` itself remains an authored-input result, not a committed
 generation. The per-VM network endpoint creates a static egress projection.
-The supervisor's `hot_revision_replaces_firewall_for_same_workload` is a
-mock test that resets its state machine between two launches; it is not
-a production policy-cutover caller. None of these is already the
+No production policy-cutover caller exists. None of these is already the
 single-owner apply transaction. Implementing a policy-generation type
 without connecting launch, effect fencing and recovery to that owner
 would add a dormant control, not this capability.
