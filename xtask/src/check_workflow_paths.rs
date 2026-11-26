@@ -1220,7 +1220,6 @@ mod tests {
             "cargo nextest run --features test-support --lib",
             "-p mvm-backends -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm",
             "cargo nextest run -p mvmctl --features test-support --test audit_emissions_live",
-            "cargo check -p mvm-cli --features test-support --example verification_loop",
         ] {
             assert!(
                 lint_features.contains(expected),

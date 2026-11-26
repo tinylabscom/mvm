@@ -77,12 +77,6 @@ tracing.workspace = true
 # through the `tracing` facade and never install a subscriber.
 tracing-subscriber.workspace = true
 
-[[example]]
-name = "verification_loop"
-# Drives the `WarmLease`/`ExecBuilder` DX layer against the hermetic mock
-# backend so the example runs on any host; needs the mock compiled in.
-required-features = ["test-support"]
-
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.29", features = ["process", "signal", "ptrace"] }
 
@@ -177,7 +171,7 @@ template-registry-s3 = ["mvm-runtime/template-registry-s3"]
 # hermetic in-memory `MockBackend` and the `--hypervisor mock` fast paths in
 # `fs`/`proc`/`diff` that key off it. Off by default so the mock — a Tier-3
 # test double with none of the security claims — never ships in a production
-# `mvmctl` binary; the test suite and the `verification_loop` example turn it on.
+# `mvmctl` binary; the test suite turns it on.
 test-support = ["mvm-runtime/test-support", "mvm-client/test-support"]
 # Propagate the debug-only HVF warm-restore validation lane to the runtime.
 hvf-live-validation = ["mvm-runtime/hvf-live-validation"]

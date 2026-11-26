@@ -47,7 +47,7 @@ const GENERIC_CLIENT_STARTS: [&str; 3] = [
     "start_prepared_custodied",
     "start_prepared_custodied_with_verified_runtime",
 ];
-const FRESH_DISPATCH_OWNERS: [(&str, &[&str]); 8] = [
+const FRESH_DISPATCH_OWNERS: [(&str, &[&str]); 7] = [
     (
         "start_custodied_verified_release",
         &[
@@ -67,10 +67,6 @@ const FRESH_DISPATCH_OWNERS: [(&str, &[&str]); 8] = [
     ),
     (
         "claim_standby_via_runner",
-        &["crates/mvm-runtime/src/backend.rs"],
-    ),
-    (
-        "start_with_verified_runtime",
         &["crates/mvm-runtime/src/backend.rs"],
     ),
     (
@@ -95,7 +91,6 @@ const BACKEND_START_OWNERS: &[&str] = &[
     "crates/mvm-hostd/src/plan_admission/start.rs",
     "crates/mvm-runtime/src/actor_teardown/native.rs",
     "crates/mvm-runtime/src/backend.rs",
-    "crates/mvm-runtime/src/vm/lease.rs",
 ];
 const UNTYPED_FULL_RESTORER: [&str; 2] = ["ForkRestore", "ForkRestorer"];
 
@@ -1100,12 +1095,6 @@ mod tests {
                 "crates/mvm-client/src/direct_start.rs",
                 "fn bypass(backend: AnyBackend, config: Config) { backend.start(&config); }\n",
                 "backend `start`",
-            ),
-            (
-                "crates/mvm-hostd/src/direct_verified.rs",
-                "fn bypass(backend: AnyBackend, config: Config) { \
-                 backend.start_with_verified_runtime(&config, None); }\n",
-                "start_with_verified_runtime",
             ),
             (
                 "crates/mvm-client/src/direct_custodied.rs",

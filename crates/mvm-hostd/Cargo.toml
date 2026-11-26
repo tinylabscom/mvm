@@ -128,8 +128,8 @@ mvm-net.workspace = true
 # plus the audit-chain verifier. Direct dep on the no_std foundation
 # crate the IR lives in.
 mvm-contract.workspace = true
-# `mvm-runtime` provides the `VmNameRegistry` the TTL reaper walks, plus the
-# `VmBackend` implementations dispatched from `AnyBackend`.
+# `mvm-runtime` provides the `VmBackend` implementations dispatched from
+# `AnyBackend`.
 mvm-runtime.workspace = true
 mvm-vmm.workspace = true
 # guest vsock exec protocol (`send_exec_streaming`, `GUEST_AGENT_PORT`) —
@@ -217,10 +217,10 @@ mvm-agentd = { workspace = true, features = ["addons"] }
 # plan_admission bundle re-verify tests build/read `.mvmpkg` archives; verb-grant
 # test decodes the signer pubkey hex.
 hex.workspace = true
-# `TestEnv` env-var guard for env-mutating tests (reaper / network_endpoint).
+# `TestEnv` env-var guard for env-mutating tests (network_endpoint).
 mvm-core = { workspace = true, features = ["test-support"] }
 # `plan_admission`'s own tests drive `AnyBackend::from_hypervisor("mock")` —
-# the hermetic in-memory backend — end-to-end through `admit_and_start`. The
+# the hermetic in-memory backend — end-to-end through admission and start. The
 # mock is gated behind `test-support` in mvm-runtime so it never ships in a
 # production binary; force it on for this crate's own test build the same
 # way the `mvm-core` entry above does.

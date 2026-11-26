@@ -173,3 +173,25 @@ pub(super) fn cpu_share(millicores: u32) -> mvm_contract::grants::Grants {
         ..mvm_contract::grants::Grants::default()
     }
 }
+
+/// Admit a synthesized plan and boot it through the shared admitted-start
+/// tail: the two calls a local launch makes, as one step.
+pub(super) fn admit_and_start(
+    backend: &mvm_runtime::AnyBackend,
+    params: AdmitAndStartParams<'_>,
+) -> Result<StartedMachine> {
+    let verified =
+        mvm_runtime::runtime_evidence::verify_selected_release_runtime_set(&params.config)?;
+    let admitted = admit_synthesized_with_verified_release(backend, &params, verified.as_ref())?;
+    start_admitted_with_verified_release(
+        StartAdmittedParams {
+            backend,
+            admitted,
+            config: params.config,
+            policy_bundle: params.policy_bundle,
+            emitter: params.emitter,
+            assurance: params.assurance,
+        },
+        verified.as_ref(),
+    )
+}

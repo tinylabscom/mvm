@@ -4,9 +4,8 @@
 //! Pure plumbing: it maps the seam's `EgressWiring` onto a [`FirewallSpec`]
 //! and delegates `enforce`→`install_default_deny`, `withdraw`→`teardown`,
 //! translating [`FirewallError`] into `EnforcementError` so the fail-closed
-//! `NotWired` posture survives the seam. This adapter exists without
-//! changing any live call path; `Supervisor::launch` is rerouted through it
-//! separately.
+//! `NotWired` posture survives the seam. No launch path constructs this
+//! adapter today.
 
 use std::sync::Arc;
 

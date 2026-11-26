@@ -27,12 +27,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mvm_core::vm_backend::{VmBackend, VmStatus};
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::{RngExt, SeedableRng};
 use tokio::sync::watch;
 
 use crate::supervisor::lifecycle::balloon::{BalloonController, HostPressureSource, TickOutcome};
-use crate::supervisor::lifecycle::reaper::jittered_interval;
 
 /// Tuning for the periodic balloon tick loop.
 #[derive(Debug, Clone)]
@@ -201,6 +200,23 @@ fn log_outcome(outcome: &TickOutcome) {
             );
         }
     }
+}
+
+/// Lower bound on a jittered interval, so jitter larger than the base cannot
+/// drive the tick to zero.
+const MIN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Compute the next jittered tick interval; never below [`MIN_INTERVAL`].
+fn jittered_interval<R: RngExt>(rng: &mut R, base: Duration, jitter: Duration) -> Duration {
+    if jitter.is_zero() {
+        return base;
+    }
+    // Pick a signed offset in `[-jitter, +jitter]`.
+    let span = jitter.as_millis() as i64;
+    let offset = rng.random_range(-span..=span);
+    let base_ms = base.as_millis() as i64;
+    let total = (base_ms + offset).max(MIN_INTERVAL.as_millis() as i64);
+    Duration::from_millis(total as u64)
 }
 
 #[cfg(test)]
@@ -525,5 +541,34 @@ mod tests {
             .await
             .expect("loop must exit within 1 s of shutdown");
         res.expect("task panicked");
+    }
+
+    #[test]
+    fn jittered_interval_stays_in_band() {
+        let mut rng = StdRng::seed_from_u64(0xc0ffee);
+        for _ in 0..256 {
+            let d = jittered_interval(&mut rng, Duration::from_secs(30), Duration::from_secs(10));
+            assert!(d >= Duration::from_secs(20));
+            assert!(d <= Duration::from_secs(40));
+        }
+    }
+
+    #[test]
+    fn jittered_interval_zero_jitter_is_base() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let d = jittered_interval(&mut rng, Duration::from_secs(30), Duration::ZERO);
+        assert_eq!(d, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn jittered_interval_clamps_to_minimum() {
+        let mut rng = StdRng::seed_from_u64(0);
+        // jitter > base would otherwise drive the interval negative.
+        let d = jittered_interval(
+            &mut rng,
+            Duration::from_millis(500),
+            Duration::from_secs(60),
+        );
+        assert!(d >= MIN_INTERVAL);
     }
 }

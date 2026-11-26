@@ -954,26 +954,6 @@ impl AnyBackend {
         self.inner().start(config)
     }
 
-    /// Start with one launch-owned release verification when one was selected.
-    pub fn start_with_verified_runtime(
-        &self,
-        config: &VmStartConfig,
-        runtime: Option<&crate::runtime_evidence::VerifiedRuntimeSet>,
-    ) -> Result<VmId> {
-        let Some(runtime) = runtime else {
-            return self.start(config);
-        };
-        runtime.verify_config(config)?;
-        #[cfg(unix)]
-        {
-            self.start_custodied_verified_release(config, Vec::new(), Some(runtime.release()))
-        }
-        #[cfg(not(unix))]
-        {
-            anyhow::bail!("verified release runtime has no supported custody backend")
-        }
-    }
-
     /// Start with original writable-image custody transferred to the final writer.
     #[cfg(unix)]
     pub fn start_custodied(

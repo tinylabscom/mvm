@@ -62,11 +62,25 @@ file = "crates/mvm-build/src/app_deps_gate.rs"
 dormant = true
 why = """
 The severity gate is exercised at seal time in the app-deps security lane, but
-no production launch path calls it. Admission re-verifies the sealed volume's
-content and manifest hashes; it does not currently refuse a validly sealed
-volume because its CVE report contains a high or critical finding. Keep this
-declaration until launch carries a typed dependency-volume gate posture and a
-production caller applies it."""
+no production launch path calls it. Re-verifying a pinned volume's content and
+manifest hashes is `verify_deps_volume_binding`, itself dormant (below); neither
+refuses a validly sealed volume because its CVE report contains a high or
+critical finding. Keep this declaration until launch carries a typed
+dependency-volume gate posture and a production caller applies it."""
+
+[[control]]
+symbol = "verify_deps_volume_binding"
+file = "crates/mvm-hostd/src/supervisor/admission/deps_volume.rs"
+dormant = true
+why = """
+Re-derives the sealed dependency volume a plan pins and refuses one whose \
+content or manifest no longer matches the pin (claim 11's admit-time half). \
+Its only caller was a supervisor launch path nothing constructed outside \
+tests, so it never ran for a real boot; that path is deleted and the check \
+kept. No boot path puts a `DepsVolumeBinding` into a plan and plan admission \
+does not read one, so a plan carrying a binding is admitted without this \
+check. This entry fails the moment admission calls it, which is the signal to \
+delete it."""
 
 [[control]]
 symbol = "apply_admitted_grants_or_undo_launch"

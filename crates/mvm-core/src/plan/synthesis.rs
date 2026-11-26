@@ -20,8 +20,7 @@
 //!
 //! - **Signing.** The `signer` module owns it — `synthesize_plan`
 //!   builds the unsigned plan; the caller signs.
-//! - **Backend dispatch.** The supervisor wires `BackendLauncher`;
-//!   this module is plan-shape-only, no I/O.
+//! - **Backend dispatch.** This module is plan-shape-only, no I/O.
 //! - **Policy resolution.** The `policy_resolver` turns the plan's
 //!   `PolicyRef` fields into concrete supervisor components.
 //!

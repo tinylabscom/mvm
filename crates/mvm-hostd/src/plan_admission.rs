@@ -22,16 +22,6 @@
 //!
 //! What this module does NOT do (intentional scope reduction):
 //!
-//! - **Drive `Supervisor::launch`.** The supervisor's backend
-//!   dispatch slot expects a `BackendLauncher` trait impl that
-//!   wraps today's `AnyBackend::start()`; landing that wrapper
-//!   means refactoring three call sites in 1084 lines of `up.rs`
-//!   (the main path, the MVM_DIRECT_BOOT branch, and the `--watch`
-//!   path). That refactor lands in a follow-up. **This module is
-//!   the substrate that makes the eventual supervisor refactor a
-//!   one-line change** — `admit_for_run` produces the
-//!   `SignedExecutionPlan` the supervisor needs.
-//!
 //! - **Emit audit lines.** A later step wires `FileAuditSigner` onto
 //!   the `AdmittedPlan`'s `plan_id`; this module is silent on audit.
 //!
@@ -128,10 +118,9 @@ pub use shares::enforce_admitted_shares;
 pub use start::{
     CliStartFailure, DispatchedPersistent, LaunchAdmission, PreparePersistentParams,
     PreparedEntrypoint, PreparedPersistent, StartAdmittedParams, StartedMachine, WarmClaimDispatch,
-    admit_and_start, boot_vm, claim_cli_transient, prepare_entrypoint, prepare_portable_entrypoint,
-    start_admitted, start_admitted_owned_actor, start_admitted_owned_actor_with_bootstrap,
-    start_cli_transient, start_entrypoint, start_fs_quick_fork, start_owned_entrypoint,
-    start_persistent,
+    boot_vm, claim_cli_transient, prepare_entrypoint, prepare_portable_entrypoint, start_admitted,
+    start_admitted_owned_actor, start_admitted_owned_actor_with_bootstrap, start_cli_transient,
+    start_entrypoint, start_fs_quick_fork, start_owned_entrypoint, start_persistent,
 };
 pub(crate) use start::{
     LaunchSource, admit_synthesized_with_verified_release, prepare_launch,

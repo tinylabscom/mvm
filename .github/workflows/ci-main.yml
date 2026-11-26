@@ -201,7 +201,6 @@ jobs:
             -p mvm-backends -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm \
             -p mvm-fs -p mvm-build
           cargo nextest run -p mvmctl --features test-support --test audit_emissions_live
-          cargo check -p mvm-cli --features test-support --example verification_loop
 
       # These independent feature suites used to extend the main feature lane
       # by about seven minutes. This runner already has the stable toolchain,

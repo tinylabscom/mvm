@@ -39,7 +39,7 @@ delete resources belonging to another process or stale generation.
 | Boot artifacts | `artifacts`, `image`, `base`, `sdk_sidecar` |
 | Build execution | `builder_runner`, `build_env` |
 | Storage | `storage`, `volume`, `warm_snapshot` |
-| Lifecycle acceleration | `resident_pool`, `standby_pool`, `checkpoint` |
+| Lifecycle acceleration | `standby_pool`, `checkpoint` |
 | Platform paths | `kvm`, `apple_container`, `hvf_restore`, `wasm_backend` |
 | Security | `security`, `netinit_audit`, artifact validation |
 
