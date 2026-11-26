@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Typed guest services over whatever the VMM uses to terminate vsock.
 //!
 //! A guest always speaks AF_VSOCK. What the *host* holds varies: Firecracker
@@ -67,7 +68,7 @@ impl GuestService {
             Self::WorkloadExit => 5251,
             Self::MachineControl => 5252,
             Self::NetworkFlow => mvm_contract::protocol::network_flow::NETWORK_FLOW_PORT,
-            Self::Telemetry => mvm_core::protocol::telemetry::TELEMETRY_PORT,
+            Self::Telemetry => crate::protocol::telemetry::TELEMETRY_PORT,
             Self::DisplayFrame => mvm_contract::stream::DISPLAY_FRAME_PORT,
             Self::Mailbox => mvm_contract::protocol::mailbox::MAILBOX_PORT,
             // The constant lives in `mvm-contract` so the guest shims —
@@ -77,7 +78,7 @@ impl GuestService {
             Self::Broker => 5300,
             Self::ConsoleData { port } => port,
             // Pinned literals, mirroring `mvm_agentd::builder_agent`'s
-            // constants. This crate sits below `mvm-agentd` and cannot name
+            // constants. `mvm-core` sits below `mvm-agentd` and cannot name
             // them; the tests below pin both ends to the same numbers.
             Self::BuilderDispatch => 21471,
             Self::BuilderdControl => 21473,
@@ -129,9 +130,9 @@ mod tests {
         assert_eq!(GuestService::MachineControl.port(), 5252);
         assert_eq!(GuestService::WorkloadExit.port(), 5251);
         // Pins the wire value. The constant it derives from lives in
-        // `mvm-contract` so the guest — which cannot depend on this crate —
-        // names the same number; this asserts the derivation still lands on
-        // the port deployed guests actually dial.
+        // `mvm-contract` so the no_std guest pieces name the same number;
+        // this asserts the derivation still lands on the port deployed guests
+        // actually dial.
         assert_eq!(GuestService::NetworkFlow.port(), 5253);
         assert_eq!(
             GuestService::NetworkFlow.port(),
@@ -143,11 +144,11 @@ mod tests {
         assert_eq!(GuestService::DisplayFrame.port(), 5255);
         assert_eq!(GuestService::Mailbox.port(), 5257);
         // Pins the wire value. The constant it derives from lives in
-        // `mvm-contract` so the guest shims — which cannot depend on this
-        // crate — name the same number.
+        // `mvm-contract` so the guest shims, which link only that crate, name
+        // the same number.
         assert_eq!(GuestService::Gpu.port(), 5256);
         // Both ends of the builder control plane pin these literals: the guest
-        // side in `mvm_agentd::builder_agent`, which this crate sits below.
+        // side in `mvm_agentd::builder_agent`, which `mvm-core` sits below.
         assert_eq!(GuestService::BuilderDispatch.port(), 21471);
         assert_eq!(GuestService::BuilderdControl.port(), 21473);
     }

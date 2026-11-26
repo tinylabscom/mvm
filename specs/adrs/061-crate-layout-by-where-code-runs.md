@@ -24,6 +24,25 @@ one process. No new admission gate, network path, fallback or security claim
 follows from a crate boundary. ADR-001 remains the security-claim authority.
 Issue #5510 owns work status; unfinished items remain unchecked.
 
+### Amendment — 2026-11-24: the `mvm-hostd` split is withdrawn
+
+The owner withdrew decision 5's five-crate split of `mvm-hostd` on
+2026-11-24. `mvm-hostd` stays one package and is reorganised as modules
+instead: the audit, egress, admission, broker and supervisor ownership map
+below names module destinations inside `mvm-hostd`, and the dependency cuts
+remain the ordering rules between those modules. No `mvm-host-audit`,
+`mvm-host-egress`, `mvm-host-admission` or `mvm-host-broker` package is
+created, and the regrouped path for `mvm-hostd` is
+`"crates/host/mvm-hostd"` alone. The rest of this decision, including the
+feature table and the retained evidence, is unchanged.
+
+### Implementation status
+
+- Order step 4, `mvm-net`: folded into `mvm_core::net` as `channel`,
+  `provider` and `registry`. The `EgressEnforcer` seam and
+  `NetworkProvider::egress_enforcer()` had no caller and were deleted rather
+  than moved.
+
 ## Context
 
 The original size inventory counted 26 crates and about 1.16 million lines
@@ -106,8 +125,10 @@ passes, written invariants per layer, and small files.
    would conceal the mixed artifact boundary. Root facade, `xtask` and
    conformance tooling keep their current ownership.
 
-5. **`mvm-hostd` aims to split along the processes it ships:** audit, egress,
-   admission, broker, and supervisor. The measured import graph below prevents
+5. **Withdrawn 2026-11-24; see the amendment above.** `mvm-hostd` is
+   reorganised as modules along the processes it ships rather than split
+   into crates. The original decision read: **`mvm-hostd` aims to split along
+   the processes it ships:** audit, egress, admission, broker, and supervisor. The measured import graph below prevents
    a direct five-crate split. The ownership map below assigns every root;
    mixed roots require the prerequisite cuts before independent crates.
    The new package names are `mvm-host-audit`, `mvm-host-egress`,
@@ -163,7 +184,8 @@ The owner's extraction order remains:
 2. Move the wire protocol out of `mvm-agentd`.
 3. Move the HVF substrate and `mvm-backends` into `mvm-vmm`; move `host` out.
 4. Fold `mvm-net` and `mvm-bundler`; delete `runmvm-client`.
-5. Extract audit, egress, admission, broker, then supervisor.
+5. Reorganise `mvm-hostd`'s audit, egress, admission, broker and supervisor
+   modules (the crate extraction is withdrawn; see the amendment above).
 6. Regroup directories.
 7. Add the ratchet and the per-layer invariants files.
 
@@ -295,7 +317,7 @@ in the workspace.
 | `crates/deps/libkrun-sys`, `crates/deps/mvm-macho-sign` | Unchanged |
 | `crates/mvm-build`, `crates/mvm-runtime`, `crates/mvm-cli` | `"crates/build"`, `"crates/runtime"`, `"crates/cli"` |
 | `crates/mvm-client`, `crates/mvm-gpu`, `crates/mvm-conformance`, root package, `xtask` | Unchanged; client relocation awaits coordinated Studio changes |
-| `crates/mvm-net`, `crates/mvm-bundler` | Fold into core as specified above |
+| `mvm-net` (folded into `mvm_core::net`), `crates/mvm-bundler` | Fold into core as specified above |
 | `crates/runmvm-client` | Retire with its publish/registry-smoke lane; retain contract publication |
 
 Nested fuzz workspaces travel with their owner, except the VMM geometry harness

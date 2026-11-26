@@ -15,12 +15,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use ed25519_dalek::Signer;
 use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
+use mvm_core::net::channel::GuestService;
 use mvm_core::protocol::hvf_control::HvfInstance;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, HostDialRoute, ResourceControls,
     StandbyError, StandbyHandle, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
-use mvm_net::channel::GuestService;
 use mvm_vmm::host::hvf_control_transport as stop_wire;
 use mvm_vmm::host::hvf_stop::{ConnectedInstance, OwnedInstance};
 use mvm_vmm::host::hvf_supervisor::{

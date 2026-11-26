@@ -35,7 +35,6 @@ hex = { workspace = true }
 # the crate builds as `run_sidecars` and nothing else.
 [target.'cfg(unix)'.dependencies]
 mvm-vmm = { workspace = true }
-mvm-net = { workspace = true }
 mvm-agentd = { workspace = true }
 libkrun-sys = { workspace = true }
 libc = { workspace = true }

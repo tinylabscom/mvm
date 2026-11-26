@@ -23,12 +23,12 @@ use mvm_agentd::vsock::{
 };
 use mvm_core::config::vm_state_dir;
 use mvm_core::launch_trace::LaunchTraceRecorder;
+use mvm_core::net::channel::GuestService;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, HostDialRoute, ResourceControls,
     SnapshotCapability, StandbyError, StandbyHandle, StandbyState, VmCapabilities, VmExitStatus,
     VmId, VmStatus,
 };
-use mvm_net::channel::GuestService;
 
 use crate::fc::{
     FcCapabilities, FirecrackerGuard, api_put_session, api_session, fc_pid_path,

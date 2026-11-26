@@ -21,11 +21,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT};
 use mvm_core::config::{vm_state_dir, vm_vsock_port_socket_at};
+use mvm_core::net::channel::GuestService;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, HostDialRoute, ResourceControls,
     VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
-use mvm_net::channel::GuestService;
 
 use crate::driver::qemu_process::{
     self, QEMU_LOG_FILE, QEMU_PID_FILE, QemuBridgeGuestDial, QemuBridgeHostDial, QemuBridgeSpec,

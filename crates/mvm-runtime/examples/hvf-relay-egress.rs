@@ -60,9 +60,9 @@ fn main() {
     use std::time::{Duration, Instant};
 
     use mvm_core::config::vm_state_dir;
+    use mvm_core::net::channel::GuestService;
     use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
     use mvm_core::vm_backend::VmStatus;
-    use mvm_net::channel::GuestService;
     use mvm_runtime::driver::HvfDriver;
     use mvm_runtime::driver::{
         ConsoleCapture, KernelImage, VmmDriver, VmmSpec, VsockDirection, VsockPort,

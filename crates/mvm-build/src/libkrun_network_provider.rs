@@ -1,5 +1,6 @@
 //! `LibkrunNetworkProvider` — the mvm-build impl of
-//! [`mvm_net::NetworkProvider`] for the libkrun direct-vsock path.
+//! [`mvm_core::net::provider::NetworkProvider`] for the libkrun direct-vsock
+//! path.
 //!
 //! Unlike the Firecracker `BridgeTapNetworkProvider`, which owns a host bridge
 //! + TAP, this provider owns **no host resource**. A libkrun guest's runtime
@@ -10,9 +11,9 @@
 //! claim-10: the provider does not choose among guest-NIC helpers. There is
 //! one transport and it is vsock.
 
+use mvm_core::net::provider::{NetHandle, NetworkError, NetworkProvider, NetworkSpec};
 use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::protocol::vm_backend::VmId;
-use mvm_net::{NetHandle, NetworkError, NetworkProvider, NetworkSpec};
 
 /// libkrun direct-vsock provider (a config producer; owns no host state — see
 /// the module docs).
@@ -66,9 +67,9 @@ impl NetworkProvider for LibkrunNetworkProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::net::provider::{NetworkProvider, NetworkSpec};
     use mvm_core::network_policy::NetworkPolicy;
     use mvm_core::protocol::vm_backend::VmId;
-    use mvm_net::{NetworkProvider, NetworkSpec};
 
     #[test]
     fn provision_tags_handle_with_vsock_direct() {
@@ -94,13 +95,10 @@ mod tests {
     }
 
     #[test]
-    fn kind_is_libkrun_policy_is_deny_all_no_separate_enforcer() {
+    fn kind_is_libkrun_policy_is_deny_all() {
         let provider = LibkrunNetworkProvider::new();
         assert_eq!(provider.kind(), "libkrun");
         // claim-10: advertised default is deny-all, opening egress is opt-in.
         assert_eq!(*provider.policy(), NetworkPolicy::deny_all());
-        // This provider is still a pure config producer, not a separate
-        // enforcer object.
-        assert!(provider.egress_enforcer().is_none());
     }
 }

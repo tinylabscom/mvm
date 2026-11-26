@@ -16,11 +16,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use libkrun_sys::{BridgeRestartPolicy, KrunContext, SupervisorConfig};
 use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT};
 use mvm_core::config::{vm_libkrun_pid, vm_state_dir, vm_vsock_port_socket_at};
+use mvm_core::net::channel::GuestService;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, HostDialRoute, ResourceControls,
     SnapshotCapability, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
-use mvm_net::channel::GuestService;
 
 use mvm_vmm::driver::spec::{BlockDev, KernelImage, VmmSpec, VsockDirection};
 use mvm_vmm::driver::traits::{DuplexStream, RunningVm, VmmDriver};

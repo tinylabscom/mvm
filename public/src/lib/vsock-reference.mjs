@@ -11,7 +11,7 @@ const sourceUrl = "https://github.com/tinylabscom/mvm/blob/main/";
 export const families = {
   services: {
     sources: [
-      ["crates/mvm-net/src/channel.rs", ["GuestService"]],
+      ["crates/mvm-core/src/net/channel.rs", ["GuestService"]],
     ],
   },
   session: {

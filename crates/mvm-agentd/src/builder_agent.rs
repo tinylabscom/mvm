@@ -257,8 +257,9 @@ mod tests {
 
     #[test]
     fn builder_control_port_literals_match_the_typed_services() {
-        // `mvm_net::GuestService::{BuilderDispatch, BuilderdControl}` pin the
-        // same two literals. That crate sits below this one and cannot name
+        // `mvm_core::net::channel::GuestService::{BuilderDispatch,
+        // BuilderdControl}` pin the same two literals. `mvm-core` sits below
+        // this crate and cannot name
         // these constants, so the pin lives on both sides; divergence would
         // route a dispatch at a port nothing is listening on.
         assert_eq!(BUILDER_DISPATCH_PORT, 21471);

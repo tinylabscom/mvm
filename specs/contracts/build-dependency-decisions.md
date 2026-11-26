@@ -1361,6 +1361,20 @@ The full workspace test suite, native macOS checks, and live admission checks
 remain unrun. The counts above are dependency-resolution evidence, not a
 measurement of linked binary contents.
 
+## Crate folds into `mvm-core` (#4839, ADR-061)
+
+Accepted. Folding a crate removes a package and its lockfile entry; it adds
+no third-party dependency, because each folded crate already depended only on
+`mvm-core` and what `mvm-core` carries.
+
+| Fold | Workspace members | `Cargo.lock` packages | `mvmctl` closure (macOS default / Linux default / release macOS, Linux x86_64, Linux aarch64) | `mvm-core` `-e no-dev` | Guest closures (`mvm-builder-guest` / `mvm-agentd` / `mvm-host-services`, musl) |
+|---|---|---|---|---|---|
+| `mvm-net` into `mvm_core::net` | 30 → 29 | 714 → 713 | 326 → 325 / 331 → 330 / 353 → 352, 352 → 351, 351 → 350; all-features 560 → 559 | 99 → 99 | 88 / 84 / 85, unchanged |
+
+Measured with `cargo tree -e normal,build --prefix none --target <target>` as
+`xtask check-closure-budget` does, and `cargo metadata --no-deps` for the
+member count; the budgets were ratcheted to the new counts in the same change.
+
 ## Owner decisions
 
 - 2026-10-24, #4663: patch the Sigstore Rekor and timestamp crates locally so

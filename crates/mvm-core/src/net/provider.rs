@@ -1,9 +1,8 @@
+#![forbid(unsafe_code)]
 //! The `NetworkProvider` trait and its supporting types.
 
-use mvm_core::network_policy::NetworkPolicy;
-use mvm_core::protocol::vm_backend::VmId;
-
-use crate::enforcement::EgressEnforcer;
+use crate::network_policy::NetworkPolicy;
+use crate::protocol::vm_backend::VmId;
 
 /// Host-side description of the network to provision for a VM.
 ///
@@ -75,17 +74,6 @@ pub trait NetworkProvider: Send + Sync {
 
     /// Tear the VM's network down, consuming its handle.
     fn teardown(&self, handle: NetHandle) -> Result<(), NetworkError>;
-
-    /// The host-egress enforcer this provider drives, if any. `None` (default)
-    /// means egress is enforced by a mechanism the provider does not own as a
-    /// separate object: the Firecracker `BridgeTapNetworkProvider` self-enforces
-    /// iptables inside `provision`, and the libkrun provider (L3)
-    /// relies on the supervisor's in-process gateway-bridge `FlowPolicy`
-    /// chokepoint. A provider returns `Some(..)` only when it drives a distinct
-    /// [`EgressEnforcer`] object (the `SupervisorEgressEnforcer`).
-    fn egress_enforcer(&self) -> Option<&dyn EgressEnforcer> {
-        None
-    }
 }
 
 #[cfg(test)]

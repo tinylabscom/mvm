@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
 use mvm_build::builder_boot::{BuilderBoot, builder_boot_cmdline};
-use mvm_net::channel::GuestService;
+use mvm_core::net::channel::GuestService;
 
 /// The resolved host artifacts a builder VM boots with. Disk slots are fixed:
 /// `vda` rootfs (RO), `vdb` nix-store (RW, persistent), `vdc` input (RO), `vdd`

@@ -3616,7 +3616,6 @@ dependencies = [
  "mvm-agentd",
  "mvm-contract",
  "mvm-core",
- "mvm-net",
  "mvm-vmm",
  "serde",
  "serde_json",
@@ -3645,7 +3644,6 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-http",
- "mvm-net",
  "mvm-sdk",
  "mvm-vmm",
  "serde",
@@ -4031,7 +4029,6 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-http",
- "mvm-net",
  "mvm-policy",
  "mvm-runtime",
  "mvm-vmm",
@@ -4111,15 +4108,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-net"
-version = "0.28.0-rc.11"
-dependencies = [
- "mvm-contract",
- "mvm-core",
- "serde_json",
-]
-
-[[package]]
 name = "mvm-policy"
 version = "0.28.0-rc.11"
 dependencies = [
@@ -4159,7 +4147,6 @@ dependencies = [
  "mvm-contract",
  "mvm-core",
  "mvm-fs",
- "mvm-net",
  "mvm-vmm",
  "nix",
  "object_store",
@@ -4231,7 +4218,6 @@ dependencies = [
  "mvm-fs",
  "mvm-http",
  "mvm-macho-sign",
- "mvm-net",
  "plist",
  "rand",
  "security-framework",

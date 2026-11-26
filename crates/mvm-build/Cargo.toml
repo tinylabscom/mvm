@@ -81,8 +81,6 @@ libc.workspace = true
 mvm-agentd.workspace = true
 mvm-vmm.workspace = true
 libkrun-sys = { workspace = true, optional = true }
-# `LibkrunNetworkProvider` implements the optional backend's network seam.
-mvm-net = { workspace = true, optional = true }
 
 # Thin CLI wrapper for the reusable Builder-pack producer. Release CI / a
 # maintainer invokes it to turn built artifacts into a signed pack.
@@ -131,7 +129,7 @@ mvm-sdk = { workspace = true, features = ["compiler"] }
 default = ["builder-libkrun"]
 # The optional libkrun implementation. Generic builder orchestration remains
 # unconditional; disabling defaults removes only this backend and dependency.
-builder-libkrun = ["dep:libkrun-sys", "dep:mvm-net"]
+builder-libkrun = ["dep:libkrun-sys"]
 # Marks an official binary distribution so artifact resolvers do not infer
 # contributor behavior from the checkout that happens to launch the binary.
 release-channel = []

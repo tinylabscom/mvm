@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use mvm_net::channel::GuestService;
+use mvm_core::net::channel::GuestService;
 
 /// Where a VM's kernel comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]

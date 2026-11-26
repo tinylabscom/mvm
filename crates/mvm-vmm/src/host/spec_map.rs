@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use mvm_agentd::vsock::dev_console_data_ports;
 use mvm_core::config::vm_hvf_vsock_port_socket_at;
+use mvm_core::net::channel::GuestService;
 use mvm_core::vm_backend::VmStartConfig;
-use mvm_net::channel::GuestService;
 
 use crate::driver::spec::{
     BlockDev, ConsoleCapture, KernelImage, PlanBinding, VmmSpec, VsockDirection, VsockPort,

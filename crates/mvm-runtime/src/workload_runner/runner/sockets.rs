@@ -78,7 +78,7 @@ pub(super) fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> Stan
         agent: mvm_core::config::vm_inhouse_agent_socket_at(state_dir),
         telemetry: mvm_core::config::vm_hvf_vsock_port_socket_at(
             state_dir,
-            mvm_net::channel::GuestService::Telemetry.port(),
+            mvm_core::net::channel::GuestService::Telemetry.port(),
         ),
         exit: state_dir.join("workload.exit"),
         // Admitted-only: an unadmitted VM gets no broker channel, so a stray
@@ -101,7 +101,7 @@ pub(super) fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> Stan
         mailbox: mvm_vmm::host::egress_bridge::mailbox_cmdline_token(config).map(|_| {
             mvm_core::config::vm_hvf_vsock_port_socket_at(
                 state_dir,
-                mvm_net::channel::GuestService::Mailbox.port(),
+                mvm_core::net::channel::GuestService::Mailbox.port(),
             )
         }),
         console_log: state_dir.join("console.log"),
@@ -112,7 +112,7 @@ pub(super) fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> Stan
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_net::channel::GuestService;
+    use mvm_core::net::channel::GuestService;
     use mvm_vmm::host::spec_map::workload_vsock_ports;
 
     #[test]
