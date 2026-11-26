@@ -2084,3 +2084,70 @@ fn the_fresh_install_smoke_recipe_runs_the_release_gate_script() {
         "the recipe must run the release gate's script with an optional version"
     );
 }
+
+/// Every `lane:` a `release.yml` caller hands `release-smoke.yml` must be one the
+/// file defines, or all its jobs skip and the call reads as success. The
+/// accepted set is read from the file's own lane conditions and its guard.
+#[test]
+fn every_release_smoke_caller_names_a_lane_the_file_defines() {
+    let smoke = first_run_smoke_workflow();
+    let defined: Vec<String> = smoke
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("if: inputs.lane == '"))
+        .map(|l| l.trim_end_matches('\'').to_string())
+        .collect();
+    assert_eq!(
+        defined.len(),
+        3,
+        "one lane condition per smoke job: {defined:?}"
+    );
+    let guard = job_block(&smoke, "unknown-lane");
+    for lane in &defined {
+        assert!(
+            guard.contains(&format!("\"{lane}\"")),
+            "the unknown-lane guard must accept {lane}"
+        );
+    }
+    let accepted = guard
+        .lines()
+        .find(|l| l.contains("fromJSON"))
+        .unwrap_or_default();
+    assert_eq!(
+        accepted.matches('"').count() / 2,
+        defined.len(),
+        "guard lanes match job lanes"
+    );
+    assert!(guard.contains("exit 1"), "the guard must fail the run");
+
+    let workflow = release_workflow();
+    let mut callers = 0;
+    for (at, _) in workflow.match_indices("uses: ./.github/workflows/release-smoke.yml\n") {
+        callers += 1;
+        let lane = workflow[at..]
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("lane: "))
+            .expect("a release-smoke caller must pass lane");
+        assert!(defined.iter().any(|d| d == lane), "unknown lane {lane:?}");
+    }
+    assert_eq!(callers, defined.len(), "each lane has exactly one caller");
+}
+
+/// The archive and recipes lanes run only when selected, and the recipes lane
+/// refuses an empty tag.
+#[test]
+fn the_archive_and_recipes_lanes_are_selected_by_lane_and_recipes_needs_a_tag() {
+    let smoke = first_run_smoke_workflow();
+    assert!(
+        job_block(&smoke, "release-archive-smoke")
+            .contains("    if: inputs.lane == 'release-archive'\n")
+    );
+    let recipes = job_block(&smoke, "install");
+    assert!(recipes.contains("    if: inputs.lane == 'release-recipes'\n"));
+    assert!(
+        recipes.contains(r#"test -n "$TAG_NAME""#),
+        "an empty tag must be refused"
+    );
+    let workflow = release_workflow();
+    let release = job_block(&workflow, "recipe-install-smoke");
+    assert!(release.contains("      lane: release-recipes\n"));
+}

@@ -14,7 +14,7 @@ tests/justfile_top_level.rs	7	Justfile shape: one file, the recipe set, no stale
 tests/nix_flake_structure.rs	45	nix/flake.nix and nix/profiles structure; no nix on the test host
 tests/pack_signing_smoke_workflow.rs	1	pack-signing-smoke.yml
 tests/pin_installer_default.rs	9	scripts/pin-installer-default.sh; runs it with stand-in gh and cosign (behavioural)
-tests/release_assets.rs	53	release.yml, release-smoke.yml, distro-packages.yml, workers.yml, update-image-pin.yml and the Justfile
+tests/release_assets.rs	54	release.yml, release-smoke.yml, distro-packages.yml, workers.yml, update-image-pin.yml and the Justfile
 tests/smoke_fresh_install.rs	39	scripts/smoke-fresh-install.sh release gate; runs it with a fake installer (behavioural)
 tests/windows_identity_inventory.rs	3	.github/scripts/run-windows-identity-tests.ps1 Windows identity lane
 tests/workspace_shard_isolation.rs	8	workspace-shard.yml and ci-main.yml shard isolation, partition and locked-source preparation for offline cross-target graph tests

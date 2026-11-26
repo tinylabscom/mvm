@@ -108,6 +108,19 @@ permissions:
   contents: read
 
 jobs:
+  # A caller's typo in `lane` would skip every lane below and read as success.
+  unknown-lane:
+    if: ${{ !contains(fromJSON('["first-run","release-archive","release-recipes"]'), inputs.lane) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Refuse a lane this file does not define
+        env:
+          LANE: ${{ inputs.lane }}
+        run: |
+          echo "::error::unknown lane '${LANE}'" >&2
+          exit 1
+
   first-run-smoke:
     if: inputs.lane == 'first-run'
     name: First run after a fresh install (${{ matrix.lane }})
