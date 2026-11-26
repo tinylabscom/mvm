@@ -50,8 +50,6 @@ pub mod commissioning_bootstrap_connection;
 /// One-use, peer-bound commissioning-bootstrap session.
 #[cfg(feature = "native-caller-identity")]
 pub mod commissioning_bootstrap_session {
-    //! Compatibility exports for the low-level commissioning-bootstrap session.
-
     pub use mvm_commissioning_auth::commissioning_bootstrap_session::{
         CommissioningBootstrapPermit, CommissioningBootstrapSession, SessionError,
     };
