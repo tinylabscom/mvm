@@ -18,7 +18,14 @@ pub use worker::{IdentityClient, PendingCredential};
 #[cfg(all(feature = "native-caller-identity", target_os = "macos"))]
 mod macos;
 #[cfg(feature = "native-caller-identity")]
-pub mod macos_peer;
+pub mod macos_peer {
+    //! Compatibility exports for the low-level macOS peer verifier.
+
+    pub use mvm_commissioning_auth::macos_peer::{
+        AUDIT_TOKEN_BYTES, DesignatedRequirement, MAX_DESIGNATED_REQUIREMENT_BYTES, MacAuditToken,
+        MacPeerVerificationError, VerifiedMacPeer,
+    };
+}
 #[cfg(all(test, feature = "native-caller-identity", target_os = "macos"))]
 mod native_tests;
 #[cfg(all(test, feature = "native-caller-identity", target_os = "macos"))]

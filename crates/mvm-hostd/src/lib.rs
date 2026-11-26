@@ -49,7 +49,13 @@ pub mod caller_identity;
 pub mod commissioning_bootstrap_connection;
 /// One-use, peer-bound commissioning-bootstrap session.
 #[cfg(feature = "native-caller-identity")]
-pub mod commissioning_bootstrap_session;
+pub mod commissioning_bootstrap_session {
+    //! Compatibility exports for the low-level commissioning-bootstrap session.
+
+    pub use mvm_commissioning_auth::commissioning_bootstrap_session::{
+        CommissioningBootstrapPermit, CommissioningBootstrapSession, SessionError,
+    };
+}
 pub mod containment;
 /// Attended display input on a running machine, rebuilt from the host's own record of the run.
 pub mod display;

@@ -120,7 +120,11 @@ pub fn exchange_connected(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (stream, peer, intent_digest);
+        let CommissioningPeerConfig {
+            expected_uid,
+            requirement,
+        } = peer;
+        let _ = (stream, expected_uid, requirement, intent_digest);
         Err(ConnectedBootstrapError::Unsupported)
     }
 }

@@ -51,19 +51,22 @@ const BUDGETS: &[ClosureBudget] = &[
         package: "mvmctl",
         target: "aarch64-apple-darwin",
         features: RELEASE_FEATURES,
-        max: 372,
+        // The effect-free commissioning-auth extraction adds one first-party crate.
+        max: 373,
     },
     ClosureBudget {
         package: "mvmctl",
         target: "x86_64-unknown-linux-gnu",
         features: RELEASE_FEATURES,
-        max: 371,
+        // The effect-free commissioning-auth extraction adds one first-party crate.
+        max: 372,
     },
     ClosureBudget {
         package: "mvmctl",
         target: "aarch64-unknown-linux-gnu",
         features: RELEASE_FEATURES,
-        max: 370,
+        // The effect-free commissioning-auth extraction adds one first-party crate.
+        max: 371,
     },
     ClosureBudget {
         package: "mvm-builder-guest",
