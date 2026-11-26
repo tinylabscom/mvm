@@ -248,6 +248,18 @@ Proposed trusted setup sequence:
    This operation linearizes only that authority state child among cooperating
    lock users. It does not establish deployment-wide sibling freshness.
    Root-side installer serialization and crash recovery remain unresolved.
+   An independent source-only read-only observer can inspect the fixed future
+   `owner-issuer-ed25519.seed` child beneath an already validated authority root.
+   It requires one authority-owned, authority-group, single-link regular file
+   with exact `0600` mode, exact 32-byte length, no extended ACL and, on macOS,
+   no BSD flags. It opens descriptor-relative with no-follow, nonblocking and
+   close-on-exec flags, and compares identity, nanosecond timestamps and full
+   policy around a bounded exact read to refuse observable changes. This is not
+   an atomic content snapshot without separately enforced writer exclusion. It
+   derives the Ed25519 key only locally and returns only copied public-key bytes plus
+   domain-separated public evidence. Exact-child absence is observation only.
+   The observer has no writer, signing, repair, retry, recovery or state
+   transition surface and does not show that `Prepared` can advance.
    Stable installer deployment, later transitions, key/journal/receipt effects,
    endpoint, VM and factory remain unimplemented.
 2. A fixed initialization entry point runs as the authority UID, exclusively

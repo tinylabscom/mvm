@@ -29,6 +29,18 @@ pub struct ProtectedAuthorityRoot {
 }
 
 impl ProtectedAuthorityRoot {
+    /// Open only the fixed issuer seed child for read-only observation.
+    #[cfg(feature = "hvf-owner-issuer-key-slot")]
+    pub(crate) fn open_owner_issuer_seed(&self) -> Result<File, rustix::io::Errno> {
+        rustix::fs::openat(
+            &self.directory,
+            crate::hvf_owner_issuer_key_slot::OWNER_ISSUER_SEED_NAME,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+    }
+
     /// Open only the fixed commissioning-lock child for read-only validation.
     pub(crate) fn open_commissioning_lock(&self) -> Result<File, rustix::io::Errno> {
         rustix::fs::openat(

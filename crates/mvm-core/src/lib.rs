@@ -78,6 +78,12 @@ pub mod hvf_owner_commissioning_state;
 /// Strict protected commissioning record for the cold-HVF owner roles.
 #[cfg(any(target_os = "macos", all(unix, feature = "test-support")))]
 pub mod hvf_owner_deployment_receipt;
+/// Strict read-only observation of the fixed protected owner issuer seed slot.
+#[cfg(all(
+    feature = "hvf-owner-issuer-key-slot",
+    any(target_os = "macos", all(unix, feature = "test-support"))
+))]
+pub mod hvf_owner_issuer_key_slot;
 /// Create-only publication of the first canonical protected commissioning state.
 #[cfg(all(
     feature = "hvf-owner-prepared-writer",

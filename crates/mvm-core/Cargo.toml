@@ -127,6 +127,8 @@ tss-esapi = { version = "7", optional = true }
 
 [features]
 default = []
+# Read-only observation of the fixed protected owner issuer seed slot.
+hvf-owner-issuer-key-slot = []
 # Fixed source-only publication of the first protected commissioning state.
 hvf-owner-prepared-writer = ["dep:mvm-commissioning-auth"]
 # OS-native key storage is host-only. Guest binaries retain the encrypted

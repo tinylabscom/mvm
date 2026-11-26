@@ -388,6 +388,21 @@ lock users. Deployment-wide sibling freshness, root-side installer
 serialization and crash recovery remain unresolved. Stable installer
 deployment, later state transitions, key/journal/receipt/completion effects,
 endpoint, VM and factory remain unimplemented.
+
+An independently gated source-only observer can inspect only the fixed future
+`owner-issuer-ed25519.seed` child beneath the retained authority root. It uses a
+read-only, no-follow, nonblocking, close-on-exec descriptor-relative open and
+requires an authority-owned, authority-group, single-link regular file with
+exact `0600` mode, exact 32-byte length, no extended ACL and no macOS BSD flags.
+It bounds the exact read and compares object identity, nanosecond timestamps
+and the complete policy before and after, refusing observable changes. This is
+not an atomic content snapshot; trusted writers still require separately
+enforced exclusion. It derives Ed25519 public material locally, zeroizes every
+seed-file read buffer and returns only copied verifying-key bytes and their
+domain-separated evidence digest. Exact-child absence is observation only. There is no seed
+generation or writer, signing capability, state append, repair, retry, recovery,
+endpoint, VM or factory, and observing the slot is not evidence that `Prepared`
+can recover or advance.
 The v1 preflight checks only these fixed sibling conflict names; it does not
 claim to discover arbitrary state beneath a future authority-owned
 subdirectory. Trusted installation and state mutation must be serialized across
@@ -905,6 +920,7 @@ From the native probes recorded on
 | Peer binding: `getpeereid`, `LOCAL_PEERTOKEN`, SecCode, connection-owned re-check | SOURCE-ONLY-CONNECTED-ADAPTER-IMPLEMENTED; no bind/listen, deployment or mutation commit |
 | Security.framework dynamic lookup and exact designated-requirement check; no UID-only fallback | SOURCE-ONLY-IMPLEMENTED |
 | Bounded commissioning-bootstrap vocabulary, one-use peer-bound permit session and one connected-stream exchange | SOURCE-ONLY-IMPLEMENTED; no endpoint creation, durable mutation or positive factory |
+| Fixed future issuer seed-slot public observation | SOURCE-ONLY-IMPLEMENTED; read-only public bytes/evidence only, no generation, signing, recovery or state advance |
 | Recovery-possession proof unchanged (D5 declined) | Existing source-only proof; receiver not implemented |
 | Hardened runtime, environment allowlist, system libraries only | PROPOSED-APPROVED-NOT-IMPLEMENTED |
 | Post-exec self-hash handshake | PROPOSED-APPROVED-NOT-IMPLEMENTED |
