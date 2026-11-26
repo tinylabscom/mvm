@@ -1,4 +1,48 @@
+#![forbid(unsafe_code)]
+//! Seal built artifacts into a signed `.mvmpkg`.
+//!
+//! [`export_bundle_with_signer`] reads a kernel, a rootfs, and whatever else
+//! the rootfs needs to boot, hashes each, builds a
+//! [`BundleManifest`](super::BundleManifest), signs it under
+//! a caller-supplied [`BundleSigner`], and writes the archive.
+//!
+//! The format — manifest, signature, archive layout — belongs to the parent
+//! `plan::bundle` module. What this module owns is the decision about what
+//! an exported bundle contains, so `mvmctl build` and a library
+//! caller cannot disagree about it.
+//!
+//! ```no_run
+//! use std::path::Path;
+//!
+//! use mvm_core::plan::bundle::export::{BundleExportInputs, BundleSigner, export_bundle_with_signer};
+//!
+//! # fn demo(signer: &dyn BundleSigner) -> anyhow::Result<()> {
+//! let inputs = BundleExportInputs::new(
+//!     "/slots/abc/artifacts/vmlinux",
+//!     "/slots/abc/artifacts/rootfs.ext4",
+//!     "aarch64",
+//!     Path::new("app.mvmpkg"),
+//! )
+//! .resources(2, 512)
+//! .label("app");
+//! let exported = export_bundle_with_signer(&inputs, signer)?;
+//! println!("{} bytes under {}", exported.size_bytes, exported.key_id.0);
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! Reading the artifacts, building the manifest, sealing the archive.
+
+mod debug;
+mod inputs;
+mod signer;
+
+pub use debug::{DebugFormat, DebugOutput};
+pub use inputs::{
+    BootAssetsInputs, BundleExportInputs, CanonicalLinuxProofInputs, CliBootAssetsInputs,
+    PostureInputs,
+};
+pub use signer::BundleSigner;
 
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
@@ -6,19 +50,18 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use mvm_contract::timestamp::UtcTimestamp;
-use mvm_core::crypto::image_verify::{sha256_file, sha256_reader};
-use mvm_core::guest_sidecar::SIDECAR_FILENAME;
-use mvm_core::plan::bundle::{
+
+use crate::crypto::image_verify::{sha256_file, sha256_reader};
+use crate::guest_sidecar::SIDECAR_FILENAME;
+use crate::plan::bundle::{
     ARTIFACTS_DIR, ArtifactRole, BUNDLE_MEMBERS_MIN_SCHEMA, BundleArtifact, BundleManifest,
     BundleMember, BundlePayload, BundleSecurityPosture, BundleSizeBudget, KeyId, VerityInfo,
     sha256_hex, write_bundle_to,
 };
-use mvm_core::plan::types::BuildProvenance;
-use mvm_core::util::atomic_io::StagedFile;
+use crate::plan::types::BuildProvenance;
+use crate::util::atomic_io::StagedFile;
 
-use crate::debug;
-use crate::inputs::{BundleExportInputs, PostureInputs};
-use crate::signer::{AsManifestSigner, BundleSigner};
+use signer::AsManifestSigner;
 
 const KERNEL_NAME: &str = "vmlinux";
 const ROOTFS_NAME: &str = "rootfs.ext4";
@@ -29,8 +72,9 @@ const LINUX_SIGNATURE_NAME: &str = "boot-image-set.json.bundle";
 const REVOCATIONS_NAME: &str = "image-set-revocations.json";
 const REVOCATIONS_SIGNATURE_NAME: &str = "image-set-revocations.json.bundle";
 
-#[cfg(test)]
-#[path = "export/canonical_tests.rs"]
+// The retained image-set proofs these tests export verify only with the
+// in-process Sigstore verifier compiled in.
+#[cfg(all(test, feature = "manifest-verify"))]
 mod canonical_tests;
 
 /// A bundle that was written.
@@ -66,7 +110,7 @@ impl StagedBundle {
     /// Parse the actual sealed archive's first member through the owned file.
     /// The writer puts the manifest first; no artifact payload is scanned.
     pub fn manifest(&mut self) -> Result<BundleManifest> {
-        use mvm_core::plan::bundle::MANIFEST_FILENAME;
+        use crate::plan::bundle::MANIFEST_FILENAME;
 
         const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
         let file = self.output.file_mut();
@@ -160,11 +204,7 @@ pub fn stage_bundle_with_signer(
     inputs: &BundleExportInputs<'_>,
     signer: &dyn BundleSigner,
 ) -> Result<StagedBundle> {
-    stage_bundle_at(
-        inputs,
-        signer,
-        mvm_core::util::time::try_utc_timestamp_now()?,
-    )
+    stage_bundle_at(inputs, signer, crate::util::time::try_utc_timestamp_now()?)
 }
 
 #[cfg(test)]
@@ -241,7 +281,7 @@ fn stage_bundle_at(
                 LINUX_SIGNATURE_NAME,
                 REVOCATIONS_NAME,
                 REVOCATIONS_SIGNATURE_NAME,
-                mvm_core::registry_pack_boot::APPLICATION_ROOT_HASH_MEMBER_NAME,
+                crate::registry_pack_boot::APPLICATION_ROOT_HASH_MEMBER_NAME,
                 "guest-runtime.tar.gz",
                 "guest-runtime.sha256",
                 "guest-runtime.bundle",
@@ -351,17 +391,17 @@ struct BundleContents {
 impl BundleContents {
     fn push_canonical_linux_proof(
         &mut self,
-        proof: &crate::CanonicalLinuxProofInputs<'_>,
-        boot: &crate::CliBootAssetsInputs<'_>,
+        proof: &CanonicalLinuxProofInputs<'_>,
+        boot: &CliBootAssetsInputs<'_>,
         now: UtcTimestamp,
     ) -> Result<()> {
-        use mvm_core::image_set::{ImageSetRequirement, ImageSetVerification, image_train_lock};
+        use crate::image_set::{ImageSetRequirement, ImageSetVerification, image_train_lock};
         anyhow::ensure!(
             proof.root.manifest_bytes() == boot.manifest_bytes
                 && proof.root.root().manifest_sha256() == boot.manifest_sha256,
             "canonical publisher proof differs from the selected Linux boot manifest"
         );
-        let feed = mvm_core::image_set_revocation::verify_image_set_revocations(
+        let feed = crate::image_set_revocation::verify_image_set_revocations(
             proof.revocations.document(),
             proof.revocations.signature_bundle(),
             now,
@@ -376,7 +416,7 @@ impl BundleContents {
         )
         .require(&requirement)
         .with_revocations(&feed);
-        mvm_core::image_set::verify_image_set_root(&request)?;
+        crate::image_set::verify_image_set_root(&request)?;
         // The CLI closure check above already binds the actual kernel inventory
         // to this SAME Linux manifest. Preserve originals, never reserialize.
         for (name, bytes) in [
@@ -392,18 +432,17 @@ impl BundleContents {
         Ok(())
     }
 
-    fn push_boot_assets(&mut self, boot: &crate::BootAssetsInputs<'_>, arch: &str) -> Result<()> {
-        use mvm_core::arch::GuestArch;
-        use mvm_core::image_set::ImageSetManifest;
-        use mvm_core::plan::bundle::select_boot_asset_members;
+    fn push_boot_assets(&mut self, boot: &BootAssetsInputs<'_>, arch: &str) -> Result<()> {
+        use crate::arch::GuestArch;
+        use crate::image_set::ImageSetManifest;
+        use crate::plan::bundle::select_boot_asset_members;
 
         anyhow::ensure!(
             sha256_hex(boot.manifest_bytes) == boot.manifest_sha256.as_str(),
             "boot image-set manifest does not match its authenticated pin"
         );
         anyhow::ensure!(
-            boot.manifest_bytes.len() as u64
-                <= mvm_core::plan::bundle::MAX_IMAGE_SET_MANIFEST_BYTES,
+            boot.manifest_bytes.len() as u64 <= crate::plan::bundle::MAX_IMAGE_SET_MANIFEST_BYTES,
             "boot image-set manifest exceeds size limit"
         );
         let arch = match arch {
@@ -454,18 +493,13 @@ impl BundleContents {
         Ok(())
     }
 
-    fn push_cli_boot_assets(
-        &mut self,
-        boot: &crate::CliBootAssetsInputs<'_>,
-        arch: &str,
-    ) -> Result<()> {
-        use mvm_core::arch::GuestArch;
-        use mvm_core::image_set::ImageSetManifest;
-        use mvm_core::plan::bundle::select_cli_boot_kernel;
+    fn push_cli_boot_assets(&mut self, boot: &CliBootAssetsInputs<'_>, arch: &str) -> Result<()> {
+        use crate::arch::GuestArch;
+        use crate::image_set::ImageSetManifest;
+        use crate::plan::bundle::select_cli_boot_kernel;
 
         anyhow::ensure!(
-            boot.manifest_bytes.len() as u64
-                <= mvm_core::plan::bundle::MAX_IMAGE_SET_MANIFEST_BYTES
+            boot.manifest_bytes.len() as u64 <= crate::plan::bundle::MAX_IMAGE_SET_MANIFEST_BYTES
                 && sha256_hex(boot.manifest_bytes) == boot.manifest_sha256.as_str(),
             "CLI boot image-set manifest does not match its authenticated pin or size limit"
         );
@@ -598,14 +632,14 @@ impl BundleContents {
     ) -> Result<Option<VerityInfo>> {
         match (sidecar, roothash) {
             (Some(sidecar), Some(roothash)) => {
-                let hash = mvm_core::packs::Sha256Hex::new(roothash)?;
+                let hash = crate::packs::Sha256Hex::new(roothash)?;
                 self.push(
                     VERITY_NAME,
                     ArtifactRole::VerityHashSidecar,
                     sidecar.to_vec(),
                 )?;
                 self.push(
-                    mvm_core::registry_pack_boot::APPLICATION_ROOT_HASH_MEMBER_NAME,
+                    crate::registry_pack_boot::APPLICATION_ROOT_HASH_MEMBER_NAME,
                     ArtifactRole::Other,
                     format!("{}\n", hash.as_str()).into_bytes(),
                 )?;
@@ -648,7 +682,7 @@ fn declarations_for(
     }
     if inputs.canonical_linux_proof.is_some() {
         members.push(BundleMember::CanonicalLinuxProof(
-            mvm_core::plan::bundle::CanonicalLinuxProof {
+            crate::plan::bundle::CanonicalLinuxProof {
                 manifest_artifact: BOOT_MANIFEST_NAME.into(),
                 signature_bundle_artifact: LINUX_SIGNATURE_NAME.into(),
                 revocation_document_artifact: REVOCATIONS_NAME.into(),
@@ -751,7 +785,7 @@ fn manifest_for(
         resources: inputs.resources.clone(),
     };
     if inputs.local_build {
-        mvm_core::plan::bundle::mark_local_build(&mut manifest);
+        crate::plan::bundle::mark_local_build(&mut manifest);
     }
     manifest
 }
@@ -832,7 +866,7 @@ fn write_summary(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     // Let the filesystem decide whether names alias. Exclusive creation also
     // refuses case-folded names and links without replacing their entries.
-    mvm_core::util::atomic_io::atomic_write_new(path, bytes)
+    crate::util::atomic_io::atomic_write_new(path, bytes)
         .with_context(|| format!("writing bundle debug summary to {}", path.display()))
 }
 
@@ -879,9 +913,9 @@ mod tests {
         assert_eq!(
             manifest
                 .labels
-                .get(mvm_core::plan::bundle::BUNDLE_ORIGIN_LABEL)
+                .get(crate::plan::bundle::BUNDLE_ORIGIN_LABEL)
                 .map(String::as_str),
-            Some(mvm_core::plan::bundle::LOCAL_BUILD_ORIGIN)
+            Some(crate::plan::bundle::LOCAL_BUILD_ORIGIN)
         );
     }
 
@@ -1006,7 +1040,7 @@ mod tests {
 
     #[test]
     fn an_archive_without_a_manifest_is_not_taken_as_sealed() {
-        use mvm_core::plan::bundle::MANIFEST_FILENAME;
+        use crate::plan::bundle::MANIFEST_FILENAME;
 
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("bundle");

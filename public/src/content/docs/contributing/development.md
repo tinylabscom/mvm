@@ -799,7 +799,7 @@ out of `check-all` without a recorded reason.
 | Gates outside `check-all` | `ci.yml` (`check-declared-backing`), `ci-main.yml` (`check-nextest-groups`), `release.yml` (`check-binary-size`), `claim-witness-freshness.yml`, `e2e-docs.yml` (`check-release-evidence`) | `cargo run -p xtask -- <gate>` |
 | aarch64 tests | `ci-main.yml` `test-workspace-aarch64` (native runner) | `cargo nextest run --workspace --exclude mvm-fs --all-targets` on an aarch64 Linux host |
 | wasm32 / no_std `mvm-contract` | `ci-main.yml` `test-linux`, via `scripts/ci-linux-coverage.sh` | `just check embedded` for the riscv32 build; the wasm32 build and wasmtime test steps are in the script |
-| Windows portability | `ci.yml` `lint-windows` | `cargo check --target x86_64-pc-windows-gnu -p mvm-contract -p mvm-core -p mvm-bundler -p mvm-backends` |
+| Windows portability | `ci.yml` `lint-windows` | `cargo check --target x86_64-pc-windows-gnu -p mvm-contract -p mvm-core -p mvm-backends` |
 | Fuzz targets compile | `ci.yml` `lint-policy` (when a manifest or fuzz dir changes) | `cargo check --locked --manifest-path crates/<crate>/fuzz/Cargo.toml --all-targets` |
 | Fuzz runs | `security.yml` `fuzz` (nightly, tags) | `just test fuzz fuzz_guest_request`, or `cargo +nightly fuzz run <target>` in the fuzz directory |
 | eBPF telemetry | `ci-main.yml` `test-ebpf-telemetry` | `just check ebpf`, then `cargo test -p mvm-hostd --features ebpf-telemetry --lib` |

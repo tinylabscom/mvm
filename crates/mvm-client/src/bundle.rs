@@ -1,7 +1,7 @@
 //! Sealing built artifacts into a signed `.mvmpkg`.
 //!
-//! The export is `mvm-bundler`'s, re-exported here so a caller names this
-//! crate alone. [`HostBundleSigner`] signs under this host's key, which is the
+//! The export is `mvm_core::plan::bundle::export`'s, re-exported here so a
+//! caller names this crate alone. [`HostBundleSigner`] signs under this host's key, which is the
 //! key `mvmctl build` signs under.
 //! Template export alone does not perform a pack's health boot; a caller must
 //! not represent an exported template as a health-checked pack.
@@ -21,7 +21,7 @@ use mvm_hostd::audit::host_keypair::{self, HostSigner};
 
 use crate::portable_boot_assets::PreparedPortableBootAssets;
 
-pub use mvm_bundler::{
+pub use mvm_core::plan::bundle::export::{
     BundleExportInputs, BundleSigner, DebugFormat, DebugOutput, ExportedBundle, PostureInputs,
     StagedBundle, export_bundle_with_signer, stage_bundle_with_signer,
 };

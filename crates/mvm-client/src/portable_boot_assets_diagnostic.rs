@@ -236,7 +236,7 @@ fn signed_release_exports_diagnostic_pack() -> Result<()> {
     let rootfs = verify_file(&root, &request.rootfs)?;
     let sidecar = verify_file(&root, &request.guest_sidecar)?;
     ensure!(
-        sidecar == mvm_bundler::guest_sidecar_path(utf8(&rootfs)?)?,
+        sidecar == mvm_core::plan::bundle::export::guest_sidecar_path(utf8(&rootfs)?)?,
         "sealed sidecar must remain beside original rootfs"
     );
     let verity = read_bound_with_limit(&lease, &request.verity, 64 * 1024 * 1024)?;
@@ -310,7 +310,7 @@ fn signed_release_exports_diagnostic_pack() -> Result<()> {
         .map(|(name, path)| (*name, path.as_path()))
         .collect();
     let bundle = output.join("claude-wire-diagnostic.mvmpkg");
-    let mut inputs = mvm_bundler::BundleExportInputs::new(
+    let mut inputs = mvm_core::plan::bundle::export::BundleExportInputs::new(
         utf8(&assets.kernel)?,
         utf8(&rootfs)?,
         &assets.runtime.arch,
@@ -320,7 +320,7 @@ fn signed_release_exports_diagnostic_pack() -> Result<()> {
     .verity(&verity, hash)
     .resources(1, 4096)
     .label("agent/claude-wire-diagnostic@2.1.273")
-    .posture(mvm_bundler::PostureInputs::new(
+    .posture(mvm_core::plan::bundle::export::PostureInputs::new(
         mvm_core::security::AgentProfile::Dev,
     ))
     .environment(environment);

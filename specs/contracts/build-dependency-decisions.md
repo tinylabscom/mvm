@@ -1397,6 +1397,7 @@ no third-party dependency, because each folded crate already depended only on
 | Fold | Workspace members | `Cargo.lock` packages | `mvmctl` closure (macOS default / Linux default / release macOS, Linux x86_64, Linux aarch64) | `mvm-core` `-e no-dev` | Guest closures (`mvm-builder-guest` / `mvm-agentd` / `mvm-host-services`, musl) |
 |---|---|---|---|---|---|
 | `mvm-net` into `mvm_core::net` | 30 → 29 | 714 → 713 | 326 → 325 / 331 → 330 / 353 → 352, 352 → 351, 351 → 350; all-features 560 → 559 | 99 → 99 | 88 / 84 / 85, unchanged |
+| `mvm-bundler` into `mvm_core::plan::bundle::export` | 29 → 28 | 713 → 712 | 325 → 324 / 330 → 329 / 352 → 351, 351 → 350, 350 → 349; all-features 559 → 558 | 99 → 99 | 88 / 84 / 85, unchanged |
 
 Measured with `cargo tree -e normal,build --prefix none --target <target>` as
 `xtask check-closure-budget` does, and `cargo metadata --no-deps` for the

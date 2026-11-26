@@ -2,19 +2,19 @@
 
 use std::path::Path;
 
-use mvm_core::plan::BundleResources;
-use mvm_core::plan::EnvironmentDescriptor;
-use mvm_core::plan::types::BuildProvenance;
-use mvm_core::policy::security::AgentProfile;
+use crate::plan::BundleResources;
+use crate::plan::EnvironmentDescriptor;
+use crate::plan::types::BuildProvenance;
+use crate::policy::security::AgentProfile;
 
-use crate::debug::DebugOutput;
+use super::debug::DebugOutput;
 
 /// Authenticated original image-set bytes and the two selected archive files.
 /// Acquisition and publisher verification belong to the caller.
 #[derive(Debug, Clone)]
 pub struct BootAssetsInputs<'a> {
     pub manifest_bytes: &'a [u8],
-    pub manifest_sha256: &'a mvm_core::packs::Sha256Hex,
+    pub manifest_sha256: &'a crate::packs::Sha256Hex,
     pub runtime_overlay: &'a Path,
     pub initramfs: &'a Path,
 }
@@ -24,8 +24,8 @@ pub struct BootAssetsInputs<'a> {
 #[derive(Debug, Clone)]
 pub struct CliBootAssetsInputs<'a> {
     pub manifest_bytes: &'a [u8],
-    pub manifest_sha256: &'a mvm_core::packs::Sha256Hex,
-    pub runtime: &'a mvm_core::plan::bundle::EmbeddedCliBootAssets,
+    pub manifest_sha256: &'a crate::packs::Sha256Hex,
+    pub runtime: &'a crate::plan::bundle::EmbeddedCliBootAssets,
     pub artifacts: &'a [(&'a str, &'a Path)],
 }
 
@@ -34,8 +34,8 @@ pub struct CliBootAssetsInputs<'a> {
 /// parsed JSON. Freshness is checked again at export and consumer admission.
 #[derive(Debug, Clone)]
 pub struct CanonicalLinuxProofInputs<'a> {
-    pub root: &'a mvm_core::image_set::RetainedImageSetRootProof,
-    pub revocations: &'a mvm_core::image_set_revocation::RetainedImageSetRevocationProof,
+    pub root: &'a crate::image_set::RetainedImageSetRootProof,
+    pub revocations: &'a crate::image_set_revocation::RetainedImageSetRevocationProof,
 }
 
 /// Everything one export reads.
@@ -49,7 +49,7 @@ pub struct BundleExportInputs<'a> {
     /// nonreserved basenames; regular-file symlinks are followed.
     pub supplemental_artifacts: &'a [(&'a str, &'a Path)],
     /// Development-only signed composition inventory; admission rechecks its inputs.
-    pub local_composition: Option<mvm_core::plan::bundle::LocalComposition>,
+    pub local_composition: Option<crate::plan::bundle::LocalComposition>,
     pub boot_assets: Option<BootAssetsInputs<'a>>,
     pub cli_boot_assets: Option<CliBootAssetsInputs<'a>>,
     pub canonical_linux_proof: Option<CanonicalLinuxProofInputs<'a>>,

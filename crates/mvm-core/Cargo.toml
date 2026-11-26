@@ -137,7 +137,8 @@ os-keyring = ["dep:keyring"]
 # `domain::manifest` (the `mvm.toml` workload file), `user_config` (the
 # operator `config.toml` store), `config::fc_version` (the host's
 # Firecracker toolchain pin), and the tar archive I/O half of
-# `plan::bundle` (`stream` plus the archive-reading entry points). Off by
+# `plan::bundle` (`stream` plus the archive-reading entry points) and its
+# `export` module, which seals built artifacts into a signed bundle. Off by
 # default so the guest binaries
 # (mvm-agentd / mvm-builder-guest / mvm-setpriv) never resolve `bs58`,
 # `unicode-normalization`, `aho-corasick`, `tar`, `toml` or `regex`; host
@@ -260,6 +261,16 @@ required-features = ["host-state"]
 [[test]]
 name = "mvmev_canonicalization_vectors"
 path = "tests/mvmev_canonicalization_vectors.rs"
+required-features = ["host-state"]
+
+[[test]]
+name = "bundle_export"
+path = "tests/bundle_export.rs"
+required-features = ["host-state"]
+
+[[test]]
+name = "bundle_export_boot_assets"
+path = "tests/bundle_export_boot_assets.rs"
 required-features = ["host-state"]
 
 [[test]]

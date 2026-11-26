@@ -105,6 +105,8 @@ use crate::image_set::{
 use crate::packs::Sha256Hex;
 
 mod declarations;
+#[cfg(feature = "host-state")]
+pub mod export;
 mod lookup;
 #[cfg(feature = "host-state")]
 mod retention;

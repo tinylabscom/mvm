@@ -13,7 +13,7 @@ build artifacts. The compiler stages source, generates `flake.nix`,
   orchestration.
 - SDK builders and language bridges remain in the base `mvm-sdk`.
 - Concrete builds run through `mvm-build` in the builder VM. Runnable package
-  assembly belongs to `mvm-bundler`; signing stays outside the compiler.
+  assembly belongs to `mvm_core::plan::bundle::export`; signing stays outside the compiler.
   Compiler tar archives are build inputs, not runnable `.mvmpkg` packages.
 
 `compile` expects an already validated workload. `validate_lockfiles` is an

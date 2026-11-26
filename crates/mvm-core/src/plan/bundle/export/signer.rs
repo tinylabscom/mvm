@@ -1,8 +1,8 @@
 //! Who a bundle is signed by.
 
+use crate::plan::bundle::{KeyId, ManifestSigner, key_id_from_pubkey};
 use anyhow::Result;
 use ed25519_dalek::VerifyingKey;
-use mvm_core::plan::bundle::{KeyId, ManifestSigner, key_id_from_pubkey};
 
 /// The identity a bundle is published under and the key that signs it.
 ///
@@ -35,7 +35,7 @@ pub trait BundleSigner {
 
 /// Presents a [`BundleSigner`] to the archive writer, which only needs the
 /// signing half.
-pub(crate) struct AsManifestSigner<'a>(pub(crate) &'a dyn BundleSigner);
+pub(super) struct AsManifestSigner<'a>(pub(super) &'a dyn BundleSigner);
 
 impl ManifestSigner for AsManifestSigner<'_> {
     fn verifying_key(&self) -> VerifyingKey {

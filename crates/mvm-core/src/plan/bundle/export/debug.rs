@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::plan::bundle::BundleManifest;
 use anyhow::{Context, Result};
-use mvm_core::plan::bundle::BundleManifest;
 use serde::Serialize;
 
 /// The encoding of a debug summary.
@@ -40,13 +40,13 @@ struct DebugSummary<'a> {
 }
 
 /// The written archive's digest and size.
-pub(crate) struct ArchiveIdentity {
+pub(super) struct ArchiveIdentity {
     pub sha256: String,
     pub size_bytes: u64,
 }
 
 /// Render the summary of the archive written to `bundle_path`.
-pub(crate) fn render(
+pub(super) fn render(
     format: DebugFormat,
     bundle_path: &Path,
     archive: ArchiveIdentity,

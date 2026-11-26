@@ -1,11 +1,13 @@
 use std::cell::Cell;
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use mvm_bundler::{BootAssetsInputs, BundleExportInputs, BundleSigner, export_bundle_with_signer};
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::*;
 use mvm_core::kernel_format::KernelFormat;
 use mvm_core::packs::{FlakeLockIdentity, SbomReference, Sha256Hex, SourceRevisionIdentity};
+use mvm_core::plan::bundle::export::{
+    BootAssetsInputs, BundleExportInputs, BundleSigner, export_bundle_with_signer,
+};
 use mvm_core::plan::bundle::{
     BOOT_ASSET_INITRAMFS_ROLE, BOOT_ASSET_OVERLAY_ROLE, KeyId, TrustStore, read_and_verify_bundle,
     select_boot_asset_members,
@@ -13,7 +15,7 @@ use mvm_core::plan::bundle::{
 
 #[test]
 fn cli_boot_export_preserves_linux_identity_and_refuses_incomplete_or_mixed_members() {
-    use mvm_bundler::CliBootAssetsInputs;
+    use mvm_core::plan::bundle::export::CliBootAssetsInputs;
     use mvm_core::plan::bundle::{BundleMember, EmbeddedCliBootAssets, select_cli_boot_kernel};
     for arch in [GuestArch::X86_64, GuestArch::Aarch64] {
         let dir = tempfile::tempdir().unwrap();

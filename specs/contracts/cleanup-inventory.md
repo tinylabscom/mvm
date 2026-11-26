@@ -840,7 +840,7 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_TENANT_KEY_NOKEY_TENANT` | test-only | `crates/mvm-runtime/src/checkpoint/custody.rs:325` | 0 | NO | - |
 | `MVM_TENANT_KEY_TESTX` | test-only | `crates/mvm-core/src/crypto/keystore.rs:448` | 0 | NO | - |
 | `MVM_TEST_CANONICAL_ENVIRONMENT` | test-only | `crates/mvm-client/src/portable_boot_assets.rs:459` | 0 | NO | - |
-| `MVM_TEST_CANONICAL_KERNEL` | live-read | `crates/mvm-bundler/src/export/canonical_tests.rs:353` | 6 | NO | - |
+| `MVM_TEST_CANONICAL_KERNEL` | live-read | `crates/mvm-core/src/plan/bundle/export/canonical_tests.rs:353` | 6 | NO | - |
 | `MVM_TEST_CANONICAL_OUTPUT` | test-only | `crates/mvm-client/src/portable_boot_assets.rs:458` | 0 | NO | - |
 | `MVM_TEST_CANONICAL_ROOTFS` | test-only | `crates/mvm-client/src/portable_boot_assets.rs:457` | 0 | NO | - |
 | `MVM_TEST_CGROUP_DIR` | test-only | `crates/mvm-vmm/src/host/fc_cgroup.rs:323` | 0 | NO | - |
@@ -921,7 +921,7 @@ Cargo features: 90 non-default features across 17 of the 28 packages (`cargo met
 | Layer | What is still accepted | Reader | Retirement condition |
 |---|---|---|---|---|
 | Builder boot ABI 0 / 1 / 2 | `BuilderBootAbi::{LEGACY=0, PAYLOAD=1, NO_MVM_BINARY=2}` (`crates/mvm-core/src/image_set/boot_abi.rs:38-44`). With a boot payload source registered the range is 0..=2 (`WITH_PAYLOAD`, `:78`); without one only 0 (`LEGACY_ONLY`, `:71`) (`crates/mvm-builder-guest/src/builder_boot/abi.rs:15-23`). `images.lock` pins ABI 1. | `supported_image_abis`, `crates/mvm-build/src/builder_boot/stage.rs:45` | published builder image declares ABI 2 (mvm-images change, CLAUDE.md) |
-| Image-set retired roles | `ImageSetRole::RetiredGuestRuntime` (`crates/mvm-core/src/image_set.rs:446`): overlay, `{"sdk_sidecar": libc}`, initramfs members parsed, never selected or fetched; also skipped at `crates/mvm-bundler/tests/boot_assets.rs:290` | image-set parser | mvm-images drops the `mvm` input |
+| Image-set retired roles | `ImageSetRole::RetiredGuestRuntime` (`crates/mvm-core/src/image_set.rs:446`): overlay, `{"sdk_sidecar": libc}`, initramfs members parsed, never selected or fetched; also skipped at `crates/mvm-core/tests/bundle_export_boot_assets.rs:290` | image-set parser | mvm-images drops the `mvm` input |
 | Portable `.mvmpkg` boot assets | `BOOT_ASSET_OVERLAY_ROLE`, `BOOT_ASSET_INITRAMFS_ROLE` (`crates/mvm-core/src/plan/bundle.rs:995,1000`), the one remaining reader of overlay/initramfs members | bundle export | replacement decided in #3928 |
 | Base-image contract 0 / 1 | `BaseImageContractRange::SUPPORTED` = `LEGACY(0)..=LINUX_LAYER(1)` (`crates/mvm-core/src/image_set/base_contract.rs:78`); a set declaring none is read as 0 by `base_image_contract_or_legacy` (`crates/mvm-core/src/image_set.rs:299`); marker `/etc/mvm/base-image-contract` (`base_contract.rs:38`) | image-set acquisition | mvm-images declares a contract (tinylabscom/mvm-images#64), then 0 can be dropped |
 | `builder_boot_abi_or_legacy` | a set with no declared ABI is read as 0 (`crates/mvm-core/src/image_set.rs:318`) | same | same as ABI 0 |
