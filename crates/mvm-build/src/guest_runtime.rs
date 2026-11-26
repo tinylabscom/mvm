@@ -1746,6 +1746,179 @@ mod tests {
         assert!(!cache.exists());
     }
 
+    /// Tar entries by name, type and bytes, in archive order.
+    type Entries = Vec<(String, EntryType, Vec<u8>)>;
+
+    /// Entries written verbatim and in order, so a fixture can break the
+    /// layout the writer always produces.
+    fn raw_archive(entries: &Entries) -> Vec<u8> {
+        let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut tar = tar::Builder::new(gz);
+        for (name, kind, bytes) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(name).unwrap();
+            header.set_entry_type(*kind);
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append(&header, bytes.as_slice()).unwrap();
+        }
+        tar.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// The release fixture's entries, manifest first, as the writer lays them out.
+    fn release_entries() -> Entries {
+        let manifest = release_manifest();
+        let mut entries = vec![(
+            GUEST_BINS_MANIFEST_FILE.to_string(),
+            EntryType::Regular,
+            serde_json::to_vec(&manifest).unwrap(),
+        )];
+        entries.extend(
+            manifest
+                .files
+                .keys()
+                .map(|member| (member.clone(), EntryType::Regular, b"fixture".to_vec())),
+        );
+        entries
+    }
+
+    /// Release archives whose first entry is a good manifest and whose members
+    /// disagree with it, one for each way they can.
+    fn inconsistent_release_archives() -> Vec<(&'static str, Vec<u8>)> {
+        const MEMBER: &str = "x86_64/bin/mvm-setpriv";
+        let position = |entries: &Entries| {
+            entries
+                .iter()
+                .position(|(name, ..)| name == MEMBER)
+                .unwrap()
+        };
+        type Edit = fn(&mut Entries, usize);
+        let edits: [(&str, Edit); 5] = [
+            ("digest mismatch", |entries, at| {
+                entries[at].2 = b"changed".to_vec();
+            }),
+            ("unlisted member", |entries, _| {
+                entries.push((
+                    "sdk-py/mvm/unlisted.py".to_string(),
+                    EntryType::Regular,
+                    b"fixture".to_vec(),
+                ));
+            }),
+            ("missing member", |entries, at| {
+                entries.remove(at);
+            }),
+            ("duplicate member", |entries, at| {
+                entries.push(entries[at].clone());
+            }),
+            ("non-regular member", |entries, at| {
+                entries[at] = (MEMBER.to_string(), EntryType::Symlink, Vec::new());
+            }),
+        ];
+        edits
+            .into_iter()
+            .map(|(case, edit)| {
+                let mut entries = release_entries();
+                let at = position(&entries);
+                edit(&mut entries, at);
+                (case, raw_archive(&entries))
+            })
+            .collect()
+    }
+
+    fn member_walks() -> usize {
+        guest_bins::MEMBER_WALKS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn an_inconsistent_archive_is_refused_at_publish_and_at_bootstrap() {
+        for (case, bytes) in inconsistent_release_archives() {
+            let temp = tempfile::tempdir().unwrap();
+            let archive = temp
+                .path()
+                .join(guest_bins::guest_bins_archive_name("1.2.3"));
+            fs::write(&archive, bytes).unwrap();
+            let published = guest_bins::release::check_release_archive(&archive, "1.2.3");
+            assert!(
+                matches!(
+                    published,
+                    Err(guest_bins::release::ReleaseGuestRuntimeError::Archive { .. })
+                ),
+                "{case}: {published:?}"
+            );
+            let base = temp.path().join("cache");
+            let installed = install_archive_scoped(
+                &base,
+                &archive,
+                "1.2.3",
+                GuestArch::X86_64,
+                ArchiveScope::Release,
+            );
+            assert!(
+                matches!(installed, Err(GuestRuntimeError::Archive(_))),
+                "{case}: {installed:?}"
+            );
+            assert_eq!(
+                fs::read_dir(base.join("objects")).unwrap().count(),
+                0,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_changed_archive_byte_is_refused_on_the_signed_digest_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let (archive, checksum, bundle) = unsigned_release(&temp.path().join("payload"));
+        let original = fs::read(&archive).unwrap();
+        let walks = member_walks();
+        // The first byte is the gzip magic, so the archive no longer opens;
+        // the middle one leaves it readable. Both stop at the digest.
+        for at in [0, original.len() / 2] {
+            let mut edited = original.clone();
+            edited[at] ^= 1;
+            fs::write(&archive, edited).unwrap();
+            let error = evidence::verify_release_archive(
+                &archive,
+                &checksum,
+                &bundle,
+                "1.2.3",
+                GuestArch::X86_64,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&error, GuestRuntimeError::Cache(reason) if reason.contains("checksum")),
+                "byte {at}: {error}"
+            );
+        }
+        assert_eq!(member_walks(), walks);
+    }
+
+    #[test]
+    fn the_signature_skip_hatch_does_not_waive_the_launch_proof() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+        let temp = tempfile::tempdir().unwrap();
+        let (archive, checksum, bundle) = unsigned_release(&temp.path().join("payload"));
+        let error = evidence::verify_release_archive(
+            &archive,
+            &checksum,
+            &bundle,
+            "1.2.3",
+            GuestArch::X86_64,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                GuestRuntimeError::Release(
+                    crate::runtime_overlay::RuntimeOverlayError::SignatureInvalid { .. }
+                )
+            ),
+            "{error}"
+        );
+    }
+
     #[test]
     fn package_locations_follow_the_real_executable_and_standard_prefix() {
         assert_eq!(

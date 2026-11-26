@@ -359,6 +359,8 @@ fn set_readable(_path: &Path) -> Result<(), GuestBinsError> {
 /// any member whose bytes do not hash to the recorded digest.
 #[tracing::instrument(skip_all)]
 pub fn verify_guest_bins_archive(path: &Path) -> Result<GuestBinsManifest, GuestBinsError> {
+    #[cfg(test)]
+    MEMBER_WALKS.with(|walks| walks.set(walks.get() + 1));
     let file = std::fs::File::open(path)?;
     let mut archive = tar::Archive::new(GzDecoder::new(file));
     let mut manifest_bytes: Option<Vec<u8>> = None;
@@ -387,6 +389,13 @@ pub fn verify_guest_bins_archive(path: &Path) -> Result<GuestBinsManifest, Guest
         serde_json::from_slice(&manifest_bytes.ok_or(GuestBinsError::MissingManifest)?)?;
     check_manifest_against(&manifest, &digests)?;
     Ok(manifest)
+}
+
+// Member walks this thread has started, so a test can hold a path to walking
+// an archive exactly as often as it should.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static MEMBER_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Read the manifest from the first entry of a gzip tarball and stop there.
