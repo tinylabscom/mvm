@@ -1,7 +1,6 @@
 #![deny(unreachable_pub)]
 use anyhow::Result;
 use std::path::PathBuf;
-use xtask::network_perf;
 
 // Only the gen-man path (gated behind `man`) uses these.
 #[cfg(feature = "man")]
@@ -583,7 +582,6 @@ fn main() -> Result<()> {
         }
         Some("perf") => perf::run(&args[2..]),
         Some("telemetry-baseline") => telemetry_baseline::run(&args[2..]),
-        Some("network-perf") => network_perf::run(&args[2..]),
         Some("gen-stubs") => {
             let workspace = workspace_root();
             gen_stubs::generate(&workspace)
@@ -605,7 +603,7 @@ fn main() -> Result<()> {
             check_all::run_all(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, emit-backend-components-tsv, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-no-cli-shellout, check-no-mvmd-dependency, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-firecracker-pin, check-closure-budget, publish-plan, check-publish-readiness, check-workspace-dep-inheritance, check-duplicate-majors, check-deny-ignore-expiry, check-binary-size, report-compile-units, check-compile-report-sync, check-kernel-pin-freshness, check-builder-shell-job-sites, check-bundle-trust-sites, check-epoch-gate, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-history-in-comments, check-no-string-backend-dispatch, check-spec-hygiene, check-root-layout, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, image-source-ref, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-thin-cli, check-cli-help-matches-docs, check-claim-catalog, check-tier-matrix, check-documented-env, check-dormant-controls, check-witness-citations, check-asserted-absence, check-pq-claims, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-single-workspace-write-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-ci-coverage, check-text-reading-tests, check-single-grants-projection, check-single-exec-secs-writer, check-seal-gate, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity, check-template-restore-boundary",
+            "Unknown xtask: {:?}. Available: gen-man, emit-backend-components-tsv, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-no-cli-shellout, check-no-mvmd-dependency, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-firecracker-pin, check-closure-budget, publish-plan, check-publish-readiness, check-workspace-dep-inheritance, check-duplicate-majors, check-deny-ignore-expiry, check-binary-size, report-compile-units, check-compile-report-sync, check-kernel-pin-freshness, check-builder-shell-job-sites, check-bundle-trust-sites, check-epoch-gate, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-history-in-comments, check-no-string-backend-dispatch, check-spec-hygiene, check-root-layout, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, image-source-ref, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-thin-cli, check-cli-help-matches-docs, check-claim-catalog, check-tier-matrix, check-documented-env, check-dormant-controls, check-witness-citations, check-asserted-absence, check-pq-claims, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-single-workspace-write-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-ci-coverage, check-text-reading-tests, check-single-grants-projection, check-single-exec-secs-writer, check-seal-gate, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, telemetry-baseline, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity, check-template-restore-boundary",
             other
         ),
         None => {
@@ -832,9 +830,6 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  perf <subcommand>                       Plan 60 Phase 9 perf gates (rootfs-size, boot)"
-            );
-            eprintln!(
-                "  network-perf <subcommand>               Validate and compare labelled network benchmark reports"
             );
             eprintln!(
                 "  gen-stubs                               Regenerate the workload-IR + host↔guest-protocol JSON schemas and their Python/TS SDK types"

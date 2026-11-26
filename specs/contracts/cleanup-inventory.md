@@ -749,13 +749,6 @@ Columns: class (`live-read` = a literal on a non-test, non-write line; `set-only
 | `MVM_NATIVE_CALLER_TEST_NAMESPACE` | live-read | `crates/mvm-hostd/src/caller_identity/native_tests.rs:166` | 1 | NO | - |
 | `MVM_NATIVE_CALLER_TEST_OPERATION` | live-read | `crates/mvm-hostd/src/caller_identity/native_tests.rs:168` | 1 | NO | - |
 | `MVM_NATIVE_CALLER_TEST_PIN` | live-read | `crates/mvm-hostd/src/caller_identity/native_tests.rs:35` | 3 | NO | - |
-| `MVM_NETWORK_PERF_BACKEND` | live-read | `crates/mvm-hostd/examples/network_perf_probe.rs:78` | 1 | NO | - |
-| `MVM_NETWORK_PERF_CPU` | live-read | `crates/mvm-hostd/examples/network_perf_probe.rs:76` | 1 | NO | - |
-| `MVM_NETWORK_PERF_HOST_ID` | live-read | `crates/mvm-hostd/examples/network_perf_probe.rs:73` | 1 | NO | - |
-| `MVM_NETWORK_PERF_IMPLEMENTATION` | live-read | `crates/mvm-hostd/examples/network_perf_probe.rs:93` | 1 | NO | - |
-| `MVM_NETWORK_PERF_SAMPLES` | live-read | `crates/mvm-hostd/examples/network_perf_probe.rs:100` | 1 | NO | - |
-| `MVM_NETWORK_PERF_SOURCE_COMMIT` | live-read | `crates/mvm-hostd/examples/network_perf_probe.rs:82` | 1 | NO | - |
-| `MVM_NETWORK_PERF_STORAGE` | live-read | `crates/mvm-hostd/examples/network_perf_probe.rs:79` | 1 | NO | - |
 | `MVM_NODE` | live-read | `crates/mvm-cli/src/commands/build/sandbox_record.rs:227` | 1 | NO | - |
 | `MVM_NO_AUTO_DEV` | live-read | `crates/mvm-vmm/src/host/linux_env.rs:93` | 1 | NO | - |
 | `MVM_NO_BUILD_CACHE` | live-read | `crates/mvm-build/src/pipeline/dev_build.rs:282` | 1 | NO | - |
