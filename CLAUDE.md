@@ -588,9 +588,12 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     `LibkrunBuilderVm::run_build` Install arm) installs deps into a
     sealed volume at `~/.mvm/volumes/deps/<volume_hash>/` carrying
     `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, and a
-    hash-chained `meta.json`; `mvm-hostd`'s supervisor admission verifier
-    calls `mvm_core::deps_audit::verify_sealed_volume` before
-    launch and refuses tampered volumes. The seal-time security lane applies
+    hash-chained `meta.json`; `mvm_build::app_deps` calls
+    `mvm_core::deps_audit::verify_sealed_volume` when the build cache reuses a
+    volume, and `mvmctl deps inspect` / `deps audit` run it too. No launch path
+    attaches a dependency volume or verifies one at admission (issue #5962): every launch builds its plan with
+    `deps_volume: None`, and `verify_deps_volume_binding` has no production
+    caller. The seal-time security lane applies
     `mvm_build::app_deps_gate::apply_install_gate` and fails closed on
     high/critical CVE findings or stub SBOM/CVE; production launch does not
     currently call that severity gate, and the dormant-control manifest pins

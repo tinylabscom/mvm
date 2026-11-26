@@ -304,9 +304,9 @@ seal gate `crates/mvm-build/src/app_deps_gate.rs`.
 
 Limit carried through: **the severity gate has no production launch caller and is
 declared dormant** (ADR-001 row, `CLAUDE.md`). Two of the seven witnesses
-therefore test a control that does not run at launch; only the sealed-byte
-reverify does. The full builder-VM install round-trip is not in the lane.
-Adequacy: the "hash-locked and reverified at admission" half is witnessed; the
+therefore test a control that does not run at launch; the sealed-byte
+reverify runs on build-cache reuse and in `deps inspect`/`audit`, not at launch. The full builder-VM install round-trip is not in the lane.
+Adequacy: the "hash-locked and re-verified on cache reuse" half is witnessed; the
 "CVE-scanned when sealed" half is witnessed only in the seal-time test lane.
 
 ### Claim 12 — host-side service bindings are plan-gated and audited
