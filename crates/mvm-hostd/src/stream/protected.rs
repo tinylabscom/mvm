@@ -288,10 +288,16 @@ pub(super) fn record_opening(
         [],
     );
     entry.labels = evidence::opening_labels(seed)?;
+    // Inside a batch the emit below would return before its record is synced,
+    // and nothing after it syncs the segment.
+    anyhow::ensure!(
+        !emitter.batch_open(),
+        "a capture opening must not be written inside an audit batch"
+    );
     emitter.emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)?;
-    // The emit above synced the segment, as a barrier on an emitter no batch
-    // is open on; verification syncs the directory. Visibility alone must not
-    // expose a producer whose opening is lost after a crash.
+    // The emit above synced the segment; verification syncs the directory.
+    // Visibility alone must not expose a producer whose opening is lost after
+    // a crash.
     // This runs before every boot announces itself and inside every warm
     // claim, so it confirms the append just made rather than re-walking the
     // whole chain, whose cost grows with every launch the host has run.
@@ -939,12 +945,53 @@ mod tests {
         });
         assert!(fault.consumed(), "the opening append must sync its segment");
         assert!(started.is_err());
+        // The fault must have landed on the opening and not on some earlier
+        // barrier, which would leave the opening's own sync unpinned.
+        let chain =
+            std::fs::read_to_string(config::mvm_audit_dir().join("opening-tenant.jsonl")).unwrap();
+        let lines: Vec<&str> = chain.lines().collect();
+        assert_eq!(lines.len(), 1, "{chain}");
+        let envelope: crate::audit::signer::SignedEnvelope =
+            serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(
+            envelope.entry.event,
+            mvm_core::transcript::evidence::TRANSCRIPT_OPENED_EVENT
+        );
         assert!(
             !config::vm_protected_stream_dir(vm)
                 .join(mvm_core::stream_client::protected::RUN_FILENAME)
                 .exists(),
             "a capture whose opening is not durable must not be routable"
         );
+    }
+
+    /// A batch holds every barrier sync until it closes, so an opening recorded
+    /// inside one would be confirmed while still unsynced.
+    #[test]
+    fn an_opening_recorded_inside_an_audit_batch_is_refused() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let vm = "opening-inside-batch";
+        let (plan, emitter, seed) = unopened_capture(vm);
+        let error = emitter
+            .batched(|| record_opening(&plan, &emitter, &seed))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("inside an audit batch"),
+            "{error:#}"
+        );
+        assert!(
+            !emitter.audit_dir().join("opening-tenant.jsonl").exists(),
+            "a refused opening must not reach the chain"
+        );
+        assert!(
+            !config::vm_protected_stream_dir(vm)
+                .join(mvm_core::stream_client::protected::RUN_FILENAME)
+                .exists()
+        );
+        // The same emitter records it once the batch is closed.
+        record_opening(&plan, &emitter, &seed).unwrap();
     }
 
     #[test]

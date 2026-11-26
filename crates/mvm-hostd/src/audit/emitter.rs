@@ -1032,6 +1032,12 @@ impl AuditEmitter {
         Ok((value, pending.detach()))
     }
 
+    /// Whether a batch is open on any chain, so a barrier emitted now would
+    /// return before its record is synced.
+    pub(crate) fn batch_open(&self) -> bool {
+        self.signers.iter().any(|signer| signer.batch_open())
+    }
+
     /// Run `f` with barrier syncs held, close the batch, and return what it
     /// still owes a sync. A failed `f` has its writes synced here and its
     /// error returned.

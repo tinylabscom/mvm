@@ -402,6 +402,11 @@ impl FileAuditSigner {
         self.batching.store(true, Ordering::SeqCst);
     }
 
+    /// Whether a batch is open, so a barrier written now would not sync.
+    pub(crate) fn batch_open(&self) -> bool {
+        self.batching.load(Ordering::SeqCst)
+    }
+
     /// Stop holding barriers and sync everything the batch deferred.
     ///
     /// Unlike [`flush_deferred`](Self::flush_deferred) this reports failure,
