@@ -272,14 +272,14 @@ flow admission `crates/mvm-hostd/src/supervisor/endpoint/flowmux/open_flow.rs`; 
 `crates/mvm-contract/src/policy/{network_policy,dns_guard,restricted_address}.rs`;
 snapshot NIC refusal `crates/mvm-vmm/src/snapshot.rs` and
 `crates/mvm-runtime/src/vm/instance_snapshot.rs`; DNS audit
-`crates/mvm-hostd/src/supervisor/audit/dns_audit.rs`.
+`crates/mvm-hostd/src/supervisor/endpoint/flowmux/dns_decision.rs`.
 
 | Witness | Class |
 |---|---|
 | `a_flow_no_rule_admits_is_refused_and_audited_under_the_default_policy`, `open_tcp_to_unknown_host_is_refused_by_default_deny_gate` (open_flow.rs), `policy_default_is_deny_all` (network_policy.rs), `run_net_default_is_deny_all` (mvm-client admission), `private_link_local_loopback_ula_metadata_are_forbidden` (dns_guard.rs), `an_embedded_ipv4_form_is_classified_by_the_address_it_reaches` (restricted_address.rs), `private_range_is_denied_by_default_and_readmitted_only_by_a_grant_naming_it`, `metadata_and_the_absolute_ranges_are_never_readmitted`, `a_name_that_resolves_inward_is_refused_as_the_address_it_reached` (egress_gate.rs), `the_forward_leg_gets_the_gate_s_answer_not_a_fresh_lookup` (pinned_dns.rs) | OUTCOME-UNIT: decision functions over synthetic flows. The gate's decisions are checked; no guest-originated packet is. `policy_default_is_deny_all` is closer to STRUCT (asserts the default value). |
 | `verify_and_resume_refuses_nic_on_restore`, `fork_restore_refuses_nic` | OUTCOME-UNIT: restore refuses a device model carrying a NIC. |
 | `assert_vsock_only_device_model` | IMPL. |
-| `emits_resolved_query_with_ip_list`, `admitted_projection_is_one_object_graph_for_every_network_surface` | OUTCOME-UNIT / STRUCT (the second compares projections, by location). |
+| `a_resolver_only_runs_after_the_admission_record` (dns_decision.rs), `admitted_projection_is_one_object_graph_for_every_network_surface` | OUTCOME-UNIT / STRUCT (the first drives the live resolve path with a capturing sink and asserts `dns.admitted` is recorded before the resolver runs; the second compares projections, by location). |
 | `ci:single-network-path` | CI-by-step-name; see section 2 item 3. The underlying `check-single-network-path` is a source scan. |
 | `ci:fuzz_dns_codec` | CI fuzz; last green `43344932988`. |
 

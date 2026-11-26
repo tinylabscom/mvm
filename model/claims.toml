@@ -220,7 +220,7 @@ witnesses = [
     "fn:policy_default_is_deny_all",
     "fn:run_net_default_is_deny_all",
     "fn:private_link_local_loopback_ula_metadata_are_forbidden",
-    "fn:emits_resolved_query_with_ip_list",
+    "fn:a_resolver_only_runs_after_the_admission_record",
     "fn:admitted_projection_is_one_object_graph_for_every_network_surface",
     "ci:single-network-path",
     "ci:fuzz_dns_codec",
