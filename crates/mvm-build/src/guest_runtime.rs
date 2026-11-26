@@ -1894,32 +1894,103 @@ mod tests {
         }
     }
 
+    /// A stand-in for the release signature, for this crate's tests only: a
+    /// payload's "signature" is its SHA-256 in hex. Unit tests cannot mint a
+    /// Sigstore bundle, and without one nothing gated reaches the code that
+    /// runs after the signatures hold.
+    fn stand_in_signature(payload: &[u8]) -> Vec<u8> {
+        hex::encode(Sha256::digest(payload)).into_bytes()
+    }
+
+    /// Check a stand-in signature, recording the asset it was asked about.
+    fn stand_in_check(
+        asked: &std::cell::RefCell<Vec<String>>,
+        payload: &[u8],
+        signature: &[u8],
+        asset: &str,
+    ) -> Result<
+        mvm_core::crypto::image_verify::VerifiedSigner,
+        crate::runtime_overlay::RuntimeOverlayError,
+    > {
+        asked.borrow_mut().push(asset.to_string());
+        if signature != stand_in_signature(payload) {
+            return Err(
+                crate::runtime_overlay::RuntimeOverlayError::SignatureInvalid {
+                    asset: asset.to_string(),
+                    reason: "not the stand-in signature".into(),
+                },
+            );
+        }
+        Ok(mvm_core::crypto::image_verify::VerifiedSigner {
+            identity: "stand-in".into(),
+            issuer: "stand-in".into(),
+        })
+    }
+
+    /// `bytes` as version 1.2.3's release in `dir`, with its checksum file and
+    /// both bundles signed by the stand-in.
+    fn stand_in_release(dir: &Path, bytes: &[u8]) -> (PathBuf, PathBuf, PathBuf) {
+        let asset = guest_bins::guest_bins_archive_name("1.2.3");
+        let archive = dir.join(&asset);
+        fs::write(&archive, bytes).unwrap();
+        let sums = format!("{}  {asset}\n", hex::encode(Sha256::digest(bytes)));
+        let checksum = dir.join(format!("{asset}.sha256"));
+        fs::write(&checksum, &sums).unwrap();
+        fs::write(
+            evidence::checksum_bundle_path(&checksum),
+            stand_in_signature(sums.as_bytes()),
+        )
+        .unwrap();
+        let bundle = dir.join(format!("{asset}.bundle"));
+        fs::write(&bundle, stand_in_signature(bytes)).unwrap();
+        (archive, checksum, bundle)
+    }
+
+    /// The launch verifier over a stand-in-signed release, with the assets
+    /// whose signatures it asked for, in order.
+    fn launch_check(
+        (archive, checksum, bundle): &(PathBuf, PathBuf, PathBuf),
+    ) -> (
+        Result<evidence::VerifiedRuntimeManifest, GuestRuntimeError>,
+        Vec<String>,
+    ) {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let result = evidence::verify_release_archive_signed_by(
+            archive,
+            checksum,
+            bundle,
+            "1.2.3",
+            GuestArch::X86_64,
+            &|payload, signature, asset| stand_in_check(&asked, payload, signature, asset),
+        );
+        (result, asked.into_inner())
+    }
+
     #[test]
     fn one_changed_archive_byte_is_refused_on_the_signed_digest_first() {
         let temp = tempfile::tempdir().unwrap();
-        let (archive, checksum, bundle) = unsigned_release(&temp.path().join("payload"));
-        let original = fs::read(&archive).unwrap();
-        let walks = member_walks();
+        let original = raw_archive(&release_entries());
+        let release = stand_in_release(temp.path(), &original);
+        let asset = guest_bins::guest_bins_archive_name("1.2.3");
         // The first byte is the gzip magic, so the archive no longer opens;
         // the middle one leaves it readable. Both stop at the digest.
         for at in [0, original.len() / 2] {
             let mut edited = original.clone();
             edited[at] ^= 1;
-            fs::write(&archive, edited).unwrap();
-            let error = evidence::verify_release_archive(
-                &archive,
-                &checksum,
-                &bundle,
-                "1.2.3",
-                GuestArch::X86_64,
-            )
-            .unwrap_err();
+            fs::write(&release.0, edited).unwrap();
+            let (refused, asked) = launch_check(&release);
             assert!(
-                matches!(&error, GuestRuntimeError::Cache(reason) if reason.contains("checksum")),
-                "byte {at}: {error}"
+                matches!(
+                    &refused,
+                    Err(GuestRuntimeError::Cache(reason))
+                        if *reason == format!("guest runtime checksum missing or mismatched for {asset}")
+                ),
+                "byte {at}: {refused:?}"
             );
+            // The archive's signature is asked for only after its digest
+            // holds, and the manifest is read only after that signature.
+            assert_eq!(asked, [format!("{asset}.sha256")], "byte {at}");
         }
-        assert_eq!(member_walks(), walks);
     }
 
     #[test]
@@ -1949,16 +2020,50 @@ mod tests {
 
     #[test]
     fn a_launch_reads_the_manifest_of_authenticated_bytes_without_walking_members() {
+        let temp = tempfile::tempdir().unwrap();
+        let bytes = raw_archive(&release_entries());
+        let (archive, checksum, bundle) = stand_in_release(temp.path(), &bytes);
+        let asset = guest_bins::guest_bins_archive_name("1.2.3");
+        let asked = std::cell::RefCell::new(Vec::new());
         let walks = member_walks();
-        assert_eq!(
-            evidence::read_authenticated_manifest(&raw_archive(&release_entries()), "1.2.3")
-                .unwrap(),
-            release_manifest()
-        );
+        let verified = evidence::verify_release_archive_signed_by(
+            &archive,
+            &checksum,
+            &bundle,
+            "1.2.3",
+            GuestArch::X86_64,
+            &|payload, signature, name| {
+                let signer = stand_in_check(&asked, payload, signature, name)?;
+                // Once the archive's signature holds, the file is replaced:
+                // a manifest read back from the path would not parse.
+                if name == asset {
+                    fs::write(&archive, b"replaced after authentication").unwrap();
+                }
+                Ok(signer)
+            },
+        )
+        .unwrap();
         assert_eq!(member_walks(), walks);
+        assert_eq!(
+            asked.into_inner(),
+            [format!("{asset}.sha256"), asset.clone()]
+        );
+        assert_eq!(verified.manifest(), &release_manifest());
+        assert_eq!(verified.signer().identity, "stand-in");
+        assert_eq!(
+            verified.archive_sha256(),
+            hex::encode(Sha256::digest(&bytes))
+        );
+        assert_eq!(fs::read(verified.archive_path()).unwrap(), bytes);
+        // The replaced file is another launch's to refuse.
+        let (refused, _) = launch_check(&(archive, checksum, bundle));
+        assert!(
+            matches!(refused, Err(GuestRuntimeError::Cache(_))),
+            "{refused:?}"
+        );
         // The manifest is still held to the release contract.
         assert!(matches!(
-            evidence::read_authenticated_manifest(&raw_archive(&release_entries()), "1.2.4"),
+            evidence::read_authenticated_manifest(&bytes, "1.2.4"),
             Err(GuestRuntimeError::Version { .. })
         ));
     }
@@ -1968,7 +2073,9 @@ mod tests {
         let mut entries = release_entries();
         entries.rotate_left(1);
         let bytes = raw_archive(&entries);
-        let launch = evidence::read_authenticated_manifest(&bytes, "1.2.3");
+        let temp = tempfile::tempdir().unwrap();
+        let release = stand_in_release(temp.path(), &bytes);
+        let (launch, _) = launch_check(&release);
         assert!(
             matches!(
                 launch,
@@ -1978,10 +2085,7 @@ mod tests {
             ),
             "{launch:?}"
         );
-        let temp = tempfile::tempdir().unwrap();
-        let archive = temp.path().join("reordered.tar.gz");
-        fs::write(&archive, bytes).unwrap();
-        let publish = guest_bins::release::check_release_archive(&archive, "1.2.3");
+        let publish = guest_bins::release::check_release_archive(&release.0, "1.2.3");
         assert!(
             matches!(
                 publish,
@@ -1992,17 +2096,34 @@ mod tests {
             ),
             "{publish:?}"
         );
+        // Nothing of the archive is parsed until its signature holds: the
+        // same bytes under a wrong signature are refused for the signature.
+        fs::write(&release.2, b"not the stand-in signature").unwrap();
+        let (unsigned, asked) = launch_check(&release);
+        assert!(
+            matches!(
+                unsigned,
+                Err(GuestRuntimeError::Release(
+                    crate::runtime_overlay::RuntimeOverlayError::SignatureInvalid { .. }
+                ))
+            ),
+            "{unsigned:?}"
+        );
+        assert_eq!(asked.len(), 2);
     }
 
+    /// The stream bound that keeps an inflating first entry from being
+    /// decompressed is witnessed where the reader lives, by
+    /// `an_oversized_pax_first_entry_is_refused_without_reading_its_body`.
     #[test]
-    fn a_launch_refuses_an_oversized_manifest_and_an_unbounded_first_entry() {
-        let entry = |name: &str, kind, bytes: Vec<u8>| vec![(name.to_string(), kind, bytes)];
-        let oversized = raw_archive(&entry(
-            GUEST_BINS_MANIFEST_FILE,
+    fn a_launch_refuses_an_oversized_manifest() {
+        let oversized = raw_archive(&vec![(
+            GUEST_BINS_MANIFEST_FILE.to_string(),
             EntryType::Regular,
             vec![b' '; 1024 * 1024 + 1],
-        ));
-        let refused = evidence::read_authenticated_manifest(&oversized, "1.2.3");
+        )]);
+        let temp = tempfile::tempdir().unwrap();
+        let (refused, _) = launch_check(&stand_in_release(temp.path(), &oversized));
         assert!(
             matches!(
                 refused,
@@ -2012,32 +2133,18 @@ mod tests {
             ),
             "{refused:?}"
         );
-        // An extension header whose body inflates to 64 MiB from a few tens of
-        // kilobytes: the read ends inside it instead of decompressing it.
-        let bomb = raw_archive(&entry("pax", EntryType::XHeader, vec![0; 64 * 1024 * 1024]));
-        assert!(bomb.len() < 1024 * 1024);
-        let refused = evidence::read_authenticated_manifest(&bomb, "1.2.3");
-        assert!(
-            matches!(
-                refused,
-                Err(GuestRuntimeError::Archive(GuestBinsError::Io(_)))
-            ),
-            "{refused:?}"
-        );
     }
 
     /// The boundary of the launch check, stated as a test: a manifest that
-    /// leads an archive is read whatever follows it. Publish, acquisition and
-    /// installation are what refuse these archives.
+    /// leads an authenticated archive is read whatever follows it. Publish,
+    /// acquisition and installation are what refuse these archives.
     #[test]
     fn a_launch_does_not_compare_members_with_the_manifest() {
         for (case, bytes) in inconsistent_release_archives() {
+            let temp = tempfile::tempdir().unwrap();
             let walks = member_walks();
-            assert_eq!(
-                evidence::read_authenticated_manifest(&bytes, "1.2.3").unwrap(),
-                release_manifest(),
-                "{case}"
-            );
+            let (verified, _) = launch_check(&stand_in_release(temp.path(), &bytes));
+            assert_eq!(verified.unwrap().manifest(), &release_manifest(), "{case}");
             assert_eq!(member_walks(), walks, "{case}");
         }
     }

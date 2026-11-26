@@ -525,6 +525,48 @@ pub(super) fn verify_release_archive(
     version: &str,
     arch: GuestArch,
 ) -> Result<VerifiedRuntimeManifest, GuestRuntimeError> {
+    let identities = mvm_core::release_trust::accepted_release_identities(version);
+    verify_release_archive_signed_by(
+        archive,
+        checksum,
+        bundle,
+        version,
+        arch,
+        &|payload, signature, asset| {
+            crate::release_signature::verify_release_archive_bytes_with_signer(
+                payload,
+                signature,
+                asset,
+                &identities,
+                mvm_core::release_trust::RELEASE_OIDC_ISSUER,
+            )
+        },
+    )
+}
+
+/// Whether `signature` is the release's signature over `payload`, the bytes
+/// published as `asset`, and who signed it.
+pub(super) type SignatureCheck<'a> = dyn Fn(
+        &[u8],
+        &[u8],
+        &str,
+    ) -> Result<
+        mvm_core::crypto::image_verify::VerifiedSigner,
+        crate::runtime_overlay::RuntimeOverlayError,
+    > + 'a;
+
+/// [`verify_release_archive`] with the signature check as a parameter. The
+/// one production caller passes the release verifier; nothing outside this
+/// module's parent can name this function, so no other crate can supply a
+/// check of its own.
+pub(super) fn verify_release_archive_signed_by(
+    archive: &Path,
+    checksum: &Path,
+    bundle: &Path,
+    version: &str,
+    arch: GuestArch,
+    signed_by: &SignatureCheck<'_>,
+) -> Result<VerifiedRuntimeManifest, GuestRuntimeError> {
     let asset = crate::guest_bins::guest_bins_archive_name(version);
     let (bytes, digest) = read_and_digest_archive(archive)?;
     let checksum_bytes = std::fs::read(checksum)?;
@@ -558,7 +600,8 @@ pub(super) fn verify_release_archive(
             Some(signature) => signature,
             None => std::fs::read(&checksum_bundle)?,
         };
-        verify_checksum_signature_bytes(&checksum_bytes, &signature, version)?;
+        tracing::info_span!("verify_checksum_signature_bytes")
+            .in_scope(|| signed_by(&checksum_bytes, &signature, &format!("{asset}.sha256")))?;
         Some(signature)
     } else {
         None
@@ -576,13 +619,7 @@ pub(super) fn verify_release_archive(
         Some(signature) => signature,
         None => std::fs::read(bundle)?,
     };
-    let signer = crate::release_signature::verify_release_archive_bytes_with_signer(
-        &bytes,
-        &signature,
-        &asset,
-        &mvm_core::release_trust::accepted_release_identities(version),
-        mvm_core::release_trust::RELEASE_OIDC_ISSUER,
-    )?;
+    let signer = signed_by(&bytes, &signature, &asset)?;
     let snapshot = write_archive_snapshot(&bytes)?;
     let manifest = read_authenticated_manifest(&bytes, version)?;
     let verified = VerifiedRuntimeManifest {

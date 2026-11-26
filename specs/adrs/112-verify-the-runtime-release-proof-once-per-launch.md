@@ -167,9 +167,13 @@ This gives a launch of about 1.7 s on the idle VM (projected from the spans:
 
 ## What this does not do
 
-- It does not reach 300 ms. After it, the launch is dominated by about 640 ms for
+- It does not reach 300 ms. After it, the launch was dominated by about 640 ms for
   the one verification, about 320 ms in `grants_budget_and_host_interface`, about
-  300 ms in `driver_boot`, and teardown. Each is a separate piece of work.
+  300 ms in `driver_boot`, and teardown. Each is a separate piece of work. The
+  one verification has since been cut by the adopted alternative below: on an
+  Apple M4 Max with a load average of 17.6 / 40.1 / 47.7 across 16 cores, its
+  median CPU time on the signed `v0.28.0-rc.11` archive went from 236.8 ms to
+  32.3 ms. It has not been re-measured on the idle VM the 640 ms came from.
 - It does not make a warm claim faster than a cold boot through the CLI. A warm
   claim costs the same admission and attach work, which is what this removes.
 - It does not change which signatures are accepted or by whom.

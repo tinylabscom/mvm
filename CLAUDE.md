@@ -875,16 +875,22 @@ this row as enforced without it.
     everywhere. The Firecracker launch proof is stricter: it re-verifies the
     archive's signed bundle at every launch and `MVM_SKIP_COSIGN_VERIFY` does
     not waive it, so a locally built archive can be assembled from but never
-    launched under Firecracker. That launch check authenticates the archive's
-    bytes — its digest against the signed checksum, and both bundles — and
-    reads the manifest from the archive's first entry (`read_release_manifest`);
-    it does not decompress or hash the members. Whether the members agree with
-    the manifest is established before signing (`check_release_archive`) and
-    again at acquisition and assembly (`install_release_guest_runtime`), not
-    at launch
-    (`a_launch_does_not_compare_members_with_the_manifest`,
-    `installing_an_authenticated_archive_still_walks_its_members`). No
-    published release carries the asset yet.
+    launched under Firecracker.
+
+    Every release launch, on every backend, authenticates the archive's bytes
+    — its digest against the signed checksum, and both bundles — and reads the
+    manifest from the archive's first entry (`read_release_manifest`); it does
+    not decompress or hash the members, and it refuses an archive whose
+    manifest is not the first entry. Whether the members agree with the
+    manifest is established before signing (`check_release_archive`) and again
+    at acquisition and assembly (`install_release_guest_runtime`), not at
+    launch
+    (`a_launch_reads_the_manifest_of_authenticated_bytes_without_walking_members`,
+    `a_launch_does_not_compare_members_with_the_manifest`,
+    `installing_an_authenticated_archive_still_walks_its_members`). Those
+    launch tests use a stand-in signature check private to `mvm-build`'s own
+    tests, so they witness the order and the missing walk, not Sigstore. The
+    published `v0.28.0-rc.2`, `rc.4` and `rc.5` releases carry the asset.
 
     The release job also attests build provenance for the binary tarballs
     (`actions/attest-build-provenance`, verifiable with `gh attestation

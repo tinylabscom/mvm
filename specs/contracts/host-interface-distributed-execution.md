@@ -654,6 +654,8 @@ its members (about 42 MB uncompressed); the decompress-and-hash step alone is 42
 M1 CI runner, which runs a source-built runtime, never takes this path and shows
 `admit_plan` at 26 ms and `attach_overlay` at 220 ms. A throwaway local change that
 cached only the member check took the launch from about 5.58 s to about 3.03 s.
+A launch has since stopped decompressing and hashing the members: it
+authenticates the archive and reads its manifest (ADR-112).
 The decision to verify once per launch, the conditions that keep it the same
 verification, the alternatives and the tests it needs are in
 [ADR-112](../adrs/112-verify-the-runtime-release-proof-once-per-launch.md); the
