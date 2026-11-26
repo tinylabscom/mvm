@@ -366,9 +366,28 @@ repairs and mutates nothing. A trusted root can still change state after the
 observations, and advisory exclusion is effective only when all mutators
 participate.
 
-Stable installer deployment, every state writer and transition, durable crash
-meaning, permit consumption, key/journal/receipt/completion effects, endpoint,
-VM and factory remain unimplemented.
+The first source-only durable transition consumes one
+`CommissioningBootstrapPermit` for the exact reloaded intent and creates only
+the fixed state child with one canonical `Prepared` record and null preparation
+evidence. Before consumption it validates the authority root and permanent
+lock, acquires the lock without waiting, reloads the intent, requires the
+retained authority directory's complete policy, freshly validates the current
+fixed authority path and requires it to name the retained directory. It then
+requires the process effective UID and GID to equal the authority role and
+refuses any preexisting state child in any form. Finally it revalidates and
+permanently consumes the live peer permit immediately before exclusive,
+no-follow `0600` creation. The opened descriptor is revalidated before
+canonical bytes are written; file and authority-directory synchronization
+precede a strict reload requiring exactly the matching interrupted `Prepared`
+record. The guard remains held through that observation. Every failure after consumption is
+publication-unknown; the operation never unlinks, truncates, overwrites,
+repairs, retries or returns the permit.
+
+This transition linearizes only the authority state child among cooperating
+lock users. Deployment-wide sibling freshness, root-side installer
+serialization and crash recovery remain unresolved. Stable installer
+deployment, later state transitions, key/journal/receipt/completion effects,
+endpoint, VM and factory remain unimplemented.
 The v1 preflight checks only these fixed sibling conflict names; it does not
 claim to discover arbitrary state beneath a future authority-owned
 subdirectory. Trusted installation and state mutation must be serialized across

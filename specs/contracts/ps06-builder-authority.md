@@ -230,11 +230,26 @@ Proposed trusted setup sequence:
    creates, repairs and mutates nothing. A trusted root can still change state
    after validation, and advisory exclusion requires every mutator to
    participate.
-   These validators, loaders and the exclusion primitive prove neither
-   authority, freshness, durable crash meaning nor an atomic snapshot. Stable
-   installer deployment, transition methods, the log writer, permit
-   consumption, key/journal/receipt effects, endpoint, VM, factory and every
-   commissioning effect remain unimplemented.
+   A fixed source-only transition now writes only the first durable state. It
+   validates and nonblockingly acquires that permanent lock, reloads the exact
+   intent, revalidates the retained authority directory's complete policy, and
+   freshly validates the current fixed authority path as the same directory.
+   It then requires the process effective UID and GID to equal the intent
+   authority role and refuses any form of preexisting state before consuming
+   the exact one-use bootstrap permit. Immediately after live peer
+   revalidation and permanent permit consumption it exclusively creates only
+   `owner-commissioning-state.jsonl`, validates the opened authority-owned
+   single-link regular `0600` descriptor with zero length and no extended ACL,
+   writes exactly one canonical `Prepared` record with null preparation
+   evidence and the held lock identity, synchronizes file then directory, and
+   strictly reloads exactly that interrupted record while the guard remains
+   held. Every post-consumption error is publication-unknown and no cleanup,
+   overwrite, repair, retry or permit return exists.
+   This operation linearizes only that authority state child among cooperating
+   lock users. It does not establish deployment-wide sibling freshness.
+   Root-side installer serialization and crash recovery remain unresolved.
+   Stable installer deployment, later transitions, key/journal/receipt effects,
+   endpoint, VM and factory remain unimplemented.
 2. A fixed initialization entry point runs as the authority UID, exclusively
    locks the authority namespace under that future design and creates the issuer
    only for that intent.

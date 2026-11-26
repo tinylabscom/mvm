@@ -22,6 +22,10 @@ pub const PROTECTED_AUTHORITY_ROOT_PATH: &str = "/private/var/db/mvm/authority";
 #[must_use]
 pub struct ProtectedAuthorityRoot {
     directory: File,
+    #[cfg(feature = "hvf-owner-prepared-writer")]
+    device: u64,
+    #[cfg(feature = "hvf-owner-prepared-writer")]
+    inode: u64,
 }
 
 impl ProtectedAuthorityRoot {
@@ -45,6 +49,70 @@ impl ProtectedAuthorityRoot {
             Mode::empty(),
         )
         .map(File::from)
+    }
+
+    /// Observe only whether the fixed state child exists, without following it.
+    #[cfg(feature = "hvf-owner-prepared-writer")]
+    pub(crate) fn commissioning_state_child_exists(&self) -> Result<bool, rustix::io::Errno> {
+        match rustix::fs::statat(
+            &self.directory,
+            "owner-commissioning-state.jsonl",
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Ok(_) => Ok(true),
+            Err(rustix::io::Errno::NOENT) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Create only the fixed state child with the closed writer flags and mode.
+    #[cfg(feature = "hvf-owner-prepared-writer")]
+    pub(crate) fn create_commissioning_state(&self) -> Result<File, rustix::io::Errno> {
+        rustix::fs::openat(
+            &self.directory,
+            "owner-commissioning-state.jsonl",
+            OFlags::WRONLY
+                | OFlags::CREATE
+                | OFlags::EXCL
+                | OFlags::NOFOLLOW
+                | OFlags::NONBLOCK
+                | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map(File::from)
+    }
+
+    /// Synchronize the validated authority directory after fixed-child creation.
+    #[cfg(feature = "hvf-owner-prepared-writer")]
+    pub(crate) fn sync_directory(&self) -> std::io::Result<()> {
+        self.directory.sync_all()
+    }
+
+    /// Revalidate the retained directory's complete authority policy.
+    #[cfg(feature = "hvf-owner-prepared-writer")]
+    pub(crate) fn revalidate(
+        &self,
+        intent: &LoadedHvfOwnerCommissioningIntent,
+    ) -> Result<(), ProtectedAuthorityRootError> {
+        require_authority_directory(
+            &self.directory,
+            intent.authority_role().uid(),
+            intent.authority_role().gid(),
+        )?;
+        let metadata = self
+            .directory
+            .metadata()
+            .map_err(|_| ProtectedAuthorityRootError::Unavailable)?;
+        if metadata.dev() != self.device || metadata.ino() != self.inode {
+            return Err(ProtectedAuthorityRootError::AuthorityPolicy);
+        }
+        Ok(())
+    }
+
+    /// Compare retained directory identity with a fresh fixed-path validation.
+    #[cfg(feature = "hvf-owner-prepared-writer")]
+    pub(crate) fn same_identity(&self, fresh: &Self) -> bool {
+        self.device == fresh.device && self.inode == fresh.inode
     }
 }
 
@@ -171,8 +239,16 @@ fn validate_from_db_root(
         intent.authority_role().uid(),
         intent.authority_role().gid(),
     )?;
+    #[cfg(feature = "hvf-owner-prepared-writer")]
+    let metadata = authority
+        .metadata()
+        .map_err(|_| ProtectedAuthorityRootError::Unavailable)?;
     Ok(ProtectedAuthorityRoot {
         directory: authority,
+        #[cfg(feature = "hvf-owner-prepared-writer")]
+        device: metadata.dev(),
+        #[cfg(feature = "hvf-owner-prepared-writer")]
+        inode: metadata.ino(),
     })
 }
 

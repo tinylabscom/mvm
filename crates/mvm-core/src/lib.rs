@@ -78,6 +78,12 @@ pub mod hvf_owner_commissioning_state;
 /// Strict protected commissioning record for the cold-HVF owner roles.
 #[cfg(any(target_os = "macos", all(unix, feature = "test-support")))]
 pub mod hvf_owner_deployment_receipt;
+/// Create-only publication of the first canonical protected commissioning state.
+#[cfg(all(
+    feature = "hvf-owner-prepared-writer",
+    any(target_os = "macos", all(unix, feature = "test-support"))
+))]
+pub mod hvf_owner_prepared_writer;
 /// Read-only descriptor validation of the protected authority state root.
 #[cfg(any(target_os = "macos", all(unix, feature = "test-support")))]
 pub mod hvf_owner_protected_authority_root;

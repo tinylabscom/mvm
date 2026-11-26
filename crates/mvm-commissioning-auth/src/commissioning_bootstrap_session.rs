@@ -1,6 +1,6 @@
 //! In-memory, one-use commissioning-bootstrap authorization.
 //!
-//! A session owns one [`VerifiedMacPeer`], binds it to one short-lived exchange,
+//! A session owns one [`crate::macos_peer::VerifiedMacPeer`], binds it to one short-lived exchange,
 //! and can move it into one permit. It opens no endpoint and performs no durable
 //! or VM effect.
 
@@ -44,6 +44,52 @@ pub enum SessionError {
     /// The live macOS peer no longer satisfies its verified observation.
     #[error("commissioning-bootstrap peer revalidation failed")]
     PeerRevalidation,
+}
+
+/// Refusal while consuming a permit for the fixed `Prepared` publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PreparedPermitConsumptionError {
+    /// The requested operation did not name the permit's exact intent.
+    #[error("commissioning-bootstrap permit intent does not match")]
+    IntentDigestMismatch,
+    /// The retained live macOS peer no longer satisfies its verified observation.
+    #[error("commissioning-bootstrap peer revalidation failed")]
+    PeerRevalidation,
+}
+
+/// Opaque proof that one permit was consumed for the exact `Prepared` intent.
+///
+/// This zero-sized value is intentionally neither cloneable nor serializable.
+/// It carries no generic authorization surface and cannot be constructed
+/// outside this crate.
+///
+/// ```compile_fail
+/// use mvm_commissioning_auth::commissioning_bootstrap_session::ConsumedPreparedAuthorization;
+///
+/// fn duplicate(authorization: ConsumedPreparedAuthorization) {
+///     let _copy = authorization.clone();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use mvm_commissioning_auth::commissioning_bootstrap_session::ConsumedPreparedAuthorization;
+///
+/// fn forge() -> ConsumedPreparedAuthorization {
+///     ConsumedPreparedAuthorization { _private: () }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use mvm_commissioning_auth::commissioning_bootstrap_session::ConsumedPreparedAuthorization;
+///
+/// fn serialize(authorization: &ConsumedPreparedAuthorization) {
+///     let _bytes = serde_json::to_vec(authorization).unwrap();
+/// }
+/// ```
+#[derive(Debug)]
+#[must_use]
+pub struct ConsumedPreparedAuthorization {
+    _private: (),
 }
 
 impl From<CodecError> for SessionError {
@@ -356,7 +402,7 @@ impl fmt::Debug for CommissioningBootstrapPermit {
         formatter
             .debug_struct("CommissioningBootstrapPermit")
             .field("intent_digest", &"[REDACTED]")
-            .field("peer", &self.peer)
+            .field("peer", &"[REDACTED]")
             .finish()
     }
 }
@@ -376,6 +422,141 @@ impl CommissioningBootstrapPermit {
     /// weaker UID-only success path.
     pub fn revalidate(&self) -> Result<(), crate::macos_peer::MacPeerVerificationError> {
         self.peer.revalidate()
+    }
+
+    /// Consumes this permit for one exact source-only `Prepared` publication.
+    ///
+    /// Digest comparison precedes live peer revalidation. Regardless of the
+    /// result, ownership is terminal: no permit or recoverable authorization is
+    /// returned on refusal.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an inexact intent digest or any live peer revalidation failure.
+    pub fn consume_for_prepared(
+        self,
+        exact_intent_digest: [u8; 32],
+    ) -> Result<ConsumedPreparedAuthorization, PreparedPermitConsumptionError> {
+        if self.intent_digest != exact_intent_digest {
+            return Err(PreparedPermitConsumptionError::IntentDigestMismatch);
+        }
+        self.peer
+            .revalidate()
+            .map_err(|_| PreparedPermitConsumptionError::PeerRevalidation)?;
+        Ok(ConsumedPreparedAuthorization { _private: () })
+    }
+}
+
+/// Test-only construction and observation for real permit-consumption paths.
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use super::{ConsumedPreparedAuthorization, PreparedPermitConsumptionError};
+
+    /// Fixture-only permit accepted exclusively by the hermetic writer seam.
+    ///
+    /// This is a distinct type from the production
+    /// [`super::CommissioningBootstrapPermit`].
+    #[derive(Debug)]
+    pub struct TestPreparedPermit {
+        intent_digest: [u8; 32],
+        revalidation_succeeds: bool,
+        consumed: Arc<AtomicBool>,
+    }
+
+    impl TestPreparedPermit {
+        /// Exact fixture intent digest.
+        #[must_use]
+        pub fn intent_digest(&self) -> &[u8; 32] {
+            &self.intent_digest
+        }
+
+        /// Consume this fixture through the same digest-then-revalidation order.
+        pub fn consume_for_prepared(
+            self,
+            exact_intent_digest: [u8; 32],
+        ) -> Result<ConsumedPreparedAuthorization, PreparedPermitConsumptionError> {
+            if self.intent_digest != exact_intent_digest {
+                return Err(PreparedPermitConsumptionError::IntentDigestMismatch);
+            }
+            self.consumed.store(true, Ordering::SeqCst);
+            if !self.revalidation_succeeds {
+                return Err(PreparedPermitConsumptionError::PeerRevalidation);
+            }
+            Ok(ConsumedPreparedAuthorization { _private: () })
+        }
+    }
+
+    /// Observation handle for whether live revalidation was attempted.
+    #[derive(Debug)]
+    pub struct PreparedPermitProbe {
+        consumed: Arc<AtomicBool>,
+    }
+
+    impl PreparedPermitProbe {
+        /// Reports whether the consuming operation reached live revalidation.
+        #[must_use]
+        pub fn was_consumed(&self) -> bool {
+            self.consumed.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Builds a permit fixture owned by the authentication crate.
+    ///
+    /// This constructor is unavailable unless the explicit `test-support`
+    /// feature is enabled.
+    #[must_use]
+    pub fn prepared_permit(
+        intent_digest: [u8; 32],
+        revalidation_succeeds: bool,
+    ) -> (TestPreparedPermit, PreparedPermitProbe) {
+        let consumed = Arc::new(AtomicBool::new(false));
+        (
+            TestPreparedPermit {
+                intent_digest,
+                revalidation_succeeds,
+                consumed: Arc::clone(&consumed),
+            },
+            PreparedPermitProbe { consumed },
+        )
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod prepared_permit_tests {
+    use super::{PreparedPermitConsumptionError, test_support::prepared_permit};
+
+    #[test]
+    fn exact_digest_precedes_terminal_live_revalidation() {
+        let (mismatch, mismatch_probe) = prepared_permit([1; 32], true);
+        assert!(matches!(
+            mismatch.consume_for_prepared([2; 32]),
+            Err(PreparedPermitConsumptionError::IntentDigestMismatch)
+        ));
+        assert!(
+            !mismatch_probe.was_consumed(),
+            "digest mismatch must not attempt live revalidation"
+        );
+
+        let (refused, refused_probe) = prepared_permit([1; 32], false);
+        assert!(matches!(
+            refused.consume_for_prepared([1; 32]),
+            Err(PreparedPermitConsumptionError::PeerRevalidation)
+        ));
+        assert!(
+            refused_probe.was_consumed(),
+            "exact digest must reach terminal live revalidation"
+        );
+
+        let (accepted, accepted_probe) = prepared_permit([1; 32], true);
+        let _authorization = accepted
+            .consume_for_prepared([1; 32])
+            .expect("exact live permit is consumed");
+        assert!(accepted_probe.was_consumed());
     }
 }
 

@@ -28,6 +28,8 @@ serde_json.workspace = true
 [features]
 default = []
 native-caller-identity = ["dep:core-foundation", "dep:security-framework"]
+# Non-production constructors and observations for exercising permit consumers.
+test-support = []
 
 [lints]
 workspace = true

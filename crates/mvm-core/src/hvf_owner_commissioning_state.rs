@@ -249,6 +249,12 @@ struct RecordContentV1 {
     evidence: PhaseEvidenceV1,
 }
 
+#[cfg(feature = "hvf-owner-prepared-writer")]
+pub(crate) struct EncodedPreparedRecord {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) digest: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "phase", deny_unknown_fields)]
 enum PhaseEvidenceV1 {
@@ -353,7 +359,7 @@ pub fn load_test_hvf_owner_commissioning_state(
     load_from_root(root, intent)
 }
 
-fn load_from_root(
+pub(crate) fn load_from_root(
     root: &ProtectedAuthorityRoot,
     intent: &LoadedHvfOwnerCommissioningIntent,
 ) -> Result<CommissioningStateObservation, HvfOwnerCommissioningStateError> {
@@ -529,6 +535,37 @@ fn record_digest(content: &RecordContentV1) -> [u8; 32] {
     hasher.update(RECORD_DOMAIN);
     hasher.update(canonical);
     hasher.finalize().into()
+}
+
+#[cfg(feature = "hvf-owner-prepared-writer")]
+pub(crate) fn encode_prepared_record(
+    intent: &LoadedHvfOwnerCommissioningIntent,
+    lock_device: u64,
+    lock_inode: u64,
+) -> EncodedPreparedRecord {
+    let content = RecordContentV1 {
+        schema_version: COMMISSIONING_STATE_VERSION,
+        sequence: 1,
+        previous_record_digest: ZERO_DIGEST,
+        intent_digest: intent.digest(),
+        deployment_id: intent.deployment_id().to_owned(),
+        deployment_epoch: intent.deployment_epoch(),
+        authority_uid: intent.authority_role().uid(),
+        authority_gid: intent.authority_role().gid(),
+        lock_device,
+        lock_inode,
+        evidence: PhaseEvidenceV1::Prepared {
+            preparation_evidence_digest: None,
+        },
+    };
+    let digest = record_digest(&content);
+    let mut bytes = serde_json::to_vec(&RecordV1 {
+        content,
+        record_digest: digest,
+    })
+    .expect("fixed commissioning state record serializes");
+    bytes.push(b'\n');
+    EncodedPreparedRecord { bytes, digest }
 }
 
 #[cfg(test)]

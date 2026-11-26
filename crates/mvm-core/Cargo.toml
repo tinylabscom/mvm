@@ -11,6 +11,7 @@ authors.workspace = true
 
 [dependencies]
 mvm-contract = { workspace = true, default-features = false, features = ["protocol", "volume"] }
+mvm-commissioning-auth = { workspace = true, optional = true }
 anyhow.workspace = true
 base64.workspace = true
 # Host-only: the `did_key` module's did:key codec. Optional so guest binaries
@@ -126,6 +127,8 @@ tss-esapi = { version = "7", optional = true }
 
 [features]
 default = []
+# Fixed source-only publication of the first protected commissioning state.
+hvf-owner-prepared-writer = ["dep:mvm-commissioning-auth"]
 # OS-native key storage is host-only. Guest binaries retain the encrypted
 # file/env providers without carrying the keyring crate or its logging edge.
 os-keyring = ["dep:keyring"]
@@ -172,7 +175,7 @@ client = ["dep:async-trait"]
 client-remote = ["client", "dep:mvm-http"]
 # Expose `plan::signing::test_support` (shared `ExecutionPlan` fixtures) to
 # other crates' test builds without shipping the fixtures in a release build.
-test-support = []
+test-support = ["mvm-commissioning-auth?/test-support"]
 # Host control-channel transport, shared async framing and the Unix
 # signer-helper client. Gated so the default closure carries no tokio.
 # The workspace Tokio selection supplies the client's net/time support.
@@ -271,6 +274,8 @@ required-features = ["host-state"]
 [dev-dependencies]
 # Independent wire-format oracle for at-rest and session encryption tests.
 aes-gcm.workspace = true
+# Auth-owned fixtures exercise consuming writer paths without a production forge API.
+mvm-commissioning-auth = { workspace = true, features = ["test-support"] }
 # Test-only: the mandatory-deny range test parses CIDRs to cross-check the
 # generated iptables script. No production path in this crate uses it.
 ipnet = { workspace = true }

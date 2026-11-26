@@ -4007,6 +4007,7 @@ dependencies = [
  "ipnet",
  "keyring",
  "libc",
+ "mvm-commissioning-auth",
  "mvm-contract",
  "mvm-crypto",
  "mvm-http",
