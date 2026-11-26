@@ -1,11 +1,11 @@
 # ADR-112 — Verify the signed runtime release proof once per launch
 
-Backing: preview
-Validation: none
+Backing: shipped-source
+Validation: a_launch_reads_the_manifest_of_authenticated_bytes_without_walking_members
 
-**Status: Proposed.** Direction chosen on 2026-11-14: verify once. The
-claim-20 and claim-3 consequences and the assurance boundary still require
-owner review before this design is considered accepted.
+**Status: Accepted.** Direction chosen on 2026-11-14: verify once. Accepted on
+2026-11-26 after security review of the claim-20 and claim-3 consequences and
+the assurance boundary (issue #5931).
 
 ## Summary, for a reader in a hurry
 
@@ -24,7 +24,7 @@ owner review before this design is considered accepted.
 - This does not reach 300 ms on its own. It is the largest single step toward
   it, and it is what makes the remaining costs visible.
 - What changes is when a signed artifact is checked, which is claim 20 territory,
-  so the exact conditions are written down below and need review.
+  so the exact conditions are written down below.
 
 ## Context
 
