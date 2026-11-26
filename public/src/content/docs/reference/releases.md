@@ -51,10 +51,10 @@ leaves the tag staged; the fix ships as a new tag. The same check runs locally
 with `just e2e smoke-fresh-install [version]`, leaving `~/.mvm` and `~/.local`
 alone.
 
-The lanes live in `.github/workflows/first-run-smoke.yml`, which `release.yml`
-calls. To prove them on the real runners before a tag depends on them,
+The lanes live in `.github/workflows/release-smoke.yml` (lane `first-run`), which
+`release.yml` calls. To prove them on the real runners before a tag depends on them,
 dispatch that workflow against a published tag:
-`gh workflow run first-run-smoke.yml --ref main -f tag=v0.18.0-rc.1`. The
+`gh workflow run release-smoke.yml --ref main -f lane=first-run -f tag=v0.18.0-rc.1`. The
 installer and the smoke script come from the dispatched ref; the binaries and
 artifacts come from the tag. That exercises the runners, the installer, and
 that tag's first run. It does not exercise code that has not been released yet:
@@ -81,9 +81,10 @@ There is no aarch64 leg: no hosted arm64 runner exposes KVM. CI's
 `test-musl-confinement` lane covers both architectures without a guest, running
 the endpoint's seccomp tests against the musl build on every pull request.
 
-The lane lives in `.github/workflows/release-archive-smoke.yml`. Dispatch it
-with the id of an earlier release run to smoke the archive that run built:
-`gh workflow run release-archive-smoke.yml --ref main -f run_id=<id> -f tag=<tag>`.
+The lane lives in `.github/workflows/release-smoke.yml` (lane `release-archive`).
+Dispatch it with the id and attempt of an earlier release run to smoke the
+archive that run built:
+`gh workflow run release-smoke.yml --ref main -f lane=release-archive -f run_id=<id> -f run_attempt=<n> -f tag=<tag>`.
 
 ## How each install path consumes a release
 

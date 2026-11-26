@@ -477,7 +477,7 @@ class CandidateTransportTests(unittest.TestCase):
         self.assertNotIn("overwrite: true", guest)
         distro = (workflows / "distro-packages.yml").read_text()
         self.assertIn("name: mvm-guest-bins-attempt-${{ github.run_attempt }}", distro)
-        smoke = (workflows / "release-archive-smoke.yml").read_text()
+        smoke = (workflows / "release-smoke.yml").read_text()
         self.assertIn("name: mvm-guest-bins-attempt-${{ github.run_attempt }}", smoke)
         self.assertIn("name: mvm-guest-bins-attempt-${{ inputs.run_attempt }}", smoke)
         self.assertIn("run_attempt requires run_id", smoke)

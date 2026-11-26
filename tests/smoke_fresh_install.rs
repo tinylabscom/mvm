@@ -1237,12 +1237,26 @@ fn the_job_timeout_covers_every_default_budget() {
     })
     .sum();
 
-    for name in ["first-run-smoke.yml", "release-archive-smoke.yml"] {
-        let workflow = std::fs::read_to_string(root.join(".github/workflows").join(name)).unwrap();
-        let minutes: u64 = workflow
+    let workflow =
+        std::fs::read_to_string(root.join(".github/workflows/release-smoke.yml")).unwrap();
+    for name in ["first-run-smoke", "release-archive-smoke"] {
+        let start = workflow.find(&format!("\n  {name}:\n")).unwrap() + 1;
+        let rest = &workflow[start..];
+        // The job ends where the next two-space-indented key begins.
+        let end = rest[1..]
+            .lines()
+            .scan(0, |at, l| {
+                let here = *at;
+                *at += l.len() + 1;
+                Some((here, l))
+            })
+            .find(|(_, l)| l.starts_with("  ") && !l.starts_with("   ") && !l.starts_with("  #"))
+            .map_or(rest.len(), |(at, _)| at + 1);
+        let job = &rest[..end];
+        let minutes: u64 = job
             .lines()
             .find_map(|line| line.trim().strip_prefix("timeout-minutes:"))
-            .unwrap_or_else(|| panic!("the job in {name} must set a timeout"))
+            .unwrap_or_else(|| panic!("the {name} job must set a timeout"))
             .trim()
             .parse()
             .unwrap();

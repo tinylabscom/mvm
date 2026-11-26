@@ -7,7 +7,7 @@
 //! way the installer and `mvmctl update` need it gated.
 //!
 //! Classification (each test reads a workflow, recipe or script as text):
-//! - Owned gate: `release.yml`, `first-run-smoke.yml`, `distro-packages.yml`,
+//! - Owned gate: `release.yml`, `release-smoke.yml`, `distro-packages.yml`,
 //!   `workers.yml`, `update-image-pin.yml` and the `Justfile` run only on a
 //!   tag, a cron or a dispatch. Nothing executes them on a pull request, so
 //!   this file is the PR-time check that their wiring (job order, signing
@@ -33,7 +33,7 @@ fn release_workflow() -> String {
 /// The first-run lanes `release.yml` calls after publishing a tag, and a
 /// maintainer dispatches against a candidate before tagging.
 fn first_run_smoke_workflow() -> String {
-    let path = Path::new(".github/workflows/first-run-smoke.yml");
+    let path = Path::new(".github/workflows/release-smoke.yml");
     fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
@@ -903,8 +903,8 @@ fn the_cli_release_ships_its_guest_runtime_signed_and_listed() {
 /// before anything is published.
 #[test]
 fn the_archive_smoke_pairs_mvmctl_with_its_unpublished_guest_runtime() {
-    let lane = fs::read_to_string(".github/workflows/release-archive-smoke.yml")
-        .expect("release-archive-smoke.yml");
+    let lane =
+        fs::read_to_string(".github/workflows/release-smoke.yml").expect("release-smoke.yml");
     let smoke = job_block(&lane, "release-archive-smoke");
     for attempt in ["github.run_attempt", "inputs.run_attempt"] {
         assert!(
@@ -1568,7 +1568,8 @@ fn a_stable_tag_is_promoted_only_after_a_fresh_install_boots() {
         "the smoke runs for a pushed tag whose asset set verified"
     );
     assert!(
-        gate.contains("    uses: ./.github/workflows/first-run-smoke.yml\n")
+        gate.contains("    uses: ./.github/workflows/release-smoke.yml\n")
+            && gate.contains("      lane: first-run\n")
             && gate.contains("      tag: ${{ github.ref_name }}\n"),
         "the release must run the shared first-run lanes against exactly the \
          tag being released"
@@ -1578,16 +1579,21 @@ fn a_stable_tag_is_promoted_only_after_a_fresh_install_boots() {
     let lanes_on = lanes
         .split("\npermissions:")
         .next()
-        .expect("first-run-smoke.yml has an `on:` block");
+        .expect("release-smoke.yml has an `on:` block");
     assert!(
         lanes_on.contains("  workflow_call:\n")
             && lanes_on.contains("  workflow_dispatch:\n")
             && lanes_on.matches("      tag:\n").count() == 2
-            && lanes_on.matches("        required: true\n").count() == 2,
+            && lanes_on.matches("      lane:\n").count() == 2,
         "the lanes must be callable by the release and dispatchable against a \
-         published candidate, each with a required tag"
+         published candidate, each selecting its lane and taking a tag"
     );
     let smoke = job_block(&lanes, "first-run-smoke");
+    assert!(
+        smoke.contains("if: inputs.lane == 'first-run'")
+            && smoke.contains(r#"test -n "$TAG_NAME""#),
+        "the first-run lane runs only when selected and still refuses an empty tag"
+    );
     assert!(
         smoke.contains(r#"run: sh scripts/smoke-fresh-install.sh "${TAG_NAME}""#)
             && smoke.contains("TAG_NAME: ${{ inputs.tag }}"),
@@ -1701,7 +1707,8 @@ fn the_release_publishes_only_an_archive_whose_first_run_egress_passed() {
     let gate = job_block(&workflow, "release-archive-smoke");
     assert!(
         gate.contains("    needs: [build, guest-runtime, runtime-proof-candidate]\n")
-            && gate.contains("    uses: ./.github/workflows/release-archive-smoke.yml\n"),
+            && gate.contains("    uses: ./.github/workflows/release-smoke.yml\n")
+            && gate.contains("      lane: release-archive\n"),
         "the archive smoke must run the shared lane on what `build` uploaded"
     );
     assert!(
@@ -1724,13 +1731,13 @@ fn the_release_publishes_only_an_archive_whose_first_run_egress_passed() {
         "the smoke downloads the x86_64 Linux archive by the name the build uploads it under"
     );
 
-    let path = Path::new(".github/workflows/release-archive-smoke.yml");
+    let path = Path::new(".github/workflows/release-smoke.yml");
     let lane = fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     let lane_on = lane
         .split("\npermissions:")
         .next()
-        .expect("release-archive-smoke.yml has an `on:` block");
+        .expect("release-smoke.yml has an `on:` block");
     assert!(
         lane_on.contains("  workflow_call:\n") && lane_on.contains("  workflow_dispatch:\n"),
         "the lane must be callable by the release and dispatchable against an earlier run"
@@ -2076,4 +2083,71 @@ fn the_fresh_install_smoke_recipe_runs_the_release_gate_script() {
         justfile().contains("smoke-fresh-install) ./scripts/smoke-fresh-install.sh \"$@\" ;;\n"),
         "the recipe must run the release gate's script with an optional version"
     );
+}
+
+/// Every `lane:` a `release.yml` caller hands `release-smoke.yml` must be one the
+/// file defines, or all its jobs skip and the call reads as success. The
+/// accepted set is read from the file's own lane conditions and its guard.
+#[test]
+fn every_release_smoke_caller_names_a_lane_the_file_defines() {
+    let smoke = first_run_smoke_workflow();
+    let defined: Vec<String> = smoke
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("if: inputs.lane == '"))
+        .map(|l| l.trim_end_matches('\'').to_string())
+        .collect();
+    assert_eq!(
+        defined.len(),
+        3,
+        "one lane condition per smoke job: {defined:?}"
+    );
+    let guard = job_block(&smoke, "unknown-lane");
+    for lane in &defined {
+        assert!(
+            guard.contains(&format!("\"{lane}\"")),
+            "the unknown-lane guard must accept {lane}"
+        );
+    }
+    let accepted = guard
+        .lines()
+        .find(|l| l.contains("fromJSON"))
+        .unwrap_or_default();
+    assert_eq!(
+        accepted.matches('"').count() / 2,
+        defined.len(),
+        "guard lanes match job lanes"
+    );
+    assert!(guard.contains("exit 1"), "the guard must fail the run");
+
+    let workflow = release_workflow();
+    let mut callers = 0;
+    for (at, _) in workflow.match_indices("uses: ./.github/workflows/release-smoke.yml\n") {
+        callers += 1;
+        let lane = workflow[at..]
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("lane: "))
+            .expect("a release-smoke caller must pass lane");
+        assert!(defined.iter().any(|d| d == lane), "unknown lane {lane:?}");
+    }
+    assert_eq!(callers, defined.len(), "each lane has exactly one caller");
+}
+
+/// The archive and recipes lanes run only when selected, and the recipes lane
+/// refuses an empty tag.
+#[test]
+fn the_archive_and_recipes_lanes_are_selected_by_lane_and_recipes_needs_a_tag() {
+    let smoke = first_run_smoke_workflow();
+    assert!(
+        job_block(&smoke, "release-archive-smoke")
+            .contains("    if: inputs.lane == 'release-archive'\n")
+    );
+    let recipes = job_block(&smoke, "install");
+    assert!(recipes.contains("    if: inputs.lane == 'release-recipes'\n"));
+    assert!(
+        recipes.contains(r#"test -n "$TAG_NAME""#),
+        "an empty tag must be refused"
+    );
+    let workflow = release_workflow();
+    let release = job_block(&workflow, "recipe-install-smoke");
+    assert!(release.contains("      lane: release-recipes\n"));
 }

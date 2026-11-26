@@ -53,7 +53,7 @@ makepkg --printsrcinfo > .SRCINFO
 ```
 
 The release workflow publishes the signed generated recipes alongside the
-archives. `release-recipes-smoke.yml` installs the published PKGBUILD with
+archives. the `release-recipes` lane of `release-smoke.yml` installs the published PKGBUILD with
 `makepkg` and `pacman`, executes the installed CLI, loads hostlib, checks the
 installed guest archive bytes, and removes the package before stable promotion.
 The generation tests do not substitute for these installed-artifact checks or
