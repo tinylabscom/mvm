@@ -718,7 +718,7 @@ A few choices look unusual until you've seen them play out.
 
 **Why do `wrapper.json` and `runtime.json` carry overlapping fields?** Two consumers, two contracts. The agent owns `runtime.json` (and ships its schema via `mvm_agentd::runtime_config::RuntimeConfig` with `deny_unknown_fields`). The wrapper owns `wrapper.json` (its schema is in `nix/wrappers/README.md`). Splitting lets the agent and the wrapper evolve independently. The overlap is intentional duplication: both consumers need the same module/function/format triple to do their jobs.
 
-**Why busybox-as-PID-1?** Cold boot under 5 seconds. systemd would dominate the boot budget. ADR-0013 spells out the math and the trade-offs.
+**Why busybox-as-PID-1?** Cold boot under 5 seconds. systemd would dominate the boot budget.
 
 **Why do command-style entrypoints still exist?** Long-running services — web servers, queue workers, anything that doesn't fit "dispatch a function per call" — boot once and stay up. The function-call path is for fine-grained per-invocation workloads. The command-style path stays first-class.
 
@@ -748,5 +748,4 @@ A few choices look unusual until you've seen them play out.
 - **ADR-0003** — schema source-of-truth and SDK conformance
 - **ADR-0008** — function-service factories
 - **ADR-0009** — function entrypoint control protocol
-- **ADR-0013** — busybox-as-PID-1 strategy, microvm.nix adoption
 - The design for `mkFunctionWorkload`

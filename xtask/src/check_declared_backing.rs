@@ -116,7 +116,6 @@ const PENDING: &[&str] = &[
     "specs/adrs/010-code-quality-enforcement.md",
     "specs/adrs/011-feature-flag-taxonomy.md",
     "specs/adrs/012-ci-execution-policy.md",
-    "specs/adrs/013-usage-billing-model.md",
     "specs/adrs/014-signed-audited-execution-plans.md",
     "specs/adrs/015-hostd-protocol-versioning.md",
     "specs/adrs/016-hermetic-vm-lifecycle-testing.md",
