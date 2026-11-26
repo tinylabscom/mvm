@@ -188,15 +188,39 @@ This gives a launch of about 1.7 s on the idle VM (projected from the spans:
   saves about 65% of what the decided design saves. It is the fallback if the
   review wants a smaller change first. The throwaway used a process-wide cache,
   which is not what is proposed; see condition 1.
-- **Make one verification cheaper** with hardware SHA-256, by not decompressing
-  twice, or by trusting the signed manifest's member digests once the archive
-  digest is authenticated. Each changes what is checked and is a separate review.
+- **Make one verification cheaper** with hardware SHA-256 or by not
+  decompressing twice. Each changes what is checked and is a separate review.
+- **Trust the signed manifest's member digests once the archive digest is
+  authenticated.** Adopted on 2026-11-25 (issue #5931), after its own review.
+  Whether an archive's members agree with its manifest is a pure function of
+  the archive's bytes, so the verdict reached before signing
+  (`check_release_archive` in the release workflow) and again at acquisition
+  and installation (`acquire_release_guest_runtime`,
+  `install_release_guest_runtime`, `install_signed_guest_runtime_archive`)
+  holds for any copy whose digest and signatures a launch has just checked. A
+  launch therefore reads the manifest from the first entry of the bytes it
+  authenticated (`read_release_manifest`, under the 1 MiB manifest cap and a
+  bound on the decompressed stream) and does not decompress or hash the
+  members. The release contract makes the manifest the first entry, and both
+  publish and launch refuse an archive that puts it elsewhere. What a launch
+  no longer establishes itself is that a signed archive is internally
+  consistent: a publisher that signs an inconsistent archive is caught at
+  publish, acquisition or installation, not at launch, where the selected
+  overlay, verity sidecar and initramfs are still hashed against the signed
+  declaration. This is not a persisted verification record: nothing is written
+  and conditions 4 and 5 are unchanged. On the `v0.28.0-rc.11` archive it takes
+  one verification from about 237 ms to about 32 ms of CPU (medians of 15 fresh
+  processes, an optimized build on an Apple M4 Max under other load).
 - **Do nothing.** The launch stays at about 5.6 s, and no launch gate can pass.
 
 ## Consequences
 
 - Claim 20's guest-runtime path stays "verified at every launch": every launch
-  still performs the full archive check, once. The ADR-001 row and the boundaries
+  re-authenticates the whole archive (digest against the signed checksum, both
+  signatures) and reads the manifest from the first archive entry; the
+  member-by-member consistency check runs at publish and at
+  acquisition/bootstrap, and a launch relies on the signed digest to make that
+  verdict applicable to the bytes it holds. The ADR-001 row and the boundaries
   note need a sentence recording that the check is shared within a launch.
 - A launch writes one temporary archive copy instead of seven, which also
   narrows the window in which a copy could be tampered with.

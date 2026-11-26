@@ -875,7 +875,16 @@ this row as enforced without it.
     everywhere. The Firecracker launch proof is stricter: it re-verifies the
     archive's signed bundle at every launch and `MVM_SKIP_COSIGN_VERIFY` does
     not waive it, so a locally built archive can be assembled from but never
-    launched under Firecracker. No published release carries the asset yet.
+    launched under Firecracker. That launch check authenticates the archive's
+    bytes — its digest against the signed checksum, and both bundles — and
+    reads the manifest from the archive's first entry (`read_release_manifest`);
+    it does not decompress or hash the members. Whether the members agree with
+    the manifest is established before signing (`check_release_archive`) and
+    again at acquisition and assembly (`install_release_guest_runtime`), not
+    at launch
+    (`a_launch_does_not_compare_members_with_the_manifest`,
+    `installing_an_authenticated_archive_still_walks_its_members`). No
+    published release carries the asset yet.
 
     The release job also attests build provenance for the binary tarballs
     (`actions/attest-build-provenance`, verifiable with `gh attestation
