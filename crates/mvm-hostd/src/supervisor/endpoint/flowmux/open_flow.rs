@@ -477,9 +477,9 @@ mod tests {
     use super::*;
     use crate::supervisor::endpoint::flowmux::registry::RegistryLimits;
     use crate::supervisor::endpoint::flowmux::tests::{
-        fresh_keys, gate_allowing_addr, gate_pinning_name, local_test_ip, read_flowmux_frame,
-        recorder_at, run_owned_session_on_runtime, run_session, run_session_from,
-        run_session_on_runtime, run_session_with, tcp_echo_server, write_frame,
+        UNDIALED_TEST_IP, fresh_keys, gate_allowing_addr, gate_pinning_name, local_test_ip,
+        read_flowmux_frame, recorder_at, run_owned_session_on_runtime, run_session,
+        run_session_from, run_session_on_runtime, run_session_with, tcp_echo_server, write_frame,
     };
     use crate::supervisor::endpoint::flowmux::{FlowMuxAccept, FlowMuxVmResources};
 
@@ -846,7 +846,7 @@ mod tests {
     /// upstream, which is the failure the refusal exists to prevent.
     #[test]
     fn connect_to_bound_host_without_an_intermediate_is_refused() {
-        let ip = local_test_ip();
+        let ip = UNDIALED_TEST_IP;
         let (service, _dir) = substitution_binding(&ip.to_string(), false);
         let gate = gate_allowing_addr(ip, 443, None);
         let (mut guest, mut guest_session, host) =
@@ -913,7 +913,7 @@ mod tests {
         let audit_path = dir.path().join("audit.jsonl");
         let (recorder, audit_key) = recorder_at(&audit_path);
         let (service, _secrets) = substitution_binding(NAME, true);
-        let gate = gate_pinning_name(NAME, local_test_ip(), 443);
+        let gate = gate_pinning_name(NAME, UNDIALED_TEST_IP, 443);
 
         let (mut guest, mut guest_session, host) =
             run_owned_session_on_runtime(move |id, key, anchor, limits| {
@@ -992,7 +992,7 @@ mod tests {
                 .expect("the test holds the only service reference")
                 .with_proxy_config(proxy),
         );
-        let gate = gate_pinning_name(NAME, local_test_ip(), 443);
+        let gate = gate_pinning_name(NAME, UNDIALED_TEST_IP, 443);
         let (mut guest, mut guest_session, host) =
             run_owned_session_on_runtime(move |id, key, anchor, limits| {
                 FlowMuxAccept::new(id, key, anchor, limits, gate)
@@ -1215,7 +1215,7 @@ mod tests {
         let gate = EgressGate::default_deny().with_peers(vec![PeerBinding {
             name: PeerName::parse(peer_target).expect("peer name parses"),
             port: 8443,
-            host_addr: local_test_ip().to_string(),
+            host_addr: UNDIALED_TEST_IP.to_string(),
             host_port: 443,
         }]);
 

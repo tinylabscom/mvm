@@ -1865,7 +1865,7 @@ mod tests {
 
         let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
 
-        let gate = gate_allowing_addr(local_test_ip(), 0, Some(9));
+        let gate = gate_allowing_addr(UNDIALED_TEST_IP, 0, Some(9));
         let host_handle = thread::spawn(move || {
             let mut session = FlowMuxSession::accept(
                 host_stream,
@@ -1981,6 +1981,27 @@ mod tests {
         drop(guest_stream);
         host_handle.join().unwrap().unwrap();
     }
+    /// An address a gate can admit for a test that never dials it.
+    ///
+    /// TEST-NET-1 is outside the mandatory-deny ranges and is not routed, so
+    /// a test using it needs no network and cannot reach a real host.
+    pub(super) const UNDIALED_TEST_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1));
+
+    #[test]
+    fn the_undialed_test_ip_is_outside_the_mandatory_deny_ranges() {
+        use mvm_contract::policy::network_policy::is_mandatory_deny;
+        assert!(!is_mandatory_deny(UNDIALED_TEST_IP));
+    }
+
+    /// One of this host's own addresses, for a test that binds a fixture and
+    /// has the session dial it through the gate.
+    ///
+    /// Such a test depends on the host's network and fails without a usable
+    /// address. Loopback cannot stand in: it is mandatory-deny, refused before
+    /// any rule, so no gate admits a loopback fixture, and the session has no
+    /// dial indirection to point an admitted address at one. Carrier-grade NAT
+    /// space (`100.64.0.0/10`) is mandatory-deny too. A test that never dials
+    /// takes [`UNDIALED_TEST_IP`] instead.
     pub(super) fn local_test_ip() -> IpAddr {
         use mvm_contract::policy::network_policy::is_mandatory_deny;
         let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind probe socket");
