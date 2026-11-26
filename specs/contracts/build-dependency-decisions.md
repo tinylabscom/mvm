@@ -1213,10 +1213,73 @@ The guest closures gain nothing and stay free of `tokio`. The closure budgets in
 |---|---|---|---|
 | `mvm-gpu` → `mvm-vmm`, for one call into the host-helper contract | Applied. The contract (version, probe flag, probe answer and parser) moved to `mvm_core::helper_contract`; `mvm-gpu` depends on `mvm-core` and no longer on `mvm-vmm`. Every caller names the new path; there is no re-export. `mvm-vmm` keeps only the test-only shape pin of the config type it owns | `mvm-gpu` 191 → 100 on the host, 183 → 78 on musl; `tokio`, `rustls`, `url` and the `icu_*` crates leave the package that builds the guest GPU shims. `mvmctl` and the lock are unchanged | The contract has no dependency of its own, but it reads the process arguments and exits, so it needs `std` and cannot live in `mvm-contract` (35 packages). Reaching that size would take a `std` feature on `mvm-contract` or a second copy of the exit helper in the endpoint binary; neither is done |
 | `which` 7.0.3 (22 call sites, every one `which::which(name)`) | Applied. Replaced by `mvm_core::util::which`, a `std`-only lookup: each `PATH` entry in order, a leading `~` expanded to `$HOME`, an empty or relative entry taken from the working directory, a name with a separator treated as a path and never searched for, and on Windows each `PATHEXT` extension tried. The existing private lookup in `mvm_core::spawn_scope` now calls it | `mvmctl` 346 → 343 on the host and 351 → 348 on Linux (`which`, `env_home`, and `either` where nothing else holds it); lock 732 → 729; the detached fuzz locks of `mvm-agentd` and `mvm-runtime` lose the same entries | One difference from the crate: a candidate must be a regular file with any execute bit set, where the crate asked the kernel whether this user may execute it (`access(2)`). `mvm-core` denies `unsafe`, and a file this user cannot execute fails at spawn with the kernel's own error. The `systemd-run` and `systemctl` lookups now also require the execute bit. `cargo machete` also found `flate2` declared and unused in `mvm-cli` since before this pass; the edge is removed, with no closure effect because other crates hold `flate2` |
-| `url`: pin `idna_adapter` to 1.1.0 (unicode-rs) in place of 1.2.1 (ICU4X) | Not applied: host-name handling changes | Would give `mvmctl` 343 → 326 on the host and lock 729 → 714: eighteen packages leave (`icu_*`, `zerovec`, `zerotrie`, `yoke`, `zerofrom` and their derives, `tinystr`, `litemap`, `writeable`, `potential_utf`) and three enter (`idna_mapping`, `unicode-bidi`, `unicode-joining-type`) | The ICU4X data in the lock (`icu_properties_data` 2.1.2, `icu_normalizer_data` 2.1.1) is Unicode 17.0; `idna_mapping` 1.1.0, `unicode-bidi` 0.3.18 and `unicode-joining-type` 1.0.0 are Unicode 16.0. Both back ends were built against `idna` 1.1.0 and `url` 2.5.9 and run over every scalar value in twenty label contexts, ten of them in the ASCII `xn--` form: they disagree on 4,803 code points, all assigned in Unicode 17.0, in 47,663 results. In every one the current build accepts the host name and the pinned build refuses it; no name is accepted only by the pinned build and none maps to a different ASCII name. The egress endpoint derives the host it matches policy on from `Url::parse`, so those names would turn from a policy decision into a parse refusal. Narrowing, but a change to egress host handling, so an owner decision. Reopens when the unicode-rs crates publish Unicode 17 tables (repeat the differential run and require zero differences), or when the owner accepts the refusal |
+| `url`: pin `idna_adapter` to 1.1.0 (unicode-rs) in place of 1.2.1 (ICU4X) | Not applied in this pass, as a change to host-name handling that needed an owner decision. Applied on 2026-11-25 after the owner accepted the refusal: see the next section | `mvmctl` 343 → 326 on the host and lock 729 → 714 | The differential run that found the 4,803 code points is described in the next section |
 | `sysinfo` 0.30.13 | Not applied: no small exact replacement | Would give `mvmctl` −1 on each host target and lock −4 (`sysinfo`, `ntapi`, `windows`, one `windows-core`) | Two uses. The balloon controller's fallback pressure source needs used and total memory: `/proc/meminfo` on Linux, but on macOS `hw.memsize` plus `host_statistics64` with the crate's page arithmetic, which is hand-written Mach FFI. The `network_perf_probe` example samples resident size of its own process, which is `proc_pidinfo` on macOS. About a hundred lines and four or five new `unsafe` blocks for one package. Reopens if the owner drops the macOS used/total fallback (it runs only when the pressure-level sysctl fails) and lets the probe report `getrusage` peak resident size; the remainder is a `/proc/meminfo` reader |
 | `objc2-foundation` 0.3.2 (four lines in `src/main.rs`) | Not applied here | Would give `mvmctl` 343 → 340 on macOS and lock −3 (`objc2`, `objc2-encode`, `objc2-foundation`) | The lines pump the main run loop inside an autorelease pool. `CFRunLoopRunInMode` from `core-foundation` would replace the pump, but keeping the pool needs hand-declared `objc_autoreleasePoolPush`/`Pop`, which trades typed bindings for raw externs and adds a direct edge to the root package: not clearly safer. The comment says the pump exists for Virtualization.framework, which this repository no longer links, and no first-party code uses the main queue or a run loop; deleting the pump and running the CLI on the main thread is the smaller change. That changes which thread the CLI runs on, so it needs a live launch witness on HVF and its own change |
 | `http` 1.4.2 | Not applied: the premise does not hold | Would give `mvmctl` −1; lock unchanged, because other packages keep `http` | `mvm-http` does not use it only for header-name constants. Its `HeaderMap`, `HeaderName`, `HeaderValue`, `Method` and `StatusCode` are the types of the client, the response parser and the error, and `mvm-http` re-exports them as its public API. Replacing them means writing a header map and header-value validation on the egress path |
+
+## The table-driven IDNA backend for `url` (#4839)
+
+Applied 2026-11-25 from `4be3c88a83` (origin/main), `aarch64-apple-darwin` host,
+by owner decision. `url` 2.5.9 reaches its host-name tables through `idna` 1.1.0,
+which accepts any `idna_adapter` 1.x: 1.2.1 selects ICU4X and 1.1.0 selects the
+unicode-rs crates. `crates/mvm-http/Cargo.toml` now carries
+`idna_adapter = "=1.1.0"` as a direct dependency it never names in code.
+`mvm-http` is the lowest `url` consumer and `mvm-hostd` depends on it, so the
+requirement is in every graph that parses a URL, the detached fuzz workspaces
+included. An exact requirement is something the resolver must satisfy:
+`cargo update -w --dry-run` locks 0 packages, and a full `cargo update --dry-run`
+leaves `idna_adapter` where it is.
+
+Counts are distinct `name version` entries, measured as in the previous section,
+with the raw line count in brackets for the host target.
+
+| Closure | Before | After |
+|---|---:|---:|
+| `mvmctl`, host (`aarch64-apple-darwin`) | 343 [501] | 326 [476] |
+| `mvmctl`, `x86_64-unknown-linux-gnu` | 348 | 331 |
+| `mvmctl`, `aarch64-unknown-linux-musl` | 347 | 330 |
+| `mvmctl` release features, macOS / x86_64 Linux / aarch64 Linux | 370 / 369 / 368 | 353 / 352 / 351 |
+| Workspace all features, `x86_64-unknown-linux-gnu`, no dev | 577 | 560 |
+| `mvm-builder-guest`, host / musl | 106 [138] / 88 | unchanged |
+| `mvm-agentd`, host / musl | 102 [131] / 84 | unchanged |
+| `mvm-host-services`, host / musl | 103 [133] / 85 | unchanged |
+| `Cargo.lock` packages | 729 | 714 |
+
+Eighteen packages leave the lock: `icu_collections`, `icu_locale_core`,
+`icu_normalizer`, `icu_normalizer_data`, `icu_properties`, `icu_properties_data`,
+`icu_provider`, `litemap`, `potential_utf`, `tinystr`, `writeable`, `yoke`,
+`yoke-derive`, `zerofrom`, `zerofrom-derive`, `zerotrie`, `zerovec` and
+`zerovec-derive`. Three enter: `idna_mapping` 1.1.0, `unicode-bidi` 0.3.18 and
+`unicode-joining-type` 1.0.0. `displaydoc` and `synstructure` also leave the
+`mvmctl` closure and stay in the lock for other packages, which is why the
+closure falls by seventeen and the lock by fifteen. The guest closures never
+held `url`; they are unchanged and stay free of `tokio`. The closure budgets in
+`xtask` are lowered to the new values, and the five detached fuzz locks that
+named the ICU packages are re-resolved.
+
+The behaviour change is a narrowing. The ICU4X data that left
+(`icu_properties_data` 2.1.2, `icu_normalizer_data` 2.1.1) is Unicode 17.0; the
+tables that replace it are Unicode 16.0. Both back ends were built against
+`idna` 1.1.0 and `url` 2.5.9 and run over every scalar value in twenty label
+contexts, ten of them in the ASCII `xn--` form. They disagree on 4,803 code
+points, all assigned in Unicode 17.0, in 47,663 results, and in every one the
+ICU4X build accepts the host name and the pinned build refuses it. No name is
+accepted only by the pinned build and none maps to a different ASCII name. The
+egress endpoint derives the host it matches policy on from `Url::parse`, so a
+request to such a name is now refused as an unparseable destination before any
+policy match, where it used to reach the default-deny decision. Both outcomes
+refuse an unadmitted name; a name an operator had admitted that uses one of
+those code points stops being reachable. Tests at the endpoint's
+`destination_host` and at `mvm_http::Proxy::parse` hold the established forms
+(`bücher.example` → `xn--bcher-kva.example`, for one), the labels that were
+already refused, and the refusal of U+088F, U+0C5C and U+323B0 in both the
+Unicode and the `xn--` form.
+
+Reopens when `idna_mapping`, `unicode-bidi` and `unicode-joining-type` publish
+Unicode 17 tables (move the requirement, repeat the differential run and require
+zero differences against ICU4X), or when a host name using a code point assigned
+after Unicode 16.0 has to be accepted.
 
 ## Runtime consumers without the authoring SDK
 
