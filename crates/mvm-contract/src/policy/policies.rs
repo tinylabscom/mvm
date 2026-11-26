@@ -209,8 +209,7 @@ pub struct PiiPolicy {
 
 /// Artifact policy. Distinct from `mvm-core::plan::ArtifactPolicy` —
 /// the plan field is a per-run snapshot; this is the bundle-side
-/// source of truth that the supervisor's `ArtifactCollector`
-/// consults at workload exit.
+/// source of truth. Nothing collects artifacts from it today.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ArtifactPolicy {
@@ -218,7 +217,7 @@ pub struct ArtifactPolicy {
     pub retention_days: u32,
 }
 
-/// Key policy. Wires `KeystoreReleaser`.
+/// Key policy. Parsed and validated; nothing reads it at runtime today.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct KeyPolicy {

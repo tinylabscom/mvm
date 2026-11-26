@@ -52,8 +52,8 @@ pub struct MvmdSpec {
     pub workload_id: String,
     /// Names of env vars the workload expects to see. Values do not
     /// travel over the wire (literals are baked into `flake.nix`;
-    /// secrets are resolved at admission by the supervisor's
-    /// `KeystoreReleaser`). mvmd uses this for quota-side accounting
+    /// secrets are resolved on the host and the guest sees only a
+    /// placeholder). mvmd uses this for quota-side accounting
     /// and operator-facing inventory.
     pub env_keys: Vec<String>,
     /// Names of secrets the workload references via `mvm.secret(...)`.

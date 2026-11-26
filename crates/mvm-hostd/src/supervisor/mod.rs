@@ -5,9 +5,7 @@
 //! and the lifecycle watchers. **Tenant code never runs in Zone B.**
 //!
 //! Structure:
-//! - `keystore` — `KeystoreReleaser` trait + `NoopKeystoreReleaser`.
 //! - `audit` — `AuditSigner` trait + `NoopAuditSigner`.
-//! - `artifact` — `ArtifactCollector` trait + `NoopArtifactCollector`.
 //! - `policy_validation` — operator-policy validators and the canonical
 //!   inspector chain.
 //!
@@ -22,12 +20,10 @@
 //! - `services` — the broker subprocess proxy clients.
 
 pub mod admission;
-pub mod artifact;
 pub mod audit;
 pub mod datapath;
 pub mod endpoint;
 pub mod inspection;
-pub mod keystore;
 pub mod lifecycle;
 pub mod policy_validation;
 pub mod services;
@@ -40,9 +36,6 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-pub use artifact::{
-    ArtifactCollector, ArtifactError, LiveArtifactCollector, NoopArtifactCollector,
-};
 pub use audit::audit_dedup::{Decision, DedupKey, RetryStormSummary, RetryStormSuppressor};
 pub use audit::audit_file::{
     ChainCheckpoint, FileAuditSigner, IncrementalVerification, RotationPolicy, SegmentWalk,
@@ -69,9 +62,6 @@ pub use inspection::pii_redactor::{
 };
 pub use inspection::secrets_scanner::{DEFAULT_RULES, SecretRule, SecretsScanner};
 pub use inspection::ssrf_guard::SsrfGuard;
-pub use keystore::{
-    KeystoreError, KeystoreReleaser, LiveKeystoreReleaser, NoopKeystoreReleaser, SecretGrant,
-};
 #[cfg(target_os = "macos")]
 pub use lifecycle::balloon::VmPressureLevelSource;
 pub use lifecycle::balloon::{
