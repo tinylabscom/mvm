@@ -127,33 +127,6 @@ impl WarmArtifactWorker {
     pub fn store(&self) -> &WarmArtifactStore {
         self.queue.store()
     }
-
-    /// Build the callback consumed by the resident warm-launch service. The
-    /// callback only validates the typed identity and enqueues work; the
-    /// expensive resolver and readiness verifier run on [`Self::process_next`].
-    pub fn prewarm_callback(self: &Arc<Self>) -> crate::warm_service::PrewarmFn {
-        let worker = Arc::clone(self);
-        Arc::new(move |_, source, artifact, target| {
-            if target == 0 {
-                return Ok(0);
-            }
-            let key = WarmArtifactKey::try_from(artifact.clone())
-                .map_err(anyhow::Error::new)
-                .context("validate warm artifact identity")?;
-            if worker
-                .store()
-                .resolve(&key)
-                .map_err(anyhow::Error::new)?
-                .is_some()
-            {
-                return Ok(1);
-            }
-            worker
-                .enqueue(source.clone(), key)
-                .context("enqueue warm artifact job")?;
-            Ok(0)
-        })
-    }
 }
 
 impl WarmArtifactBuildPlan {

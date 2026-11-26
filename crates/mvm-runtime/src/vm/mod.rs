@@ -12,10 +12,8 @@
 
 pub mod admission;
 pub mod attendance;
-pub mod exec_builder;
 pub mod human_credential;
 pub mod instance_snapshot;
-pub mod lease;
 pub mod name_custody;
 pub mod name_registry;
 pub mod overlay;

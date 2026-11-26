@@ -71,8 +71,7 @@ pub struct MockBackend {
     /// Opt-in: report `supports_standby_pool()` and honor `claim_standby`.
     /// Off by default so existing tests keep the fail-closed `Unsupported`.
     supports_standby: bool,
-    /// Test knob: make `stop` fail, to exercise error-surfacing paths
-    /// (e.g. `WarmLease::release` vs the swallowing `Drop`).
+    /// Test knob: make `stop` fail, to exercise error-surfacing paths.
     fail_stop: bool,
     /// Test knob: make `spawn_standby` fail even when `supports_standby` is
     /// set, so a warm-pool caller's failure-counting path is exercisable

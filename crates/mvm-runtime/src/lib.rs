@@ -105,9 +105,6 @@ pub mod netinit_audit;
 /// Private, pid-owned staging directories for transient plaintext, and the
 /// sweep that reclaims those whose owner died.
 pub mod private_staging;
-/// QEMU workload runtime backend (dev/test).
-/// Process-local reservation and rollback for resident warm parents.
-pub mod resident_pool;
 /// Capability-aware backend selection (fail-closed, no silent downgrade).
 pub mod selection;
 /// Backend-agnostic supervisor standby pool registry (`~/.mvm/pool/`
@@ -124,8 +121,6 @@ pub mod trusted_snapshot_service;
 /// backends (HVF/KVM/WHP) drive it. The "no VMM lock-in" seam.
 /// Shared host-side vsock egress support. Backend-agnostic; every VMM path uses
 /// the same gate/relay substrate while policy remains in the host endpoint.
-/// In-process Claim/Release/Prewarm ownership boundary for resident warm launches.
-pub mod warm_service;
 /// Plugs `mvm_fs`'s content-addressed `SnapshotStore` beneath the existing
 /// checkpoint lineage: stage a checkpoint's bytes into the snapshot store,
 /// then clone them only after the checkpoint's fail-closed lineage
@@ -152,11 +147,7 @@ pub use mvm_vmm::vmm;
 /// Re-export the shared vsock egress bridge from `mvm-vmm`.
 pub use mvm_vmm::vsock_egress_bridge;
 
-// Embedded-library surface for the warm-lease ergonomics.
 pub use mvm_core::vm_backend::WarmPrewarmSource;
-pub use resident_pool::{ResidentPoolError, ResidentWarmLease, ResidentWarmPool};
-pub use vm::exec_builder::{ExecBuilder, ExecOutcome};
-pub use vm::lease::{AcquireSpec, WarmLease, WarmLeaseOrigin};
 pub use warm_artifact_builder::{
     WarmArtifactBuildPlan, WarmArtifactPlanResolver, WarmArtifactSupportPaths, WarmArtifactWorker,
     WarmGoldenVmReadinessVerifier,
@@ -184,7 +175,6 @@ pub use base::shell_mock;
 pub use backend::{AnyBackend, FirecrackerConfig};
 #[cfg(feature = "test-support")]
 pub use mock::MockBackend;
-pub use warm_service::{PrewarmFn, WarmLaunchService};
 pub use workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 
 /// The per-VM egress-TLS cert/key split helper. `mvmctl machine run`
