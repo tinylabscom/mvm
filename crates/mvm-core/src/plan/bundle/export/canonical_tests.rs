@@ -14,8 +14,7 @@ use crate::plan::bundle::{EmbeddedCliBootAssets, TrustStore, key_id_from_pubkey}
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use std::cell::Cell;
 
-#[path = "../../../image_set/fixtures/published_root.rs"]
-mod published;
+use crate::image_set::published_root as published;
 const FEED: &[u8] = include_bytes!(
     "../../../../tests/fixtures/image-set-revocations/revocation-list-v1/revocations.json"
 );
