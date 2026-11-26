@@ -173,7 +173,7 @@ form — or honestly not at all:
   ADR-024 it stays opt-in, claim-free, and — if it ever executes real
   workloads — the engine runs in-guest, never as a host process dependency.
 - **Docker / shared-kernel containers** — removed by Plan 329. The
-  ADR-034 dev tier has been deleted; mvm is microVM-only and a host with no
+  Docker dev tier has been deleted; mvm is microVM-only and a host with no
   usable hypervisor fails closed. The Apple Container backend remains
   available as an explicit opt-in on Apple Silicon, but it is a
   hardware-virtualized path (HVF with a container kernel), not a

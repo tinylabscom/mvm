@@ -136,7 +136,6 @@ const PENDING: &[&str] = &[
     "specs/adrs/031-serialization-crypto-storage-selection.md",
     "specs/adrs/032-egress-connect-completion-and-in-seam-dns.md",
     "specs/adrs/033-rust-vmm-virtio-primitives.md",
-    "specs/adrs/034-docker-dev-tier-backend.md",
     "specs/adrs/035-workload-stream-plane.md",
     "specs/adrs/036-l3-tun-over-vsock.md",
     "specs/adrs/037-mvmd-only-production-launch.md",
