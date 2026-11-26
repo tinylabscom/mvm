@@ -152,7 +152,7 @@ transformation applies to it.
   path with a different label. Hermetic protocol doubles are allowed; a second
   network stack is not.
 
-- **An L3 TUN-over-vsock compatibility mode** (deleted ADR-036, now removed).
+- **An L3 TUN-over-vsock compatibility mode** (deleted, now removed).
   The guest got a point-to-point `mvm0` TUN and the agent framed raw IP packets
   over vsock to a host gateway, so programs that ignore proxy variables (static
   binaries, their own dialer or resolver, ICMP) worked. Rejected as the second
@@ -164,7 +164,7 @@ transformation applies to it.
   link with two endpoints; slirp or vpnkit style gateways are a second policy
   engine outside the signed plan and audit chain; and TLS interception needs a
   host CA in the guest trust store.
-- **A userspace socket datapath for that mode** (deleted ADR-052, now removed).
+- **A userspace socket datapath for that mode** (deleted, now removed).
   smoltcp terminated guest TCP below the datapath seam, deferred the guest
   handshake until the host `connect()` succeeded, and was the only forwarding
   backend that needed no privilege, which is why macOS used it. Retired with the
@@ -172,7 +172,7 @@ transformation applies to it.
   reasoning: retransmission, windowing and reassembly are subtle, and a hostile
   guest drives them directly. ICMP, raw IP protocols and arbitrary IPv4 stayed
   refused at admission.
-- **A privileged macOS network helper** (deleted ADR-039, rejected 2026-08-03).
+- **A privileged macOS network helper** (rejected 2026-08-03).
   A root helper creating `utun` interfaces and PF anchors would have given
   macOS workloads ICMP and raw IP. Nothing needs them, and a permanent root
   process widens a helper bug from one VM's networking to root on the host, so
@@ -181,8 +181,7 @@ transformation applies to it.
   execution and caller-supplied PF syntax inexpressible in its wire format
   rather than validated away, and bind each machine to the first caller that
   created it by peer credentials.
-- **IPv6 as a first-class address family for the raw-packet mode** (deleted
-  ADR-038, proposed and never shipped). The one part that shipped is kernel
+- **IPv6 as a first-class address family for the raw-packet mode** (proposed, never shipped, deleted). The one part that shipped is kernel
   configuration: the workload kernel builds with `CONFIG_IPV6=y`, about 200 KB
   larger, with the IPsec-for-v6 options disabled so the build guard that keeps
   XFRM out still passes.
