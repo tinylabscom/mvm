@@ -2,8 +2,8 @@
 //! reveal path, and outbound PII is redacted before it can leave the host.
 //!
 //! Both scenarios are hermetic: the secret service is built against isolated
-//! temp stores, and the PII redactor is the same pure-Rust inspector the
-//! egress proxy uses.
+//! temp stores, and the PII redactor is the same pure-Rust detector the
+//! egress endpoint's redaction uses.
 
 use cucumber::{given, then, when};
 use mvm_client::secret::{SecretBindingMeta, SecretService, SecretValueInput};
