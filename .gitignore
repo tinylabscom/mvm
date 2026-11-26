@@ -26,9 +26,6 @@ public/dist/
 public/.astro/
 # Generated man pages (produced by `cargo xtask gen-man`)
 man/*.1
-nixos.qcow2
-.ash_history
-keys
 # Stray Rust compiled artifacts (e.g. a misdirected --out-dir); never tracked.
 *.rlib
 # Scratch source files a stray guest/host cross-compile may drop at the repo
