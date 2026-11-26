@@ -5,8 +5,8 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use super::tests::{
-    fresh_keys, gate_allowing_addr, local_test_ip, read_flowmux_frame, run_session_from,
-    run_session_on_runtime, write_frame,
+    UNDIALED_TEST_IP, fresh_keys, gate_allowing_addr, local_test_ip, read_flowmux_frame,
+    run_session_from, run_session_on_runtime, write_frame,
 };
 use super::*;
 use mvm_core::audit_sink::AuditSink;
@@ -361,7 +361,7 @@ fn repeated_udp_denials_count_suppression_but_failed_writes_are_retried() {
 fn authenticated_udp_repeats_are_counted_without_another_journal_write() {
     let sink = Arc::new(CapturingSink::default());
     let supplied = Arc::clone(&sink);
-    let gate = gate_allowing_addr(local_test_ip(), 0, Some(9));
+    let gate = gate_allowing_addr(UNDIALED_TEST_IP, 0, Some(9));
     let (mut guest, mut session, host) =
         run_session_from(RegistryLimits::default(), move |id, key, anchor, limits| {
             FlowMuxAccept::new(id, key, anchor, limits, gate).with_audit_sink(supplied)

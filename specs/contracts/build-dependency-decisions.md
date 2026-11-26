@@ -1214,7 +1214,7 @@ The guest closures gain nothing and stay free of `tokio`. The closure budgets in
 | `mvm-gpu` → `mvm-vmm`, for one call into the host-helper contract | Applied. The contract (version, probe flag, probe answer and parser) moved to `mvm_core::helper_contract`; `mvm-gpu` depends on `mvm-core` and no longer on `mvm-vmm`. Every caller names the new path; there is no re-export. `mvm-vmm` keeps only the test-only shape pin of the config type it owns | `mvm-gpu` 191 → 100 on the host, 183 → 78 on musl; `tokio`, `rustls`, `url` and the `icu_*` crates leave the package that builds the guest GPU shims. `mvmctl` and the lock are unchanged | The contract has no dependency of its own, but it reads the process arguments and exits, so it needs `std` and cannot live in `mvm-contract` (35 packages). Reaching that size would take a `std` feature on `mvm-contract` or a second copy of the exit helper in the endpoint binary; neither is done |
 | `which` 7.0.3 (22 call sites, every one `which::which(name)`) | Applied. Replaced by `mvm_core::util::which`, a `std`-only lookup: each `PATH` entry in order, a leading `~` expanded to `$HOME`, an empty or relative entry taken from the working directory, a name with a separator treated as a path and never searched for, and on Windows each `PATHEXT` extension tried. The existing private lookup in `mvm_core::spawn_scope` now calls it | `mvmctl` 346 → 343 on the host and 351 → 348 on Linux (`which`, `env_home`, and `either` where nothing else holds it); lock 732 → 729; the detached fuzz locks of `mvm-agentd` and `mvm-runtime` lose the same entries | One difference from the crate: a candidate must be a regular file with any execute bit set, where the crate asked the kernel whether this user may execute it (`access(2)`). `mvm-core` denies `unsafe`, and a file this user cannot execute fails at spawn with the kernel's own error. The `systemd-run` and `systemctl` lookups now also require the execute bit. `cargo machete` also found `flate2` declared and unused in `mvm-cli` since before this pass; the edge is removed, with no closure effect because other crates hold `flate2` |
 | `url`: pin `idna_adapter` to 1.1.0 (unicode-rs) in place of 1.2.1 (ICU4X) | Not applied in this pass, as a change to host-name handling that needed an owner decision. Applied on 2026-11-25 after the owner accepted the refusal: see the next section | `mvmctl` 343 → 326 on the host and lock 729 → 714 | The differential run that found the 4,803 code points is described in the next section |
-| `sysinfo` 0.30.13 | Not applied: no small exact replacement | Would give `mvmctl` −1 on each host target and lock −4 (`sysinfo`, `ntapi`, `windows`, one `windows-core`) | Two uses. The balloon controller's fallback pressure source needs used and total memory: `/proc/meminfo` on Linux, but on macOS `hw.memsize` plus `host_statistics64` with the crate's page arithmetic, which is hand-written Mach FFI. The `network_perf_probe` example samples resident size of its own process, which is `proc_pidinfo` on macOS. About a hundred lines and four or five new `unsafe` blocks for one package. Reopens if the owner drops the macOS used/total fallback (it runs only when the pressure-level sysctl fails) and lets the probe report `getrusage` peak resident size; the remainder is a `/proc/meminfo` reader |
+| `sysinfo` 0.30.13 | Not applied: no small exact replacement | Would give `mvmctl` −1 on each host target and lock −4 (`sysinfo`, `ntapi`, `windows`, one `windows-core`) | One use. The balloon controller's fallback pressure source needs used and total memory: `/proc/meminfo` on Linux, but on macOS `hw.memsize` plus `host_statistics64` with the crate's page arithmetic, which is hand-written Mach FFI. About a hundred lines and new `unsafe` blocks for one package. Reopens if the owner drops the macOS used/total fallback (it runs only when the pressure-level sysctl fails); the remainder is a `/proc/meminfo` reader |
 | `objc2-foundation` 0.3.2 (four lines in `src/main.rs`) | Not applied here | Would give `mvmctl` 343 → 340 on macOS and lock −3 (`objc2`, `objc2-encode`, `objc2-foundation`) | The lines pump the main run loop inside an autorelease pool. `CFRunLoopRunInMode` from `core-foundation` would replace the pump, but keeping the pool needs hand-declared `objc_autoreleasePoolPush`/`Pop`, which trades typed bindings for raw externs and adds a direct edge to the root package: not clearly safer. The comment says the pump exists for Virtualization.framework, which this repository no longer links, and no first-party code uses the main queue or a run loop; deleting the pump and running the CLI on the main thread is the smaller change. That changes which thread the CLI runs on, so it needs a live launch witness on HVF and its own change |
 | `http` 1.4.2 | Not applied: the premise does not hold | Would give `mvmctl` −1; lock unchanged, because other packages keep `http` | `mvm-http` does not use it only for header-name constants. Its `HeaderMap`, `HeaderName`, `HeaderValue`, `Method` and `StatusCode` are the types of the client, the response parser and the error, and `mvm-http` re-exports them as its public API. Replacing them means writing a header map and header-value validation on the egress path |
 
@@ -1280,6 +1280,23 @@ Reopens when `idna_mapping`, `unicode-bidi` and `unicode-joining-type` publish
 Unicode 17 tables (move the requirement, repeat the differential run and require
 zero differences against ICU4X), or when a host name using a code point assigned
 after Unicode 16.0 has to be accepted.
+
+## Network performance harness removal (2026-11-25)
+
+Measured from `d2b6833a66` (origin/main), `aarch64-apple-darwin` host, with the
+raw commands AGENTS.md names. Deleting `xtask network-perf`, the
+`network_perf_probe` example and the `network-perf` feature of `mvm-hostd`
+removed no package: the example was `sysinfo`'s second user, and the balloon
+controller still needs it.
+
+| Measure | Before | After |
+|---|---:|---:|
+| `cargo tree -p mvmctl -e normal,build --prefix none \| sort -u \| wc -l` | 501 | 501 |
+| `grep -c '^\[\[package\]\]' Cargo.lock` | 729 | 729 |
+
+`mvm-hostd` lost two development-only edges, neither of which is a package:
+its dependency on `xtask`, whose library target existed only to share the
+report schema with the example, and the `addons` feature of `mvm-agentd`.
 
 ## Runtime consumers without the authoring SDK
 

@@ -1640,7 +1640,7 @@ mod tests {
             "cargo check -p mvm-cli --features release-artifact-bootstrap --lib",
             "cargo check -p mvm-cli --features release-artifact-bootstrap,manifest-verify --lib",
             "cargo test -p mvm-build --features release-channel --lib",
-            "name: Assert auto-detect still picks libkrun off Linux/HVF",
+            "name: Assert builder auto-detect picks hvf, firecracker or qemu and never libkrun",
             "name: In-process pure ext4 materialize tests",
         ] {
             assert!(
