@@ -138,7 +138,7 @@ pub struct L4RuleSpec {
 pub struct EgressPolicy {
     /// `open` — no proxy. Anything else routes through the L7 chain.
     pub mode: Option<String>,
-    /// (host, port) allowlist consumed by `DestinationPolicy`.
+    /// (host, port) allowlist, projected into the endpoint's egress gate.
     /// `port = 0` is the explicit "any port for this host" wildcard.
     #[serde(default)]
     pub allow_list: Vec<(String, u16)>,
@@ -152,10 +152,10 @@ pub struct EgressPolicy {
     /// ([`DEFAULT_BODY_CAP_BYTES`]).
     #[serde(default)]
     pub body_cap_bytes: u64,
-    /// Per-name inspector opt-out. Empty == every inspector enabled.
-    /// Names match `Inspector::name()` strings: `destination_policy`,
-    /// `ssrf_guard`, `secrets_scanner`, `injection_guard`,
-    /// `pii_redactor`.
+    /// Per-name inspector opt-out. Admission accepts only the names
+    /// `destination_policy`, `ssrf_guard`, `secrets_scanner`,
+    /// `injection_guard` and `pii_redactor`; no inspector chain reads
+    /// the field today.
     #[serde(default)]
     pub disabled_inspectors: Vec<String>,
     /// Per-destination egress redaction. Synthesized into the signed

@@ -1,16 +1,13 @@
 //! `SecretsScanner` — block outbound requests carrying secrets.
 //!
-//! Second-line defence. The destination allowlist
-//! (`DestinationPolicy`) refuses traffic to unauthorised hosts; this
-//! inspector refuses traffic to *authorised* hosts when the body
-//! looks like it's smuggling out a credential.
+//! Finds credential-shaped bytes in a body, so a caller can refuse or mask
+//! a body that looks like it is smuggling out a credential.
 //!
 //! Threat shape addressed:
 //! - LLM agent reads `~/.aws/credentials` (or a `.env` file the
 //!   workload mounted) and includes it verbatim in a tool-call
-//!   request to `api.openai.com`. The destination is on the
-//!   allowlist, so DestinationPolicy passes — but the body should
-//!   not.
+//!   request to `api.openai.com`. The destination is allowed, but the
+//!   body should not be.
 //! - Sloppy shell-out logs that interpolate secrets into a request.
 //! - Prompt-injected exfiltration where the model is tricked into
 //!   copying environment variables or session tokens.
@@ -19,10 +16,9 @@
 //! compiled into a single `regex::bytes::RegexSet`. Bytes (not str)
 //! because bodies can be binary (multipart, protobuf, gzip-streaming
 //! though we'll learn we can't usefully scan compressed bodies and
-//! defer that to a later wave). On match, deny with a reason that
-//! names the **rule** that fired but **never** echoes the matched
-//! value — audit logs land in operator dashboards and we can't leak
-//! the secret we just blocked.
+//! defer that to a later wave). A match reports the **rule** that fired,
+//! never the matched value — audit logs land in operator dashboards and
+//! we can't leak the secret we just blocked.
 //!
 //! Design choices:
 //! - Curated rules, not a kitchen-sink list. Each rule must be
@@ -32,15 +28,10 @@
 //! - `RegexSet` runs all patterns in a single pass. O(body_len)
 //!   instead of O(n_rules × body_len).
 //! - Patterns are compiled once at construction and amortised across
-//!   every inspect() call.
-//! - No body-length cap here — that belongs in the proxy layer,
-//!   which will refuse oversized requests outright. This inspector
-//!   trusts the proxy to hand it bounded bytes.
+//!   every scan.
+//! - No body-length cap here — callers hand the scanner bounded bytes.
 
-use async_trait::async_trait;
 use regex::bytes::{Regex, RegexSet};
-
-use crate::supervisor::inspection::inspector::{Inspector, InspectorVerdict, RequestCtx};
 
 /// One curated detection rule. The `name` lands verbatim in the
 /// deny reason; `pattern` is the regex compiled into the `RegexSet`.
@@ -183,7 +174,7 @@ pub const DEFAULT_RULES: &[SecretRule] = &[
     },
 ];
 
-/// Inspector that scans outbound bodies for known secret patterns.
+/// Scans bodies for known secret patterns.
 /// Construct with [`SecretsScanner::with_default_rules`] for the
 /// curated ruleset, or [`SecretsScanner::new`] to bring your own
 /// (e.g., add a workload-specific custom-token shape).
@@ -277,45 +268,17 @@ impl SecretsScanner {
     }
 }
 
-#[async_trait]
-impl Inspector for SecretsScanner {
-    fn name(&self) -> &'static str {
-        "secrets_scanner"
-    }
-
-    async fn inspect(&self, ctx: &mut RequestCtx) -> InspectorVerdict {
-        // Empty body → no work, no risk. Common case for GET/DELETE.
-        if ctx.body.is_empty() {
-            return InspectorVerdict::Allow;
-        }
-        let hits = self.scan(&ctx.body);
-        if hits.is_empty() {
-            InspectorVerdict::Allow
-        } else {
-            // Stable, deduplicated rule list in the deny reason.
-            // Never include the matched bytes — operator dashboards
-            // and audit logs are downstream of this string.
-            let names = hits.join(", ");
-            InspectorVerdict::Deny {
-                reason: format!("outbound body contains secrets matching rule(s): {names}"),
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn ctx_with_body(body: &[u8]) -> RequestCtx {
-        RequestCtx::new("api.openai.com", 443, "/v1/chat").with_body(body.to_vec())
+    fn default_hits(body: &[u8]) -> Vec<&'static str> {
+        SecretsScanner::with_default_rules().scan(body)
     }
 
-    #[tokio::test]
-    async fn empty_body_allows() {
-        let scanner = SecretsScanner::with_default_rules();
-        let mut c = RequestCtx::new("example.com", 443, "/");
-        assert!(scanner.inspect(&mut c).await.is_allow());
+    #[test]
+    fn empty_body_has_no_hits() {
+        assert!(default_hits(b"").is_empty());
     }
 
     #[test]
@@ -337,102 +300,68 @@ mod tests {
         assert!(none.is_empty());
     }
 
-    #[tokio::test]
-    async fn benign_body_allows() {
-        let scanner = SecretsScanner::with_default_rules();
-        let body = br#"{"messages":[{"role":"user","content":"hello world"}]}"#;
-        let mut c = ctx_with_body(body);
-        assert!(scanner.inspect(&mut c).await.is_allow());
+    #[test]
+    fn benign_body_has_no_hits() {
+        assert!(
+            default_hits(br#"{"messages":[{"role":"user","content":"hello world"}]}"#).is_empty()
+        );
     }
 
-    #[tokio::test]
-    async fn aws_access_key_denies() {
-        let scanner = SecretsScanner::with_default_rules();
-        let body = br#"{"key":"AKIAIOSFODNN7EXAMPLE","note":"test"}"#;
-        let mut c = ctx_with_body(body);
-        match scanner.inspect(&mut c).await {
-            InspectorVerdict::Deny { reason } => {
-                assert!(reason.contains("aws_access_key_id"));
-                // Crucial: the matched value must NOT leak into the
-                // reason string (audit logs are operator-visible).
-                assert!(!reason.contains("AKIAIOSFODNN7EXAMPLE"));
-            }
-            other => panic!("expected Deny, got {other:?}"),
+    #[test]
+    fn aws_access_key_is_named_by_rule() {
+        let hits = default_hits(br#"{"key":"AKIAIOSFODNN7EXAMPLE","note":"test"}"#);
+        assert_eq!(hits, vec!["aws_access_key_id"]);
+    }
+
+    #[test]
+    fn vendor_keys_are_named_by_rule() {
+        let cases = [
+            (
+                "github_personal_access_token",
+                format!("Authorization: token ghp_{}", "a".repeat(36)),
+            ),
+            (
+                "anthropic_api_key",
+                format!("X-Api-Key: sk-ant-{}", "x".repeat(64)),
+            ),
+            (
+                "pem_private_key",
+                "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n".to_string(),
+            ),
+        ];
+        for (name, body) in cases {
+            let hits = default_hits(body.as_bytes());
+            assert!(hits.contains(&name), "{name} did not fire; hits={hits:?}");
         }
     }
 
-    #[tokio::test]
-    async fn github_pat_denies() {
-        let scanner = SecretsScanner::with_default_rules();
-        let body = format!("Authorization: token ghp_{}", "a".repeat(36));
-        let mut c = ctx_with_body(body.as_bytes());
-        let v = scanner.inspect(&mut c).await;
-        assert!(v.is_deny(), "expected deny, got {v:?}");
-        if let InspectorVerdict::Deny { reason } = v {
-            assert!(reason.contains("github_personal_access_token"));
-        }
-    }
-
-    #[tokio::test]
-    async fn anthropic_key_denies() {
-        let scanner = SecretsScanner::with_default_rules();
-        let body = format!("X-Api-Key: sk-ant-{}", "x".repeat(64));
-        let mut c = ctx_with_body(body.as_bytes());
-        let v = scanner.inspect(&mut c).await;
-        assert!(v.is_deny(), "expected deny, got {v:?}");
-        if let InspectorVerdict::Deny { reason } = v {
-            assert!(reason.contains("anthropic_api_key"));
-        }
-    }
-
-    #[tokio::test]
-    async fn pem_private_key_denies() {
-        let scanner = SecretsScanner::with_default_rules();
-        let body = b"-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n";
-        let mut c = ctx_with_body(body);
-        let v = scanner.inspect(&mut c).await;
-        assert!(v.is_deny(), "expected deny, got {v:?}");
-        if let InspectorVerdict::Deny { reason } = v {
-            assert!(reason.contains("pem_private_key"));
-        }
-    }
-
-    #[tokio::test]
-    async fn multiple_secrets_all_listed() {
-        let scanner = SecretsScanner::with_default_rules();
+    #[test]
+    fn multiple_secrets_all_listed() {
         let body = format!("aws=AKIAIOSFODNN7EXAMPLE github=ghp_{}", "z".repeat(36));
-        let mut c = ctx_with_body(body.as_bytes());
-        match scanner.inspect(&mut c).await {
-            InspectorVerdict::Deny { reason } => {
-                assert!(reason.contains("aws_access_key_id"));
-                assert!(reason.contains("github_personal_access_token"));
-            }
-            other => panic!("expected Deny, got {other:?}"),
-        }
+        let hits = default_hits(body.as_bytes());
+        assert!(hits.contains(&"aws_access_key_id"), "hits={hits:?}");
+        assert!(
+            hits.contains(&"github_personal_access_token"),
+            "hits={hits:?}"
+        );
     }
 
-    #[tokio::test]
-    async fn binary_body_does_not_panic() {
+    #[test]
+    fn binary_body_does_not_panic() {
         // Bodies can be binary (protobuf, gzip, image upload). The
         // scanner must accept arbitrary bytes without choking on
         // non-UTF-8 input.
-        let scanner = SecretsScanner::with_default_rules();
         let mut body: Vec<u8> = (0u8..=255).collect();
         body.extend_from_slice(b"AKIAIOSFODNN7EXAMPLE");
-        let mut c = ctx_with_body(&body);
-        let v = scanner.inspect(&mut c).await;
-        assert!(v.is_deny());
+        assert_eq!(default_hits(&body), vec!["aws_access_key_id"]);
     }
 
-    #[tokio::test]
-    async fn short_aws_like_string_does_not_match() {
+    #[test]
+    fn short_aws_like_string_does_not_match() {
         // High-precision claim: random base64-ish strings shouldn't
         // trigger. AWS rule requires `AKIA` + exactly 16 [0-9A-Z].
-        let scanner = SecretsScanner::with_default_rules();
         // 15 chars after AKIA — too short to match.
-        let body = b"AKIASHORTSTRING1";
-        let mut c = ctx_with_body(body);
-        assert!(scanner.inspect(&mut c).await.is_allow());
+        assert!(default_hits(b"AKIASHORTSTRING1").is_empty());
     }
 
     #[test]
@@ -519,9 +448,6 @@ mod tests {
 
     #[test]
     fn scan_returns_rule_names_directly() {
-        // The `scan()` API is also useful outside the Inspector
-        // path (e.g., for tests / CLI verification tooling), so it
-        // gets its own coverage.
         let scanner = SecretsScanner::with_default_rules();
         let hits = scanner.scan(b"plain body, nothing here");
         assert!(hits.is_empty());
@@ -529,8 +455,8 @@ mod tests {
         assert_eq!(hits, vec!["aws_access_key_id"]);
     }
 
-    #[tokio::test]
-    async fn custom_ruleset_works() {
+    #[test]
+    fn custom_ruleset_works() {
         // Workloads with custom token shapes can plug their own
         // rules in alongside the defaults.
         let custom = [SecretRule {
@@ -538,11 +464,9 @@ mod tests {
             pattern: r"acmecorp_[A-Za-z0-9]{20}",
         }];
         let scanner = SecretsScanner::new(&custom).expect("compile");
-        let mut c = ctx_with_body(b"X-Token: acmecorp_abcdefghij1234567890");
-        let v = scanner.inspect(&mut c).await;
-        assert!(v.is_deny(), "expected deny, got {v:?}");
-        if let InspectorVerdict::Deny { reason } = v {
-            assert!(reason.contains("internal_token"));
-        }
+        assert_eq!(
+            scanner.scan(b"X-Token: acmecorp_abcdefghij1234567890"),
+            vec!["internal_token"]
+        );
     }
 }

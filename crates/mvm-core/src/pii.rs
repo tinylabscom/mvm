@@ -55,9 +55,7 @@
 //!
 //! High-recall PII detection (names, addresses, free-form fields) is
 //! not in this ruleset — it requires NER models and falls outside
-//! "high-precision regex" territory. A future step can plug in a
-//! model-backed detector behind the same `Inspector` trait without
-//! changing the chain.
+//! "high-precision regex" territory.
 
 use regex::bytes::{Regex, RegexSet};
 
@@ -144,7 +142,7 @@ pub enum Mode {
     Block,
 }
 
-/// Inspector that scans outbound bodies for PII shapes. Ships in
+/// Scans bodies for PII shapes. Ships in
 /// **detect-only** mode today; see [`Mode`] for the planned
 /// promotion path.
 pub struct PiiRedactor {
