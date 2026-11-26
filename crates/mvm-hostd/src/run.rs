@@ -1022,10 +1022,10 @@ mod tests {
                     std::fs::write(config.initrd_path.as_ref().unwrap(), b"tampered").unwrap()
                 }
                 "release-triplet" => {
-                    let directory = data
-                        .path()
-                        .join("cache/guest-runtime/releases")
-                        .join(env!("CARGO_PKG_VERSION"));
+                    let directory = mvm_build::guest_bins::release::release_guest_runtime_cache_dir(
+                        &data.path().join("cache"),
+                        env!("CARGO_PKG_VERSION"),
+                    );
                     std::fs::create_dir_all(&directory).unwrap();
                     let asset =
                         mvm_build::guest_bins::guest_bins_archive_name(env!("CARGO_PKG_VERSION"));

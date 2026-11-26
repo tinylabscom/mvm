@@ -1091,7 +1091,8 @@ mod runtime_overlay_attach_tests {
         let version = env!("CARGO_PKG_VERSION");
         let arch = GuestArch::host();
         seed_cache(dir.path(), version, arch);
-        let release = dir.path().join("guest-runtime/releases").join(version);
+        let release =
+            mvm_build::guest_bins::release::release_guest_runtime_cache_dir(dir.path(), version);
         std::fs::create_dir_all(&release).unwrap();
         std::fs::write(
             release.join(format!("mvm-guest-bins-v{version}.tar.gz")),

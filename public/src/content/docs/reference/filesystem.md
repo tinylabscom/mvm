@@ -227,3 +227,10 @@ and contains the sealed
 `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and
 `checksums-sha256.txt` metadata reused by every VM that boots that runtime
 version.
+
+A release binary that downloaded its own guest runtime keeps it in
+`~/.mvm/cache/guest-runtime/releases/<version>/`: the archive
+`mvm-guest-bins-v<version>.tar.gz`, its `.sha256` digest, and the signature
+bundles of both (`.bundle` and `.sha256.bundle`). `mvmctl bootstrap` writes
+the directory and every launch re-authenticates the archive from those files;
+a launch refuses a directory whose files are incomplete or do not verify.

@@ -703,7 +703,8 @@ mod tests {
             seed_warm_universal_initramfs(home.path());
             let cache = home.path().join("cache");
             let version = env!("CARGO_PKG_VERSION");
-            let release = cache.join("guest-runtime/releases").join(version);
+            let release =
+                mvm_build::guest_bins::release::release_guest_runtime_cache_dir(&cache, version);
             std::fs::create_dir_all(&release).unwrap();
             let asset_version = if failure == "wrong-version" {
                 "0.0.0-wrong"

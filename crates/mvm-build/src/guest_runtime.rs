@@ -304,7 +304,7 @@ fn find_verified_release_runtime(
     mut locations: Vec<PathBuf>,
     verify: &ReleaseArchiveCheck<'_>,
 ) -> Result<Option<evidence::VerifiedReleaseRuntime>, GuestRuntimeError> {
-    let cached = cache_root.join("guest-runtime/releases").join(version);
+    let cached = guest_bins::release::release_guest_runtime_cache_dir(cache_root, version);
     locations.push(cached.clone());
     let asset = guest_bins::guest_bins_archive_name(version);
     for directory in locations {
@@ -392,12 +392,7 @@ fn resolve_release_guest_runtime(
     };
     let mut legacy_package = None;
     'packaged: for directory in packaged {
-        for name in [
-            asset.clone(),
-            format!("{asset}.sha256"),
-            format!("{asset}.bundle"),
-            format!("{asset}.sha256.bundle"),
-        ] {
+        for name in guest_bins::release::release_guest_runtime_files(version) {
             match fs::symlink_metadata(directory.join(name)) {
                 Ok(_) => {
                     let runtime = install(directory)?;
@@ -432,10 +427,12 @@ fn resolve_release_guest_runtime(
             }
         }
     }
-    let releases = cache_root.join("guest-runtime").join("releases");
-    fs::create_dir_all(&releases)?;
-    let _lock = guest_agent_build::acquire_guest_build_lock(&releases, "guest runtime release")?;
-    let destination = releases.join(version);
+    let destination = guest_bins::release::release_guest_runtime_cache_dir(cache_root, version);
+    let releases = destination
+        .parent()
+        .ok_or_else(|| GuestRuntimeError::Cache("release cache directory has no parent".into()))?;
+    fs::create_dir_all(releases)?;
+    let _lock = guest_agent_build::acquire_guest_build_lock(releases, "guest runtime release")?;
     match fs::symlink_metadata(&destination) {
         Ok(_) => {
             if let Some(files) = &legacy_package {
@@ -453,7 +450,7 @@ fn resolve_release_guest_runtime(
             if require_quartet && !evidence::checksum_bundle_present(&bundle)? {
                 let stage = tempfile::Builder::new()
                     .prefix(".checksum-")
-                    .tempdir_in(&releases)?;
+                    .tempdir_in(releases)?;
                 let downloaded = stage.path().join(&bundle_name);
                 crate::runtime_overlay::curl_download(
                     &format!("{release_url}/{bundle_name}"),
@@ -474,13 +471,8 @@ fn resolve_release_guest_runtime(
     }
     let stage = tempfile::Builder::new()
         .prefix(".download-")
-        .tempdir_in(&releases)?;
-    for name in [
-        asset.clone(),
-        format!("{asset}.sha256"),
-        format!("{asset}.bundle"),
-        format!("{asset}.sha256.bundle"),
-    ] {
+        .tempdir_in(releases)?;
+    for name in guest_bins::release::release_guest_runtime_files(version) {
         let target = stage.path().join(&name);
         if let Some(bytes) = legacy_package
             .as_ref()
@@ -1427,7 +1419,7 @@ mod tests {
         assert!(
             cached_runtime_release_proof(cache.path(), "../escape", GuestArch::host()).is_err()
         );
-        let directory = cache.path().join("guest-runtime/releases").join(version);
+        let directory = guest_bins::release::release_guest_runtime_cache_dir(cache.path(), version);
         fs::create_dir_all(&directory).unwrap();
         assert!(cached_runtime_release_proof(cache.path(), version, GuestArch::host()).is_err());
         fs::write(
@@ -2368,7 +2360,9 @@ mod tests {
     fn cached_release_is_reverified_instead_of_trusting_its_location() {
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("cache");
-        unsigned_release(&cache.join("guest-runtime/releases/1.2.3"));
+        unsigned_release(&guest_bins::release::release_guest_runtime_cache_dir(
+            &cache, "1.2.3",
+        ));
         let error = resolve_release_guest_runtime(
             &cache,
             "1.2.3",
@@ -2416,7 +2410,7 @@ mod tests {
                 crate::runtime_overlay::RuntimeOverlayError::SignatureInvalid { .. }
             )
         ));
-        assert!(!cache.join("guest-runtime/releases/1.2.3").exists());
+        assert!(!guest_bins::release::release_guest_runtime_cache_dir(&cache, "1.2.3").exists());
         assert!(!cache.join("guest-runtime/v1/objects").exists());
     }
 
@@ -2484,8 +2478,9 @@ mod tests {
             )
             .is_err()
         );
-        let releases = cache.join("guest-runtime/releases");
-        assert!(!releases.join("1.2.3").exists());
+        let entry = guest_bins::release::release_guest_runtime_cache_dir(&cache, "1.2.3");
+        assert!(!entry.exists());
+        let releases = entry.parent().unwrap();
         assert!(!cache.join("guest-runtime/v1/objects").exists());
         assert!(fs::read_dir(releases).unwrap().all(|entry| {
             !entry
