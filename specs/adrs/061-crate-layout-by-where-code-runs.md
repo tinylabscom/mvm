@@ -142,7 +142,7 @@ passes, written invariants per layer, and small files.
    becomes `mvm_core::plan::bundle::export`, gated by `host-state`; the
    caller still supplies the signer and retains signing authority.
 
-7. **`runmvm-client` is deleted.** Nothing in the workspace depends on it and
+7. **`runmvm-client` is deleted (done, #4839).** Nothing in the workspace depends on it and
    the known embedder uses `mvm-client`. Its publish lane and registry smoke
    test go with it.
 
