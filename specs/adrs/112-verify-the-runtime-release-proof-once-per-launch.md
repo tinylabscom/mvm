@@ -105,8 +105,8 @@ Each of these was measured and ruled out on the machines named above.
 - File writes: a 20 MB copy took under 5 ms.
 - Helper processes: only two are started, at the very end.
 - Network: a system-call trace of a launch shows no outbound connection.
-- Signing, audit and key load: `sign_and_verify_plan` 0.3 ms,
-  `audit_record` 4.8 ms, `host_signing_key_load` 0.2 ms.
+- Signing, audit and key load: `admit_plan.sign_and_verify_plan` 0.3 ms,
+  `audit_record` 4.8 ms, `admit_plan.host_signing_key_load` 0.2 ms.
 
 ### Why the cost was hard to see
 
@@ -168,8 +168,9 @@ This gives a launch of about 1.7 s on the idle VM (projected from the spans:
 ## What this does not do
 
 - It does not reach 300 ms. After it, the launch was dominated by about 640 ms for
-  the one verification, about 320 ms in `grants_budget_and_host_interface`, about
-  300 ms in `driver_boot`, and teardown. Each is a separate piece of work. The
+  the one verification, about 320 ms in
+  `admit_plan.grants_budget_and_host_interface`, about 300 ms in `driver_boot`,
+  and teardown. Each is a separate piece of work. The
   one verification has since been cut by the adopted alternative below: on an
   Apple M4 Max with a load average of 17.6 / 40.1 / 47.7 across 16 cores, its
   median CPU time on the signed `v0.28.0-rc.11` archive went from 236.8 ms to
