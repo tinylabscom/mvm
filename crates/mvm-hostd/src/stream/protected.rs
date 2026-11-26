@@ -288,9 +288,16 @@ pub(super) fn record_opening(
         [],
     );
     entry.labels = evidence::opening_labels(seed)?;
+    // Inside a batch the emit below would return before its record is synced,
+    // and nothing after it syncs the segment.
+    anyhow::ensure!(
+        !emitter.batch_open(),
+        "a capture opening must not be written inside an audit batch"
+    );
     emitter.emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)?;
-    // Verification also syncs the matching segment and directory. Visibility
-    // alone must not expose a producer whose opening is lost after a crash.
+    // The emit above synced the segment; verification syncs the directory.
+    // Visibility alone must not expose a producer whose opening is lost after
+    // a crash.
     // This runs before every boot announces itself and inside every warm
     // claim, so it confirms the append just made rather than re-walking the
     // whole chain, whose cost grows with every launch the host has run.
@@ -891,6 +898,153 @@ mod tests {
         assert!(!run.persists);
         assert!(!run.directory(&root).unwrap().exists());
         assert!(!config::mvm_keys_dir().exists());
+    }
+
+    /// The seed of a capture generation and the private emitter its owner
+    /// would open, on a chain that holds nothing yet.
+    fn unopened_capture(vm: &str) -> (ExecutionPlan, AuditEmitter, TranscriptManifest) {
+        let plan = PlanFixture::new().tenant("opening-tenant").build();
+        let root = config::vm_protected_stream_dir(vm);
+        config::create_private_dir(&root).unwrap();
+        let emitter = AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&[41; 32]),
+            &config::mvm_audit_dir(),
+        )
+        .unwrap();
+        let writer = build_writer_with_policy(
+            vm,
+            &root.join("generations/1-1/00000000000000000000"),
+            Some(AtRestRetention::default()),
+            &plan.tenant.0,
+            &config::mvm_keys_dir(),
+        )
+        .unwrap();
+        (plan, emitter, writer.sealed_manifest())
+    }
+
+    /// Confirming the opening does not sync the segment again, so the launch
+    /// depends on the append having synced it. A start whose append cannot
+    /// sync must therefore fail, and it can only fail if the opening is
+    /// written as a barrier outside any batch.
+    #[test]
+    fn a_start_whose_opening_append_cannot_sync_is_refused() {
+        use crate::audit::audit_file::write_faults::{Boundary, Guard};
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        host_keypair::load_or_init_at(&config::mvm_keys_dir()).unwrap();
+        let plan = PlanFixture::new().tenant("opening-tenant").build();
+        let vm = "opening-sync-refused";
+        // The chain is empty, so the opening is the first record this start
+        // appends and the only one the fault can land on.
+        let fault = Guard::arm(Boundary::Sync);
+        let started = CaptureOwner::start(CaptureParams {
+            vm,
+            authority: CaptureAuthority::Admitted(&plan),
+            redaction: &plan.redaction,
+        });
+        assert!(fault.consumed(), "the opening append must sync its segment");
+        assert!(started.is_err());
+        // The fault must have landed on the opening and not on some earlier
+        // barrier, which would leave the opening's own sync unpinned.
+        let chain =
+            std::fs::read_to_string(config::mvm_audit_dir().join("opening-tenant.jsonl")).unwrap();
+        let lines: Vec<&str> = chain.lines().collect();
+        assert_eq!(lines.len(), 1, "{chain}");
+        let envelope: crate::audit::signer::SignedEnvelope =
+            serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(
+            envelope.entry.event,
+            mvm_core::transcript::evidence::TRANSCRIPT_OPENED_EVENT
+        );
+        assert!(
+            !config::vm_protected_stream_dir(vm)
+                .join(mvm_core::stream_client::protected::RUN_FILENAME)
+                .exists(),
+            "a capture whose opening is not durable must not be routable"
+        );
+    }
+
+    /// A batch holds every barrier sync until it closes, so an opening recorded
+    /// inside one would be confirmed while still unsynced.
+    #[test]
+    fn an_opening_recorded_inside_an_audit_batch_is_refused() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let vm = "opening-inside-batch";
+        let (plan, emitter, seed) = unopened_capture(vm);
+        let error = emitter
+            .batched(|| record_opening(&plan, &emitter, &seed))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("inside an audit batch"),
+            "{error:#}"
+        );
+        assert!(
+            !emitter.audit_dir().join("opening-tenant.jsonl").exists(),
+            "a refused opening must not reach the chain"
+        );
+        assert!(
+            !config::vm_protected_stream_dir(vm)
+                .join(mvm_core::stream_client::protected::RUN_FILENAME)
+                .exists()
+        );
+        // The same emitter records it once the batch is closed.
+        record_opening(&plan, &emitter, &seed).unwrap();
+    }
+
+    #[test]
+    fn a_recorded_opening_authenticates_when_the_chain_is_read_back_from_disk() {
+        use mvm_core::transcript::evidence::{
+            TRANSCRIPT_OPENED_EVENT, authenticate_appended_opening, authenticate_opening,
+            opening_labels,
+        };
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let (plan, emitter, seed) = unopened_capture("opening-read-back");
+        record_opening(&plan, &emitter, &seed).unwrap();
+        let (audit_dir, key) = (emitter.audit_dir().to_path_buf(), emitter.verifying_key());
+        // Nothing of the writer survives: what authenticates is the file.
+        drop(emitter);
+        let walked = authenticate_opening(&audit_dir, &key, &seed).unwrap();
+        assert_eq!(walked.event, TRANSCRIPT_OPENED_EVENT);
+        assert_eq!(walked.tenant, plan.tenant);
+        assert_eq!(walked.labels, opening_labels(&seed).unwrap());
+        assert_eq!(
+            authenticate_appended_opening(&audit_dir, &key, &seed).unwrap(),
+            walked
+        );
+    }
+
+    /// A chain rotation ahead of the opening moves it into a new live segment,
+    /// which is where its confirmation looks for it.
+    #[test]
+    fn an_opening_that_rotates_the_chain_authenticates_in_the_new_live_segment() {
+        use mvm_core::transcript::evidence::{authenticate_appended_opening, authenticate_opening};
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        env.set(config::AUDIT_SEGMENT_BYTES_ENV, "1");
+        let (plan, emitter, seed) = unopened_capture("opening-after-rotation");
+        let earlier = crate::supervisor::audit::signer::for_plan(&plan, None, "plan.failed", []);
+        emitter
+            .emit_entry_for_evidence(&earlier, EvidenceReceipt::Omitted)
+            .unwrap();
+        record_opening(&plan, &emitter, &seed).unwrap();
+        let (audit_dir, key) = (emitter.audit_dir().to_path_buf(), emitter.verifying_key());
+        let live = audit_dir.join(format!("{}.jsonl", plan.tenant.0));
+        let lines = std::fs::read_to_string(&live).unwrap();
+        assert_eq!(
+            lines.lines().count(),
+            2,
+            "the live segment holds the continuation record and the opening"
+        );
+        assert_eq!(
+            authenticate_appended_opening(&audit_dir, &key, &seed).unwrap(),
+            authenticate_opening(&audit_dir, &key, &seed).unwrap()
+        );
     }
 
     #[test]

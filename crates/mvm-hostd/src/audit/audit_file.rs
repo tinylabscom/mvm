@@ -402,6 +402,11 @@ impl FileAuditSigner {
         self.batching.store(true, Ordering::SeqCst);
     }
 
+    /// Whether a batch is open, so a barrier written now would not sync.
+    pub(crate) fn batch_open(&self) -> bool {
+        self.batching.load(Ordering::SeqCst)
+    }
+
     /// Stop holding barriers and sync everything the batch deferred.
     ///
     /// Unlike [`flush_deferred`](Self::flush_deferred) this reports failure,
@@ -1580,6 +1585,20 @@ mod tests {
             SyncPolicy::Barrier
         );
         assert_eq!(sync_policy_for(""), SyncPolicy::Barrier);
+    }
+
+    /// A capture is exposed once its opening is confirmed, and the confirming
+    /// read does not sync the segment again, so the append is the only flush
+    /// the opening gets. Deferring it would expose a producer whose opening a
+    /// power loss can still take.
+    #[test]
+    fn a_transcript_opening_is_never_deferrable() {
+        use mvm_core::transcript::evidence::TRANSCRIPT_OPENED_EVENT;
+        assert!(!DEFERRABLE_EVENTS.contains(&TRANSCRIPT_OPENED_EVENT));
+        assert_eq!(
+            sync_policy_for(TRANSCRIPT_OPENED_EVENT),
+            SyncPolicy::Barrier
+        );
     }
 
     /// A launch's entries must all be on disk once its terminal entry returns,

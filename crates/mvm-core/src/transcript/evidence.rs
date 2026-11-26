@@ -79,8 +79,8 @@ pub fn authenticate_opening(
     opening.context("expected exactly one original host-signed transcript opening")
 }
 
-/// Authenticate an opening the caller has just appended, and make it durable,
-/// without re-walking the tenant's audit history.
+/// Authenticate an opening the caller has just appended and synced, without
+/// re-walking the tenant's audit history.
 ///
 /// [`authenticate_opening`] proves an opening from a chain the caller did not
 /// write, so it verifies every segment from the first. A producer confirming
@@ -89,8 +89,12 @@ pub fn authenticate_opening(
 /// the opening to what the full walk would check of it — the host signature
 /// over the exact signed bytes, the chain link to the line before it, and the
 /// expected tenant and labels — and refuses a second opening for the same
-/// capture in that segment. Then it syncs the segment and the directory, which
-/// is the durability the producer waits on before it is exposed.
+/// capture in that segment. Then it syncs the directory, so the segment's name
+/// is as durable as its contents before the producer is exposed.
+///
+/// The segment itself is not synced here. The caller's append must already
+/// have synced it, which a barrier append outside any batch does; an opening
+/// written without that is authenticated by this function but not durable.
 ///
 /// What it deliberately does not do is re-attest the history before the
 /// opening. That walk grows with every launch the host has ever run; on a host
@@ -129,7 +133,7 @@ pub fn authenticate_appended_opening(
         opening.tenant.0 == *tenant && opening.labels == expected,
         "conflicting original transcript opening"
     );
-    std::fs::File::open(&live.segment)?.sync_all()?;
+    // The append that wrote the opening already synced this segment.
     std::fs::File::open(audit_dir)?.sync_all()?;
     Ok(opening)
 }
