@@ -136,6 +136,17 @@ with a shape-matched claim and a hard latency ceiling.
 - *Unsigned portable artifacts.* Our signed bundle and publisher trust store
   stay; a portable artifact that carries no signature cannot take part in
   the admission path.
+- *A client API in container vocabulary.* An HTTP surface that speaks an
+  existing container API would let current tooling drive mvm unmodified, but
+  it borrows words that describe a weaker boundary than the one mvm provides
+  and reopens the container-versus-microVM confusion that ended the Docker dev
+  tier. A narrow run surface in mvm's own vocabulary captures most of the
+  adoption benefit. Whatever client surface is built synthesizes a plan and
+  goes through admission, inherits the one egress gate, refuses fields it
+  cannot map (privileged mode, host mounts, host networking, device
+  passthrough) with a named reason rather than ignoring them, and claims
+  nothing by proximity. Choosing the container vocabulary later would need its
+  own ADR that confronts why the Docker tier was removed.
 
 **Open, and deliberately not decided here:** live copy-on-write fan-out with a
 workload-declared branch point, and a graphics path. Both are plausible
