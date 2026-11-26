@@ -1,11 +1,7 @@
-//! Request and content inspection: the inspector chain, secret/PII/injection scanners, redaction, destination and SSRF policy, and HTTP hardening.
+//! Content inspection: secret and PII scanners, redaction, the SSRF address classifier and HTTP hardening.
 
-pub mod circuit_breaker;
-pub mod destination;
 pub mod entropy_scanner;
 pub mod http_hardening;
-pub mod injection_guard;
-pub mod inspector;
 pub mod name_scanner;
 pub mod pii_redactor;
 /// Undeclared secret/PII redaction shared by the egress endpoint and the

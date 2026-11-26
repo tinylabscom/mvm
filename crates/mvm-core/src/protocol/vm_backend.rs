@@ -30,9 +30,8 @@ pub use mvm_contract::protocol::vm_backend::{
     RuntimeSourceRootStrategy, SnapshotCapability, StandbyCompat, StandbyError, StandbyHandle,
     StandbySpec, StandbyState, StartMode, VmCapabilities, VmExitStatus, VmFile, VmId, VmInfo,
     VmNetworkInfo, VmPortMapping, VmStatus, VmVolume, VmVolumeKind, WarmArtifactIdentity,
-    WarmClaimOutcome, WarmClaimRefusal, WarmClaimTiming, WarmLaunchMode, WarmPrewarmSource,
-    WarmServiceRequest, WarmServiceResponse, WarmStartError, WarmStartOutcome, clamp_vcpus,
-    decode_host_epoch_cmdline, encode_user_volumes_cmdline, is_secret_env_name,
+    WarmClaimOutcome, WarmClaimRefusal, WarmPrewarmSource, WarmStartError, WarmStartOutcome,
+    clamp_vcpus, decode_host_epoch_cmdline, encode_user_volumes_cmdline, is_secret_env_name,
 };
 
 /// How the host reaches a vsock port the guest listens on, as the backend

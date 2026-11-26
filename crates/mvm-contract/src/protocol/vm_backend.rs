@@ -687,27 +687,6 @@ pub struct WarmStartOutcome {
     pub reseed: ReseedStatus,
 }
 
-/// Whether a launch may use a cold boot when no compatible warm capacity is
-/// immediately available.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WarmLaunchMode {
-    /// Use warm capacity when available, but preserve a cold-boot path.
-    #[default]
-    Optional,
-    /// Refuse the launch unless a compatible warm parent can be claimed.
-    Required,
-    /// Do not consult the warm pool.
-    Cold,
-}
-
-impl WarmLaunchMode {
-    /// Whether this mode requires an authenticated warm claim.
-    pub const fn requires_warm(self) -> bool {
-        matches!(self, Self::Required)
-    }
-}
-
 /// A typed reason a warm claim was refused. These reasons are part of the
 /// host-side launch contract: callers can distinguish capacity pressure from
 /// an incompatible or unhealthy parent without parsing log text.
@@ -739,18 +718,6 @@ pub enum WarmClaimOutcome {
     ColdBoot,
     /// The caller requested warm service and must not cold-boot.
     Refused(WarmClaimRefusal),
-}
-
-/// Monotonic timing marks for one warm decision. Values are integer
-/// microseconds so the same record is stable across JSON, logs, and metrics.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WarmClaimTiming {
-    /// Time spent waiting for a compatible pool entry.
-    pub pool_wait_us: u64,
-    /// Time spent claiming and authenticating the child.
-    pub claim_us: u64,
-    /// Total warm window from claim dispatch to authenticated readiness.
-    pub warm_window_us: u64,
 }
 
 /// Host-path-free source descriptor for an asynchronous warm-artifact job.
@@ -804,84 +771,6 @@ pub struct WarmArtifactIdentity {
     pub rootfs_sha256: String,
     /// Runtime overlay content identity, when required.
     pub runtime_overlay_sha256: Option<String>,
-}
-
-/// Control-plane request for the resident warm-launch service.
-///
-/// The admitted workload envelope remains owned by the trusted launch role;
-/// this boundary carries the request identity and compatibility shape used to
-/// schedule it, never a host path or user secret.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum WarmServiceRequest {
-    /// Claim one compatible warm parent for a launch lease.
-    Claim {
-        /// Caller-generated id used for audit correlation and replay checks.
-        request_id: String,
-        /// Lease id that will own the claimed child until release.
-        lease_id: String,
-        /// Whether cold fallback is permitted.
-        mode: WarmLaunchMode,
-        /// Complete parent compatibility shape; host paths are excluded.
-        compatibility: StandbyCompat,
-    },
-    /// Release a previously accepted lease.
-    Release {
-        /// Caller-generated id used for audit correlation.
-        request_id: String,
-        /// Lease to stop and remove from active service state.
-        lease_id: String,
-    },
-    /// Ask the service to prepare capacity for a compatibility shape.
-    Prewarm {
-        /// Caller-generated id used for audit correlation.
-        request_id: String,
-        /// Immutable-source intent resolved by the asynchronous worker.
-        source: WarmPrewarmSource,
-        /// Complete content identity for the artifact object to prepare.
-        artifact: WarmArtifactIdentity,
-        /// Shape the published parents must satisfy.
-        compatibility: StandbyCompat,
-        /// Desired number of idle parents.
-        target: u32,
-    },
-}
-
-/// Control-plane response from the resident warm-launch service.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case")]
-pub enum WarmServiceResponse {
-    /// A child is authenticated and owned by `lease_id`.
-    Claimed {
-        request_id: String,
-        lease_id: String,
-        vm_id: VmId,
-        timing: WarmClaimTiming,
-    },
-    /// Optional mode had no usable warm capacity and may cold-boot.
-    ColdBoot {
-        request_id: String,
-        lease_id: String,
-        vm_id: VmId,
-        timing: WarmClaimTiming,
-    },
-    /// Required mode could not be honored.
-    Refused {
-        request_id: String,
-        refusal: WarmClaimRefusal,
-        timing: WarmClaimTiming,
-    },
-    /// The service accepted release and removed the active lease.
-    Released {
-        request_id: String,
-        lease_id: String,
-    },
-    /// The service accepted an asynchronous prewarm request.
-    PrewarmAccepted {
-        request_id: String,
-        target: u32,
-        current: u32,
-    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1551,73 +1440,30 @@ mod tests {
     }
 
     #[test]
-    fn warm_service_request_and_response_roundtrip_without_host_paths() {
-        let compatibility = StandbyCompat {
-            template_id: Some("python-312".into()),
-            kernel_sha256: "aa".repeat(32),
-            vcpus: 2,
-            mem_mib: 128,
-            image_sha256: Some("bb".repeat(32)),
-            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
-            vsock_egress: false,
+    fn warm_prewarm_source_and_artifact_identity_roundtrip_without_host_paths() {
+        let source = WarmPrewarmSource::OciImage {
+            reference: "python:3.12".into(),
         };
-        let request = WarmServiceRequest::Claim {
-            request_id: "req-1".into(),
-            lease_id: "lease-1".into(),
-            mode: WarmLaunchMode::Required,
-            compatibility,
+        let artifact = WarmArtifactIdentity {
+            backend: "hvf".into(),
+            backend_version: "v1".into(),
+            guest_agent_sha256: "aa".repeat(32),
+            kernel_sha256: "bb".repeat(32),
+            initramfs_sha256: "cc".repeat(32),
+            rootfs_sha256: "dd".repeat(32),
+            runtime_overlay_sha256: Some("ee".repeat(32)),
         };
-        let json = serde_json::to_string(&request).expect("warm request serializes");
-        assert!(!json.contains("/") && !json.contains("host"));
-        let decoded: WarmServiceRequest =
-            serde_json::from_str(&json).expect("warm request deserializes");
-        assert_eq!(decoded, request);
-
-        let response = WarmServiceResponse::Refused {
-            request_id: "req-1".into(),
-            refusal: WarmClaimRefusal::NoCompatibleParent,
-            timing: WarmClaimTiming {
-                pool_wait_us: 12,
-                claim_us: 0,
-                warm_window_us: 12,
-            },
-        };
-        let response_json = serde_json::to_string(&response).expect("warm response serializes");
-        let decoded_response: WarmServiceResponse =
-            serde_json::from_str(&response_json).expect("warm response deserializes");
-        assert_eq!(decoded_response, response);
-
-        let prewarm = WarmServiceRequest::Prewarm {
-            request_id: "req-2".into(),
-            source: WarmPrewarmSource::OciImage {
-                reference: "python:3.12".into(),
-            },
-            artifact: WarmArtifactIdentity {
-                backend: "hvf".into(),
-                backend_version: "v1".into(),
-                guest_agent_sha256: "aa".repeat(32),
-                kernel_sha256: "bb".repeat(32),
-                initramfs_sha256: "cc".repeat(32),
-                rootfs_sha256: "dd".repeat(32),
-                runtime_overlay_sha256: Some("ee".repeat(32)),
-            },
-            compatibility: StandbyCompat {
-                template_id: None,
-                kernel_sha256: "cc".repeat(32),
-                vcpus: 2,
-                mem_mib: 128,
-                image_sha256: Some("dd".repeat(32)),
-                root_strategy: RuntimeSourceRootStrategy::BlockExt4,
-                vsock_egress: false,
-            },
-            target: 1,
-        };
-        let prewarm_json = serde_json::to_string(&prewarm).expect("prewarm serializes");
-        assert!(!prewarm_json.contains("/"));
+        let source_json = serde_json::to_string(&source).expect("source serializes");
+        let artifact_json = serde_json::to_string(&artifact).expect("identity serializes");
+        assert!(!source_json.contains('/') && !artifact_json.contains('/'));
         assert_eq!(
-            serde_json::from_str::<WarmServiceRequest>(&prewarm_json)
-                .expect("prewarm deserializes"),
-            prewarm
+            serde_json::from_str::<WarmPrewarmSource>(&source_json).expect("source deserializes"),
+            source
+        );
+        assert_eq!(
+            serde_json::from_str::<WarmArtifactIdentity>(&artifact_json)
+                .expect("identity deserializes"),
+            artifact
         );
     }
 

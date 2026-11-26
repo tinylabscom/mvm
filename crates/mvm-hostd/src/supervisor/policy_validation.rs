@@ -1,29 +1,15 @@
-//! Operator-policy validation and the canonical egress inspector chain.
+//! Operator-policy validation.
 //!
 //! The validators refuse a policy bundle naming an inspector or an audit
-//! stream scheme this build does not know, so a typo fails at resolution
-//! instead of silently disabling a control. The chain builders keep the
-//! inspector names those validators accept tied to the inspectors that exist.
-
-use std::sync::Arc;
+//! stream scheme this build does not know, so a typo fails at resolution.
 
 use thiserror::Error;
 
 use mvm_core::policy::EgressPolicy;
 
-use crate::supervisor::inspection::circuit_breaker::{CircuitBreaker, InspectorReporter};
-use crate::supervisor::inspection::destination::DestinationPolicy;
-use crate::supervisor::inspection::injection_guard::InjectionGuard;
-use crate::supervisor::inspection::inspector::{Inspector, InspectorChain};
-use crate::supervisor::inspection::pii_redactor::PiiRedactor;
-use crate::supervisor::inspection::secrets_scanner::SecretsScanner;
-use crate::supervisor::inspection::ssrf_guard::SsrfGuard;
-
-/// Stable identifiers for every inspector the canonical
-/// [`build_inspector_chain`] wires. Matches each inspector's
-/// `Inspector::name()` return value. Operators reference these
-/// names in `EgressPolicy::disabled_inspectors`; [`validate_egress_policy_inspector_names`]
-/// uses this list to fail-loud on typos.
+/// The inspector names `EgressPolicy::disabled_inspectors` accepts;
+/// [`validate_egress_policy_inspector_names`] uses this list to fail-loud
+/// on typos. No inspector chain is built from the policy today.
 ///
 /// Order is cheap/precise first, body inspectors last — keep it
 /// that way if you add a name.
@@ -58,14 +44,8 @@ pub enum EgressPolicyValidationError {
 /// Verify every name in `policy.disabled_inspectors` matches a known
 /// inspector (member of [`KNOWN_INSPECTOR_NAMES`]).
 ///
-/// `build_inspector_chain` itself stays lenient — it silently skips
-/// unknown names so in-process callers that own their config can
-/// extend the disabled list ahead of inspector additions. This
-/// function is the *admission-time* tightening: the policy
-/// resolver in `mvm-cli` calls this to fail loud on typos
-/// (e.g. `["ssr_guard"]` would silently leave SSRF enforced; not
-/// catching that at admission means the operator thinks they
-/// disabled it).
+/// The policy resolver in `mvm-client` calls this at admission to fail
+/// loud on typos (e.g. `["ssr_guard"]`).
 pub fn validate_egress_policy_inspector_names(
     policy: &EgressPolicy,
 ) -> Result<(), EgressPolicyValidationError> {
@@ -134,118 +114,6 @@ pub fn validate_audit_policy_stream_destinations(
     Ok(())
 }
 
-/// Build an [`InspectorChain`] from the workload's [`EgressPolicy`].
-/// Order is cheap/most-precise checks first, body
-/// inspectors last (so a destination-denied request never pays the
-/// cost of body scanning).
-///
-/// `policy.disabled_inspectors` filters out by name — empty == every
-/// inspector enabled. The named inspectors must match
-/// `Inspector::name()` strings exactly.
-///
-/// When `breakers` is `Some`, each inspector is wrapped in a
-/// [`CircuitBreaker`] that shares the supplied
-/// [`InspectorReporter`]. The chain length is unchanged — wrappers
-/// preserve the wrapped inspector's `name()` so audit binding stays
-/// intact.
-///
-/// Public so the resolver in `mvm-client`'s `admission::policy_resolver`
-/// can build the same canonical chain when it turns a parsed bundle
-/// into a `ResolvedSlots`. Keeping the order in one place avoids
-/// chain-shape drift between the in-process supervisor path and
-/// the CLI resolver.
-pub fn build_inspector_chain(
-    policy: &EgressPolicy,
-    breakers: Option<Arc<InspectorReporter>>,
-) -> InspectorChain {
-    let disabled = |name: &'static str| policy.disabled_inspectors.iter().any(|d| d == name);
-    let wrap = |inner: Box<dyn Inspector>| -> Box<dyn Inspector> {
-        match &breakers {
-            Some(r) => Box::new(CircuitBreaker::new(inner, r.clone())),
-            None => inner,
-        }
-    };
-    let mut chain = InspectorChain::new();
-    if !disabled("destination_policy") {
-        let dp = DestinationPolicy::new(
-            policy
-                .allow_list
-                .iter()
-                .map(|(host, port)| (host.as_str(), *port)),
-        );
-        chain.push(wrap(Box::new(dp) as Box<dyn Inspector>));
-    }
-    if !disabled("ssrf_guard") {
-        chain.push(wrap(Box::new(SsrfGuard::new())));
-    }
-    if !disabled("secrets_scanner") {
-        chain.push(wrap(Box::new(SecretsScanner::with_default_rules())));
-    }
-    if !disabled("injection_guard") {
-        chain.push(wrap(Box::new(InjectionGuard::with_default_rules())));
-    }
-    if !disabled("pii_redactor") {
-        chain.push(wrap(Box::new(PiiRedactor::with_default_rules())));
-    }
-    chain
-}
-
-/// Same as [`build_inspector_chain`] but the PII inspector is
-/// constructed from a parsed [`mvm_core::policy::PiiPolicy`] (mode +
-/// category filter) instead of hardwired to defaults. Used by the
-/// resolver so a tenant bundle's `[pii]` section actually
-/// drives runtime behavior (Mode::Detect / Redact / Block, scoped to
-/// a category subset).
-///
-/// Returns the same canonical chain order as `build_inspector_chain`.
-/// The PII inspector is *skipped entirely* when `pii.mode =
-/// "disabled"` (the kill-switch for analytics workloads
-/// that scrub PII upstream) — same effect as adding `"pii_redactor"`
-/// to `disabled_inspectors`, but expressed through the more
-/// operator-natural `pii.mode` field.
-///
-/// Refuses unknown `pii.mode` / `pii.categories[i]` values via
-/// `PiiPolicyError` so a typo fails the boot loudly at admission
-/// rather than silently scanning fewer categories than intended.
-pub fn build_pii_inspector_chain(
-    egress: &EgressPolicy,
-    pii: &mvm_core::policy::PiiPolicy,
-    breakers: Option<Arc<InspectorReporter>>,
-) -> Result<InspectorChain, crate::supervisor::inspection::pii_redactor::PiiPolicyError> {
-    let disabled = |name: &'static str| egress.disabled_inspectors.iter().any(|d| d == name);
-    let wrap = |inner: Box<dyn Inspector>| -> Box<dyn Inspector> {
-        match &breakers {
-            Some(r) => Box::new(CircuitBreaker::new(inner, r.clone())),
-            None => inner,
-        }
-    };
-    let mut chain = InspectorChain::new();
-    if !disabled("destination_policy") {
-        let dp = DestinationPolicy::new(
-            egress
-                .allow_list
-                .iter()
-                .map(|(host, port)| (host.as_str(), *port)),
-        );
-        chain.push(wrap(Box::new(dp) as Box<dyn Inspector>));
-    }
-    if !disabled("ssrf_guard") {
-        chain.push(wrap(Box::new(SsrfGuard::new())));
-    }
-    if !disabled("secrets_scanner") {
-        chain.push(wrap(Box::new(SecretsScanner::with_default_rules())));
-    }
-    if !disabled("injection_guard") {
-        chain.push(wrap(Box::new(InjectionGuard::with_default_rules())));
-    }
-    if !disabled("pii_redactor")
-        && let Some(red) = PiiRedactor::from_policy(pii)?
-    {
-        chain.push(wrap(Box::new(red)));
-    }
-    Ok(chain)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,38 +131,19 @@ mod tests {
     }
 
     #[test]
-    fn build_inspector_chain_honours_disabled_inspectors() {
-        let mut policy = dev_egress_policy(false);
-        policy.disabled_inspectors =
-            vec!["secrets_scanner".to_string(), "pii_redactor".to_string()];
-        let chain = build_inspector_chain(&policy, None);
-        // 5 default inspectors minus 2 disabled = 3.
-        assert_eq!(chain.len(), 3);
-    }
-
-    #[test]
-    fn build_inspector_chain_full_default() {
-        let policy = dev_egress_policy(false);
-        let chain = build_inspector_chain(&policy, None);
-        // All 5 inspectors present.
-        assert_eq!(chain.len(), 5);
-    }
-
-    #[test]
-    fn known_inspector_names_matches_chain_inspectors() {
-        // Each name in KNOWN_INSPECTOR_NAMES must actually disable a
-        // chain slot. Any drift between this constant and the
-        // canonical build_inspector_chain order is a bug.
-        for &name in KNOWN_INSPECTOR_NAMES {
-            let mut policy = dev_egress_policy(false);
-            policy.disabled_inspectors = vec![name.to_string()];
-            let chain = build_inspector_chain(&policy, None);
-            assert_eq!(
-                chain.len(),
-                KNOWN_INSPECTOR_NAMES.len() - 1,
-                "disabling {name:?} should drop exactly one inspector from the chain"
-            );
-        }
+    fn known_inspector_names_are_pinned() {
+        // The validator's list is part of the policy format: a bundle that
+        // names any of these must keep passing admission.
+        assert_eq!(
+            KNOWN_INSPECTOR_NAMES,
+            &[
+                "destination_policy",
+                "ssrf_guard",
+                "secrets_scanner",
+                "injection_guard",
+                "pii_redactor",
+            ]
+        );
     }
 
     #[test]
@@ -326,102 +175,6 @@ mod tests {
                 assert_eq!(name, "secrets_scaner");
                 assert_eq!(valid, KNOWN_INSPECTOR_NAMES);
             }
-        }
-    }
-
-    fn dev_pii_policy() -> mvm_core::policy::PiiPolicy {
-        mvm_core::policy::PiiPolicy {
-            mode: None,
-            categories: vec![],
-        }
-    }
-
-    #[test]
-    fn build_pii_inspector_chain_default_matches_default_chain() {
-        // No PII policy override → chain length matches the lenient
-        // 5-inspector default. Proves the new function is a strict
-        // superset of `build_inspector_chain`'s shape.
-        let egress = dev_egress_policy(false);
-        let pii = dev_pii_policy();
-        let chain = build_pii_inspector_chain(&egress, &pii, None).expect("default ok");
-        assert_eq!(chain.len(), 5);
-    }
-
-    #[test]
-    fn build_pii_inspector_chain_drops_inspector_when_mode_disabled() {
-        // `pii.mode = "disabled"` is the operator-natural kill-switch;
-        // semantically equivalent to adding `"pii_redactor"` to
-        // `disabled_inspectors`. The chain shrinks to 4.
-        let egress = dev_egress_policy(false);
-        let pii = mvm_core::policy::PiiPolicy {
-            mode: Some("disabled".to_string()),
-            categories: vec![],
-        };
-        let chain = build_pii_inspector_chain(&egress, &pii, None).expect("disabled ok");
-        assert_eq!(chain.len(), 4);
-    }
-
-    #[test]
-    fn build_pii_inspector_chain_honors_redact_mode() {
-        // `pii.mode = "redact"` keeps the inspector in the chain but
-        // its internal Mode flips to Redact. We can't easily inspect
-        // the internal Mode through the InspectorChain trait surface,
-        // but we can prove from_policy preserves mode by going
-        // through the redactor constructor directly.
-        let pii = mvm_core::policy::PiiPolicy {
-            mode: Some("redact".to_string()),
-            categories: vec![],
-        };
-        let red = PiiRedactor::from_policy(&pii)
-            .expect("ok")
-            .expect("not disabled");
-        assert_eq!(
-            red.mode(),
-            crate::supervisor::inspection::pii_redactor::Mode::Redact
-        );
-    }
-
-    #[test]
-    fn build_pii_inspector_chain_refuses_unknown_mode() {
-        let egress = dev_egress_policy(false);
-        let pii = mvm_core::policy::PiiPolicy {
-            mode: Some("paranoid".to_string()),
-            categories: vec![],
-        };
-        let err = build_pii_inspector_chain(&egress, &pii, None).expect_err("typo");
-        match err {
-            crate::supervisor::inspection::pii_redactor::PiiPolicyError::UnknownMode {
-                value,
-                valid,
-            } => {
-                assert_eq!(value, "paranoid");
-                assert!(valid.contains(&"detect"));
-                assert!(valid.contains(&"disabled"));
-            }
-            other => panic!("expected UnknownMode, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn build_pii_inspector_chain_refuses_unknown_category() {
-        let egress = dev_egress_policy(false);
-        let pii = mvm_core::policy::PiiPolicy {
-            mode: Some("detect".to_string()),
-            categories: vec!["email".to_string(), "license_plate".to_string()],
-        };
-        let err = build_pii_inspector_chain(&egress, &pii, None).expect_err("typo");
-        match err {
-            crate::supervisor::inspection::pii_redactor::PiiPolicyError::UnknownCategory {
-                index,
-                name,
-                valid,
-            } => {
-                assert_eq!(index, 1);
-                assert_eq!(name, "license_plate");
-                assert!(valid.contains(&"email"));
-                assert!(valid.contains(&"us_ssn"));
-            }
-            other => panic!("expected UnknownCategory, got {other:?}"),
         }
     }
 
@@ -501,44 +254,6 @@ mod tests {
                 assert_eq!(index, 1);
                 assert_eq!(name, "no_such_inspector");
             }
-        }
-    }
-
-    // ---- circuit-breaker wiring ----
-
-    #[test]
-    fn build_inspector_chain_without_breakers_has_raw_inspectors() {
-        // Sanity: when no reporter is wired the chain is unchanged.
-        let policy = dev_egress_policy(false);
-        let chain = build_inspector_chain(&policy, None);
-        assert_eq!(chain.len(), 5);
-    }
-
-    #[test]
-    fn build_inspector_chain_with_breakers_preserves_length_and_names() {
-        // Wrapping must be invisible to the chain interface — same
-        // count, same names — so audit binding (which keys on
-        // Inspector::name) stays intact.
-        let reporter = Arc::new(
-            crate::supervisor::inspection::circuit_breaker::InspectorReporter::new(
-                crate::supervisor::inspection::circuit_breaker::CircuitBreakerConfig::default(),
-            ),
-        );
-        let policy = dev_egress_policy(false);
-        let chain = build_inspector_chain(&policy, Some(reporter));
-        assert_eq!(chain.len(), 5);
-        let dbg = format!("{chain:?}");
-        for name in [
-            "destination_policy",
-            "ssrf_guard",
-            "secrets_scanner",
-            "injection_guard",
-            "pii_redactor",
-        ] {
-            assert!(
-                dbg.contains(name),
-                "expected wrapped chain to expose {name}, got {dbg}"
-            );
         }
     }
 }

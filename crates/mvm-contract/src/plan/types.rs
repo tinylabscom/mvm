@@ -829,7 +829,7 @@ impl Variant {
 }
 
 /// A secret binding from a name (visible inside the guest) to its
-/// source (resolved by the supervisor's `KeystoreReleaser`).
+/// source, resolved on the host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretBinding {
@@ -892,9 +892,8 @@ mod secret_binding_approval_tests {
 
 /// Where a secret comes from. Pluggable providers (Vault, AWS SM,
 /// GCP SM) plus per-run attestation-gated release. A secret's raw
-/// value never appears in a plan — only a reference the supervisor's
-/// `KeystoreReleaser` resolves at admission; the plan (persisted to
-/// `plan.json`) carries no plaintext.
+/// value never appears in a plan — only a reference the host resolves;
+/// the plan (persisted to `plan.json`) carries no plaintext.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum SecretSource {
@@ -902,13 +901,13 @@ pub enum SecretSource {
     /// resolves to a SecretId at the supervisor.
     Keystore { address: String },
     /// External provider (Vault, AWS SM, etc.). The provider URL +
-    /// path are opaque to mvm-core::plan; resolved by `KeystoreReleaser`.
+    /// path are opaque to mvm-core::plan; resolved on the host.
     External { provider: String, path: String },
 }
 
 /// Artifact-capture policy for the run. `capture_paths` are guest-side
-/// directories the supervisor's `ArtifactCollector` sweeps post-run;
-/// `retention_days` controls the cleanup sweeper.
+/// directories named for post-run capture and `retention_days` their
+/// retention. They are signed with the plan; nothing collects them today.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactPolicy {
@@ -937,8 +936,7 @@ pub struct AttestationRequirement {
 pub enum AttestationMode {
     /// No attestation. Stub. mvmctl warns; mvmd may refuse.
     Noop,
-    /// TPM2 EK + AK quote. Supervisor's `KeystoreReleaser` gates
-    /// secret release on a successful quote.
+    /// TPM2 EK + AK quote.
     Tpm2,
     /// AMD SEV-SNP report. Provider not yet implemented.
     SevSnp,
