@@ -414,6 +414,7 @@ mod tests {
                 assemblies: Default::default(),
             },
             origin: ReleaseGuestRuntimeOrigin::Installed,
+            unpublished: None,
         }
     }
 

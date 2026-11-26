@@ -433,6 +433,7 @@ mod tests {
                 assemblies: Default::default(),
             },
             origin: mvm_build::guest_bins::release::ReleaseGuestRuntimeOrigin::Installed,
+            unpublished: None,
         };
         assert_eq!(
             ready_line(&runtime),

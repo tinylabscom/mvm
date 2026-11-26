@@ -249,7 +249,8 @@ fn prepare_native_standby_runtime() -> Result<()> {
     let cache = PathBuf::from(config::mvm_cache_dir());
     let version = env!("CARGO_PKG_VERSION");
     let arch = mvm_core::arch::GuestArch::host();
-    let directory = cache.join("guest-runtime/releases").join(version);
+    let directory =
+        mvm_build::guest_bins::release::release_guest_runtime_cache_dir(&cache, version);
     let asset = mvm_build::guest_bins::guest_bins_archive_name(version);
     let runtime = mvm_build::guest_runtime::install_signed_guest_runtime_archive(
         &cache,

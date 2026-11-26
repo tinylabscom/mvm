@@ -227,3 +227,18 @@ and contains the sealed
 `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and
 `checksums-sha256.txt` metadata reused by every VM that boots that runtime
 version.
+
+A release binary with no guest runtime installed beside it keeps the one it
+downloaded in `~/.mvm/cache/guest-runtime/releases/<version>/`: the archive
+`mvm-guest-bins-v<version>.tar.gz`, its `.sha256` digest, and the signature
+bundles of both (`.bundle` and `.sha256.bundle`). `mvmctl bootstrap`, the
+first launch that has to prepare the guest runtime, and `mvmctl env update`
+(for the version it installs) write the directory, and only after those files
+verify with the same check a launch runs. A launch authenticates the archive
+from the archive, the digest and the archive's bundle, and checks the digest
+file's bundle when it is present. A directory that no longer verifies is
+refused, not replaced: remove it and run the command again. Portable
+packaging reads and writes the same directory. With `MVM_SKIP_COSIGN_VERIFY`
+set, a download still proceeds but is never written here; `mvmctl bootstrap`
+still copies it into `guest-runtime/v1/objects` and assembles the launch
+pieces from it.

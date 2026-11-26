@@ -96,7 +96,9 @@ pub fn check_source_runtime(
 ) -> Result<CheckedSourceRuntime, GuestRuntimeError> {
     if !crate::artifact_acquisition::compiled_channel().permits_automatic_builds() {
         return Err(GuestRuntimeError::Cache(
-            "compiled release channel refuses unsigned source runtime evidence".into(),
+            "compiled release channel refuses unsigned source runtime evidence; \
+             no release guest runtime is prepared, run `mvmctl bootstrap`"
+                .into(),
         ));
     }
     let workspace = crate::image_source::guest_runtime_source_checkout().ok_or_else(|| {
