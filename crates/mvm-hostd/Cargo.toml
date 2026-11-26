@@ -122,6 +122,8 @@ mvm-net.workspace = true
 # plus the audit-chain verifier. Direct dep on the no_std foundation
 # crate the IR lives in.
 mvm-contract.workspace = true
+# Low-level, effect-free peer verification and one-use bootstrap permit.
+mvm-commissioning-auth = { workspace = true, optional = true }
 # `mvm-runtime` provides the `VmNameRegistry` the TTL reaper walks, plus the
 # `VmBackend` implementations dispatched from `AnyBackend`.
 mvm-runtime.workspace = true
@@ -179,6 +181,8 @@ libc.workspace = true
 rustix = { version = "1.1", features = ["fs", "event", "process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Native caller credential custody remains in hostd; commissioning peer code
+# uses the same target-gated libraries through mvm-commissioning-auth.
 core-foundation = { version = "0.10", optional = true }
 security-framework = { version = "3.7", optional = true }
 
@@ -230,7 +234,12 @@ ctor = "0.2"
 # Host admission independently reauthenticates signed application descriptors.
 default = ["manifest-verify"]
 # macOS-only protected caller opt-in; other platforms return Unsupported.
-native-caller-identity = ["dep:core-foundation", "dep:security-framework"]
+native-caller-identity = [
+    "dep:core-foundation",
+    "dep:mvm-commissioning-auth",
+    "dep:security-framework",
+    "mvm-commissioning-auth/native-caller-identity",
+]
 manifest-verify = ["mvm-core/manifest-verify"]
 # Build the hermetic legacy-L3/FlowMux comparison producer. Never enabled by
 # a production binary; it exposes only a high-level loopback fixture.

@@ -3899,6 +3899,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-commissioning-auth"
+version = "0.28.0-rc.11"
+dependencies = [
+ "core-foundation 0.10.1",
+ "libc",
+ "mvm-contract",
+ "rand",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "mvm-compiler"
 version = "0.28.0-rc.11"
 dependencies = [
@@ -4114,6 +4128,7 @@ dependencies = [
  "mio",
  "mvm-agentd",
  "mvm-build",
+ "mvm-commissioning-auth",
  "mvm-contract",
  "mvm-core",
  "mvm-fs",

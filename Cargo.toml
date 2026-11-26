@@ -5,6 +5,9 @@ members = [
     "crates/mvm-contract",
     "crates/mvm-crypto",
     "crates/mvm-core",
+    # Effect-free commissioning authentication sits below mvm-core and hostd:
+    # dynamic macOS peer verification plus one-use, peer-bound permits.
+    "crates/mvm-commissioning-auth",
     "crates/mvm-net",
     "crates/deps/libkrun-sys",
     "crates/deps/mvm-macho-sign",
@@ -308,6 +311,7 @@ tree-sitter-typescript = "0.23.2"
 # dependency unless the workspace entry already carries it. The root binary
 # opts back into user-facing defaults through its own `[features]` block.
 mvm-contract = { path = "crates/mvm-contract", version = "0.28.0-rc.11", default-features = false, features = ["protocol"] }
+mvm-commissioning-auth = { path = "crates/mvm-commissioning-auth", version = "0.28.0-rc.11", default-features = false }
 mvm-crypto = { path = "crates/mvm-crypto", version = "0.28.0-rc.11" }
 mvm-core = { path = "crates/mvm-core", version = "0.28.0-rc.11" }
 mvm-policy = { path = "crates/mvm-policy", version = "0.28.0-rc.11" }

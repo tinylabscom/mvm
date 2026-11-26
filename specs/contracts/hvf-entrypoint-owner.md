@@ -810,17 +810,22 @@ who is on the socket; the proof says who is allowed. The pid alone is not
 compared at step 5 because the probes showed that `exec` changes `pidversion`
 and leaves the pid and `LOCAL_PEERPID` unchanged.
 
-The source-only verifier prerequisite exists under
-`mvm-hostd::caller_identity::macos_peer`, and the connected source-only adapter
-under `mvm-hostd::commissioning_bootstrap_connection`, when
-`native-caller-identity` is enabled. The verifier returns a non-cloneable
-observation with private fields and a `revalidate()` operation. The adapter
-accepts one already-connected `UnixStream`, obtains UID and token only from that
-connection, owns a duplicate for recapture, and drives one bounded exchange.
-Native diagnostics are mapped to payload-free typed refusals. Other platforms
-refuse explicitly. This is not a listener or deployed receiver: it does not
-bind or discover a socket, commit a mutation, initialize state, hold a key,
-write a journal, start a VM or construct a factory.
+The source-only verifier, one-use session and private permit are owned by the
+low-level `mvm-commissioning-auth` crate. `mvm-hostd` re-exports the verifier at
+`mvm-hostd::caller_identity::macos_peer` and the session and permit at
+`mvm-hostd::commissioning_bootstrap_session` for source compatibility. The
+connected source-only adapter remains under
+`mvm-hostd::commissioning_bootstrap_connection` and owns `getpeereid`,
+`LOCAL_PEERTOKEN` capture and framing when `native-caller-identity` is enabled.
+The verifier returns a non-cloneable observation with private fields and a
+`revalidate()` operation. The adapter accepts one already-connected
+`UnixStream`, obtains UID and token only from that connection, owns a duplicate
+for recapture, and drives one bounded exchange. Native diagnostics are mapped
+to payload-free typed refusals. Other supported build platforms refuse
+explicitly. This ownership extraction adds no listener or deployed receiver:
+it does not bind or discover a socket, commit or consume a mutation permit,
+initialize state, hold a key, write a journal, start a VM or construct a
+factory.
 
 **Stops:** a different UID (refused at accept, independent of socket mode); an
 unrelated same-UID process without the enrolled key (proof) and without the
