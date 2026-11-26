@@ -1,8 +1,8 @@
 //! Egress policy projection seam.
 //!
 //! One resolved [`EffectivePolicy`] projects to two enforcement
-//! shapes: the canonical CIDR-keyed grant set the kernel layer
-//! (nftables / `CanonicalL4Gate` / `PlanFlowPolicy`) consumes, and the
+//! shapes: the canonical CIDR-keyed grant set the per-VM endpoint's
+//! egress gate consumes, and the
 //! hostname-keyed outbound grant set the WASI context builder
 //! consumes. Hostnames are pinned to IPs at projection time (via
 //! the admission-time `DnsPinRegistry`) so both projections are

@@ -131,8 +131,8 @@ pub struct ExecutionPlan {
     /// enforce for this boot.
     pub admission_profile: AdmissionProfile,
 
-    /// Network policy reference. Wired to `mvm-core::policy::EgressPolicy`
-    /// (L7 + PII rules) via the supervisor's `SupervisorEgressProxy`.
+    /// Network policy reference: the tenant bundle whose egress policy is
+    /// projected into the per-VM endpoint's egress gate.
     pub network_policy: PolicyRef,
 
     /// Networking transport mode. Closed by default ([`NetworkMode::None`]): no
