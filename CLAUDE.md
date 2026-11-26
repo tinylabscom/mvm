@@ -874,7 +874,9 @@ this row as enforced without it.
     verifier, so the cache holds only the files that verified
     (`the_cached_files_are_the_bytes_that_were_verified`).
     `MVM_SKIP_COSIGN_VERIFY` skips the signature at download time as it does
-    everywhere, and such a download is never cached. The Firecracker launch proof is stricter: it re-verifies the
+    everywhere; such a download is never written to that release cache, though
+    bootstrap still copies it into the shared object store and assembles the
+    launch pieces from it. The Firecracker launch proof is stricter: it re-verifies the
     archive's signed bundle at every launch and `MVM_SKIP_COSIGN_VERIFY` does
     not waive it, so a locally built archive can be assembled from but never
     launched under Firecracker.

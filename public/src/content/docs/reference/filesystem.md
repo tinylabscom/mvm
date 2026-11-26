@@ -237,6 +237,8 @@ first launch that has to prepare the guest runtime, and `mvmctl env update`
 verify with the same check a launch runs. A launch authenticates the archive
 from the archive, the digest and the archive's bundle, and checks the digest
 file's bundle when it is present. A directory that no longer verifies is
-refused, not replaced: remove it and run `mvmctl bootstrap` again. With
-`MVM_SKIP_COSIGN_VERIFY` set, a download still proceeds, but nothing it
-fetched is written here.
+refused, not replaced: remove it and run the command again. Portable
+packaging reads and writes the same directory. With `MVM_SKIP_COSIGN_VERIFY`
+set, a download still proceeds but is never written here; `mvmctl bootstrap`
+still copies it into `guest-runtime/v1/objects` and assembles the launch
+pieces from it.

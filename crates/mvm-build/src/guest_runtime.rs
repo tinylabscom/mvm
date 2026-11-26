@@ -73,6 +73,27 @@ pub enum GuestRuntimeError {
         expected: String,
         actual: String,
     },
+    #[error(
+        "the cached guest runtime of release {version} in {} does not verify: {source}; \
+         remove that directory and run the command again",
+        dir.display()
+    )]
+    CachedReleaseEvidence {
+        version: String,
+        dir: PathBuf,
+        #[source]
+        source: Box<GuestRuntimeError>,
+    },
+    #[error(
+        "could not install the verified guest runtime as {}: {source}; if that object is \
+         damaged, remove it and run the command again",
+        object.display()
+    )]
+    StoreObject {
+        object: PathBuf,
+        #[source]
+        source: Box<GuestRuntimeError>,
+    },
 }
 
 /// Reject a self-consistent but incomplete archive before any artifact can be
@@ -236,15 +257,21 @@ fn install_authenticated_release_archive(
     let base = cache_root.join("guest-runtime").join("v1");
     fs::create_dir_all(&base)?;
     let _lock = guest_agent_build::acquire_guest_build_lock(&base, "guest runtime")?;
-    let stage = stage_archive(&base, snapshot)?;
-    promote_staged_archive(
-        &base,
-        stage,
-        manifest.clone(),
-        digest.to_string(),
-        arch,
-        ArchiveScope::Release,
-    )
+    stage_archive(&base, snapshot)
+        .and_then(|stage| {
+            promote_staged_archive(
+                &base,
+                stage,
+                manifest.clone(),
+                digest.to_string(),
+                arch,
+                ArchiveScope::Release,
+            )
+        })
+        .map_err(|source| GuestRuntimeError::StoreObject {
+            object: base.join("objects").join(digest),
+            source: Box::new(source),
+        })
 }
 
 /// Acquire all four signed release files for portable packaging. Unlike the
@@ -432,7 +459,7 @@ pub(crate) fn resolve_release_guest_runtime_with(
 ) -> Result<GuestRuntime, GuestRuntimeError> {
     check_release_version(version)?;
     let asset = guest_bins::guest_bins_archive_name(version);
-    let install = |dir: &Path| {
+    let install_checked = |dir: &Path, check: &ReleaseArchiveCheck<'_>| {
         install_verified_release_archive(
             cache_root,
             [
@@ -442,9 +469,10 @@ pub(crate) fn resolve_release_guest_runtime_with(
             ],
             version,
             arch,
-            verify,
+            check,
         )
     };
+    let install = |dir: &Path| install_checked(dir, verify);
     let mut legacy_package = None;
     'packaged: for directory in packaged {
         for name in guest_bins::release::release_guest_runtime_files(version) {
@@ -499,6 +527,18 @@ pub(crate) fn resolve_release_guest_runtime_with(
                     }
                 }
             }
+            // Only the entry failing its check is the entry's fault; a store or
+            // network failure says so itself.
+            let verify_entry = |archive: &Path, checksum: &Path, bundle: &Path| {
+                verify(archive, checksum, bundle).map_err(|source| {
+                    GuestRuntimeError::CachedReleaseEvidence {
+                        version: version.to_owned(),
+                        dir: destination.clone(),
+                        source: Box::new(source),
+                    }
+                })
+            };
+            let install = |dir: &Path| install_checked(dir, &verify_entry);
             let runtime = install(&destination)?;
             let bundle_name = format!("{asset}.sha256.bundle");
             let bundle = destination.join(&bundle_name);
@@ -510,7 +550,14 @@ pub(crate) fn resolve_release_guest_runtime_with(
                 crate::runtime_overlay::curl_download(
                     &format!("{release_url}/{bundle_name}"),
                     &downloaded,
-                )?;
+                )
+                .map_err(|error| {
+                    GuestRuntimeError::Cache(format!(
+                        "the cached guest runtime in {} has no {bundle_name}, and fetching it \
+                         failed: {error}",
+                        destination.display()
+                    ))
+                })?;
                 evidence::verify_checksum_signature(
                     &fs::read(destination.join(format!("{asset}.sha256")))?,
                     &downloaded,
@@ -2358,12 +2405,14 @@ mod tests {
         let rendered = refused.to_string();
         assert!(
             matches!(
-                refused,
-                guest_bins::release::ReleaseGuestRuntimeError::Cached { ref dir, .. } if *dir == entry
+                &refused,
+                guest_bins::release::ReleaseGuestRuntimeError::Release(
+                    GuestRuntimeError::CachedReleaseEvidence { dir, .. }
+                ) if *dir == entry
             ),
             "{refused:?}"
         );
-        assert!(rendered.contains("mvmctl bootstrap"), "{rendered}");
+        assert!(rendered.contains("remove that directory"), "{rendered}");
         assert!(
             rendered.contains(&entry.display().to_string()),
             "{rendered}"
@@ -2388,11 +2437,104 @@ mod tests {
         assert!(
             matches!(
                 &refused,
-                guest_bins::release::ReleaseGuestRuntimeError::Cached { dir, .. } if *dir == entry
+                guest_bins::release::ReleaseGuestRuntimeError::Release(
+                    GuestRuntimeError::CachedReleaseEvidence { dir, .. }
+                ) if *dir == entry
             ),
             "{refused:?}"
         );
         assert!(refused.to_string().contains("remove that directory"));
+    }
+
+    #[test]
+    fn a_release_runtime_that_misses_its_digest_is_refused_before_its_signature() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove(crate::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        env.remove(crate::runtime_overlay::SKIP_HASH_VERIFY_ENV);
+        let release = tempfile::tempdir().unwrap();
+        let bytes = raw_archive(&release_entries());
+        let (archive, _, _) = stand_in_release(release.path(), &bytes);
+        let mut tampered = bytes.clone();
+        let middle = tampered.len() / 2;
+        tampered[middle] ^= 1;
+        fs::write(&archive, tampered).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let signed = Signed::default();
+
+        let refused = bootstrap_acquire(release.path(), cache.path(), &signed);
+        let asset = guest_bins::guest_bins_archive_name("1.2.3");
+        assert!(
+            matches!(
+                &refused,
+                Err(guest_bins::release::ReleaseGuestRuntimeError::Release(
+                    GuestRuntimeError::Cache(reason)
+                )) if *reason == format!("guest runtime checksum missing or mismatched for {asset}")
+            ),
+            "{refused:?}"
+        );
+        // Only the checksum file's signature was checked: the archive's
+        // signature is never asked about bytes whose digest failed.
+        let asked: Vec<String> = signed.borrow().iter().map(|(a, _, _)| a.clone()).collect();
+        assert_eq!(asked, [format!("{asset}.sha256")]);
+        assert!(!release_entry(cache.path()).exists());
+        assert!(no_staging_left(cache.path()));
+        assert!(!cache.path().join("guest-runtime/v1/objects").exists());
+    }
+
+    #[test]
+    fn a_cache_hit_that_cannot_fetch_its_missing_checksum_bundle_says_so() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove(crate::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        let release = tempfile::tempdir().unwrap();
+        stand_in_release(release.path(), &raw_archive(&release_entries()));
+        let cache = tempfile::tempdir().unwrap();
+        bootstrap_acquire(release.path(), cache.path(), &Signed::default()).unwrap();
+        let asset = guest_bins::guest_bins_archive_name("1.2.3");
+        let entry = release_entry(cache.path());
+        fs::remove_file(entry.join(format!("{asset}.sha256.bundle"))).unwrap();
+        fs::remove_dir_all(release.path()).unwrap();
+
+        let refused = bootstrap_acquire(release.path(), cache.path(), &Signed::default())
+            .expect_err("the missing checksum bundle cannot be fetched offline");
+        // The entry itself verifies, so it is not blamed and not to be removed.
+        assert!(
+            matches!(
+                &refused,
+                guest_bins::release::ReleaseGuestRuntimeError::Release(GuestRuntimeError::Cache(
+                    reason
+                )) if reason.contains(&format!("has no {asset}.sha256.bundle"))
+            ),
+            "{refused:?}"
+        );
+        assert!(!refused.to_string().contains("remove that directory"));
+    }
+
+    #[test]
+    fn a_damaged_store_object_is_named_instead_of_the_cache_entry() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove(crate::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        let release = tempfile::tempdir().unwrap();
+        let bytes = raw_archive(&release_entries());
+        stand_in_release(release.path(), &bytes);
+        let cache = tempfile::tempdir().unwrap();
+        bootstrap_acquire(release.path(), cache.path(), &Signed::default()).unwrap();
+        let object = cache
+            .path()
+            .join("guest-runtime/v1/objects")
+            .join(hex::encode(Sha256::digest(&bytes)));
+        fs::write(object.join("archive.tar.gz"), b"damaged").unwrap();
+
+        let refused = bootstrap_acquire(release.path(), cache.path(), &Signed::default())
+            .expect_err("a damaged store object refuses");
+        assert!(
+            matches!(
+                &refused,
+                guest_bins::release::ReleaseGuestRuntimeError::Release(
+                    GuestRuntimeError::StoreObject { object: named, .. }
+                ) if *named == object
+            ),
+            "{refused:?}"
+        );
     }
 
     #[test]
@@ -2639,12 +2781,18 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert!(matches!(
-            error,
-            GuestRuntimeError::Release(
-                crate::runtime_overlay::RuntimeOverlayError::SignatureInvalid { .. }
-            )
-        ));
+        assert!(
+            matches!(
+                &error,
+                GuestRuntimeError::CachedReleaseEvidence { source, .. } if matches!(
+                    **source,
+                    GuestRuntimeError::Release(
+                        crate::runtime_overlay::RuntimeOverlayError::SignatureInvalid { .. }
+                    )
+                )
+            ),
+            "{error:?}"
+        );
         assert!(!cache.join("guest-runtime/v1/objects").exists());
     }
 
