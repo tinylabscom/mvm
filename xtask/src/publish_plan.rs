@@ -713,7 +713,7 @@ mod tests {
     }
 
     /// The checked-in manifests satisfy the gate, and crates.io gets the
-    /// public contract and standalone hostlib-client crates. Every other
+    /// public contract crate. Every other
     /// workspace crate is internal; widening this set is a decision made here
     /// as well as in the manifests.
     #[test]
@@ -723,7 +723,7 @@ mod tests {
             .expect("xtask has a parent");
         run_check(root).expect("the workspace passes check-publish-readiness");
         let plan = plan(&load(root).expect("load")).expect("plan");
-        assert_eq!(plan.publish, ["mvm-contract", "runmvm-client"]);
+        assert_eq!(plan.publish, ["mvm-contract"]);
         assert!(plan.withheld.is_empty(), "{:?}", plan.withheld);
     }
 }

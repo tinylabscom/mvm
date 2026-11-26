@@ -71,7 +71,6 @@ jobs:
           bash scripts/build-distro-packages.test.sh
           bash nix/packaging/release/verify-release-assets.test.sh
           python3 nix/packaging/release/verify-release-assets.auth.test.py
-          python3 scripts/test_rust_registry_smoke.py
           python3 scripts/test-sdk-release-preflight.py
 
   package:

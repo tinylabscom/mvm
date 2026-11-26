@@ -1375,6 +1375,23 @@ Measured with `cargo tree -e normal,build --prefix none --target <target>` as
 `xtask check-closure-budget` does, and `cargo metadata --no-deps` for the
 member count; the budgets were ratcheted to the new counts in the same change.
 
+## `runmvm-client` deleted (#4839, ADR-061)
+
+Accepted (owner, 2026-11-26). The crate was a 315-line JSON client that loaded
+`libmvm_hostlib` with `libloading`. It was never on crates.io, nothing in the
+workspace or the sibling repositories depended on it, and `mvmctl` did not link
+it. It was one of two publish roots; `mvm-contract` is now the only one, and
+the registry smoke test that consumed it (script, its test, the reusable
+workflow and the post-publish gate in `publish-crates.yml`) is deleted with it.
+`libloading` was used by nothing else and leaves the lockfile.
+
+| Delete | Workspace members | `Cargo.lock` packages | `mvmctl` closure (`cargo tree -p mvmctl -e normal,build --prefix none`, sorted unique lines / distinct `name version`) |
+|---|---|---|---|
+| `runmvm-client` | 29 → 28 | 713 → 711 (`runmvm-client`, `libloading`) | 474 → 474 / 325 → 325, unchanged |
+
+The dated tables above (usage map, evidence matrix, line counts) still list
+`libloading` and `crates/runmvm-client` as measured on their own dates.
+
 ## Owner decisions
 
 - 2026-10-24, #4663: patch the Sigstore Rekor and timestamp crates locally so
