@@ -260,8 +260,6 @@ notify-debouncer-mini = "0.7"
 ipnet = { version = "2", features = ["serde"] }
 async-trait = "=0.1.89"
 
-# Pure-Rust DNS resolver, used only by the opt-in custom-dns feature.
-hickory-resolver = "0.26"
 # DNS protocol stack for the in-guest addon DNS resolver.
 hickory-proto = "0.26"
 
@@ -509,7 +507,6 @@ default = [
 # plus the full host networking + hostd IPC.
 host = [
     "mvm-cli/manifest-verify",
-    "mvm-cli/custom-dns",
     "mvm-core/hostd-transport",
 ]
 
