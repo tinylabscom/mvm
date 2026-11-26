@@ -46,7 +46,6 @@ pub mod bundle_posture;
 pub mod bundle_resources;
 mod cli_dispatch;
 mod durability;
-mod enforce;
 pub mod entrypoint_resolve;
 pub mod instructions;
 pub mod mailbox_grant;
@@ -71,7 +70,6 @@ pub use durability::{
     admit_plan_for_boot_syncing_beside_boot,
     admit_plan_for_boot_with_verified_runtime_syncing_beside_boot,
 };
-pub use enforce::{enforce_kernel, enforce_shares, enforce_shares_for_claim};
 pub use instructions::InstructionSources;
 pub use outcome::{
     BootPosture, StartMode, emit_failed, emit_launched, record_uncertain_restore_stop,

@@ -711,8 +711,11 @@ mod ps11_keyless_witness {
             signed_share.read_only,
             "evaluate_and_harden must convert the requested writable instruction share to read-only"
         );
-        let rw_err = enforce_shares(&admitted, std::slice::from_ref(&requested_attachment))
-            .expect_err("backend enforcement must reject the original writable attachment");
+        let rw_err = mvm_hostd::plan_admission::enforce_admitted_shares(
+            std::slice::from_ref(&requested_attachment),
+            admitted.admitted.plan(),
+        )
+        .expect_err("backend enforcement must reject the original writable attachment");
         assert!(
             format!("{rw_err:#}").contains("not named in the signed"),
             "rejection must come from the admitted-share boundary: {rw_err:#}"
@@ -721,8 +724,11 @@ mod ps11_keyless_witness {
             read_only: true,
             ..requested_attachment
         };
-        enforce_shares(&admitted, &[effective_attachment])
-            .expect("backend enforcement accepts the hardened read-only attachment");
+        mvm_hostd::plan_admission::enforce_admitted_shares(
+            &[effective_attachment],
+            admitted.admitted.plan(),
+        )
+        .expect("backend enforcement accepts the hardened read-only attachment");
         let entries = chain(&f);
         let verified = entry(&entries, "trust.instruction_verified");
         assert_eq!(verified["signer"], SIGNER);
