@@ -120,8 +120,8 @@ owns the gate, not added next to it.
    existing vsock-framing fuzzers (claim 5). The dependency is deliberate: DNS
    compression and message validation are mature, adversarial parser work, so
    reusing the already-audited protocol crate is a smaller security budget than
-   maintaining a second hand-written codec. `hickory-resolver` remains optional
-   behind `custom-dns`; the default upstream path does not pull that resolver.
+   maintaining a second hand-written codec. No build pulls `hickory-resolver`:
+   the optional `custom-dns` adapter was deleted with no caller.
 4. **Resource bounds.** Per-workload token-bucket on queries, a concurrency cap
    on in-flight upstream lookups, and a response-size bound.
 5. **No confused deputy.** The handler is scoped to the *workload's* admitted

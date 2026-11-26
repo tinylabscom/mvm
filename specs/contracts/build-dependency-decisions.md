@@ -1298,6 +1298,33 @@ controller still needs it.
 its dependency on `xtask`, whose library target existed only to share the
 report schema with the example, and the `addons` feature of `mvm-agentd`.
 
+## `hickory-resolver` removal with the dead egress datapath (2026-11-26)
+
+Measured from `10b7050593` (origin/main), `aarch64-apple-darwin` host, rustc
+1.100.0, with the commands of the two previous sections. The `custom-dns`
+feature of `mvm-hostd` (forwarded by `mvm-cli` and enabled by the root `host`
+feature, so part of every release build) compiled one module: a
+`hickory-resolver` adapter for the supervisor's L7 proxy. Neither the adapter
+nor the proxy had a production constructor, and both are deleted. The live
+endpoint resolves through `datapath::dns_resolver`; `hickory-proto` stays for
+the DNS codec and the guest addon resolver.
+
+| Closure | Before | After |
+|---|---:|---:|
+| `mvmctl`, host (`aarch64-apple-darwin`) | 325 [474] | 325 [474] |
+| `mvmctl`, `x86_64-unknown-linux-gnu` | 330 | 330 |
+| `mvmctl` release features, macOS / x86_64 Linux / aarch64 Linux | 352 / 351 / 350 | 329 / 335 / 334 |
+| Workspace all features, `x86_64-unknown-linux-gnu`, no dev | 560 | 553 |
+| `Cargo.lock` packages | 713 | 700 |
+
+Thirteen packages leave the lock: `core-foundation` 0.9.4 (0.10 stays),
+`hickory-net` 0.26.3, `hickory-resolver` 0.26.3, `ipconfig` 0.3.4, `moka`
+0.12.15, `ndk-context` 0.1.1, `prefix-trie` 0.8.4, `resolv-conf` 0.7.6,
+`system-configuration` 0.7.0, `system-configuration-sys` 0.6.0, `tagptr` 0.2.0,
+`widestring` 1.2.1 and `windows-registry` 0.6.1. The default closures never
+held the resolver and are unchanged, as are the guest closures. The release
+closure budgets in `xtask` are lowered to the new values.
+
 ## Runtime consumers without the authoring SDK
 
 The runtime client no longer re-exports `mvm_client::authoring` or depends on
