@@ -491,6 +491,8 @@ statement = "Every published release artifact is authenticated under the release
 # exactly its own version before it is parsed or cached. An ordinary signed
 # release launch authenticates its selected archive once and retains the
 # checked bytes across attachment, signed-plan admission, and lifecycle custody.
+# That check is of the archive's bytes and its manifest; whether the members
+# agree with the manifest is established before signing and again at assembly.
 # A copy an installer placed beside mvmctl was already checked at install time;
 # the launch still verifies its own snapshot. The host account remains trusted.
 #

@@ -1210,7 +1210,7 @@ bootstrap path.
 - **Build path — refuses.** `crates/mvm-build/src/release_signature.rs` fails the build on a missing or malformed bundle and names the asset, and accepts only the versioned release-workflow identity.
 - **Fetch path — refuses.** `crates/mvm-cli/src/commands/env/artifact_verify.rs` rejects an unsigned manifest before parsing it, and the documented hash-skip hatch does not waive the manifest signature.
 - **Self-update path — refuses.** `verify_signature` in `crates/mvm-cli/src/update.rs` used to shell out to `cosign` and return `Ok` when it was not on `PATH`. It now calls the build path's verifier with the CLI release train, so a host without cosign gets the same verdict as one with it. `a_real_release_bundle_verifies_under_its_tag` verifies a committed release bundle under its real tag and refuses it under another, which is what shows the tag and the identity template agree. The `checksums-sha256.txt` the archive is compared against goes through the fetch path's manifest check first, under the same tag-bound identity: an unsigned manifest is refused before it is parsed (`self_update_refuses_an_unsigned_checksum_manifest_before_parsing`), as are edited bytes and another release's genuine manifest (`self_update_refuses_a_checksum_manifest_signed_for_another_tag`). Neither `MVM_SKIP_HASH_VERIFY` nor `--skip-verify` waives it; `--skip-verify` waives only the archive's own bundle, so the archive stays authenticated through the manifest.
-- **Guest-runtime launch check — shared within one launch.** A release launch asks several times whether the signed guest-runtime archive is authentic (admission, overlay, initramfs, dispatch, lifecycle bind). Within one launch those asks share one verification: a successful result is remembered, for that launch on that thread only, under the content of everything it read (archive digest, checksum, both signature bundles, version, architecture), so a changed byte of any of them verifies in full. A failure is never remembered, nothing is written for a later process to trust, and the next launch verifies from scratch (ADR-112).
+- **Guest-runtime launch check — shared within one launch.** A release launch asks several times whether the signed guest-runtime archive is authentic (admission, overlay, initramfs, dispatch, lifecycle bind). Within one launch those asks share one verification: a successful result is remembered, for that launch on that thread only, under the content of everything it read (archive digest, checksum, both signature bundles, version, architecture), so a changed byte of any of them verifies in full. A failure is never remembered, nothing is written for a later process to trust, and the next launch verifies from scratch (ADR-112). The guest-runtime launch check authenticates the archive bytes and reads the manifest; member consistency is established before signing and again at assembly, not at launch.
 - **Install path — refuses.** An installed `mvmctl` remains the preferred
   verifier and host `cosign` remains the fallback. On a host with neither,
   `install.sh` compares the archive with the target-specific SHA-256 carried by
@@ -1268,9 +1268,15 @@ bootstrap path.
   `MVM_SKIP_COSIGN_VERIFY` remains the emergency-rotation hatch; it does not
   turn a path-only proof into verified launch authority.
   `signed_release_verification_is_once_per_launch_and_refuses_tampering`
-  exercises the real published `v0.28.0-rc.2` quartet with a test-only
-  verification counter, but is opt-in because that 20 MB signed archive is not
-  committed to the repository. It is not a live Firecracker or HVF count witness.
+  exercises a real signed release quartet — whichever one the directory it is
+  pointed at holds — with test-only verification and member-walk counters, but
+  is opt-in because a 20 MB signed archive is not committed to the repository.
+  It is not a live Firecracker or HVF count witness. The gated witness of the
+  same path is
+  `a_launch_reads_the_manifest_of_authenticated_bytes_without_walking_members`,
+  which drives the launch verifier with a stand-in signature check private to
+  `mvm-build`'s tests; it witnesses the order and the absence of a member walk,
+  not Sigstore verification.
 
 The `manifest-verify`-gated tests on these paths run in the `Lint feature coverage`
 job of `ci.yml`, which is what makes them citable: `check-claim-catalog` cannot

@@ -1,11 +1,11 @@
 # ADR-112 — Verify the signed runtime release proof once per launch
 
-Backing: preview
-Validation: none
+Backing: shipped-source
+Validation: a_launch_reads_the_manifest_of_authenticated_bytes_without_walking_members
 
-**Status: Proposed.** Direction chosen on 2026-11-14: verify once. The
-claim-20 and claim-3 consequences and the assurance boundary still require
-owner review before this design is considered accepted.
+**Status: Accepted.** Direction chosen on 2026-11-14: verify once. Accepted on
+2026-11-26 after security review of the claim-20 and claim-3 consequences and
+the assurance boundary (issue #5931).
 
 ## Summary, for a reader in a hurry
 
@@ -24,7 +24,7 @@ owner review before this design is considered accepted.
 - This does not reach 300 ms on its own. It is the largest single step toward
   it, and it is what makes the remaining costs visible.
 - What changes is when a signed artifact is checked, which is claim 20 territory,
-  so the exact conditions are written down below and need review.
+  so the exact conditions are written down below.
 
 ## Context
 
@@ -105,8 +105,8 @@ Each of these was measured and ruled out on the machines named above.
 - File writes: a 20 MB copy took under 5 ms.
 - Helper processes: only two are started, at the very end.
 - Network: a system-call trace of a launch shows no outbound connection.
-- Signing, audit and key load: `sign_and_verify_plan` 0.3 ms,
-  `audit_record` 4.8 ms, `host_signing_key_load` 0.2 ms.
+- Signing, audit and key load: `admit_plan.sign_and_verify_plan` 0.3 ms,
+  `audit_record` 4.8 ms, `admit_plan.host_signing_key_load` 0.2 ms.
 
 ### Why the cost was hard to see
 
@@ -167,9 +167,14 @@ This gives a launch of about 1.7 s on the idle VM (projected from the spans:
 
 ## What this does not do
 
-- It does not reach 300 ms. After it, the launch is dominated by about 640 ms for
-  the one verification, about 320 ms in `grants_budget_and_host_interface`, about
-  300 ms in `driver_boot`, and teardown. Each is a separate piece of work.
+- It does not reach 300 ms. After it, the launch was dominated by about 640 ms for
+  the one verification, about 320 ms in
+  `admit_plan.grants_budget_and_host_interface`, about 300 ms in `driver_boot`,
+  and teardown. Each is a separate piece of work. The
+  one verification has since been cut by the adopted alternative below: on an
+  Apple M4 Max with a load average of 17.6 / 40.1 / 47.7 across 16 cores, its
+  median CPU time on the signed `v0.28.0-rc.11` archive went from 236.8 ms to
+  32.3 ms. It has not been re-measured on the idle VM the 640 ms came from.
 - It does not make a warm claim faster than a cold boot through the CLI. A warm
   claim costs the same admission and attach work, which is what this removes.
 - It does not change which signatures are accepted or by whom.
@@ -188,15 +193,39 @@ This gives a launch of about 1.7 s on the idle VM (projected from the spans:
   saves about 65% of what the decided design saves. It is the fallback if the
   review wants a smaller change first. The throwaway used a process-wide cache,
   which is not what is proposed; see condition 1.
-- **Make one verification cheaper** with hardware SHA-256, by not decompressing
-  twice, or by trusting the signed manifest's member digests once the archive
-  digest is authenticated. Each changes what is checked and is a separate review.
+- **Make one verification cheaper** with hardware SHA-256 or by not
+  decompressing twice. Each changes what is checked and is a separate review.
+- **Trust the signed manifest's member digests once the archive digest is
+  authenticated.** Adopted on 2026-11-25 (issue #5931), after its own review.
+  Whether an archive's members agree with its manifest is a pure function of
+  the archive's bytes, so the verdict reached before signing
+  (`check_release_archive` in the release workflow) and again at acquisition
+  and installation (`acquire_release_guest_runtime`,
+  `install_release_guest_runtime`, `install_signed_guest_runtime_archive`)
+  holds for any copy whose digest and signatures a launch has just checked. A
+  launch therefore reads the manifest from the first entry of the bytes it
+  authenticated (`read_release_manifest`, under the 1 MiB manifest cap and a
+  bound on the decompressed stream) and does not decompress or hash the
+  members. The release contract makes the manifest the first entry, and both
+  publish and launch refuse an archive that puts it elsewhere. What a launch
+  no longer establishes itself is that a signed archive is internally
+  consistent: a publisher that signs an inconsistent archive is caught at
+  publish, acquisition or installation, not at launch, where the selected
+  overlay, verity sidecar and initramfs are still hashed against the signed
+  declaration. This is not a persisted verification record: nothing is written
+  and conditions 4 and 5 are unchanged. On the `v0.28.0-rc.11` archive it takes
+  one verification from about 237 ms to about 32 ms of CPU (medians of 15 fresh
+  processes, an optimized build on an Apple M4 Max under other load).
 - **Do nothing.** The launch stays at about 5.6 s, and no launch gate can pass.
 
 ## Consequences
 
 - Claim 20's guest-runtime path stays "verified at every launch": every launch
-  still performs the full archive check, once. The ADR-001 row and the boundaries
+  re-authenticates the whole archive (digest against the signed checksum, both
+  signatures) and reads the manifest from the first archive entry; the
+  member-by-member consistency check runs at publish and at
+  acquisition/bootstrap, and a launch relies on the signed digest to make that
+  verdict applicable to the bytes it holds. The ADR-001 row and the boundaries
   note need a sentence recording that the check is shared within a launch.
 - A launch writes one temporary archive copy instead of seven, which also
   narrows the window in which a copy could be tampered with.
