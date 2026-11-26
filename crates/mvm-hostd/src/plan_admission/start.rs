@@ -458,7 +458,7 @@ pub struct StartAdmittedParams<'a> {
 /// The post-admission tail every admitted boot shares: the gates, the backend
 /// start, the grants, the budget charge and the launch records.
 ///
-/// Split out of [`admit_and_start`] so a caller holding an already-admitted
+/// Separate from admission so a caller holding an already-admitted
 /// plan — a resumed durable session, for one — can boot it without admitting a
 /// second time. Two admissions would mean two nonces and two signed plans, with
 /// the second silently becoming the real authority. Because this is the only
@@ -1384,45 +1384,6 @@ fn start_owned_admitted_impl(
             .enforced_grants
             .expect("actor host start always checks enforced grants"),
     })
-}
-
-/// The single admitted-boot entrypoint every driver shares — the CLI's
-/// `mvmctl run` / `mvmctl machine run` and the `mvm-client` local backend both reach it, so a
-/// workload can never boot on a path that skipped admission.
-///
-/// Order matters and is fail-closed: synthesize + sign + verify + validity +
-/// replay (+ bundle re-verify) run first, and any failure among them returns
-/// with **no VM created** — admission is a gate, not a formality. Only once the
-/// admission is recorded does this delegate to [`start_admitted`], which owns
-/// the rest of the order.
-#[tracing::instrument(skip_all)]
-pub fn admit_and_start(
-    backend: &AnyBackend,
-    params: AdmitAndStartParams<'_>,
-) -> Result<StartedMachine> {
-    let verified =
-        mvm_runtime::runtime_evidence::verify_selected_release_runtime_set(&params.config)?;
-    admit_and_start_with_verified_release(backend, params, verified.as_ref())
-}
-
-/// Admit and boot a local launch with one release verification for all gates.
-pub(crate) fn admit_and_start_with_verified_release(
-    backend: &AnyBackend,
-    params: AdmitAndStartParams<'_>,
-    verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
-) -> Result<StartedMachine> {
-    let admitted = admit_synthesized_with_verified_release(backend, &params, verified_runtime)?;
-    start_admitted_with_verified_release(
-        StartAdmittedParams {
-            backend,
-            admitted,
-            config: params.config,
-            policy_bundle: params.policy_bundle,
-            emitter: params.emitter,
-            assurance: params.assurance,
-        },
-        verified_runtime,
-    )
 }
 
 /// Admit a synthesized plan without dispatching it; the caller retains its one-use authority.

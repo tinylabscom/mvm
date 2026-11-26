@@ -2101,8 +2101,8 @@ fn operator_trial_retains_one_verified_release_from_admission_through_dispatch()
 
 #[test]
 fn a_declared_campaign_opens_its_session_on_the_boot_path() {
-    // The production seam: `admit_and_start` is what a run goes through,
-    // and a declared campaign has to become a live session there rather
+    // Admission followed by the shared admitted-start tail is what a run
+    // goes through, and a declared campaign has to become a live session there rather
     // than in a test that hand-built one. The broker-handler tests may
     // already have installed the process-global plane, so this test uses
     // that legitimate instance when running in parallel.

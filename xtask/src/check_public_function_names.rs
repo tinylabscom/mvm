@@ -101,12 +101,6 @@ const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
     (
         "crates/mvm-hostd/src/plan_admission/start.rs",
         "module",
-        "admit_and_start",
-        "admit_and_start_with_verified_release",
-    ),
-    (
-        "crates/mvm-hostd/src/plan_admission/start.rs",
-        "module",
         "start_admitted",
         "start_admitted_with_verified_release",
     ),
@@ -145,12 +139,6 @@ const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
         "impl AnyBackend",
         "prepare_owned_launch",
         "prepare_owned_launch_with_verified_runtime",
-    ),
-    (
-        "crates/mvm-runtime/src/backend.rs",
-        "impl AnyBackend",
-        "start",
-        "start_with_verified_runtime",
     ),
     // The hermetic OCI registry fixture keeps its `_with_status` sibling
     // because the base form pins the 307 hop production always answered,

@@ -201,7 +201,7 @@ mod tests {
 /// Refuse a launch whose SDK sidecar the guest could not `dlopen`.
 ///
 /// The check itself is admission's, in `mvm-hostd`, and it runs there for
-/// callers that go through `admit_and_start`. `mvmctl run` does not — it admits
+/// callers that boot through the shared admitted-start tail. `mvmctl run` does not — it admits
 /// through `admit_for_run`, which skips the post-admission gates — so without
 /// this call the refusal never fires on the path most workloads take, and a
 /// libc mismatch surfaces inside the guest as a relocation error instead.

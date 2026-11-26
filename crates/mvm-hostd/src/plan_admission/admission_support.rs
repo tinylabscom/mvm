@@ -262,7 +262,7 @@ fn enforce_sidecar_libc(
     )
 }
 
-/// Inputs for [`admit_and_start`]. The `synthesis` describes the plan to admit
+/// Inputs for admitting and starting a synthesized plan. The `synthesis` describes the plan to admit
 /// (the signed authority) and `config` is the launch shape to boot; they come
 /// from one source in a well-formed caller, and [`enforce_admitted_shares`]
 /// fails closed if they ever disagree on volumes.

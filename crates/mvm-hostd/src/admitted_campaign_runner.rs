@@ -69,8 +69,7 @@ pub struct AdmittedTrialBoot {
 /// Narrow operator-configured boot seam used by the lifecycle runner.
 ///
 /// Implementations resolve and re-verify the exact signed extension pack,
-/// synthesize the plan, and call `plan_admission::admit_and_start` with an
-/// assurance campaign. The runner receives no generic client, command, argv,
+/// synthesize the plan, and admit and start it with an assurance campaign. The runner receives no generic client, command, argv,
 /// environment, credential, or host-path selector from the provider request.
 pub trait AdmittedTrialBooter: Send + Sync {
     fn boot(
