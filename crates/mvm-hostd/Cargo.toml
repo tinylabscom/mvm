@@ -145,9 +145,6 @@ sysinfo = { version = "0.30", default-features = false }
 ipnet.workspace = true
 # Evented readiness for FlowMux UDP relays.
 mio = { workspace = true }
-# custom-dns pulls hickory 0.26 (needs Rust 1.88); the default build
-# carries no hickory and stays on the workspace 1.85 floor.
-hickory-resolver = { workspace = true, features = ["tokio"], optional = true }
 rand.workspace = true
 regex.workspace = true
 leakguard.workspace = true
@@ -228,7 +225,6 @@ manifest-verify = ["mvm-core/manifest-verify"]
 # Enable the host-side eBPF/procfs egress telemetry probe in the supervisor.
 # Off by default so the Aya dependency tree does not inflate mvmctl's closure.
 ebpf-telemetry = ["dep:aya"]
-custom-dns = ["dep:hickory-resolver"]
 # Enable the wasm-container backend in the depended-on runtime crate, so the
 # data-governance witness (tests/wasm_egress_witness.rs) can drive a real
 # WasmBackend through this crate's real SubstitutionService/audit chain. Test-only

@@ -25,9 +25,8 @@
 //! - **Emit audit lines.** A later step wires `FileAuditSigner` onto
 //!   the `AdmittedPlan`'s `plan_id`; this module is silent on audit.
 //!
-//! - **Resolve component slots.** A later step maps `PolicyRef →
-//!   concrete SupervisorEgressProxy/ToolGate/...`. This module returns the
-//!   plan with refs unresolved.
+//! - **Resolve component slots.** This module returns the plan with its
+//!   `PolicyRef`s unresolved.
 //!
 //! ## Test seam
 //!

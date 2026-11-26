@@ -5,7 +5,6 @@
 //! and the lifecycle watchers. **Tenant code never runs in Zone B.**
 //!
 //! Structure:
-//! - `egress` — `SupervisorEgressProxy` trait + `NoopEgressProxy`.
 //! - `keystore` — `KeystoreReleaser` trait + `NoopKeystoreReleaser`.
 //! - `audit` — `AuditSigner` trait + `NoopAuditSigner`.
 //! - `artifact` — `ArtifactCollector` trait + `NoopArtifactCollector`.
@@ -15,7 +14,7 @@
 //! Everything else lives in a responsibility group:
 //! - `admission` — caller registration and restored/warm-claimed plan checks.
 //! - `audit` — the chain-signed audit log and per-subsystem audit events.
-//! - `datapath` — guest-egress L4/L7 proxy, DNS/ICMP and firewall primitives.
+//! - `datapath` — guest-egress DNS/ICMP primitives.
 //! - `endpoint` — the per-VM network endpoint, FlowMux and TLS termination.
 //! - `inspection` — inspectors, scanners, redaction and destination policy.
 //! - `lifecycle` — HVF stop, wall clock, session expiry, balloon.
@@ -26,7 +25,6 @@ pub mod admission;
 pub mod artifact;
 pub mod audit;
 pub mod datapath;
-pub mod egress;
 pub mod endpoint;
 pub mod inspection;
 pub mod keystore;
@@ -59,22 +57,6 @@ pub use audit::signer::{
     AuditError, AuditSigner, CapturingAuditSigner, NoopAuditSigner, PlanAuditEntry, SignedEnvelope,
     flow_closed, flow_observer_fault, flow_opened, for_plan, transcript_sealed,
 };
-#[cfg(any(target_os = "linux", test))]
-pub use datapath::firewall::linux_nft::{
-    CommandNftApplier, LinuxNftFirewall, NftApplier, NftError,
-};
-pub use datapath::firewall::{FirewallEnforcer, FirewallError, FirewallSpec, NoopFirewallEnforcer};
-#[cfg(feature = "custom-dns")]
-pub use datapath::hickory_dns::HickoryDnsResolver;
-pub use datapath::l7_proxy::{
-    AuditFields, CapturingEgressAuditSink, ConnectParseError, ConnectRequest, DnsResolver,
-    EgressAuditSink, EgressOutcome, EvaluationResult, L7EgressProxy, NoopEgressAuditSink,
-    TokioDnsResolver, parse_connect,
-};
-pub use datapath::proxy::l4::{
-    CanonicalL4Gate, L4Decision, L4Error, L4Gate, NoopL4Gate, Protocol as L4Protocol,
-};
-pub use egress::{EgressDecision, EgressError, NoopEgressProxy, SupervisorEgressProxy};
 pub use inspection::circuit_breaker::{
     CircuitBreaker, CircuitBreakerConfig, CircuitState, Clock as CircuitBreakerClock,
     InspectorReporter, SystemClock as CircuitBreakerSystemClock,

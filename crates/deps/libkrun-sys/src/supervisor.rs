@@ -76,8 +76,7 @@ pub struct SupervisorConfig {
     /// and the per-VM subscriber sockets.
     #[serde(default)]
     pub audit_dir: Option<std::path::PathBuf>,
-    /// `~/.mvm/audit/gateway-<vm>.sock` — per-VM subscriber socket
-    /// the `mvm_hostd::supervisor::audit::gateway_audit::GatewayAuditSink` binds.
+    /// `~/.mvm/audit/gateway-<vm>.sock` — per-VM subscriber socket path.
     #[serde(default)]
     pub gateway_audit_socket: Option<std::path::PathBuf>,
     /// `~/.mvm/audit/gateway-events-<vm>.sock` — per-VM ingest
