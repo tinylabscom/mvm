@@ -317,7 +317,7 @@ in the workspace.
 | `crates/deps/libkrun-sys`, `crates/deps/mvm-macho-sign` | Unchanged |
 | `crates/mvm-build`, `crates/mvm-runtime`, `crates/mvm-cli` | `"crates/build"`, `"crates/runtime"`, `"crates/cli"` |
 | `crates/mvm-client`, `crates/mvm-gpu`, `crates/mvm-conformance`, root package, `xtask` | Unchanged; client relocation awaits coordinated Studio changes |
-| `crates/mvm-net`, `crates/mvm-bundler` | Fold into core as specified above |
+| `mvm-net` (folded into `mvm_core::net`), `crates/mvm-bundler` | Fold into core as specified above |
 | `crates/runmvm-client` | Retire with its publish/registry-smoke lane; retain contract publication |
 
 Nested fuzz workspaces travel with their owner, except the VMM geometry harness
