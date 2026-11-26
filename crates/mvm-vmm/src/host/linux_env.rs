@@ -293,8 +293,8 @@ impl LinuxEnv for DevVmEnv {
 
 /// Create the appropriate `LinuxEnv` for the current platform.
 ///
-/// macOS 26+ Apple Silicon routes through the libkrun dev VM's guest-agent
-/// vsock channel; native Linux runs on the host. macOS Intel, Linux without
+/// macOS routes through the dev VM's guest-agent vsock channel; native Linux
+/// runs on the host. macOS Intel, Linux without
 /// KVM, WSL2, and native Windows are not supported local Linux execution
 /// boundaries today; WSL2 nested KVM and a Hyper-V managed Linux builder are
 /// future backend work.
@@ -307,26 +307,27 @@ pub fn create_linux_env() -> Box<dyn LinuxEnv> {
 
 /// Whether [`default_env`] runs scripts on this host rather than inside a VM.
 ///
-/// True wherever [`create_linux_env`] picks [`NativeEnv`]: native Linux and
-/// macOS 13-25. A `run_in_vm` script there is an ordinary host shell command,
-/// so anything that would only be safe inside a disposable VM — sweeping
-/// `/tmp`, collecting a Nix store, clearing profiles — must not be sent to it.
+/// True wherever [`create_linux_env`] picks [`NativeEnv`]: every host but
+/// macOS. A `run_in_vm` script there is an ordinary host shell command, so
+/// anything that would only be safe inside a disposable VM — sweeping `/tmp`,
+/// collecting a Nix store, clearing profiles — must not be sent to it. A Mac
+/// is never a Linux environment, whatever its version.
 pub fn default_env_runs_on_host() -> bool {
-    !platform::current().is_hvf_default_tier()
+    !matches!(platform::current(), platform::Platform::MacOS)
 }
 
 /// Whether a `run_in_vm`-style guest op can reach a real Linux execution
 /// environment today.
 ///
-/// True on native Linux and macOS 13-25, both of which [`create_linux_env`]
-/// resolves to [`NativeEnv`]. False only on macOS 26+ Apple Silicon, where
+/// True off macOS, where [`create_linux_env`] resolves to [`NativeEnv`].
+/// False on macOS, where
 /// [`create_linux_env`] hands back [`DevVmEnv`] and — since the dev-VM
 /// auto-start path was retired (see [`start_dev_daemon`]) — a `run_in_vm`
 /// call has nothing left to dispatch to. Guest ops that still need a Linux
 /// builder on that tier should check this and fail closed via
 /// [`require_guest_exec_available`] instead of attempting the doomed call.
 pub fn guest_exec_via_vm_available() -> bool {
-    !platform::current().is_hvf_default_tier()
+    default_env_runs_on_host()
 }
 
 /// Fails closed with an actionable error naming `limitation` when
@@ -486,11 +487,12 @@ mod tests {
     // ── guest_exec gating ───────────────────────────────────────────
 
     #[test]
-    fn guest_exec_via_vm_available_is_negation_of_hvf_default_tier() {
+    fn guest_exec_via_vm_is_available_exactly_off_macos() {
         assert_eq!(
             guest_exec_via_vm_available(),
-            !platform::current().is_hvf_default_tier()
+            cfg!(not(target_os = "macos"))
         );
+        assert_eq!(default_env_runs_on_host(), cfg!(not(target_os = "macos")));
     }
 
     /// The gate's decision is forced through the same bool

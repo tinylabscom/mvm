@@ -68,14 +68,9 @@ pub fn builder_backend_env_override() -> Option<BuilderBackendChoice> {
 #[must_use]
 pub fn auto_detected_builder_backend(
     plat: Platform,
-    is_macos_apple_silicon: bool,
     is_hvf_default_tier: bool,
 ) -> BuilderBackendChoice {
-    mvm_build::builder_backend_select::auto_detect_default_for(
-        plat,
-        is_macos_apple_silicon,
-        is_hvf_default_tier,
-    )
+    mvm_build::builder_backend_select::auto_detect_default_for(plat, is_hvf_default_tier)
 }
 
 /// Whether the Linux builder-VM rollout signal is set in the environment.
@@ -206,11 +201,11 @@ mod tests {
     #[test]
     fn auto_detection_follows_the_described_host() {
         assert_eq!(
-            auto_detected_builder_backend(Platform::LinuxNative, false, false),
+            auto_detected_builder_backend(Platform::LinuxNative, false),
             BuilderBackendChoice::Firecracker
         );
         assert_eq!(
-            auto_detected_builder_backend(Platform::MacOS, true, true),
+            auto_detected_builder_backend(Platform::MacOS, true),
             BuilderBackendChoice::Hvf
         );
     }

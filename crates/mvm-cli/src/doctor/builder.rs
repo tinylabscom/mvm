@@ -254,18 +254,10 @@ pub(super) fn builder_transport_check(plat: Platform) -> Check {
 /// The check is informational — it never fails. libkrun appears only when an
 /// explicit development override selects it.
 pub(super) fn builder_backend_check(plat: Platform) -> Check {
-    builder_backend_check_for(
-        plat,
-        matches!(plat, Platform::MacOS) && cfg!(target_arch = "aarch64"),
-        plat.is_hvf_default_tier(),
-    )
+    builder_backend_check_for(plat, plat.is_hvf_default_tier())
 }
 
-fn builder_backend_check_for(
-    plat: Platform,
-    is_macos_apple_silicon: bool,
-    is_hvf_default_tier: bool,
-) -> Check {
+fn builder_backend_check_for(plat: Platform, is_hvf_default_tier: bool) -> Check {
     use mvm_client::diagnostics::{
         BuilderBackendChoice, MVM_BUILDER_BACKEND_ENV, MVM_LINUX_BUILDER_VM_ENV,
         auto_detected_builder_backend, builder_backend_env_override, linux_builder_vm_requested,
@@ -278,7 +270,7 @@ fn builder_backend_check_for(
     // while the availability half described `plat`, so the two could disagree
     // and the report would be internally inconsistent. It also made the
     // function untestable for any platform other than the one running it.
-    let auto = auto_detected_builder_backend(plat, is_macos_apple_silicon, is_hvf_default_tier);
+    let auto = auto_detected_builder_backend(plat, is_hvf_default_tier);
     let resolved = env_override.unwrap_or(auto);
 
     // Best-effort: detect whether the override came from the
@@ -782,26 +774,13 @@ mod tests {
 
         #[cfg(target_arch = "aarch64")]
         {
-            let macos = builder_backend_check_for(Platform::MacOS, true, true);
+            let macos = builder_backend_check_for(Platform::MacOS, true);
             assert!(
                 macos.info.starts_with("hvf — "),
                 "macOS 26+ on aarch64 must resolve HVF regardless of the running host; got: {}",
                 macos.info
             );
         }
-    }
-
-    #[test]
-    fn builder_backend_check_reports_qemu_below_the_hvf_os_floor() {
-        let mut env = TestEnv::new();
-        env.remove("MVM_BUILDER_BACKEND");
-
-        let macos = builder_backend_check_for(Platform::MacOS, true, false);
-        assert!(
-            macos.info.starts_with("qemu — "),
-            "pre-26 Apple Silicon macOS must not report unavailable HVF; got: {}",
-            macos.info
-        );
     }
 
     #[cfg(target_os = "linux")]

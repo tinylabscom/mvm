@@ -201,8 +201,8 @@ impl ResourceControls {
     #[must_use]
     pub const fn for_backend(kind: BackendKind) -> Self {
         match kind {
-            // libkrun is *not* Linux-only — it is the macOS 13-25 workload
-            // default — and macOS has no cgroup, so the CPU answer depends on
+            // libkrun is *not* Linux-only — a source build can select it on
+            // macOS — and macOS has no cgroup, so the CPU answer depends on
             // the host rather than the kind alone. Declaring `CgroupShare` on a
             // Mac would let a share grant be accepted and then fail at apply
             // time, the overstatement the macOS arm below exists to avoid.
@@ -846,7 +846,7 @@ mod tests {
         assert!(!c.cpu.serves_share());
     }
 
-    // libkrun is a live macOS 13-25 workload backend, not a Linux-only tier,
+    // libkrun can be selected on macOS, so it is not a Linux-only tier,
     // so its CPU control must depend on the host rather than the kind alone.
     // Written as a pair of `cfg`-gated halves rather than one assertion so
     // the test is a witness on whichever host runs it, instead of only

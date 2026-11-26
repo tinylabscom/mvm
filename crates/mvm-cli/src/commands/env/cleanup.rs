@@ -5,7 +5,7 @@
 //! Without any tier flag the command prunes `~/.mvm/dev/builds/` and, when
 //! the Linux environment is a dev VM, clears that VM's `/tmp` and runs
 //! `nix-collect-garbage -d` inside it. Where the Linux environment is this
-//! host (native Linux, macOS 13-25) those two steps are skipped: they would
+//! host (native Linux) those two steps are skipped: they would
 //! be run against the host itself. The tier
 //! flags add host-side directory sweeps that run after the in-VM
 //! step and are gated by a confirmation prompt.

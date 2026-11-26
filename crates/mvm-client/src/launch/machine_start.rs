@@ -1001,7 +1001,7 @@ mod tests {
     #[test]
     fn macos_26_default_is_hvf() {
         if !mvm_core::platform::current().is_hvf_default_tier() {
-            return; // Not on the macOS-26 tier (e.g. macOS 13-25 CI runner).
+            return; // The macOS version could not be read.
         }
         let mut env = TestEnv::new();
         env.remove("MVM_HYPERVISOR");
