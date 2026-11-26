@@ -1237,12 +1237,14 @@ fn the_job_timeout_covers_every_default_budget() {
     })
     .sum();
 
-    for name in ["first-run-smoke.yml", "release-archive-smoke.yml"] {
-        let workflow = std::fs::read_to_string(root.join(".github/workflows").join(name)).unwrap();
-        let minutes: u64 = workflow
+    let workflow =
+        std::fs::read_to_string(root.join(".github/workflows/release-smoke.yml")).unwrap();
+    for name in ["first-run-smoke", "release-archive-smoke"] {
+        let job = &workflow[workflow.find(&format!("\n  {name}:\n")).unwrap()..];
+        let minutes: u64 = job
             .lines()
             .find_map(|line| line.trim().strip_prefix("timeout-minutes:"))
-            .unwrap_or_else(|| panic!("the job in {name} must set a timeout"))
+            .unwrap_or_else(|| panic!("the {name} job must set a timeout"))
             .trim()
             .parse()
             .unwrap();

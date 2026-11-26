@@ -196,7 +196,7 @@ fn no_untrusted_event_can_place_a_job_on_the_self_hosted_runner() {
          if it moved, this test is no longer guarding it"
     );
     assert!(
-        reaching.contains("first-run-smoke.yml") && reaching.contains("release.yml"),
+        reaching.contains("release-smoke.yml") && reaching.contains("release.yml"),
         "the macOS first-run lane must target the `{RUNNER_LABEL}` runner through its \
          matrix, and the release that calls it must be seen to reach it"
     );

@@ -28,7 +28,7 @@ and the complete signed guest archive triplet in
 dependencies instead of ignoring them; builder validation must establish any
 additional release-specific dynamic dependencies.
 
-`release-recipes-smoke.yml` builds this standalone derivation on both native
+The `release-recipes` lane of `release-smoke.yml` builds this standalone derivation on both native
 Linux architectures, installs it into an isolated Nix profile, runs the CLI and
 loads hostlib, checks the installed guest archive, and removes the profile
 package. Stable promotion requires those jobs. Recipe generation alone is not

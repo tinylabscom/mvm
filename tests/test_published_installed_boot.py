@@ -338,7 +338,7 @@ class ReleaseSmokeWorkflowShapeTests(unittest.TestCase):
     lane must have the gh CLI before the script that calls it."""
 
     def test_the_macos_lane_provides_gh_before_the_published_bytes_check(self):
-        first_run = (WORKFLOWS / "first-run-smoke.yml").read_text()
+        first_run = (WORKFLOWS / "release-smoke.yml").read_text()
         provider = first_run.index("uses: ./.github/actions/gh-cli")
         caller = first_run.index("python3 scripts/published-installed-boot.py lane")
         self.assertLess(provider, caller)

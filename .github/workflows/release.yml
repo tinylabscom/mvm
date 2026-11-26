@@ -810,8 +810,9 @@ jobs:
     permissions:
       contents: read
       actions: read
-    uses: ./.github/workflows/release-archive-smoke.yml
+    uses: ./.github/workflows/release-smoke.yml
     with:
+      lane: release-archive
       runtime_candidate_artifact_id: ${{ needs.runtime-proof-candidate.outputs.candidate_artifact_id }}
       runtime_candidate_artifact_digest: ${{ needs.runtime-proof-candidate.outputs.candidate_artifact_digest }}
       runtime_archive_sha256: ${{ needs.runtime-proof-candidate.outputs.archive_sha256 }}
@@ -1203,13 +1204,19 @@ jobs:
   # Both backends a new user boots: HVF on the self-hosted Apple Silicon
   # runner `e2e-docs` uses (no hosted macOS runner can boot a guest), and
   # Firecracker on a hosted Linux runner with KVM. The lanes live in
-  # first-run-smoke.yml so they can be dispatched against a release candidate
+  # release-smoke.yml so they can be dispatched against a release candidate
   # before a tag depends on them.
   first-run-smoke:
     needs: [verify-release]
     if: ${{ github.event_name == 'push' && needs.verify-release.result == 'success' }}
-    uses: ./.github/workflows/first-run-smoke.yml
+    # The shared file's archive job asks for `actions: read`; a caller must grant
+    # what any job of the file asks, though this lane's own jobs use only contents.
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/release-smoke.yml
     with:
+      lane: first-run
       tag: ${{ github.ref_name }}
 
   # This report witnesses the current signed image pin with the released CLI.
@@ -1277,8 +1284,12 @@ jobs:
   recipe-install-smoke:
     needs: [verify-release]
     if: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
-    uses: ./.github/workflows/release-recipes-smoke.yml
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/release-smoke.yml
     with:
+      lane: release-recipes
       tag: ${{ github.ref_name }}
 
   # The only step that makes a release reach users who did not ask for it:

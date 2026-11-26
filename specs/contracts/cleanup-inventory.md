@@ -905,7 +905,7 @@ Host/architecture lanes CI actually builds or smokes (from `strategy.matrix` in 
 | Workflow job | Lanes |
 |---|---|---|
 | `release.yml` `build` | `aarch64-apple-darwin` (macos-latest); `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` (both ubuntu-24.04; the x86_64 one builds the musl target) |
-| `first-run-smoke.yml` | macOS+HVF (self-hosted M1), Linux+Firecracker (ubuntu-24.04) |
+| `release-smoke.yml` `first-run-smoke` | macOS+HVF (self-hosted M1), Linux+Firecracker (ubuntu-24.04) |
 | `ci-main.yml` `test-musl-confinement` | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` |
 | `homebrew-smoke.yml` | ubuntu-latest, ubuntu-24.04-arm, macos-26 |
 | `distro-packages.yml`, `installer-compat.yml` `distro` | debian:stable, ubuntu:24.04, fedora:latest, rockylinux:9, each x86_64 and aarch64 |

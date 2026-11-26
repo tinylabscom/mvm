@@ -1,0 +1,451 @@
+name: Release smokes
+
+# The smokes that install a release the way a user would, one job per lane,
+# selected by the `lane` input so a caller or a dispatch runs exactly one:
+#
+# - `first-run`: installs a published tag and runs the README's first command, a
+#   second boot from the same HOME, and a boot that binds an SDK host service on
+#   each backend: HVF on the self-hosted Apple Silicon runner, Firecracker on a
+#   hosted Linux runner with KVM. `release.yml` calls it for the tag it just
+#   published and `promote-release` waits on it. Dispatch it against an
+#   already-published tag (a release candidate) to prove a lane before a tag
+#   depends on it: the scripts and installer come from the dispatched ref.
+# - `release-archive`: runs the fresh-install smoke against the Linux x86_64
+#   archive a release run built and has not published yet: the static musl
+#   mvmctl and the per-VM host binaries beside it, booted through Firecracker on
+#   a hosted runner with KVM. Every lane before publication builds from the tree
+#   with the host's glibc, so a defect that exists only in the shipped static
+#   binaries passes all of them. v0.22.0 was one: on x86_64, musl's open() issues
+#   the legacy `open` syscall where glibc issues `openat`, the network
+#   endpoint's seccomp filter allowed only the latter, and every run that
+#   granted egress failed once the guest authenticated. The guest runtime the
+#   same run built is staged beside that mvmctl, where the installer puts the
+#   published one, and the smoke requires `mvmctl bootstrap` to adopt it there.
+#   x86_64 only: GitHub's arm64 runners expose no KVM. `release.yml` calls it
+#   after its build and before it publishes; dispatch it with the id and attempt
+#   of a release run to smoke the archive that run built.
+# - `release-recipes`: installs the published AUR and Nix recipes.
+#
+# `tag` is required by `first-run` and `release-recipes` (each refuses an empty
+# one) and optional for `release-archive`. `run_id`, `run_attempt` and the
+# `runtime_*` inputs belong to `release-archive`.
+on:
+  workflow_call:
+    inputs:
+      lane:
+        description: Which smoke to run, first-run, release-archive or release-recipes
+        required: true
+        type: string
+      tag:
+        description: Release tag; release-archive treats empty as a dry run
+        required: false
+        type: string
+        default: ""
+      run_id:
+        description: Id of another release run whose archive to smoke; empty for the calling run
+        required: false
+        type: string
+        default: ""
+      run_attempt:
+        description: Exact attempt of the named run; required when run_id is set
+        required: false
+        type: string
+        default: ""
+      runtime_candidate_artifact_id:
+        description: Signed runtime candidate upload ID; empty to smoke the unsigned runtime
+        required: false
+        type: string
+        default: ""
+      runtime_candidate_artifact_digest:
+        description: Signed runtime candidate artifact ZIP digest
+        required: false
+        type: string
+        default: ""
+      runtime_archive_sha256:
+        description: Candidate archive byte pin
+        required: false
+        type: string
+        default: ""
+      runtime_checksum_sha256:
+        description: Candidate checksum byte pin
+        required: false
+        type: string
+        default: ""
+      runtime_archive_bundle_sha256:
+        description: Candidate archive signature bundle byte pin
+        required: false
+        type: string
+        default: ""
+      runtime_checksum_bundle_sha256:
+        description: Candidate checksum signature bundle byte pin
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: Which smoke to run, first-run, release-archive or release-recipes
+        required: true
+        type: choice
+        options: [first-run, release-archive, release-recipes]
+      tag:
+        description: Release tag, e.g. v0.18.0-rc.1; required by first-run and release-recipes, optional for release-archive (empty skips the version check)
+        required: false
+        type: string
+        default: ""
+      run_id:
+        description: release-archive only. Id of the release workflow run whose build uploaded the archive
+        required: false
+        type: string
+        default: ""
+      run_attempt:
+        description: release-archive only. Exact producing attempt of the named release run
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  first-run-smoke:
+    if: inputs.lane == 'first-run'
+    name: First run after a fresh install (${{ matrix.lane }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: macOS, HVF
+            runner: [self-hosted, macOS, ARM64, m1]
+            artifact: first-run-macos-hvf
+            target: aarch64-apple-darwin
+          - lane: Linux, Firecracker
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            runner: ubuntu-24.04
+            artifact: first-run-linux-firecracker
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    # Above the smoke's summed budgets (install 20 min, three boots 20 min), so
+    # a slow step fails on its own budget with a transcript, not on this.
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Require the tag
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+        run: test -n "$TAG_NAME" || { echo "::error::this lane needs a tag" >&2; exit 1; }
+
+      # What `install/linux.md` asks of a user: write access to /dev/kvm.
+      - name: Grant /dev/kvm access for the job
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — a first run cannot boot here." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+
+      - name: Start a systemd user session for the Firecracker scope
+        uses: ./.github/actions/user-session
+        if: runner.os == 'Linux'
+
+      - name: Set up uv
+        if: runner.os == 'macOS'
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.12.5"
+
+      - name: Provide a python3 new enough for the repository scripts
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/python3-via-uv
+
+      # The published-bytes check runs `gh release download` and `gh
+      # attestation verify`; the self-hosted runner does not ship gh.
+      - name: Provide the GitHub CLI
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/gh-cli
+
+      - name: Install cosign for authoritative evidence
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v2.5.2
+
+      - name: Authenticate published bytes and witness the installed boots
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag }}
+          HOST_TARGET: ${{ matrix.target }}
+        run: |
+          python3 scripts/published-installed-boot.py lane \
+            --tag "$TAG_NAME" --target "$HOST_TARGET" \
+            --out "${RUNNER_TEMP}/installed-boot-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+      - name: Install the tag as a new user and run the first command (diagnostic)
+        if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+          MVM_SMOKE_OUT: ${{ runner.temp }}/first-run
+          MVM_SMOKE_COLD_FIRST: "1"
+        run: sh scripts/smoke-fresh-install.sh "${TAG_NAME}"
+
+      - name: Upload successful installed boot lane
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: installed-boot-lane-${{ matrix.target }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/installed-boot-${{ github.run_id }}-${{ github.run_attempt }}/lane.json
+            ${{ runner.temp }}/installed-boot-${{ github.run_id }}-${{ github.run_attempt }}/smoke/transcript.log
+            ${{ runner.temp }}/installed-boot-${{ github.run_id }}-${{ github.run_attempt }}/smoke/boot-results.jsonl
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the transcript
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ matrix.artifact }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/first-run
+            ${{ runner.temp }}/installed-boot-${{ github.run_id }}-${{ github.run_attempt }}/smoke
+          if-no-files-found: warn
+          retention-days: 30
+
+  release-archive-smoke:
+    if: inputs.lane == 'release-archive'
+    permissions:
+      contents: read
+      # Downloading an artifact another run uploaded goes through the Actions API.
+      actions: read
+    name: First run of the unpublished archive (Linux, Firecracker)
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
+    # Above the smoke's summed budgets (bootstrap 20 min, four boots 25 min),
+    # so a slow step fails on its own budget with a transcript, not on this.
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Require explicit attempt for a named run
+        env:
+          RUN_ID: ${{ inputs.run_id }}
+          RUN_ATTEMPT: ${{ inputs.run_attempt }}
+          # A dispatch of this file names the run to smoke; a called run reports its caller's name.
+          DIRECT_DISPATCH: ${{ github.event_name == 'workflow_dispatch' && github.workflow == 'Release smokes' }}
+        run: |
+          if [ "$DIRECT_DISPATCH" = true ] && [ -z "$RUN_ID" ]; then
+            echo "::error::dispatching release-archive needs run_id and run_attempt" >&2
+            exit 1
+          fi
+          if [ -n "$RUN_ID" ]; then
+            [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]] && [[ "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          elif [ -n "$RUN_ATTEMPT" ]; then
+            echo "::error::run_attempt requires run_id" >&2
+            exit 1
+          fi
+
+      - name: Grant /dev/kvm access for the job
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — the archive cannot boot here." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+
+      - name: Start a systemd user session for the Firecracker scope
+        uses: ./.github/actions/user-session
+
+      # A called workflow sees its caller's event, so a dispatched release dry
+      # run reads as `workflow_dispatch` here too. Which run built the archive
+      # is decided by the input alone.
+      - name: Download the archive the calling release run built
+        if: inputs.run_id == ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: mvmctl-x86_64-unknown-linux-gnu-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-archive
+
+      - name: Download the archive the named release run built
+        if: inputs.run_id != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: mvmctl-x86_64-unknown-linux-gnu-attempt-${{ inputs.run_attempt }}
+          path: ${{ runner.temp }}/release-archive
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download the guest runtime the calling release run built
+        if: inputs.run_id == '' && inputs.runtime_candidate_artifact_id == ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: mvm-guest-bins-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/guest-runtime
+
+      - name: Download the guest runtime the named release run built
+        if: inputs.run_id != '' && inputs.runtime_candidate_artifact_id == ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: mvm-guest-bins-attempt-${{ inputs.run_attempt }}
+          path: ${{ runner.temp }}/guest-runtime
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # A launch authenticates the runtime it assembled from, so the smoke
+      # stages the signed quartet the release run produced, never the bare
+      # archive.
+      - name: Fetch the exact signed release runtime candidate
+        id: candidate
+        if: inputs.runtime_candidate_artifact_id != ''
+        uses: ./.github/actions/fetch-runtime-candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          artifact-id: ${{ inputs.runtime_candidate_artifact_id }}
+          artifact-digest: ${{ inputs.runtime_candidate_artifact_digest }}
+          archive-sha256: ${{ inputs.runtime_archive_sha256 }}
+          checksum-sha256: ${{ inputs.runtime_checksum_sha256 }}
+          archive-bundle-sha256: ${{ inputs.runtime_archive_bundle_sha256 }}
+          checksum-bundle-sha256: ${{ inputs.runtime_checksum_bundle_sha256 }}
+
+      - name: Check the archive against the checksum the build recorded
+        run: |
+          cd "${RUNNER_TEMP}/release-archive"
+          sha256sum --check mvmctl-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+      # One runtime, held to the checksum its build recorded; on a tag, the
+      # one named for the tag's version.
+      - name: Check the guest runtime against the checksum the build recorded
+        id: guest-runtime
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+          RUNTIME_DIR: ${{ steps.candidate.outputs.directory || format('{0}/guest-runtime', runner.temp) }}
+        run: |
+          set -euo pipefail
+          cd "${RUNTIME_DIR}"
+          shopt -s nullglob
+          runtimes=(mvm-guest-bins-v*.tar.gz)
+          if [ "${#runtimes[@]}" -ne 1 ]; then
+            echo "::error::expected one guest runtime archive, found ${#runtimes[@]}: ${runtimes[*]}" >&2
+            exit 1
+          fi
+          if [ -n "${TAG_NAME}" ] && [ "${runtimes[0]}" != "mvm-guest-bins-${TAG_NAME}.tar.gz" ]; then
+            echo "::error::${runtimes[0]} is not the guest runtime of ${TAG_NAME}" >&2
+            exit 1
+          fi
+          sha256sum --check "${runtimes[0]}.sha256"
+          echo "archive=${RUNTIME_DIR}/${runtimes[0]}" >> "${GITHUB_OUTPUT}"
+
+      - name: Unpack the archive and run the first-run smoke, egress included
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+          MVM_SMOKE_ARCHIVE: ${{ runner.temp }}/release-archive/mvmctl-x86_64-unknown-linux-gnu.tar.gz
+          MVM_SMOKE_GUEST_RUNTIME: ${{ steps.guest-runtime.outputs.archive }}
+          MVM_SMOKE_OUT: ${{ runner.temp }}/release-archive-smoke
+        run: sh scripts/smoke-fresh-install.sh ${TAG_NAME:+"$TAG_NAME"}
+
+      - name: Upload the transcript
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-archive-smoke-linux-firecracker
+          path: ${{ runner.temp }}/release-archive-smoke
+          if-no-files-found: warn
+          retention-days: 30
+
+  install:
+    if: inputs.lane == 'release-recipes'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - format: aur
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            runner: ubuntu-24.04
+          - format: nix
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            runner: ubuntu-24.04
+          - format: nix
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Require the tag
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+        run: test -n "$TAG_NAME" || { echo "::error::this lane needs a tag" >&2; exit 1; }
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v2.5.2
+      - name: Download and authenticate the published recipe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag }}
+          FORMAT: ${{ matrix.format }}
+        run: |
+          set -euo pipefail
+          recipe=package.nix
+          if [ "${FORMAT}" = aur ]; then recipe=PKGBUILD; fi
+          mkdir recipes
+          gh release download "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern "${recipe}" --pattern "${recipe}.bundle" --dir recipes
+          cosign verify-blob --bundle "recipes/${recipe}.bundle" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG_NAME}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "recipes/${recipe}"
+
+      - name: Install and remove on Arch Linux
+        if: matrix.format == 'aur'
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e EXPECT_VERSION="${TAG_NAME#v}" \
+            -v "${GITHUB_WORKSPACE}/recipes:/recipes:ro" \
+            -v "${GITHUB_WORKSPACE}/scripts/smoke-installed-release.py:/smoke.py:ro" \
+            archlinux:base-devel bash -euc '
+              pacman -Syu --noconfirm --needed python
+              useradd --create-home builder
+              install -o builder -g builder /recipes/PKGBUILD /home/builder/PKGBUILD
+              su builder -c "cd /home/builder && makepkg --noconfirm"
+              pacman -U --noconfirm /home/builder/mvmctl-bin-*.pkg.tar.zst
+              python /smoke.py /usr "$EXPECT_VERSION"
+              pacman -R --noconfirm mvmctl-bin
+              test ! -e /usr/bin/mvmctl
+              test ! -e /usr/lib/mvmctl/guest-runtime
+            '
+
+      # Same pinned installer and native Linux boundary as the Nix CI lane.
+      - name: Install Nix
+        if: matrix.format == 'nix'
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Build, install and remove the standalone Nix package
+        if: matrix.format == 'nix'
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016 # Interpolation belongs to Nix, not Bash.
+          package="$(nix-build --no-out-link --expr '
+            let
+              lock = (builtins.fromJSON (builtins.readFile ./flake.lock)).nodes.nixpkgs.locked;
+              pkgs = import (builtins.fetchTarball {
+                url = "https://github.com/${lock.owner}/${lock.repo}/archive/${lock.rev}.tar.gz";
+                sha256 = lock.narHash;
+              }) {};
+            in pkgs.callPackage ./recipes/package.nix {}
+          ')"
+          profile="${RUNNER_TEMP}/mvm-profile"
+          nix-env --profile "${profile}" --install "${package}"
+          python3 scripts/smoke-installed-release.py "${profile}" "${TAG_NAME#v}"
+          nix-env --profile "${profile}" --uninstall '*'
+          test ! -e "${profile}/bin/mvmctl"
+          test ! -e "${profile}/lib/mvmctl/guest-runtime"
