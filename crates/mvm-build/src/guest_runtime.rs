@@ -279,7 +279,31 @@ pub fn cached_verified_release_runtime(
         return Err(GuestRuntimeError::Cache("invalid release version".into()));
     }
     let executable = std::env::current_exe()?.canonicalize()?;
-    let mut locations = packaged_runtime_locations(&executable)?;
+    find_verified_release_runtime(
+        cache_root,
+        version,
+        arch,
+        packaged_runtime_locations(&executable)?,
+        &|archive, checksum, bundle| {
+            evidence::verify_release_archive(archive, checksum, bundle, version, arch)
+        },
+    )
+}
+
+/// What a release archive's evidence authenticates to; the one production
+/// verifier is [`evidence::verify_release_archive`].
+type ReleaseArchiveCheck<'a> = dyn Fn(&Path, &Path, &Path) -> Result<evidence::VerifiedRuntimeManifest, GuestRuntimeError>
+    + 'a;
+
+/// [`cached_verified_release_runtime`] over explicit packaged locations and
+/// verifier. Private, so no other crate can substitute a check of its own.
+fn find_verified_release_runtime(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    mut locations: Vec<PathBuf>,
+    verify: &ReleaseArchiveCheck<'_>,
+) -> Result<Option<evidence::VerifiedReleaseRuntime>, GuestRuntimeError> {
     let cached = cache_root.join("guest-runtime/releases").join(version);
     locations.push(cached.clone());
     let asset = guest_bins::guest_bins_archive_name(version);
@@ -304,13 +328,7 @@ pub fn cached_verified_release_runtime(
             }
         }
         if present {
-            let verified = evidence::verify_release_archive(
-                &archive,
-                &checksum,
-                &signature_bundle,
-                version,
-                arch,
-            )?;
+            let verified = verify(&archive, &checksum, &signature_bundle)?;
             verified.declaration(arch)?.validate(arch)?;
             let proof = evidence::RuntimeReleaseProof {
                 archive: archive.canonicalize()?,
@@ -2065,6 +2083,81 @@ mod tests {
         assert!(matches!(
             evidence::read_authenticated_manifest(&bytes, "1.2.4"),
             Err(GuestRuntimeError::Version { .. })
+        ));
+    }
+
+    /// What a launch finds after bootstrap downloaded the release runtime into
+    /// a fresh cache, checked with the stand-in signature.
+    fn launch_lookup_after_bootstrap(
+        cache: &Path,
+    ) -> Result<Option<evidence::VerifiedReleaseRuntime>, GuestRuntimeError> {
+        find_verified_release_runtime(
+            cache,
+            "1.2.3",
+            GuestArch::X86_64,
+            Vec::new(),
+            &|archive, checksum, bundle| {
+                let asked = std::cell::RefCell::new(Vec::new());
+                evidence::verify_release_archive_signed_by(
+                    archive,
+                    checksum,
+                    bundle,
+                    "1.2.3",
+                    GuestArch::X86_64,
+                    &|payload, signature, asset| stand_in_check(&asked, payload, signature, asset),
+                )
+            },
+        )
+    }
+
+    #[test]
+    fn a_launch_finds_and_reauthenticates_the_runtime_bootstrap_downloaded() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        // The download checks the release signature with the real verifier,
+        // which a stand-in bundle cannot pass; the launch lookup below does
+        // not read this hatch and checks every signature.
+        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+        env.remove(crate::runtime_overlay::SKIP_HASH_VERIFY_ENV);
+        let release = tempfile::tempdir().unwrap();
+        let bytes = raw_archive(&release_entries());
+        stand_in_release(release.path(), &bytes);
+        let cache = tempfile::tempdir().unwrap();
+
+        let acquired = guest_bins::release::acquire_release_guest_runtime(
+            &guest_bins::release::ReleaseGuestRuntimeRequest {
+                release_url: &format!("file://{}", release.path().display()),
+                version: "1.2.3",
+                cache_root: cache.path(),
+                installed_dirs: &[],
+            },
+        )
+        .unwrap();
+        let found = launch_lookup_after_bootstrap(cache.path())
+            .unwrap()
+            .expect("a launch must find the runtime bootstrap cached");
+        assert_eq!(
+            found.proof().archive,
+            acquired.archive.canonicalize().unwrap()
+        );
+        assert_eq!(
+            found.proof().archive_sha256,
+            hex::encode(Sha256::digest(&bytes))
+        );
+
+        // A missing signature bundle and a changed archive byte still refuse.
+        let asset = guest_bins::guest_bins_archive_name("1.2.3");
+        let bundle = acquired.archive.with_file_name(format!("{asset}.bundle"));
+        let signature = fs::read(&bundle).unwrap();
+        fs::remove_file(&bundle).unwrap();
+        assert!(launch_lookup_after_bootstrap(cache.path()).is_err());
+        fs::write(&bundle, signature).unwrap();
+        let mut tampered = bytes.clone();
+        let middle = tampered.len() / 2;
+        tampered[middle] ^= 1;
+        fs::write(&acquired.archive, tampered).unwrap();
+        assert!(matches!(
+            launch_lookup_after_bootstrap(cache.path()),
+            Err(GuestRuntimeError::Cache(reason)) if reason.contains("checksum")
         ));
     }
 
