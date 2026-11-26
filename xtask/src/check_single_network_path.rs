@@ -131,13 +131,6 @@ const ENDPOINT_SOCKET_OWNERS: &[&str] = &[
     "crates/mvm-http/src/client.rs",
 ];
 
-/// Host network users that do not carry workload traffic. Each exemption is
-/// exact and purpose-labelled so the list cannot silently widen by directory.
-const INFRA_SOCKET_EXEMPTIONS: &[(&str, &str)] = &[(
-    "crates/mvm-hostd/src/supervisor/datapath/l7_proxy.rs",
-    "standalone supervisor proxy component outside the admitted workload runner",
-)];
-
 /// The builder crate: its guest inits run inside every builder VM, and its
 /// host half launches those VMs.
 const BUILDER_CRATE_SRC: &str = "crates/mvm-build/src";
@@ -730,7 +723,6 @@ fn check_socket_owners(workspace: &Path) -> Result<()> {
         workspace.join("crates/mvm-http/src"),
     ];
     let mut violations = Vec::new();
-    let mut exemptions_seen = BTreeSet::new();
     for root in roots {
         scan_path(workspace, &root, &mut |rel, code| {
             if !SOCKET_TOKENS.iter().any(|token| code.contains(token)) {
@@ -739,24 +731,10 @@ fn check_socket_owners(workspace: &Path) -> Result<()> {
             if path_allowed(rel, ENDPOINT_SOCKET_OWNERS) {
                 return;
             }
-            if let Some((path, _purpose)) = INFRA_SOCKET_EXEMPTIONS
-                .iter()
-                .find(|(path, _)| *path == rel)
-            {
-                exemptions_seen.insert(*path);
-                return;
-            }
             violations.push(format!(
                 "{rel}: opens an Internet socket outside mvm-network-endpoint"
             ));
         })?;
-    }
-    for (path, purpose) in INFRA_SOCKET_EXEMPTIONS {
-        if !exemptions_seen.contains(path) {
-            violations.push(format!(
-                "{path}: stale infrastructure socket exemption ({purpose})"
-            ));
-        }
     }
     if !violations.is_empty() {
         bail!(
@@ -1088,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_and_exact_infra_socket_cases_are_the_only_allowed_shapes() {
+    fn endpoint_socket_owners_are_the_only_allowed_shapes() {
         assert!(path_allowed(ENDPOINT_BIN, ENDPOINT_SOCKET_OWNERS));
         assert!(path_allowed(
             "crates/mvm-hostd/src/supervisor/endpoint/flowmux/tcp_relay.rs",
@@ -1102,11 +1080,6 @@ mod tests {
             "crates/mvm-hostd/src/supervisor/endpoint/terminator/flow.rs",
             ENDPOINT_SOCKET_OWNERS
         ));
-        assert!(
-            INFRA_SOCKET_EXEMPTIONS
-                .iter()
-                .any(|(path, _)| *path == "crates/mvm-hostd/src/supervisor/datapath/l7_proxy.rs")
-        );
     }
 
     fn proxy_file(name: &str, code: &str) -> (String, String) {

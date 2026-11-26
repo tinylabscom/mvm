@@ -15,7 +15,6 @@ mod ingress_transform;
 /// stdin config contract + store-opening/service assembly. The
 /// `mvm-network-endpoint` bin is the process wrapper.
 pub mod network_endpoint;
-pub mod network_endpoint_connector;
 pub mod network_endpoint_proxy;
 pub mod reversible_replacement;
 pub mod runtime_approval;

@@ -292,7 +292,6 @@ A = {
     "mvm-hostd/src/actor_process.rs": ("helper bin", "spawn the per-VM actor controller through the verified host-helper resolver"),
     "mvm-hostd/src/mailbox_process.rs": ("helper bin", "launch path starts the per-VM mailbox process with derived keys on stdin"),
     "mvm-hostd/src/health_probe.rs": ("mvmctl self re-exec", "`mvmctl machine restart` after a failed healthcheck (embedder-refused)"),
-    "mvm-hostd/src/supervisor/datapath/firewall/linux_nft.rs": ("net (nft)", "install host nftables rules"),
     "mvm-hostd/src/supervisor/services/spawn.rs": ("helper bin", "ProcessSpawner: start a signed, integrity-checked host service binary"),
     # CLI
     "mvm-cli/src/bench/cold_launch_runner.rs": ("mvmctl self re-exec", "`mvmctl pool status` / launch for the bench harness"),
