@@ -21,11 +21,9 @@
 
 /// Backend-neutral typed services over the VMM's guest-vsock transport.
 pub mod channel;
-pub mod enforcement;
 pub mod provider;
 pub mod registry;
 
 pub use channel::GuestService;
-pub use enforcement::{EgressEnforcer, EgressWiring, EnforcementError};
 pub use provider::{NetHandle, NetworkError, NetworkProvider, NetworkSpec};
 pub use registry::NetworkProviderRegistry;

@@ -4031,7 +4031,6 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-http",
- "mvm-net",
  "mvm-policy",
  "mvm-runtime",
  "mvm-vmm",

@@ -6,10 +6,8 @@ firewall commands, or a particular mesh implementation.
 
 ## Who uses it
 
-`mvm-backends` supplies concrete VMM-facing network implementations.
-`mvm-runtime` selects and orchestrates providers. `mvm-build` uses the same
-contract for builder networking, while `mvm-hostd` and `mvm-vmm` use its typed
-guest-service and enforcement surfaces. Fleet orchestrators can register a
+`mvm-backends`, `mvm-vmm` and `mvm-runtime` use its typed guest-service
+surface. `mvm-build` implements the provider contract for builder networking. Fleet orchestrators can register a
 custom WireGuard or Tailscale provider without changing this crate.
 
 ## How it works
@@ -20,10 +18,9 @@ resources required for later policy application and teardown. Providers are
 registered by mode in `NetworkProviderRegistry`, allowing selection without
 scattered backend matches.
 
-Egress is separately represented by `EgressEnforcer` and `EgressWiring`. This
-keeps provisioning from silently implying authorization: the default network
-policy comes from `mvm-core` and denies traffic until an admitted policy is
-applied. `GuestService` describes typed services carried over guest vsock
+Provisioning does not imply authorization: the default network policy comes
+from `mvm-core` and denies traffic until an admitted policy is applied; egress
+is enforced by the per-VM network endpoint, not by this crate. `GuestService` describes typed services carried over guest vsock
 rather than opening untracked listeners.
 
 ## Main modules
@@ -32,7 +29,6 @@ rather than opening untracked listeners.
 |---|---|
 | `provider` | `NetworkProvider`, `NetworkSpec`, `NetHandle`, and errors |
 | `registry` | Provider registration and lookup |
-| `enforcement` | Egress policy application and wiring contracts |
 | `channel` | Backend-neutral guest service definitions |
 
 ## Design boundaries

@@ -94,13 +94,10 @@ mod tests {
     }
 
     #[test]
-    fn kind_is_libkrun_policy_is_deny_all_no_separate_enforcer() {
+    fn kind_is_libkrun_policy_is_deny_all() {
         let provider = LibkrunNetworkProvider::new();
         assert_eq!(provider.kind(), "libkrun");
         // claim-10: advertised default is deny-all, opening egress is opt-in.
         assert_eq!(*provider.policy(), NetworkPolicy::deny_all());
-        // This provider is still a pure config producer, not a separate
-        // enforcer object.
-        assert!(provider.egress_enforcer().is_none());
     }
 }
