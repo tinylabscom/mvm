@@ -342,8 +342,9 @@ conformance ID register that `xtask check-conformance` reads. There is
 no `specs/claims/` directory today; it existed and was deleted by the v1
 simplification restructure. Historical plans may still describe that removal,
 but live claim authority belongs to ADR-001 and `model/claims.toml`. Do not
-infer ADR existence from a numeric range: ADR-001 through ADR-064 and ADR-110
-through ADR-112 have files, and no number between them does. Resolve every citation against
+infer ADR existence from a numeric range: the numbers run from ADR-001 to ADR-064
+and ADR-110 to ADR-112, with gaps where deleted ADRs left their numbers unused,
+and no number between 064 and 110 has a file. Resolve every citation against
 `specs/adrs/`; `check-adr-coverage` enforces that rule.
 
 Keep the ADR-001 table in sync when you rename or move a witness. The

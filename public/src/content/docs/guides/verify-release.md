@@ -291,7 +291,7 @@ Two environment variables disable parts of the verification pipeline. Both print
 
 | Variable | Disables | Use case |
 |----------|----------|----------|
-| `MVM_SKIP_HASH_VERIFY=1` | SHA-256 check on artifact bytes (existing W5.1) | Mid-flight corruption while the publish flow is broken |
+| `MVM_SKIP_HASH_VERIFY=1` | SHA-256 check on artifact bytes (ADR-001 claim 6) | Mid-flight corruption while the publish flow is broken |
 | `MVM_SKIP_COSIGN_VERIFY=1` | Cosign signature check on manifest + revocation list | Sigstore-side outage where TUF root or Rekor is unavailable |
 
 The two are independent — setting one doesn't disable the other. SHA-256 still runs even with cosign disabled, and vice versa.
