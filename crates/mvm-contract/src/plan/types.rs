@@ -804,8 +804,7 @@ impl AdmissionProfile {
 /// Workload variant — `Dev` is the development sandbox (carries the
 /// dev guest agent's RCE-by-design Exec handler, accepts looser
 /// policies), `Prod` is the production posture (no dev primitives,
-/// strict policy gates). The `L7EgressProxy` consults this at
-/// construction time to refuse plain-HTTP egress for `Prod`.
+/// strict policy gates).
 ///
 /// Mirrors `passthru.variant` from Nix-side `mkGuest`. The supervisor
 /// resolves it from the workload's `SignedImageRef.name` suffix or

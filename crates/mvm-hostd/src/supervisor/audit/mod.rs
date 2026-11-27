@@ -6,8 +6,6 @@ pub use crate::audit::{
 };
 
 pub mod denial_stage;
-/// Chain-signed metadata audit for policy-gated DNS questions.
-pub mod dns_audit;
 pub mod icmp_audit;
 /// Chain-signed `secret.substituted` / `secret.placeholder_dropped`
 /// audit events (claim 13: metadata only, never the secret value).

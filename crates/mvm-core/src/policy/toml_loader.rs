@@ -226,7 +226,7 @@ stream_destinations = ["file:///var/log/mvm/audit.jsonl"]
     #[test]
     fn parse_bundle_round_trips_l4_rules() {
         // `[[network.l4]]` rows attach an allow-list to the bundle. The
-        // supervisor's L4Gate consumes these at flow-establishment time;
+        // endpoint's egress gate enforces them after projection;
         // here we just prove the schema accepts the rows and surfaces
         // them on `bundle.network`.
         let text = format!(

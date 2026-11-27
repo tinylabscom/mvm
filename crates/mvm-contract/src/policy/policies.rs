@@ -20,8 +20,8 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-/// Network policy. `l4` is the L4 allow-list the supervisor's `L4Gate`
-/// consults at flow-establishment time. `preset` is a stub kept for
+/// Network policy. `l4` is the L4 allow-list, projected into the
+/// canonical egress set the per-VM endpoint's egress gate enforces. `preset` is a stub kept for
 /// forward compat with the `mvm-core::policy::network_policy` shape that
 /// older bundles may still carry.
 ///
@@ -35,9 +35,8 @@ pub struct BundleNetworkPolicy {
     /// Name of the network preset
     /// (`open` / `agent` / `tenant-isolated` / etc.). Stub.
     pub preset: Option<String>,
-    /// L4 allow-list (`proto`, `dst_cidr`, port range) evaluated by
-    /// the supervisor's `L4Gate` at flow-establishment time. Empty =
-    /// default-deny.
+    /// L4 allow-list (`proto`, `dst_cidr`, port range), enforced by the
+    /// endpoint's egress gate after projection. Empty = default-deny.
     #[serde(default)]
     pub l4: Vec<L4RuleSpec>,
     /// Observer chain. Each entry is a name resolved against the host's
@@ -117,39 +116,31 @@ pub struct L4RuleSpec {
     pub port_hi: u16,
 }
 
-/// L7 egress policy. The fields the `L7EgressProxy` consumes:
-/// - `allow_list` is the (host, port) destination policy.
-/// - `allow_plain_http` opens the plain-HTTP code path; **the
-///   supervisor refuses to honour `true` for `Variant::Prod`** so
-///   production workloads can never accidentally egress unencrypted.
-/// - `body_cap_bytes` bounds the body read for plain-HTTP. `0` means
-///   "use default" ([`DEFAULT_BODY_CAP_BYTES`], 16 MiB) — matches
-///   AI-provider request sizes (long contexts + image uploads).
-/// - `disabled_inspectors` lets operators turn off specific
-///   inspectors by name (e.g., disable `pii_redactor` for an
-///   analytics workload that scrubs upstream).
+/// Egress policy. What reaches enforcement today:
+/// - `allow_list` is projected into the per-VM endpoint's egress gate as
+///   the (host, port) destination policy.
+/// - `mode = Some("open")` projects to unrestricted egress.
 ///
-/// `mode` is retained for compatibility with the earlier stub; the
-/// supervisor honours `mode = Some("open")` as a kill-switch that
-/// skips the proxy entirely. New fields are `#[serde(default)]` so
-/// older bundles continue to parse.
+/// `allow_plain_http`, `body_cap_bytes` and `disabled_inspectors` are
+/// parsed, signed and (for `disabled_inspectors`) validated at admission,
+/// but nothing enforces them. New fields are `#[serde(default)]` so older
+/// bundles continue to parse.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EgressPolicy {
-    /// `open` — no proxy. Anything else routes through the L7 chain.
+    /// `open` — unrestricted egress. Any other value leaves the
+    /// `allow_list` in force.
     pub mode: Option<String>,
     /// (host, port) allowlist, projected into the endpoint's egress gate.
     /// `port = 0` is the explicit "any port for this host" wildcard.
     #[serde(default)]
     pub allow_list: Vec<(String, u16)>,
-    /// Whether plain HTTP (not just CONNECT/HTTPS) is permitted.
-    /// **Forbidden for `Variant::Prod`** — the supervisor's
-    /// `with_l7_egress` builder rejects this combination at policy
-    /// load.
+    /// Whether plain HTTP (not just CONNECT/HTTPS) is permitted. No
+    /// code reads it today.
     #[serde(default)]
     pub allow_plain_http: bool,
-    /// Body read cap for plain-HTTP (bytes). `0` means "use default"
-    /// ([`DEFAULT_BODY_CAP_BYTES`]).
+    /// Body read cap for plain-HTTP (bytes). No code reads it today; the
+    /// endpoint's redaction applies [`DEFAULT_BODY_CAP_BYTES`].
     #[serde(default)]
     pub body_cap_bytes: u64,
     /// Per-name inspector opt-out. Admission accepts only the names
@@ -169,9 +160,8 @@ pub struct EgressPolicy {
     pub reversible_replacement: crate::policy::reversible_replacement::ReversibleReplacementPolicy,
 }
 
-/// Default body cap when `EgressPolicy::body_cap_bytes` is 0.
-/// 16 MiB — matches AI-provider request sizes (long contexts +
-/// image uploads). Configurable per workload via the policy field.
+/// Body cap the endpoint's redaction applies. 16 MiB — matches
+/// AI-provider request sizes (long contexts + image uploads).
 pub const DEFAULT_BODY_CAP_BYTES: u64 = 16 * 1024 * 1024;
 
 /// One filesystem-preopen grant in a policy bound. `access` is the
