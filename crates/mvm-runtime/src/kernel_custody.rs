@@ -124,8 +124,7 @@ impl KernelBoundLaunch {
                 instance: None,
                 process: None,
             };
-            mvm_core::util::atomic_io::write_private_new(&record, &serde_json::to_vec(&pending)?)?;
-            unsynced.add_file(record.clone());
+            write_pending_record(&record, &pending, unsynced)?;
         }
         Ok(Self {
             config,
@@ -302,6 +301,18 @@ impl KernelBoundLaunch {
     }
 }
 
+/// Write a launch's pending record and add it to the launch's deferred syncs,
+/// so its contents are durable before the lease directory that names it.
+fn write_pending_record(
+    path: &Path,
+    pending: &KernelUse,
+    unsynced: &mut crate::runtime_evidence::UnsyncedBind,
+) -> Result<()> {
+    mvm_core::util::atomic_io::write_private_new(path, &serde_json::to_vec(pending)?)?;
+    unsynced.add_file(path.to_path_buf());
+    Ok(())
+}
+
 fn read_record(path: &Path) -> Result<KernelUse> {
     use std::io::Read;
     let mut options = std::fs::OpenOptions::new();
@@ -387,9 +398,21 @@ fn release_process_generation(
     )
 }
 
-// Resource deletion mechanics only. The sole production callers above supply
-// the existing opaque exit proof or a process-table check, never a
-// deserialized record or a stop result.
+/// Release a pending record nothing was started from: a launch that failed
+/// before its spawn. A record bound to an instance or a process is retained.
+#[cfg(unix)]
+pub(crate) fn release_unstarted(lifecycle: &RuntimeLifecycleLease, vm_id: &str) -> Result<()> {
+    release_matching(
+        lifecycle,
+        vm_id,
+        |record| record.instance.is_none() && record.process.is_none(),
+        || Ok(()),
+    )
+}
+
+// Resource deletion mechanics only. The production callers above supply
+// the existing opaque exit proof or a process-table check, or release a
+// record never bound to any instance before a spawn; never a stop result.
 #[cfg(unix)]
 fn release_generation(
     lifecycle: &RuntimeLifecycleLease,
@@ -796,6 +819,57 @@ mod tests {
         let path = lease.canonical_kernel_record();
         std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
         (generation, path)
+    }
+
+    /// A pending record joins the launch's deferred syncs, so its contents
+    /// are durable before the lease directory that names it.
+    #[test]
+    fn a_pending_kernel_record_joins_the_launch_sync() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let lease = RuntimeLifecycleLease::acquire("kernel-pending-unit").unwrap();
+        let pending = KernelUse {
+            version: 1,
+            vm: "kernel-pending-unit".into(),
+            generation: "kernel-pending".into(),
+            device: 1,
+            inode: 2,
+            instance: None,
+            process: None,
+        };
+        let path = lease.canonical_kernel_record();
+        let mut unsynced = crate::runtime_evidence::UnsyncedBind::default();
+
+        write_pending_record(&path, &pending, &mut unsynced).unwrap();
+        crate::runtime_evidence::durable_steps::take();
+        unsynced.sync().unwrap();
+
+        assert_eq!(
+            crate::runtime_evidence::durable_steps::take(),
+            vec![path.clone()]
+        );
+        assert_eq!(read_record(&path).unwrap().generation, "kernel-pending");
+    }
+
+    /// A launch that fails before anything started from it releases its
+    /// pending record and generation. A record bound to a process is not.
+    #[test]
+    fn only_an_unstarted_kernel_record_is_released_before_spawn() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let lease = RuntimeLifecycleLease::acquire("kernel-fc-unit").unwrap();
+
+        let (generation, path) = process_record(home.path(), &lease, Some(fc_process(1)));
+        assert!(release_unstarted(&lease, "kernel-fc-unit").is_err());
+        assert!(generation.exists() && path.exists());
+        std::fs::remove_file(&path).unwrap();
+
+        let (generation, path) = process_record(home.path(), &lease, None);
+        assert!(release_unstarted(&lease, "another-vm").is_err());
+        release_unstarted(&lease, "kernel-fc-unit").unwrap();
+        assert!(!generation.exists() && !path.exists());
     }
 
     fn fc_process(start_ticks: u64) -> mvm_vmm::host::process_identity::ProcessIdentity {

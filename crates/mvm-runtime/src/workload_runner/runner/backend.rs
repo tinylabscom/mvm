@@ -58,7 +58,17 @@ impl<S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
             &lifecycle,
             &mut unsynced,
         )?;
-        unsynced.sync_before_spawn()?;
+        if let Err(error) = unsynced.sync_before_spawn() {
+            // Nothing started from the bind, so its pending kernel record can
+            // go rather than refuse this VM name for good.
+            #[cfg(unix)]
+            if let Err(release) =
+                crate::kernel_custody::release_unstarted(&lifecycle, &launch.config().name)
+            {
+                tracing::warn!(error = %format!("{release:#}"), "kernel record retained");
+            }
+            return Err(error);
+        }
         let config = launch.config();
         cold_hvf_channel::require_cold_start_config(config)?;
         ClaimGuards::new(&self.spawner)
