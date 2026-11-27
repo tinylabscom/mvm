@@ -83,20 +83,6 @@ pub struct EgressPolicy {
     /// (host, port) allowlist.
     #[serde(default)]
     pub allow_list: Vec<(String, u16)>,
-    /// Whether plain HTTP (not just CONNECT/HTTPS) is permitted. No
-    /// code reads it today.
-    #[serde(default)]
-    pub allow_plain_http: bool,
-    /// Body read cap for plain-HTTP (bytes). No code reads it today; the
-    /// endpoint's redaction applies [`DEFAULT_BODY_CAP_BYTES`].
-    #[serde(default)]
-    pub body_cap_bytes: u64,
-    /// Per-name inspector opt-out. Admission accepts only the names
-    /// `destination_policy`, `ssrf_guard`, `secrets_scanner`,
-    /// `injection_guard` and `pii_redactor`; no inspector chain reads
-    /// the field today.
-    #[serde(default)]
-    pub disabled_inspectors: Vec<String>,
     /// Per-destination egress redaction.
     #[serde(default)]
     pub redaction: crate::policy::redaction::RedactionPolicy,
@@ -237,5 +223,36 @@ port_hi  = 443
         let back: FlowByteLogSpec = toml::from_str(&toml_str).unwrap();
         assert_eq!(spec, back);
         assert!(toml_str.contains("directions = \"egress\""));
+    }
+
+    #[test]
+    fn egress_policy_refuses_removed_fields_by_name() {
+        for field in [
+            "allow_plain_http = false",
+            "body_cap_bytes = 0",
+            "disabled_inspectors = []",
+        ] {
+            let name = field.split(' ').next().unwrap();
+            let err = toml::from_str::<EgressPolicy>(field).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&alloc::format!("unknown field `{name}`")),
+                "{name}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn egress_policy_serialized_shape_is_pinned() {
+        // Actor manifests hash this encoding into their snapshot and
+        // template digests, so a field change moves those digests.
+        assert_eq!(
+            serde_json::to_string(&EgressPolicy::default()).unwrap(),
+            concat!(
+                r#"{"mode":null,"allow_list":[],"#,
+                r#""redaction":{"default":{"entropy":{"action":"off"},"pii":{"mode":null,"categories":[]},"names":"off","secrets":"block"},"profiles":[]},"#,
+                r#""reversible_replacement":{"default":{"enabled":false,"classes":[],"replace_surfaces":[],"reinject_surfaces":[],"fallback":"redact"},"profiles":[]}}"#
+            )
+        );
     }
 }
