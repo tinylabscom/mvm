@@ -207,7 +207,8 @@ pub fn stage_bundle_with_signer(
     stage_bundle_at(inputs, signer, crate::util::time::try_utc_timestamp_now()?)
 }
 
-#[cfg(test)]
+// Only the canonical tests, which need the in-process verifier, call this.
+#[cfg(all(test, feature = "manifest-verify"))]
 fn export_bundle_at(
     inputs: &BundleExportInputs<'_>,
     signer: &dyn BundleSigner,
