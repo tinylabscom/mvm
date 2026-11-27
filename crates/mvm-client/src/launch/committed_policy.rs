@@ -99,7 +99,7 @@ mod tests {
                 "manifest_path": "/project/mvm.toml",
                 "manifest_text": "flake = \".\"\n",
                 "defaults": [],
-                "platform": mvm_policy::Platform::default(),
+                "platform": mvm_core::policy::authored::Platform::default(),
                 "sources": [],
                 "effective": policy,
                 "effective_sha256": "0".repeat(64),

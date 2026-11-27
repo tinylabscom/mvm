@@ -113,7 +113,6 @@ required-features = ["trusted-apfs"]
 # `egress-ca`: the https terminator mints per-SNI leaves
 # under the per-VM intermediate (`mvm_core::crypto::egress_ca`).
 mvm-core = { workspace = true, features = ["egress-ca", "host-state", "hostd-transport"] }
-mvm-policy.workspace = true
 mvm-http.workspace = true
 # The Workload IR (`SecretRef`, `AuthType`, `HealthCheck`, `host_matches`,
 # …) the keyholder + supervisor + healthcheck modules resolve against,

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{merge::ResolvedPolicy, model::PolicyBody, source::PolicyError};
+use super::{merge::ResolvedPolicy, model::PolicyBody, source::PolicyError};
 
 /// A resolved policy as a document.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

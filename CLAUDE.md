@@ -36,8 +36,8 @@ downloads verified artifacts (ADR-030).
 A crate depends only on crates on its own line or above; each `lib.rs` documents its scope.
 
 1. `mvm-contract` (`no_std` Workload IR, wire protocol, policy DTOs, audit verifier; builds for wasm), `mvm-crypto` (primitives), `mvm-http` (minimal HTTP/1.1 client), `mvm-setpriv` (guest privilege-drop helper), `crates/deps/mvm-macho-sign`.
-2. `mvm-core` -- types, config and `~/.mvm` paths, signed `ExecutionPlan` and `.mvmpkg` bundles, policy, crypto, guest-service channels; no tokio by default (`check-core-runtime-free`); keeps only code several crates share.
-3. `mvm-policy` (authored policy composition), `mvm-fs` (OCI client, allow-listed unpacker, pure-Rust ext4 writer), `crates/deps/libkrun-sys` (FFI + safe wrapper), `mvm-agentd` (guest agent, vsock protocol, console), `mvm-compiler` (workload compilation; no builds, network or signing), `mvm-gpu` (host GPU endpoint; guest shims are its cdylib examples).
+2. `mvm-core` -- types, config and `~/.mvm` paths, signed `ExecutionPlan` and `.mvmpkg` bundles, policy (authored-policy composition in `policy::authored`, behind `host-state`), crypto, guest-service channels; no tokio by default (`check-core-runtime-free`); keeps only code several crates share.
+3. `mvm-fs` (OCI client, allow-listed unpacker, pure-Rust ext4 writer), `crates/deps/libkrun-sys` (FFI + safe wrapper), `mvm-agentd` (guest agent, vsock protocol, console), `mvm-compiler` (workload compilation; no builds, network or signing), `mvm-gpu` (host GPU endpoint; guest shims are its cdylib examples).
 4. `mvm-vmm` (device model, hypervisor traits, `VmmDriver` seam, and the Firecracker/HVF/libkrun/QEMU drivers behind its `fc`/`hvf`/`libkrun`/`qemu` features), `mvm-host-services` (guest `libmvm_host_services.so`), `mvm-builder-guest` (builder-VM binaries + contract).
 5. `mvm-build` (Nix builder pipeline, artifact cache, runtime-piece assembly).
 6. `mvm-runtime` -- `VmBackend` + `AnyBackend`, VM lifecycle, workload runners.

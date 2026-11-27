@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use mvm_contract::protocol::vm_backend::BackendKind;
-use mvm_policy::{
+use mvm_core::policy::authored::{
     CapturedSource, Platform, PolicyBody, PolicyStore, ProjectPolicy, resolve_capturing_sources,
     resolve_from_captured_sources, select_launch_policy,
 };
@@ -190,7 +190,7 @@ fn prepare_with(
     store: &PolicyStore,
 ) -> Result<ProjectPolicyCandidate> {
     ensure!(
-        platform.os == Some(mvm_policy::model::HostOs::Linux)
+        platform.os == Some(mvm_core::policy::authored::model::HostOs::Linux)
             && platform.backend == Some(BackendKind::Firecracker),
         "committed local project policy initially supports Firecracker on Linux only"
     );
@@ -241,7 +241,7 @@ impl ProjectPolicyCandidate {
             "unknown committed project-policy version or generation"
         );
         ensure!(
-            self.platform.os == Some(mvm_policy::model::HostOs::Linux)
+            self.platform.os == Some(mvm_core::policy::authored::model::HostOs::Linux)
                 && self.platform.backend == Some(BackendKind::Firecracker),
             "committed project policy has an unsupported platform"
         );
@@ -419,7 +419,7 @@ mod tests {
         std::fs::write(&profile, "[overrides.network]\nallow = [\"old.test\"]\n").unwrap();
         let store = PolicyStore::at(&policy);
         let platform = Platform {
-            os: Some(mvm_policy::model::HostOs::Linux),
+            os: Some(mvm_core::policy::authored::model::HostOs::Linux),
             backend: Some(BackendKind::Firecracker),
             ..Platform::default()
         };
@@ -482,7 +482,7 @@ mod tests {
         )
         .unwrap();
         let platform = Platform {
-            os: Some(mvm_policy::model::HostOs::Linux),
+            os: Some(mvm_core::policy::authored::model::HostOs::Linux),
             backend: Some(BackendKind::Firecracker),
             ..Platform::default()
         };
@@ -519,7 +519,7 @@ mod tests {
         )
         .unwrap();
         let platform = Platform {
-            os: Some(mvm_policy::model::HostOs::Linux),
+            os: Some(mvm_core::policy::authored::model::HostOs::Linux),
             backend: Some(BackendKind::Firecracker),
             arch: Platform::current(None).arch,
         };
@@ -565,7 +565,7 @@ mod tests {
         std::fs::write(&profile, "[overrides.network]\nallow = [\"old.test\"]\n").unwrap();
         let source = PolicyStore::at(&policy);
         let platform = Platform {
-            os: Some(mvm_policy::model::HostOs::Linux),
+            os: Some(mvm_core::policy::authored::model::HostOs::Linux),
             backend: Some(BackendKind::Firecracker),
             arch: Platform::current(None).arch,
         };

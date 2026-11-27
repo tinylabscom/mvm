@@ -3632,7 +3632,6 @@ dependencies = [
  "mvm-fs",
  "mvm-hostd",
  "mvm-http",
- "mvm-policy",
  "mvm-runtime",
  "mvm-sdk",
  "mvm-vmm",
@@ -3872,7 +3871,6 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-http",
- "mvm-policy",
  "mvm-runtime",
  "mvm-vmm",
  "rand",
@@ -3948,23 +3946,6 @@ dependencies = [
  "plist",
  "sha1",
  "sha2 0.11.0",
-]
-
-[[package]]
-name = "mvm-policy"
-version = "0.28.0-rc.11"
-dependencies = [
- "anyhow",
- "libc",
- "mvm-contract",
- "mvm-core",
- "schemars",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "thiserror 2.0.18",
- "toml",
 ]
 
 [[package]]

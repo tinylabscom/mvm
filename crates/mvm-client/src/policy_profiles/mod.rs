@@ -1,7 +1,7 @@
 //! Composable policy: groups, profiles, and the resolved manifest.
 //!
 //! What a workload may do is composed from `mvm.toml`, a grants file,
-//! workload IR and flags. The shared `mvm-policy` crate owns the authored
+//! workload IR and flags. `mvm_core::policy::authored` owns the authored
 //! policy rules; this module preserves client paths and lowers them into
 //! launch inputs:
 //!
@@ -27,16 +27,14 @@ pub mod environment;
 pub mod manifest;
 pub mod preview;
 pub mod query;
-pub mod resolve;
-pub use mvm_policy::{builtin, merge, model, source};
+pub use mvm_core::policy::authored::{builtin, merge, model, resolve, source};
 
 pub use manifest::{FoldedLaunch, LaunchFlags, ResolvedManifest, fold};
-pub use mvm_policy::select_launch_policy;
-pub use mvm_policy::{
+pub use mvm_core::policy::authored::select_launch_policy;
+pub use mvm_core::policy::authored::{
     GroupFile, LayerOrigin, LayerSummary, MAX_EXTENDS_DEPTH, Platform, PolicyBody, PolicyError,
     PolicyRef, PolicySelection, PolicyStore, ProfileFile, ProjectPolicy, ResolvedPolicy,
 };
-pub use resolve::resolve;
 
 /// The policy selected for a launch, before application and plan admission.
 #[derive(Debug)]

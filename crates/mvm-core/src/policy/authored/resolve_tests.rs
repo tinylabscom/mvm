@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::NetworkSection;
+use crate::policy::authored::model::NetworkSection;
 
 /// A temporary user policy directory.
 struct Dir {
@@ -793,7 +793,7 @@ fn a_project_escape_hatch_is_stripped_not_honoured() {
 
 #[test]
 fn project_policy_reads_the_policy_table_and_network_allow_hosts() {
-    let manifest = mvm_core::manifest::Manifest::from_toml_str(
+    let manifest = crate::manifest::Manifest::from_toml_str(
         "flake = \".\"\n[network]\nallow_hosts = [\"a.test\"]\n[policy]\nprofile = \"offline\"\ninclude = [\"g\"]\n",
     )
     .unwrap();

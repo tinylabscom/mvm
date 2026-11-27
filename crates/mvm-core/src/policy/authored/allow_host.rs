@@ -1,7 +1,7 @@
 //! The common parser for workload egress allow-host requests.
 
+use crate::network_policy::{HostPort, is_banned_ssh_port};
 use anyhow::{Context, Result};
-use mvm_core::network_policy::{HostPort, is_banned_ssh_port};
 
 /// Parse one `--allow-host` entry, defaulting a bare host to HTTPS.
 ///

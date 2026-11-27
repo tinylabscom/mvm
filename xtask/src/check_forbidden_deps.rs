@@ -192,7 +192,7 @@ name = "sea-orm"
         assert!(is_forbidden("sqlx-mysql"));
         assert!(is_forbidden("mysql_common"));
         assert!(!is_forbidden("sqlx-sqlite"));
-        assert!(!is_forbidden("mvm-policy"));
+        assert!(!is_forbidden("mvm-core"));
     }
 
     #[test]

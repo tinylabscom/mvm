@@ -5,7 +5,7 @@
 //! - a **path** — starts with `/`, `./` or `../`, or ends in `.toml` or
 //!   `.json`; a relative path resolves against the file that names it;
 //! - a **name** — looked up in the user's policy directory
-//!   (`mvm_core::config::policy_profiles_dir` / `policy_groups_dir`) and then
+//!   (`crate::config::policy_profiles_dir` / `policy_groups_dir`) and then
 //!   among the built-ins;
 //! - a **pack** — `namespace/name[@version]`, resolved from an installed,
 //!   pinned, publisher-verified signed pack.
@@ -35,7 +35,7 @@ fn open_captured_source(path: &Path) -> std::io::Result<std::fs::File> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)?;
     let metadata = file.metadata()?;
-    mvm_core::private_fs::require_current_owner(&metadata)?;
+    crate::private_fs::require_current_owner(&metadata)?;
     if !metadata.is_file() || metadata.nlink() != 1 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -50,7 +50,7 @@ fn open_captured_source(path: &Path) -> std::io::Result<std::fs::File> {
 
 #[cfg(not(unix))]
 fn open_captured_source(path: &Path) -> std::io::Result<std::fs::File> {
-    Err(mvm_core::private_fs::unsupported_platform_error(path))
+    Err(crate::private_fs::unsupported_platform_error(path))
 }
 
 /// A policy document on disk: TOML (`.toml`, or any other extension) or
@@ -285,8 +285,8 @@ impl PolicyStore {
     #[must_use]
     pub fn from_config() -> Self {
         Self {
-            profiles_dir: mvm_core::config::policy_profiles_dir(),
-            groups_dir: mvm_core::config::policy_groups_dir(),
+            profiles_dir: crate::config::policy_profiles_dir(),
+            groups_dir: crate::config::policy_groups_dir(),
             captured: None,
             capture_bytes: false,
         }
@@ -415,15 +415,15 @@ impl PolicyStore {
                     None => format!("{namespace}/{name}"),
                 };
                 let noun = kind.noun();
-                let reference: mvm_core::registry_pack::PackReference =
+                let reference: crate::registry_pack::PackReference =
                     spelling.parse().map_err(|error| {
                         PolicyError::new(
                             referrer,
                             format!("{noun} `{spelling}` is not a valid pack reference: {error}"),
                         )
                     })?;
-                let lock = mvm_core::registry_pack_store::load_pack_lockfile(
-                    &mvm_core::config::pack_lockfile_path(),
+                let lock = crate::registry_pack_store::load_pack_lockfile(
+                    &crate::config::pack_lockfile_path(),
                 )
                 .map_err(|error| {
                     PolicyError::new(
@@ -432,8 +432,8 @@ impl PolicyStore {
                     )
                 })?;
                 let publisher_policy =
-                    mvm_core::registry_pack_store::load_publisher_policy_or_official_default(
-                        &mvm_core::config::registry_pack_publisher_policy_path(),
+                    crate::registry_pack_store::load_publisher_policy_or_official_default(
+                        &crate::config::registry_pack_publisher_policy_path(),
                     )
                     .map_err(|error| {
                         PolicyError::new(
@@ -444,8 +444,8 @@ impl PolicyStore {
                         )
                     })?
                     .policy;
-                let (installed, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
-                    &mvm_core::config::registry_pack_cache_dir(),
+                let (installed, verified) = crate::registry_pack_store::open_installed_registry_pack(
+                    &crate::config::registry_pack_cache_dir(),
                     &lock,
                     &publisher_policy,
                     &reference,
@@ -459,10 +459,10 @@ impl PolicyStore {
                     )
                 })?;
                 let document = match kind {
-                    Kind::Profile => mvm_core::registry_pack_store::PackPolicyDocument::Profile,
-                    Kind::Group => mvm_core::registry_pack_store::PackPolicyDocument::Group,
+                    Kind::Profile => crate::registry_pack_store::PackPolicyDocument::Profile,
+                    Kind::Group => crate::registry_pack_store::PackPolicyDocument::Group,
                 };
-                let (path, text) = mvm_core::registry_pack_store::read_pack_policy_document(
+                let (path, text) = crate::registry_pack_store::read_pack_policy_document(
                     &installed, &verified, document,
                 )
                 .map_err(|error| {
@@ -820,14 +820,14 @@ mod tests {
         // isolate the whole home so a developer's installed packs never
         // decide the outcome.
         let home = tempfile::tempdir().unwrap();
-        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let mut env = crate::util::test_env::TestEnv::new();
         env.set("MVM_HOME", home.path());
         // An empty-but-present trust policy reaches the lockfile lookup, so
         // the refusal names the remedy rather than the policy bootstrap.
-        let empty_policy = mvm_core::registry_pack::RegistryPackPublisherPolicy::new(Vec::new())
+        let empty_policy = crate::registry_pack::RegistryPackPublisherPolicy::new(Vec::new())
             .expect("an empty policy is valid");
-        mvm_core::registry_pack_store::save_publisher_policy(
-            &mvm_core::config::registry_pack_publisher_policy_path(),
+        crate::registry_pack_store::save_publisher_policy(
+            &crate::config::registry_pack_publisher_policy_path(),
             &empty_policy,
         )
         .expect("write empty publisher policy");

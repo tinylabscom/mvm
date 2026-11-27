@@ -77,7 +77,7 @@ pub fn resolve_run_network_policy(
     let base = if !allow_host.is_empty() {
         let rules = allow_host
             .iter()
-            .map(|s| parse_allow_host(s))
+            .map(|s| mvm_core::policy::authored::allow_host::parse_allow_host(s))
             .collect::<Result<Vec<_>>>()?;
         NetworkPolicy::allow_list(rules)
     } else if let Some(preset) = preset {
@@ -130,13 +130,6 @@ pub fn parse_peer_binding(raw: &str) -> Result<mvm_contract::peer::PeerBinding> 
         .validate()
         .map_err(|e| anyhow::anyhow!("invalid --peer '{raw}': {e}"))?;
     Ok(binding)
-}
-
-/// Parse one `--allow-host` entry. `HOST:PORT` is parsed strictly;
-/// `HOST` with no port defaults to `443` (https). Fails closed on a
-/// malformed port or empty host before any VM work.
-pub fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
-    mvm_policy::allow_host::parse_allow_host(entry)
 }
 
 #[cfg(test)]
