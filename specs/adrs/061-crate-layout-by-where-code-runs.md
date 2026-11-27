@@ -42,6 +42,9 @@ feature table and the retained evidence, is unchanged.
   `provider` and `registry`. The `EgressEnforcer` seam and
   `NetworkProvider::egress_enforcer()` had no caller and were deleted rather
   than moved.
+- Order step 4, `mvm-bundler`: folded into `mvm_core::plan::bundle::export`
+  behind `host-state`. The caller still supplies the `BundleSigner`, and
+  `mvm-client` keeps its existing `bundle` re-exports.
 
 ## Context
 
@@ -317,7 +320,7 @@ in the workspace.
 | `crates/deps/libkrun-sys`, `crates/deps/mvm-macho-sign` | Unchanged |
 | `crates/mvm-build`, `crates/mvm-runtime`, `crates/mvm-cli` | `"crates/build"`, `"crates/runtime"`, `"crates/cli"` |
 | `crates/mvm-client`, `crates/mvm-gpu`, `crates/mvm-conformance`, root package, `xtask` | Unchanged; client relocation awaits coordinated Studio changes |
-| `mvm-net` (folded into `mvm_core::net`), `crates/mvm-bundler` | Fold into core as specified above |
+| `mvm-net` (folded into `mvm_core::net`), `mvm-bundler` (folded into `mvm_core::plan::bundle::export`) | Fold into core as specified above |
 | `runmvm-client` (deleted) | Retire with its publish/registry-smoke lane; retain contract publication |
 
 Nested fuzz workspaces travel with their owner, except the VMM geometry harness

@@ -312,9 +312,9 @@ impl PreparedPortableBootAssets {
     /// consulted until proof, artifact and selection checks have succeeded.
     pub fn export(
         &self,
-        inputs: &mvm_bundler::BundleExportInputs<'_>,
-        signer: &dyn mvm_bundler::BundleSigner,
-    ) -> Result<mvm_bundler::ExportedBundle> {
+        inputs: &mvm_core::plan::bundle::export::BundleExportInputs<'_>,
+        signer: &dyn mvm_core::plan::bundle::export::BundleSigner,
+    ) -> Result<mvm_core::plan::bundle::export::ExportedBundle> {
         self.stage(inputs, signer)?.publish()
     }
 
@@ -324,9 +324,9 @@ impl PreparedPortableBootAssets {
     /// abort. It is not registry admission or authority to run a workload.
     pub fn stage(
         &self,
-        inputs: &mvm_bundler::BundleExportInputs<'_>,
-        signer: &dyn mvm_bundler::BundleSigner,
-    ) -> Result<mvm_bundler::StagedBundle> {
+        inputs: &mvm_core::plan::bundle::export::BundleExportInputs<'_>,
+        signer: &dyn mvm_core::plan::bundle::export::BundleSigner,
+    ) -> Result<mvm_core::plan::bundle::export::StagedBundle> {
         self.verify_build_kernel(Path::new(inputs.vmlinux))?;
         verify_export_selection(inputs, &self.runtime.arch, &sha256_file(&self.initrd)?)?;
         let files = [
@@ -360,17 +360,18 @@ impl PreparedPortableBootAssets {
             ),
         ];
         let mut selected = inputs.clone();
-        selected.cli_boot_assets = Some(mvm_bundler::CliBootAssetsInputs {
+        selected.cli_boot_assets = Some(mvm_core::plan::bundle::export::CliBootAssetsInputs {
             manifest_bytes: self.publisher.root().manifest_bytes(),
             manifest_sha256: self.publisher.root().root().manifest_sha256(),
             runtime: &self.runtime,
             artifacts: &files,
         });
-        selected.canonical_linux_proof = Some(mvm_bundler::CanonicalLinuxProofInputs {
-            root: self.publisher.root(),
-            revocations: self.publisher.revocations(),
-        });
-        let output = mvm_bundler::stage_bundle_with_signer(&selected, signer)?;
+        selected.canonical_linux_proof =
+            Some(mvm_core::plan::bundle::export::CanonicalLinuxProofInputs {
+                root: self.publisher.root(),
+                revocations: self.publisher.revocations(),
+            });
+        let output = mvm_core::plan::bundle::export::stage_bundle_with_signer(&selected, signer)?;
         if let Err(error) = self.verify_integrity() {
             return Err(output.abort(error));
         }
@@ -419,7 +420,7 @@ fn refuse_health_runtime_mix(config: &mvm_core::vm_backend::VmStartConfig) -> Re
 }
 
 fn verify_export_selection(
-    inputs: &mvm_bundler::BundleExportInputs<'_>,
+    inputs: &mvm_core::plan::bundle::export::BundleExportInputs<'_>,
     arch: &str,
     initrd: &str,
 ) -> Result<()> {
@@ -483,8 +484,11 @@ mod tests {
                 serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
             descriptor.validate().unwrap();
             let metadata: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(mvm_bundler::guest_sidecar_path(utf8(&rootfs).unwrap()).unwrap())
-                    .unwrap(),
+                &std::fs::read(
+                    mvm_core::plan::bundle::export::guest_sidecar_path(utf8(&rootfs).unwrap())
+                        .unwrap(),
+                )
+                .unwrap(),
             )
             .unwrap();
             assert_eq!(
@@ -518,7 +522,7 @@ mod tests {
         std::fs::create_dir(&output).expect("output must be a fresh directory");
         mvm_core::config::create_private_dir(&output).unwrap();
         let bundle = output.join("workload.mvmpkg");
-        let mut inputs = mvm_bundler::BundleExportInputs::new(
+        let mut inputs = mvm_core::plan::bundle::export::BundleExportInputs::new(
             utf8(&assets.kernel).unwrap(),
             utf8(&rootfs).unwrap(),
             assets.runtime.arch.as_str(),
@@ -535,8 +539,10 @@ mod tests {
                 .resources(u32::from(resources.cpu_cores), resources.memory_mb)
                 .label(format!("{}@{}", pack.name, pack.version))
                 .posture(
-                    mvm_bundler::PostureInputs::new(mvm_core::security::AgentProfile::SealedProd)
-                        .allows_egress(true),
+                    mvm_core::plan::bundle::export::PostureInputs::new(
+                        mvm_core::security::AgentProfile::SealedProd,
+                    )
+                    .allows_egress(true),
                 )
                 .environment(environment);
         }
@@ -576,7 +582,7 @@ mod tests {
         let out = directory.path().join("out");
         std::fs::write(&initrd, b"health initrd").unwrap();
         let expected = sha256_file(&initrd).unwrap();
-        let mut inputs = mvm_bundler::BundleExportInputs::new(
+        let mut inputs = mvm_core::plan::bundle::export::BundleExportInputs::new(
             kernel.to_str().unwrap(),
             rootfs.to_str().unwrap(),
             "aarch64",
@@ -588,7 +594,7 @@ mod tests {
         verify_export_selection(&inputs, "aarch64", &expected).unwrap();
         assert!(verify_export_selection(&inputs, "x86_64", &expected).is_err());
         let pin = mvm_core::packs::Sha256Hex::from_bytes(b"root");
-        inputs.boot_assets = Some(mvm_bundler::BootAssetsInputs {
+        inputs.boot_assets = Some(mvm_core::plan::bundle::export::BootAssetsInputs {
             manifest_bytes: b"root",
             manifest_sha256: &pin,
             runtime_overlay: &kernel,

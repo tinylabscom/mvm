@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use mvm_bundler::{
+use mvm_core::plan::bundle::export::{
     BundleExportInputs, BundleSigner, DebugOutput, ExportedBundle, PostureInputs,
     export_bundle_with_signer, stage_bundle_with_signer,
 };

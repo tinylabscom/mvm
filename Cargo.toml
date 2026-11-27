@@ -14,7 +14,6 @@ members = [
     # Seals built artifacts into a signed `.mvmpkg` under any Ed25519 signer.
     # Depends on mvm-core alone, so the CLI and a library caller share one
     # export without either linking a backend to get it.
-    "crates/mvm-bundler",
     # Shared workload compilation primitives. `mvm-sdk` is the
     # author-facing compatibility facade over this crate.
     "crates/mvm-compiler",
@@ -305,7 +304,6 @@ mvm-contract = { path = "crates/mvm-contract", version = "0.28.0-rc.11", default
 mvm-crypto = { path = "crates/mvm-crypto", version = "0.28.0-rc.11" }
 mvm-core = { path = "crates/mvm-core", version = "0.28.0-rc.11" }
 mvm-policy = { path = "crates/mvm-policy", version = "0.28.0-rc.11" }
-mvm-bundler = { path = "crates/mvm-bundler", version = "0.28.0-rc.11" }
 mvm-compiler = { path = "crates/mvm-compiler", version = "0.28.0-rc.11" }
 mvm-client ={ path = "crates/mvm-client", version = "0.28.0-rc.11" }
 mvm-agentd = { path = "crates/mvm-agentd", version = "0.28.0-rc.11" }

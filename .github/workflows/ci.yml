@@ -871,7 +871,7 @@ jobs:
       - name: cargo check for x86_64-pc-windows-gnu
         run: |
           cargo check --locked --target x86_64-pc-windows-gnu \
-            -p mvm-contract -p mvm-core -p mvm-bundler -p mvm-backends
+            -p mvm-contract -p mvm-core -p mvm-backends
           cargo check --locked --target x86_64-pc-windows-gnu \
             -p mvm-core --features provenance,client,hostd-transport
 

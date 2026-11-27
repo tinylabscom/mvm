@@ -1,26 +1,25 @@
 //! Linux/feed crypto is genuine; CLI runtime payloads here are structural
 //! fixtures, not runtime authentication or native admission.
 use super::*;
-use crate::{CanonicalLinuxProofInputs, CliBootAssetsInputs};
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use mvm_core::arch::GuestArch;
-use mvm_core::image_set::{
+
+use crate::arch::GuestArch;
+use crate::image_set::{
     BaseImageContractRange, BuilderBootAbiRange, HostProtocolSupport, ImageSetManifest,
     ImageSetVerification, RetainedImageSetRootProof, cache_image_set_root, image_train_lock,
     read_cached_image_set_root_proof,
 };
-use mvm_core::image_set_revocation::{ImageSetRevocationStore, RetainedImageSetRevocationProof};
-use mvm_core::packs::Sha256Hex;
-use mvm_core::plan::bundle::{EmbeddedCliBootAssets, TrustStore, key_id_from_pubkey};
+use crate::image_set_revocation::{ImageSetRevocationStore, RetainedImageSetRevocationProof};
+use crate::packs::Sha256Hex;
+use crate::plan::bundle::{EmbeddedCliBootAssets, TrustStore, key_id_from_pubkey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use std::cell::Cell;
 
-#[path = "../../../mvm-core/src/image_set/fixtures/published_root.rs"]
-mod published;
+use crate::image_set::published_root as published;
 const FEED: &[u8] = include_bytes!(
-    "../../../mvm-core/tests/fixtures/image-set-revocations/revocation-list-v1/revocations.json"
+    "../../../../tests/fixtures/image-set-revocations/revocation-list-v1/revocations.json"
 );
 const SIGNATURE: &[u8] = include_bytes!(
-    "../../../mvm-core/tests/fixtures/image-set-revocations/revocation-list-v1/revocations.json.bundle"
+    "../../../../tests/fixtures/image-set-revocations/revocation-list-v1/revocations.json.bundle"
 );
 fn clock() -> mvm_contract::timestamp::UtcTimestamp {
     "2026-10-15T12:00:00Z".parse().unwrap()
@@ -179,7 +178,7 @@ fn raw_root_hash_export_signs_exact_bytes_and_manifest_agreement() {
     let inputs = f.inputs().verity(b"synthetic verity", &hash);
     let exported = export_bundle_at(&inputs, &signer, clock()).unwrap();
     let bytes = std::fs::read(&exported.path).unwrap();
-    let verified = mvm_core::plan::bundle::read_and_verify_bundle(&bytes, &signer).unwrap();
+    let verified = crate::plan::bundle::read_and_verify_bundle(&bytes, &signer).unwrap();
     let member = verified.manifest.find_by_name("rootfs.roothash").unwrap();
     let expected = format!("{hash}\n").into_bytes();
     assert_eq!(member.role, ArtifactRole::Other);
@@ -276,7 +275,7 @@ fn omitted_or_mixed_closure_refuses_before_any_signer_call() {
         runtime: &f.runtime,
         artifacts: &files,
     });
-    inputs.boot_assets = Some(crate::BootAssetsInputs {
+    inputs.boot_assets = Some(BootAssetsInputs {
         manifest_bytes: published::MANIFEST,
         manifest_sha256: f.root.root().manifest_sha256(),
         runtime_overlay: &f.paths[4].1,
@@ -297,8 +296,8 @@ fn coherent_kernel_and_linux_manifest_substitution_refuses_before_signing() {
         .iter_mut()
         .find(|m| {
             m.role
-                == mvm_core::image_set::ImageSetRole::WorkloadKernel(
-                    mvm_core::image_set::WorkloadImageProfile::DefaultTenant,
+                == crate::image_set::ImageSetRole::WorkloadKernel(
+                    crate::image_set::WorkloadImageProfile::DefaultTenant,
                 )
                 && m.target.admits(GuestArch::host())
                 && m.build_mode.is_none()
@@ -364,7 +363,7 @@ fn originals_survive_canonical_export_and_signature_verification() {
     let signer = f.signer();
     export_bundle_at(&inputs, &signer, clock()).unwrap();
     let bytes = std::fs::read(&f.out).unwrap();
-    let verified = mvm_core::plan::bundle::read_and_verify_bundle(&bytes, &signer).unwrap();
+    let verified = crate::plan::bundle::read_and_verify_bundle(&bytes, &signer).unwrap();
     assert_eq!(verified.manifest.schema_version, 7);
     for (name, expected) in [
         (BOOT_MANIFEST_NAME, published::MANIFEST),

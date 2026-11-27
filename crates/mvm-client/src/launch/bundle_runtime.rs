@@ -514,11 +514,11 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
     use mvm_build::boot_asset_fixture;
     use mvm_build::published_image_set::fixture::ImageSetFixture;
-    use mvm_bundler::{
-        BootAssetsInputs, BundleExportInputs, BundleSigner, export_bundle_with_signer,
-    };
     use mvm_core::image_set::{ImageSetVersion, MemberTarget};
     use mvm_core::packs::Sha256Hex;
+    use mvm_core::plan::bundle::export::{
+        BootAssetsInputs, BundleExportInputs, BundleSigner, export_bundle_with_signer,
+    };
     use mvm_core::util::test_env::TestEnv;
 
     struct Publisher(SigningKey);

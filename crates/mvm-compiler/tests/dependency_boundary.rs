@@ -40,7 +40,6 @@ fn compiler_does_not_link_authoring_or_execution_crates() {
         "mvm-client",
         "mvm-runtime",
         "mvm-build",
-        "mvm-bundler",
         "mvm-agentd",
         "mvm-host-services",
     ] {
