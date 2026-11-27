@@ -116,7 +116,7 @@ jobs:
       # The authored-policy schema is generated from the Rust types and
       # published twice (schema/ and the docs reference page); the drift tests
       # and the emitter bin exist only under `schema`.
-      - name: policy schema drift (schema)
+      - name: policy schema drift (mvm-client schema)
         if: matrix.suite == 'portable'
         run: |
           cargo nextest run -p mvm-core --features host-state,schema -E 'test(/policy::authored::/)'
