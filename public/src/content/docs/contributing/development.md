@@ -42,15 +42,16 @@ After the change under test has landed on `main`, an authorized maintainer can
 collect evidence without running the Release workflow:
 
 ```bash
-gh workflow run e2e-docs-macos-evidence.yml --repo tinylabscom/mvm --ref main
-gh run list --repo tinylabscom/mvm --workflow e2e-docs-macos-evidence.yml --limit 5
+gh workflow run e2e-docs-evidence.yml --repo tinylabscom/mvm --ref main -f lane=macos
+gh run list --repo tinylabscom/mvm --workflow e2e-docs-evidence.yml --limit 5
 ```
 
 The dispatch admits only this repository's `main`, has `contents: read` only,
 inherits no secrets, and neither publishes nor deploys. The run's `headSha`
 (`gh run view --repo tinylabscom/mvm --json headSha,url`) identifies the tested
 commit: the local reusable workflow and default checkout both use that event
-SHA, not a later moving `main`. There is no arbitrary ref or command input.
+SHA, not a later moving `main`. Its only input is `lane`, a choice of `linux`
+or `macos`; there is no arbitrary ref or command input.
 
 This runs the complete existing macOS HVF suite on the self-hosted Apple Silicon
 runner, including both `0/2` and `1/2` shards, live and snapshot coverage, and
@@ -78,13 +79,13 @@ After review and landing on `main`, an authorized maintainer can collect the
 Linux Firecracker evidence for #4764 without Release or draft assets:
 
 ```bash
-gh workflow run e2e-docs-linux-evidence.yml --repo tinylabscom/mvm --ref main
-gh run list --repo tinylabscom/mvm --workflow e2e-docs-linux-evidence.yml --limit 5
+gh workflow run e2e-docs-evidence.yml --repo tinylabscom/mvm --ref main -f lane=linux
+gh run list --repo tinylabscom/mvm --workflow e2e-docs-evidence.yml --limit 5
 ```
 
-Like the macOS entrypoint, this admits only this repository's `main`, has only
-`contents: read`, inherits no secrets, accepts no ref or command inputs, and
-does not publish or deploy. The local reusable workflow and checkout use the
+This is the same workflow with the other lane: it admits only this
+repository's `main`, has only `contents: read`, inherits no secrets, accepts
+no ref or command inputs, and does not publish or deploy. The local reusable workflow and checkout use the
 event SHA; record it with `gh run view RUN_ID --repo tinylabscom/mvm --json headSha,url`.
 It runs the full existing Linux suite, both `0/2` and `1/2` shards, with live,
 directory-share and strict-skip flags unchanged. Only `@runtime_candidate`

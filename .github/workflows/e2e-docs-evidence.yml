@@ -1,0 +1,31 @@
+name: Documented surface evidence
+run-name: ${{ inputs.lane }} documented surface evidence at ${{ github.sha }}
+
+# One dispatch for both documented-surface evidence lanes: `linux` runs the
+# live Linux lane, `macos` the self-hosted Apple Silicon lane. `lane` is a
+# choice input, so a dispatch naming any other lane is refused before a job
+# is scheduled.
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: Which documented surface to run, linux or macos
+        required: true
+        type: choice
+        options:
+          - linux
+          - macos
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    # Admit only reviewed main code before scheduling the live or self-hosted lane.
+    if: github.repository == 'tinylabscom/mvm' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/e2e-docs.yml
+    with:
+      run_linux: ${{ inputs.lane == 'linux' }}
+      run_macos: ${{ inputs.lane == 'macos' }}
+      allow_runtime_candidate_skip: true
+      macos_blocks_on_unusable_host: true
