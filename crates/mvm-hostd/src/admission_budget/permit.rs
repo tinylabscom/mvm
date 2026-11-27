@@ -90,7 +90,11 @@ pub struct HostBudgetPermit {
 #[derive(Debug)]
 enum PermitMode {
     Tracked,
-    UnboundedOrdinary { charge: MachineCharge },
+    UnboundedOrdinary {
+        charge: MachineCharge,
+        /// The machine whose charge record admission's batch already wrote.
+        recorded_in_batch: std::sync::OnceLock<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -118,7 +122,10 @@ impl HostBudgetPermit {
             home,
             id: uuid::Uuid::new_v4().to_string(),
             drop_policy: DropPolicy::Retain,
-            mode: PermitMode::UnboundedOrdinary { charge },
+            mode: PermitMode::UnboundedOrdinary {
+                charge,
+                recorded_in_batch: std::sync::OnceLock::new(),
+            },
         })
     }
 
@@ -285,7 +292,7 @@ impl HostBudgetPermit {
 
     /// Check the real prepared hold before the host signs the proposed plan.
     pub fn verify_plan_resources(&self, plan: &ExecutionPlan) -> Result<()> {
-        if let PermitMode::UnboundedOrdinary { charge } = self.mode {
+        if let PermitMode::UnboundedOrdinary { charge, .. } = self.mode {
             ensure!(
                 charge
                     == charge_for(
@@ -368,8 +375,20 @@ impl HostBudgetPermit {
     /// Persist the legacy charge while retaining the authoritative hold.
     pub fn record_started(&self, vm_name: &str) -> Result<()> {
         validate_name(vm_name)?;
-        if let PermitMode::UnboundedOrdinary { charge } = self.mode {
-            return super::record_charge_at(&self.home, vm_name, charge);
+        if let PermitMode::UnboundedOrdinary {
+            charge,
+            recorded_in_batch,
+        } = &self.mode
+        {
+            // Written and synced in admission's batch, which the boot waited
+            // for before the workload could run. A record a failed claim's
+            // cleanup removed since is written again.
+            if recorded_in_batch.get().is_some_and(|name| name == vm_name)
+                && super::charge_path_at(&self.home, vm_name).is_file()
+            {
+                return Ok(());
+            }
+            return super::record_charge_at(&self.home, vm_name, *charge);
         }
         self.mutate(|record| {
             ensure!(
@@ -391,6 +410,39 @@ impl HostBudgetPermit {
             }
             Ok(())
         })
+    }
+
+    /// Write an ordinary launch's charge record for `vm_name` while admission's
+    /// audit batch is open on `emitter`, so the batch's one sync makes it
+    /// durable before activation rather than a sync of its own after start.
+    ///
+    /// Only an unbounded permit writes here. A configured host budget charges
+    /// the machine through its ledger reservation and records the charge once
+    /// the machine has started, so a tracked permit writes nothing now.
+    ///
+    /// # Errors
+    ///
+    /// If the name is invalid or the record cannot be written.
+    pub fn record_admitted_charge(
+        &self,
+        vm_name: &str,
+        emitter: &crate::audit::emitter::AuditEmitter,
+    ) -> Result<()> {
+        let PermitMode::UnboundedOrdinary {
+            charge,
+            recorded_in_batch,
+        } = &self.mode
+        else {
+            return Ok(());
+        };
+        validate_name(vm_name)?;
+        let path = super::charge_path_at(&self.home, vm_name);
+        let json = serde_json::to_vec(charge).context("serializing the admitted charge")?;
+        emitter
+            .write_durable_in_batch(&path, &json)
+            .with_context(|| format!("writing the admitted charge to {}", path.display()))?;
+        let _ = recorded_in_batch.set(vm_name.to_owned());
+        Ok(())
     }
 
     /// Release a known pre-effect failure; never releases a dispatched hold.

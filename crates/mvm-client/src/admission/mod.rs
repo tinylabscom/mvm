@@ -1221,6 +1221,15 @@ fn admit_with_runtime_evidence(
         if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {
             tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
         }
+        // A boot that waits for this batch before activation also makes its
+        // host charge durable here, earlier than after start and in the same
+        // sync round. An inline admission's caller records its own charge.
+        if matches!(sync, durability::AdmissionSync::BesideBoot) {
+            admitted
+                .host_budget_permit()
+                .record_admitted_charge(p.vm_name, &emitter)
+                .context("recording the admitted host charge")?;
+        }
         Ok(())
     };
     let durability = match sync {
@@ -1597,6 +1606,47 @@ pub(crate) mod admit_plan_tests {
             "the admission is on the chain before the sync is waited for: {chain}"
         );
         durability.wait().expect("the sync succeeds");
+    }
+
+    /// With no host budget configured, a beside-boot admission writes the
+    /// launch's host charge record before it returns, inside the batch whose
+    /// one sync the boot waits for, instead of after the VM has started. An
+    /// inline admission leaves the charge to its caller, as before.
+    #[test]
+    fn a_beside_boot_admission_records_the_host_charge_before_dispatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path().join("home"));
+        let rootfs = write_rootfs(dir.path(), b"charged rootfs");
+        let keys_dir = dir.path().join("keys");
+        let audit_dir = dir.path().join("audit");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+        let vm_name = params.vm_name;
+        let record = mvm_core::config::vm_state_dir(vm_name).join("admitted-charge.json");
+
+        let (_context, durability) =
+            admit_plan_for_boot_syncing_beside_boot(params).expect("admission succeeds");
+        assert!(
+            record.is_file(),
+            "the charge is recorded before any dispatch"
+        );
+        durability
+            .wait()
+            .expect("the batch syncs the charge with the admission");
+
+        std::fs::remove_dir_all(mvm_core::config::vm_state_dir(vm_name)).expect("clean");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+        admit_plan_for_boot(params).expect("inline admission succeeds");
+        assert!(
+            !record.exists(),
+            "an inline admission leaves the charge to its caller"
+        );
     }
 
     /// The host budget is a refusal, and refusals do not wait for a boot: a

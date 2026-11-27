@@ -965,6 +965,22 @@ impl AuditEmitter {
         Ok((value, pending.detach()))
     }
 
+    /// Atomically write `path` and make both its bytes and its name durable.
+    ///
+    /// Inside an open batch the file and its directory join the batch's one
+    /// sync round, and the caller must wait for that round before relying on
+    /// them; outside a batch both are synced before this returns.
+    pub(crate) fn write_durable_in_batch(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        write_atomic_batched(path, bytes, &self.atomic_sync_state)?;
+        let parent = path
+            .parent()
+            .with_context(|| format!("path has no parent: {}", path.display()))?;
+        if !atomic_sync::defer_atomic_sync(&self.atomic_sync_state, parent) {
+            mvm_core::atomic_io::sync_dir(parent)?;
+        }
+        Ok(())
+    }
+
     /// Whether a batch is open on any chain, so a barrier emitted now would
     /// return before its record is synced.
     pub(crate) fn batch_open(&self) -> bool {
@@ -1355,6 +1371,37 @@ mod tests {
         verify_audit_chain(&chain, &verifying).expect("the chain verifies");
         let text = std::fs::read_to_string(&chain).unwrap();
         assert!(text.contains("plan.admitted"));
+    }
+
+    /// A durable write made inside an open batch leaves both its file and
+    /// the directory naming it to the batch's one sync, and that sync makes
+    /// them durable; outside a batch it is synced before returning.
+    #[test]
+    fn a_durable_write_in_a_batch_defers_its_file_and_directory_to_the_batch() {
+        let dir = crate::audit::test_fixtures::AuditDir::new();
+        let key = SigningKey::from_bytes(&[36; 32]);
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let record = dir.path().join("vms/early/admitted-charge.json");
+
+        let ((), durability) = emitter
+            .batched_sync_detached(|| {
+                emitter.write_durable_in_batch(&record, b"{}")?;
+                assert_eq!(
+                    atomic_sync::deferred_path_count(&emitter.atomic_sync_state),
+                    2,
+                    "the file and its directory wait for the batch's sync"
+                );
+                Ok(())
+            })
+            .unwrap();
+        durability
+            .wait()
+            .expect("the batch syncs a file and a directory");
+        assert_eq!(std::fs::read(&record).unwrap(), b"{}");
+
+        let outside = dir.path().join("vms/late/admitted-charge.json");
+        emitter.write_durable_in_batch(&outside, b"{}").unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"{}");
     }
 
     #[test]
