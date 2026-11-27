@@ -223,6 +223,27 @@ fn strict_manifest_rejects_key_injection_and_direct_parent() {
 }
 
 #[test]
+fn manifest_setting_a_removed_egress_field_is_refused_by_name() {
+    let bootstrap = authored().bind().unwrap();
+    for field in ["allow_plain_http", "body_cap_bytes", "disabled_inspectors"] {
+        for path in [
+            "/constraints/effective_policy/egress",
+            "/templates/0/definition/effective_policy/egress",
+        ] {
+            let mut value = serde_json::to_value(&bootstrap).unwrap();
+            value.pointer_mut(path).unwrap()[field] = serde_json::json!(false);
+            let err =
+                ActorBootstrap::read(serde_json::to_vec(&value).unwrap().as_slice()).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(&format!("unknown field `{field}`")),
+                "{path} {field}: {msg}"
+            );
+        }
+    }
+}
+
+#[test]
 fn actor_preflight_requires_both_operator_ceilings_before_any_spawn() {
     let bootstrap = authored().bind().unwrap();
     let mut config = mvm_core::user_config::MvmConfig::default();
