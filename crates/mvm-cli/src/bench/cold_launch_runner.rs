@@ -957,7 +957,10 @@ tmpfs /tmp tmpfs rw 0 0
         let counter = dir.join("count");
         std::fs::write(&counter, "0").unwrap();
 
-        let mut script = String::from("#!/bin/sh\nset -e\n");
+        // A warm lane asks the pool for an idle standby before each launch.
+        let mut script = String::from(
+            "#!/bin/sh\nset -e\nif [ \"$1\" = pool ]; then printf '%s' '{\"idle\":1}'; exit 0; fi\n",
+        );
         script.push_str(&format!("n=$(cat {})\n", counter.display()));
         script.push_str(&format!("echo $((n + 1)) > {}\n", counter.display()));
         for (index, body) in bodies.iter().enumerate() {
@@ -974,6 +977,70 @@ tmpfs /tmp tmpfs rw 0 0
         std::fs::write(&path, script).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_warm_lane_over_its_ceiling_records_every_sample_and_fails_the_report() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let ready = ProcessMemorySnapshot {
+            resident_bytes: 100,
+            minor_faults: Some(3),
+            major_faults: Some(1),
+        };
+        let warm = |startup_ms: f64| {
+            let mut sample = sample_for(startup_ms + 20.0);
+            sample.launch_mode = LaunchMode::Warm;
+            sample.phases.launch_mode = LaunchMode::Warm;
+            sample.work.warm_claim = true;
+            sample.phases.startup_ms = Some(startup_ms);
+            sample.warm_first_command_memory = Some(WarmFirstCommandMemory {
+                pid: 42,
+                ready,
+                after_first_command: ready,
+                delta: ProcessMemoryDelta::between(ready, ready),
+            });
+            sample.backend_phases = vec![mvm_core::launch_trace::TracePhase {
+                name: "warm_claim.child_materialized".to_string(),
+                ms: startup_ms / 2.0,
+            }];
+            sample
+        };
+        // The slow warm-up that used to abort the lane, then a measured set
+        // with one claim inside the ceiling and two outside it.
+        let mvmctl = fake_mvmctl(
+            tmp.path(),
+            &[warm(773.7), warm(717.2), warm(250.0), warm(696.0)],
+        );
+        let bench = ColdLaunchBench::builder(&mvmctl, LaunchLane::WarmClaim)
+            .runs(3)
+            .warmup(1)
+            .build()
+            .unwrap();
+
+        let report = bench.measure().expect("every warm sample is recorded");
+        assert_eq!(report.raw.len(), 3);
+        let startup = report
+            .startup_requirement
+            .as_ref()
+            .expect("warm lanes carry a startup requirement");
+        assert_eq!(startup.observed_max_ms, Some(717.2));
+        assert!(!startup.met);
+        let (_, materialized) = report
+            .stats
+            .backend_phases
+            .iter()
+            .find(|(name, _)| name == "warm_claim.child_materialized")
+            .expect("the claim's phase trace reaches the report");
+        assert_eq!(materialized.samples, 3);
+
+        let err = bench
+            .validate_report(&report)
+            .expect_err("a missed ceiling still fails the lane");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("hard boot requirement"), "{rendered}");
+        assert!(rendered.contains("717.2"), "{rendered}");
     }
 
     #[cfg(unix)]
