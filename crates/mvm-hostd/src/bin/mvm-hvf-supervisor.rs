@@ -323,19 +323,22 @@ fn record_signed_marker(exe: &std::path::Path) {
 /// serializes concurrent launches (codesign --force rewrites the shared binary
 /// in place). Mirrors the libkrun supervisor's `ensure_self_signed`.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn set_disk_cloexec(
-    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
-    enabled: bool,
-) -> anyhow::Result<()> {
-    for fd in cfg
-        .writable_disk_fds
+fn disk_fds(cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig) -> Vec<libc::c_int> {
+    cfg.writable_disk_fds
         .iter()
         .flat_map(|disk| [disk.backing, disk.sidecar])
         .chain(cfg.readonly_data_disk_fds.iter().map(|disk| disk.fd))
-    {
+        .collect()
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn set_disk_cloexec(
+    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+) -> anyhow::Result<()> {
+    for fd in disk_fds(cfg) {
         // SAFETY: preflight established these exact live descriptors. Only
         // their close-on-exec flag changes; ownership stays with the caller.
-        let result = unsafe { libc::fcntl(fd, libc::F_SETFD, i32::from(enabled)) };
+        let result = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
         anyhow::ensure!(result >= 0, "updating disk descriptor inheritance");
     }
     Ok(())
@@ -416,10 +419,8 @@ fn ensure_self_signed(
         .args(std::env::args_os().skip(1))
         .env("MVM_HVF_SIGNED", "1");
     diagnostics.configure_reexec(&mut command);
-    if let Err(error) = set_disk_cloexec(cfg, false) {
-        eprintln!("mvm-hvf-supervisor: retaining disk descriptors failed: {error}");
-        std::process::exit(1);
-    }
+    // The re-exec keeps disk custody; every other descriptor closes with it.
+    mvm_vmm::host::restore_image::inherit_descriptors(&mut command, disk_fds(cfg));
     let err = command.exec();
     eprintln!("mvm-hvf-supervisor: re-exec after signing failed: {err}");
     std::process::exit(1);
@@ -723,7 +724,7 @@ fn run() -> anyhow::Result<()> {
             diagnostics = unsafe { StartupReporter::inherited() };
             // Unrelated signing helpers must not inherit disk custody. The
             // reexec itself retains it explicitly immediately before exec.
-            set_disk_cloexec(&cfg, true)?;
+            set_disk_cloexec(&cfg)?;
             ensure_self_signed(&mut diagnostics, &cfg);
             mvm_hostd::supervisor::admission::caller_registration::adopt_startup_files(&cfg)?
         }

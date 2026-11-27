@@ -20,7 +20,7 @@ path = "src/main.rs"
 # The library has the same name; documenting both would write one path twice.
 doc = false
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [lints]

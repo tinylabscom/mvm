@@ -10,6 +10,10 @@ authors.workspace = true
 
 [dependencies]
 mvm-contract = { workspace = true, default-features = false, features = ["protocol", "volume"] }
+# `env_hygiene::helper_command` marks every inherited descriptor close-on-exec
+# in each host helper through its `fd_hygiene`; a libc-only leaf, so no new
+# external crate and no cycle.
+mvm-setpriv.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 # Host-only: the `did_key` module's did:key codec. Optional so guest binaries

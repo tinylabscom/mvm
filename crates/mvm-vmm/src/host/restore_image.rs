@@ -1423,4 +1423,30 @@ mod tests {
             .unwrap();
         assert!(!without.success(), "an unrelated spawn does not");
     }
+
+    /// The keep-list survives the hygiene every host helper applies, and only
+    /// the listed descriptor does.
+    #[test]
+    fn a_helper_inherits_its_listed_descriptor_and_nothing_else() {
+        let bytes = b"saved guest memory".to_vec();
+        let (_root, private, source) = fixture(&bytes);
+        let verified =
+            VerifiedRestoreFile::prepare(&source, &private, &sha256_hex(&bytes)).unwrap();
+        let kept = verified.file().as_raw_fd();
+        let stray = std::fs::File::open("/dev/null").unwrap();
+        // SAFETY: changes only the descriptor flags of a file this test owns.
+        assert_eq!(
+            unsafe { libc::fcntl(stray.as_raw_fd(), libc::F_SETFD, 0) },
+            0
+        );
+        let holds = |fd: RawFd| {
+            let mut helper = mvm_core::env_hygiene::helper_command("/bin/sh");
+            helper.args(["-c", "[ -e /dev/fd/$1 ]", "sh", &fd.to_string()]);
+            inherit_descriptors(&mut helper, vec![kept]);
+            helper.status().unwrap().success()
+        };
+
+        assert!(holds(kept), "the listed descriptor reaches the helper");
+        assert!(!holds(stray.as_raw_fd()), "an unlisted one does not");
+    }
 }

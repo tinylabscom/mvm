@@ -78,6 +78,9 @@ pub fn spawn(binary: &Path, config: ActorHolderConfig, controller: UnixStream) -
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let fd = controller.as_raw_fd();
+    // The holder's one kept descriptor: `helper_command` marked every
+    // descriptor from 3 up close-on-exec, and this later hook installs the
+    // controller socket at fd 3, where `mvm-actor-holder` reads it.
     // SAFETY: only async-signal-safe descriptor operations run after fork.
     // The owned socket remains open until spawn returns; fd 3 is reserved here.
     unsafe {
@@ -89,7 +92,6 @@ pub fn spawn(binary: &Path, config: ActorHolderConfig, controller: UnixStream) -
             Ok(())
         });
     }
-    mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 4, None);
     let mut child = command.spawn().context("spawn actor holder")?;
     drop(controller);
     let ready = (|| {
