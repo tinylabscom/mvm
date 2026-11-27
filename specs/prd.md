@@ -264,7 +264,7 @@ admission. When a session ends the guest and its memory are destroyed. Claims
 1–4, 15.
 
 Limit: local `mvmctl` launches are development mode. The only production launch
-authority is an authenticated launch from `mvmd` (ADR-037). A cold boot on a
+authority is an authenticated launch from `mvmd` (ADR-014). A cold boot on a
 guest agent older than the seccomp token applies no filter (claim 1 row).
 
 ### Volumes (Shipped as policy; not yet a numbered claim)

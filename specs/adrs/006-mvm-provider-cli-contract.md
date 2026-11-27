@@ -57,7 +57,7 @@ registry, tenant scheduler, or fleet control plane.** `mvmctl deploy` is allowed
 as a client operation that submits a signed deployment intent, artifact
 references, and policy to an authenticated `mvmd` origin. The client does not
 choose a production host or hypervisor; `mvmd` owns placement, backend
-selection, and launch authority (ADR-037). This is a narrow exception to the
+selection, and launch authority (ADR-014). This is a narrow exception to the
 "no tenant/fleet orchestration" boundary, not a general provider abstraction.
 
 **`mvm` does not model accelerators, GPUs, or remote inference targets as

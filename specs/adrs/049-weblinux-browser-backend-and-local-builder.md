@@ -12,8 +12,8 @@ continues to govern the direct-WASI tier and its claim-free security posture.
 contain one open-source `mvmd` deployment client, but it still does not become a
 tenant scheduler, provider registry, or fleet control plane.  
 **Complements:** ADR-007 (`VmBackend`), ADR-014 (signed/audited execution
-plans), ADR-024 (WASI/browser claim boundary), ADR-037 (`mvmd` is the only
-production launch authority), and ADR-042 (one flow-aware workload networking
+plans; `mvmd` is the only production launch authority), ADR-024 (WASI/browser
+claim boundary), and ADR-042 (one flow-aware workload networking
 path).  
 **Implementation plan:** specs/plans/338-weblinux-browser-backend-builder-workbench-and-mvmd-deploy.md (retired; recover from tag specs-archive-2026-11-02)
 
@@ -336,7 +336,7 @@ This amends ADR-006 narrowly: `mvmctl deploy` is allowed as a client operation,
 but `mvm` still has no provider registry, fleet scheduler, tenant reconciler, or
 cloud control-plane implementation.
 
-ADR-037 remains unchanged: only an authenticated `mvmd`-initiated launch is a
+ADR-014's launch-authority rule remains unchanged: only an authenticated `mvmd`-initiated launch is a
 production launch. Browser and other local executions are development-tier,
 even when they run a production-shaped artifact.
 

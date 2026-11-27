@@ -2,7 +2,7 @@
 #
 # Boots real microVMs on a GPU-less host: the per-VM host endpoint answers
 # through the deterministic stub backend, so no GPU is required anywhere
-# (ADR-053). The scenarios use the persistent machine flow because a
+# (ADR-007). The scenarios use the persistent machine flow because a
 # transient run deletes its state dir on exit — the positive witness
 # asserts on the per-VM gpu-endpoint.log after the guest program ran, and
 # the negative one proves the state dir carries no endpoint at all.
