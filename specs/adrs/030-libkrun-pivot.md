@@ -98,5 +98,5 @@ This ADR governs the execution substrate (libkrun/HVF, no host Nix, no
 intermediate VM) and does not restate which specific backend runs a
 given workload or build — that selection logic is ADR-007's decision.
 It also does not restate how a user-supplied OCI image gets turned into
-a bootable rootfs — that is ADR-017's decision and is unchanged by this
+a bootable rootfs — that is ADR-054's decision and is unchanged by this
 one.

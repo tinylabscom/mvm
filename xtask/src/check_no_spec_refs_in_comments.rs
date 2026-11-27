@@ -304,7 +304,7 @@ mod tests {
         };
         assert_eq!(count("foo = \"#640 in a string\";\n"), 0);
         assert_eq!(count("# Plan 71 — one-line helper\n"), 1);
-        assert_eq!(count("buildInputs = []; # ADR-018 overlay\n"), 1);
+        assert_eq!(count("buildInputs = []; # ADR-054 overlay\n"), 1);
     }
 
     #[test]

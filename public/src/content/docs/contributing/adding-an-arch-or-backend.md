@@ -91,7 +91,7 @@ The artifact model validates and configures rootfs images; it does not build
 them. Building is a separate seam, and pure-Rust host-side ext4 creation has
 **shipped** — `mvm_build::rootfs::materialize_ext4_pure` writes a mountable ext4
 image in-process with no `mkfs` and no subprocess, and is the default path.
-ADR-004 supersedes ADR-017's builder-VM `mke2fs` mechanism while preserving its
+ADR-004 supersedes ADR-054's OCI-verity builder-VM `mke2fs` mechanism while preserving its
 roothash guarantee; the builder VM remains the automatic fallback for trees the
 pure writer cannot faithfully emit (for example ones carrying
 `security.capability` xattrs).

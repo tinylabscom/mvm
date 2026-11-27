@@ -572,7 +572,7 @@ more prose
     fn multiple_blocks_in_one_file_are_all_found() {
         let src = "\
 ---
-title: \"ADR-017\"
+title: \"ADR-054\"
 status: Proposed
 ---
 

@@ -254,7 +254,7 @@ pub fn seal_with_verity(
         let _ = (sidecar_path, roothash_path);
         Err(OciUnpackError::HostUnsupported {
             operation: "verity sidecar generation (veritysetup format)",
-            reason: "veritysetup is Linux-only; the W1.5 CLI orchestrator routes this through the libkrun builder VM (ADR-017)",
+            reason: "veritysetup is Linux-only; the W1.5 CLI orchestrator routes this through the libkrun builder VM (ADR-054)",
         })
     }
 }

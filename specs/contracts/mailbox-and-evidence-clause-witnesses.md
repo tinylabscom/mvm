@@ -100,7 +100,7 @@ and the manifest types in `mvm-core::receipt_archive`. Witnesses are in
 | Operator sees attested and derived differently, and a bad archive exits nonzero | `audit_receipts_verify` | `verify_reports_a_plan_scoped_archive_as_attested_and_a_full_chain_one_as_derived`, `verify_exits_nonzero_for_an_archive_whose_receipt_was_altered` | MET |
 | Audit/receipt parity with the client boundary (#4415/#4416) | not in this tree's archive path | none | NOT YET, owned by those issues |
 
-## Protocol and readiness (ADR-019)
+## Protocol and readiness (ADR-054)
 
 Enforcing code is `mvm-agentd` (`vsock/response.rs`, `vsock/rpc.rs`,
 `bin/mvm-guest-agent*`) and `mvm-runtime::warm_readiness`. The ADR's

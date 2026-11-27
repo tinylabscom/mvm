@@ -147,7 +147,7 @@ it stays non-root.
 
 Enforcement: verity construction `crates/mvm-fs/src/ext4/verity.rs`; sealing
 `crates/mvm-build` (`oci_verity_sealing`); roothash delivered in
-`ActivateEnvironment` and checked by the initramfs agent (ADR-018; the check
+`ActivateEnvironment` and checked by the initramfs agent (ADR-054; the check
 itself is not located by this document); snapshot envelope in
 `crates/mvm-runtime/src/vm/instance_snapshot.rs`.
 

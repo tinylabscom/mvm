@@ -302,8 +302,8 @@ use a `/data/cache` convention rather than a new allowed root.
   elevate to uid 0 (claim 2). Services run as their own unprivileged uids
   through `mvm-setpriv --no-new-privs`, and the rootfs is a read-only
   dm-verity mount, so passwd, group and nsswitch cannot be rewritten. The stronger requirement, that the runtime
-  never runs as root and there is no usable root account, is ADR-026, still
-  `Proposed`. It is a requirement here, not a claim; do not promote it until
+  never runs as root and there is no usable root account, is ADR-054's
+  rootless-runtime section, still `Proposed`. It is a requirement here, not a claim; do not promote it until
   its build-time no-setuid check and runtime euid witness exist.
 - **On the host.** The requirement is that `mvmctl` never needs `sudo`. Today
   that is **not true on Linux/Firecracker**: the driver starts Firecracker
