@@ -25,9 +25,9 @@ qualifies cross-epoch Call completion.
 ## Context
 
 MVM microVMs are used as functions, not only as isolated sandboxes: a workload
-receives a message, does bounded work, replies, and waits. Section 0 names this
-the workload actor model and section 10 rejects an in-process actor framework. ADR-057
-gave the mailbox Erlang-style semantics: `call`, `cast`, `reply`, monitors,
+receives a message, does bounded work, replies, and waits. Section 0 names
+this the workload actor model and section 10 rejects an in-process actor
+framework. ADR-057 gave the mailbox Erlang-style semantics: `call`, `cast`, `reply`, monitors,
 links, signed restart policy and `ExecutionEpoch` fencing.
 
 What remains undecided is the lifecycle around those messages:
