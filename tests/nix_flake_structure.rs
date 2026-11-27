@@ -892,7 +892,7 @@ fn mk_guest_carries_overlay_aware_contract() {
     assert!(
         content.contains("mkdir -p \"$out/mvm/runtime\""),
         "mk-guest.nix must create /mvm/runtime in the rootfs as the \
-         ADR-018 bind-mount target. Missing the `mkdir -p \"$out/mvm/runtime\"` \
+         ADR-054 bind-mount target. Missing the `mkdir -p \"$out/mvm/runtime\"` \
          line means the verity-init bind-mount target is missing and the \
          agent never starts."
     );
@@ -900,7 +900,7 @@ fn mk_guest_carries_overlay_aware_contract() {
     assert!(
         content.contains("overlayAware = true"),
         "mk-guest.nix mvmMeta passthru must declare `overlayAware = true` \
-         (Plan 74 W1.4b / ADR-018). Admission-time gates read this to \
+         (Plan 74 W1.4b / ADR-054). Admission-time gates read this to \
          refuse boot of cached pre-W1.4b templates."
     );
 

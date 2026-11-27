@@ -234,7 +234,7 @@ synchronous host sinks and pipe-EOF waits still exist.
 ### Redaction invariant
 
 The following audit / readiness / progress / receipt surfaces are
-guaranteed by ADR-019 §4 / §5 to **never** contain data-plane
+guaranteed by ADR-054 §"Guest protocol, readiness and receipts" to **never** contain data-plane
 payload bytes. The list is the authoritative one:
 
 - `~/.mvm/audit/<tenant>.jsonl` chain-signed entries.

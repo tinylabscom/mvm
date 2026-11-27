@@ -11,9 +11,11 @@ Accepted, 2026-10-05. Tracking issue:
 Amends ADR-030 decision 4 (both the builder image and every user-facing image
 build from `mvm-images`) and ADR-004's account of how mvm's own Linux binaries
 reach a guest. Supersedes the consumer half of
-specs/plans/2026-09-29-guest-bins-artifact-decoupling.md (retired; recover from tag specs-archive-2026-11-02). ADR-018 carries a
-dated note that corrects its acquisition text against today's code and points
-here for where the overlay and sidecar are going.
+specs/plans/2026-09-29-guest-bins-artifact-decoupling.md (retired; recover from tag specs-archive-2026-11-02). Since
+2026-11-27 ([#4839](https://github.com/tinylabscom/mvm/issues/4839)) it also
+holds the runtime overlay, OCI root filesystem, guest protocol, distribution
+and rootless-runtime decisions that used to be separate records; see "Guest
+runtime contracts" below.
 
 This records a decision. This repository's side has landed in source:
 `mvmctl` assembles the guest runtime from its own release asset and no longer
@@ -219,6 +221,167 @@ and cite #4100 for the direction, never the reverse.
   and those witnesses change deliberately.
   `mvmctl image dev ensure` without a selected checkout installs the pinned
   set's dev members, which are Linux layer.
+
+## Guest runtime contracts
+
+These sections were separate decision records until 2026-11-27. Each keeps the
+decisions that code, the claims ledger or the docs still rely on; text that no
+longer described the code was dropped, not carried.
+
+### Runtime overlay
+
+Besides the initramfs, every workload microVM boots two block devices: the
+root filesystem, which is image content, and the runtime overlay, which is mvm
+content assembled from the guest runtime as above. Both are dm-verity sealed.
+Their root hashes reach the initramfs agent in `ActivateEnvironment`, never on
+the kernel command line, and the agent sets up and checks both verity devices
+before it pivots. The overlay mounts read-only at `/mvm/runtime`. There is no
+separate verity init.
+
+- **The overlay is the only source of mvm's guest binaries.** `mkGuest` bakes
+  none of the agent, netinit, addon DNS, exit reporter or egress client into a
+  root filesystem, and there is no baked fallback: a launch without a prepared
+  overlay refuses and names `mvmctl bootstrap` rather than booting without an
+  agent.
+- **An OCI root filesystem stays what the registry served.** mvm never
+  injects its binaries into pulled content, so the image's digest identity
+  holds. `/mvm` is reserved: an image carrying anything at or under it is
+  refused while its layers are unpacked.
+- **Overlay executables are static.** They carry no dynamic loader and assume
+  nothing about the root filesystem's libc, so they run in a root with any libc
+  or none. The glibc host-services library ships in the SDK sidecar instead.
+- **The host re-verifies the cached overlay before every attach.** The
+  resolver in `mvm_fs::overlay` re-hashes the cached files against the
+  checksum manifest recorded beside them and requires the cached `VERSION` to
+  equal the running `mvmctl` version. Either mismatch refuses at admission.
+- **Assembly is deterministic.** The ext4 image and verity tree are written in
+  process with pinned parameters (4096-byte data and hash blocks, zero salt),
+  and assembly re-derives the tree and root hash from the written image and
+  refuses a disagreement.
+- **The SDK sidecar is attached per workload, from the signed plan.** It is a
+  separate read-only ext4 mounted at `/mvm/sdk`, attached only when the plan's
+  service bindings name an SDK-served host service, through one host-share
+  grant in the plan and one read-only volume in the launch config.
+  `enforce_sdk_sidecar_attachment` refuses both a bound workload without it
+  and an attachment the plan did not authorize. It carries no dm-verity
+  target; its integrity is the checksum manifest and the version pin.
+
+Non-goals: one mvm-controlled overlay per architecture, never a per-tenant
+variant; never writable; no shell, interpreter or libc for the workload's own
+use.
+
+### OCI root filesystems
+
+- **Preparation and launch are separate operations.** `mvmctl image pull`
+  fetches the manifest, verifies layer digests, unpacks through the
+  allow-listed unpacker and prepares the root filesystem and its verity
+  sidecars. Prepared-only resolution refuses a missing, incompatible or
+  incomplete preparation instead of pulling, unpacking, materializing or
+  verifying signatures online. It is cache-only, not write-free: it may adopt
+  an already-built matching runtime variant into the index. A persisted
+  selection is expected data, not admission. It is re-resolved at every launch
+  and persistent start, compared on reference, manifest, root filesystem,
+  runtime, platform and backend identity, and bound into the signed
+  admission; a changed selection refuses rather than refreshing. Measuring an
+  existing cache for the first time records those bytes; it is not evidence of
+  how they were derived from the OCI image.
+- **Verity is generated on every OCI materialization and enforced when
+  sealed.** The run-image path always emits a Merkle tree and root hash with
+  the overlay's pinned parameters, so the root hash depends on the input tree
+  alone. The in-process writer (`mvm_build::rootfs::materialize_ext4_pure`) is
+  the default; the builder-VM fallback for trees it cannot represent runs
+  `veritysetup` with the same parameters and reaches the same root hash.
+  ADR-004 owns that writer split. A sealed launch refuses a verity set that is
+  recorded but incomplete; an unsealed development launch boots without
+  enforcing it.
+- **Production refuses a mutable reference before any network access.**
+  `--prod` requires a digest-pinned reference and an explicit registry trust
+  policy, and refuses a tag before the registry is contacted, for `mvmctl image
+  pull` and for a launch. Cosign verification of the resolved digest is
+  required during production preparation and the policy cannot disable it.
+  Prepared-only production resolution checks its authenticated pull receipt
+  against the current policy and the base-image scan instead of verifying
+  online.
+- **Every launch of a pulled image records its provenance** — registry,
+  repository, supplied reference, resolved manifest digest, layer digests and
+  trust policy — in the chain-signed audit log. That is claim 14; its witnesses
+  are in ADR-001's ledger.
+
+Provenance and verity answer different questions, where a launch came from
+and whether these bytes are the ones verified, and a production launch needs
+both. Open: the two verity writers are redundant work where the fallback runs.
+
+### Guest protocol, readiness and receipts
+
+- **Every session starts with a protocol hello.** A guest-agent session,
+  reachability probes included, begins with `ProtocolHello`. A version
+  mismatch, or any other first request, gets `ProtocolMismatch` naming the
+  remedy (upgrade the host, rebuild the guest, or downgrade the host) before
+  anything dispatches. Protocol types are closed enums that reject unknown
+  fields; there is no untyped compatibility shim.
+- **Capabilities are a closed enum** (`GuestCapability`). A caller that needs
+  one the guest does not advertise fails before the command runs, naming it.
+- **Readiness is separate from lifecycle.** The coarse VM state says whether
+  the backend runs the VM; a readiness report says whether it is usable, per
+  component (control plane, entrypoint, warm pool, integrations, probes,
+  volumes), each `Disabled`, `Starting`, `Ready` or `Failed`. `Disabled` is
+  never reported as `Ready`, and readiness invents no lifecycle state.
+- **Control and data stay separate within one authenticated protocol.** Every
+  frame is capped at 256 KiB. Data-plane content moves in chunks sized from
+  that cap and the encoding's worst-case expansion, checked at build time.
+  Payload bytes never enter audit entries, readiness reports or receipts; where
+  a receipt refers to output it stores a hash.
+- **Backpressure is typed and non-terminal.** A backpressured wait reports a
+  closed reason (agent unreachable within its grace period, named services'
+  probes pending, slow output consumer, full input buffer, paused artifact
+  transfer, busy builder VM) and the caller keeps waiting.
+- **Receipts are default-safe.** A run receipt records what ran as hashes and
+  metadata (backend, network posture, exit status, output hashes), never raw
+  argv, environment, stdin, stdout, stderr, secrets or tokens.
+
+Not decided here: a structured progress-event stream across CLI text and JSON,
+and a command mapping failures to remedies.
+
+### Distribution
+
+A release install on a supported host needs no package manager. On macOS 26+
+Apple Silicon it uses HVF; libkrun is a source-build opt-in that uses the
+host's own Homebrew installation, and the release ships no libkrun tier. The
+release archive carries `mvmctl`, its per-VM helpers and the guest runtime,
+installed beside one another, and every published archive is authenticated
+under claim 20. Dropped with macOS below 26: vendoring and signing libkrun and
+libkrunfw ourselves, and the root-flake bundle packager that was to do it.
+
+### Rootless guest runtime (Proposed)
+
+This subsection is Proposed, not accepted, and states no claim. What ships is
+claim 2 (no guest binary can elevate to uid 0) and claim 1's confinement.
+
+The target is that no workload or guest-controlled code runs as uid 0 and no
+usable root account exists. Today uid 0 is held by the initramfs agent for
+boot setup only: verity, mounts, the pivot and the guest environment. It then
+narrows its capability bounding set and drops to the fixed workload identity,
+keeping only named capabilities, before activation completes; workload
+processes start through `mvm-setpriv` with `no_new_privs`. The privileged
+helpers that must outlive that drop (CRNG reseed, late read-only volume
+mounts) start before it. Privileged setup a workload needs happens before the
+drop or through an explicitly granted capability, never by running workload
+code as root, so workloads bind high ports.
+
+Rejected: a literal rootless PID 1, since the kernel hands PID 1 to uid 0; and
+user namespaces, which contain an in-guest root on the host side rather than
+removing it.
+
+Open, and blocking acceptance: a runtime witness that the agent and workload
+euid is non-zero once live; a build-time scan that the production root
+filesystem holds no setuid-root binary and no `su`, `sudo` or `doas`; and
+confirmation that a production image has no root login or shell and the dev
+console shell runs as the workload uid. The claim number is assigned in the
+change that ships those witnesses. Related:
+[#2101](https://github.com/tinylabscom/mvm/issues/2101) (the OCI workload
+process runs with `NoNewPrivs=0` and a full bounding set),
+[#4612](https://github.com/tinylabscom/mvm/issues/4612),
+[#4819](https://github.com/tinylabscom/mvm/issues/4819).
 
 ## Consequences
 
