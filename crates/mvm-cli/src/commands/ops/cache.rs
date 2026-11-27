@@ -417,6 +417,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             }
 
+            // What a crashed process left in the Firecracker idle pool: the
+            // same liveness-aware reap as the helpers above, under the same flag.
+            if !no_reap_orphans && !dry_run {
+                mvm_vmm::fc::idle_pool::recover();
+            }
+
             // Optionally sweep orphaned builds first. Same logic as
             // `mvmctl manifest prune --orphans` — bundled here so the
             // user can do a single clean-everything pass without

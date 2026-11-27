@@ -857,7 +857,8 @@ pub(in crate::commands) struct MachineRemoveArgs {
     /// Persistent machine name(s).
     #[arg(value_name = "NAME")]
     pub names: Vec<String>,
-    /// Remove all persistent machine specs.
+    /// Remove all persistent machine specs, and drain every unclaimed standby
+    /// and idle Firecracker process.
     #[arg(long, conflicts_with = "names")]
     pub all: bool,
     /// Skip the interactive confirmation prompt.
@@ -1025,7 +1026,8 @@ pub(in crate::commands) struct MachineStopArgs {
     /// VM name(s) to stop.
     #[arg(value_name = "NAME")]
     pub names: Vec<String>,
-    /// Stop all running VMs.
+    /// Stop all running VMs, and drain every unclaimed standby and idle
+    /// Firecracker process.
     #[arg(long, conflicts_with = "names")]
     pub all: bool,
     /// Skip the interactive confirmation prompt.

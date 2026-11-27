@@ -131,8 +131,8 @@ pub struct ClaimContext<'a> {
     pub anchor: &'a dyn CheckpointChainAnchor,
     /// The content-addressed checkpoint the standby parent was captured as.
     pub parent_checkpoint: &'a CheckpointId,
-    /// VM name registry file whose sibling lock serializes the parent reserve
-    /// and the child-name mint, so two claims never double-claim one parent.
+    /// VM name registry file whose sibling lock serializes the child-name
+    /// mint. The parent reserve is serialized by the pool's claim lock.
     pub registry_path: &'a Path,
     /// Host signing authority invoked only after the runner has minted the
     /// final child identity. Grant-less test contexts may omit it; a plan that

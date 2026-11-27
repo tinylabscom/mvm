@@ -16,14 +16,14 @@ use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotStore};
 use super::refusal::{map_lineage_refusal, refuse};
 use super::{ClaimContext, ClaimRefusal};
 use crate::checkpoint::{CheckpointStore, verify_content_at_rest, verify_lineage};
-use crate::vm::name_registry::acquire_registry_lock;
 use crate::warm_snapshot::is_trusted_snapshot_id;
 
-/// Reserve the passed parent atomically under the registry lock (the no-double-
-/// claim guard), then verify its sealed content and its content-address. Saved-
-/// state claims additionally verify the metadata lineage against the signed
-/// audit chain; resident HVF claims use their signed snapshot manifest as the
-/// O(1) publication witness. Returns the verified parent meta. Runs before any
+/// Reserve the passed parent atomically under the pool's claim lock (the
+/// no-double-claim guard, shared with eviction and the drain), then verify
+/// its sealed content and its content-address. Saved-state claims
+/// additionally verify the metadata lineage against the signed audit chain;
+/// resident HVF claims use their signed snapshot manifest as the O(1)
+/// publication witness. Returns the verified parent meta. Runs before any
 /// clone or boot: an unclaimable or tampered parent fails closed.
 ///
 /// A parent that fails verification (or whose sealed record is unreadable) is
@@ -38,8 +38,12 @@ pub(super) fn reserve_and_verify_parent(
     resident_handoff: bool,
 ) -> std::result::Result<CheckpointMeta, StandbyError> {
     {
-        let _lock = acquire_registry_lock(ctx.registry_path)
-            .map_err(|e| StandbyError::ClaimFailed(format!("acquire registry lock: {e:#}")))?;
+        // The pool's claim lock, which eviction and the drain take too, so a
+        // record read as claimable here cannot be taken before it is marked.
+        let _lock = ctx
+            .pool
+            .claim_lock()
+            .map_err(|e| StandbyError::ClaimFailed(format!("acquire standby claim lock: {e:#}")))?;
         let Some(current) = ctx
             .pool
             .load_selected(&handle.id)

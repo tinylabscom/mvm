@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use mvm_core::vm_backend::{StandbyCompat, StandbyHandle, StandbyState};
 
+use crate::vm::instance_snapshot::MachineLifecycleLock;
+
 /// Filename of the per-standby metadata JSON inside its dir.
 const HANDLE_FILE: &str = "standby.json";
 
@@ -46,6 +48,13 @@ impl SupervisorStandbyPool {
     /// whole pool (e.g. an exclusive warm lock) anchor on this.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The lock every change of a record's claim state takes: a claim's
+    /// reservation, eviction and the drain. Holding it, a record read as
+    /// unclaimed stays unclaimed until it is released.
+    pub fn claim_lock(&self) -> Result<mvm_core::atomic_io::FileLock> {
+        mvm_core::atomic_io::FileLock::acquire(&self.root.join("claim"))
     }
 
     /// Persist (or update) a standby's handle under `<root>/<id>/standby.json`,
@@ -120,7 +129,7 @@ impl SupervisorStandbyPool {
     /// and must be removed after the backend consumes its one-shot control
     /// channel.
     pub fn claim_idle_compatible(&self, want: &StandbyCompat) -> Result<Option<StandbyHandle>> {
-        let _claim_guard = mvm_core::atomic_io::FileLock::acquire(&self.root.join("claim"))?;
+        let _claim_guard = self.claim_lock()?;
         let Some(mut handle) = self
             .list()?
             .into_iter()
@@ -203,14 +212,72 @@ impl SupervisorStandbyPool {
             .fold(0u64, |total, h| total.saturating_add(u64::from(h.mem_mib))))
     }
 
+    /// Remove every unclaimed record and hand back what it named, for the
+    /// caller to tear down. A claimed record belongs to the launcher consuming
+    /// it and stays, and so does one whose preloaded child's lifecycle gate is
+    /// held: a claim reserves a preloaded child by holding that gate. Each
+    /// taken child's gate is held from before its record goes. Nothing is
+    /// signalled here.
+    ///
+    /// The records go before their VMs are torn down, so a teardown that fails
+    /// or is cut short leaves a standby VM with no record; the per-VM loop of
+    /// the next `machine stop --all` finds it under `vms/`.
+    pub fn take_unclaimed(&self) -> Result<Vec<TakenStandby>> {
+        // A home that never kept a standby has nothing to take, and needs no lock file.
+        if !self.root.is_dir() {
+            return Ok(Vec::new());
+        }
+        let gates = std::cell::RefCell::new(std::collections::BTreeMap::new());
+        let mut taken = Vec::new();
+        self.take_oldest_where(
+            None,
+            |h| match h.preloaded_child_vm_name.as_deref() {
+                None => true,
+                Some(child) => match MachineLifecycleLock::try_acquire(child) {
+                    Ok(Some(gate)) => {
+                        gates.borrow_mut().insert(h.id.clone(), gate);
+                        true
+                    }
+                    Ok(None) | Err(_) => false,
+                },
+            },
+            |handle| {
+                let child_gate = gates.borrow_mut().remove(&handle.id);
+                taken.push(TakenStandby { handle, child_gate });
+            },
+        )?;
+        Ok(taken)
+    }
+
     fn evict_oldest_where(
         &self,
         max_memory_mib: u64,
         selects: impl Fn(&StandbyHandle) -> bool,
     ) -> Result<Vec<String>> {
-        // Share the claim lock with reservation so a parent cannot be selected
-        // for eviction from an idle listing while another launcher claims it.
-        let _budget_guard = mvm_core::atomic_io::FileLock::acquire(&self.root.join("claim"))?;
+        let mut evicted = Vec::new();
+        self.take_oldest_where(Some(max_memory_mib), selects, |h| {
+            if !h.is_saved_state() && pid_alive(h.pid) {
+                // SAFETY: `kill` takes plain integers and dereferences nothing.
+                // The pid is the one this pool recorded; only its liveness was
+                // checked, not its start time. The claim lock keeps a claim from
+                // reserving a record taken here.
+                unsafe { libc::kill(h.pid as libc::pid_t, libc::SIGTERM) };
+            }
+            evicted.push(h.id);
+        })?;
+        Ok(evicted)
+    }
+
+    /// Remove the oldest selected idle or parked records until those left hold
+    /// at most `max_memory_mib` (all of them with `None`), handing each one to
+    /// `taken` as soon as its record is gone.
+    fn take_oldest_where(
+        &self,
+        max_memory_mib: Option<u64>,
+        mut selects: impl FnMut(&StandbyHandle) -> bool,
+        mut taken: impl FnMut(StandbyHandle),
+    ) -> Result<()> {
+        let _claim_guard = self.claim_lock()?;
         let mut candidates: Vec<_> = self
             .list()?
             .into_iter()
@@ -221,22 +288,15 @@ impl SupervisorStandbyPool {
             .fold(0u64, |total, h| total.saturating_add(u64::from(h.mem_mib)));
         candidates.sort_by_key(|h| h.spawned_unix_secs);
 
-        let mut evicted = Vec::new();
         for h in candidates {
-            if memory_mib <= max_memory_mib {
+            if max_memory_mib.is_some_and(|max| memory_mib <= max) {
                 break;
-            }
-            if !h.is_saved_state() && pid_alive(h.pid) {
-                // SAFETY: the pid belongs to a live supervisor recorded by this
-                // pool; a subsequent claim cannot race because only idle/parked
-                // records are candidates under the budget lock.
-                unsafe { libc::kill(h.pid as libc::pid_t, libc::SIGTERM) };
             }
             self.remove(&h.id)?;
             memory_mib = memory_mib.saturating_sub(u64::from(h.mem_mib));
-            evicted.push(h.id);
+            taken(h);
         }
-        Ok(evicted)
+        Ok(())
     }
 
     /// Mark a standby `Claimed` (persisted) — so a concurrent launch won't double-claim.
@@ -349,6 +409,13 @@ impl SupervisorStandbyPool {
     }
 }
 
+/// A standby a drain took out of the pool, with the lifecycle gate of its
+/// preloaded child when it has one, held from the moment its record went.
+pub struct TakenStandby {
+    pub handle: StandbyHandle,
+    pub child_gate: Option<MachineLifecycleLock>,
+}
+
 /// Ask a standby's process to stop. For a standby whose pool record is gone,
 /// so the usual remove-and-reap path cannot reach it.
 pub fn terminate_standby_process(pid: u32) {
@@ -459,6 +526,66 @@ mod tests {
             preloaded_child_vm_name: None,
             vsock_egress: false,
         }
+    }
+
+    /// A claim that holds a preloaded child's lifecycle gate owns that
+    /// standby even while its record still reads `Idle`. The drain skips it
+    /// rather than waiting on the gate and stopping the machine the claim is
+    /// about to commit.
+    #[test]
+    fn draining_skips_a_standby_whose_child_a_claim_holds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
+        let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
+        let mut held = handle("held", "k", StandbyState::Idle);
+        held.preloaded_child_vm_name = Some("held-child".into());
+        let mut free = handle("free", "k", StandbyState::Idle);
+        free.preloaded_child_vm_name = Some("free-child".into());
+        pool.record(&held).unwrap();
+        pool.record(&free).unwrap();
+        let _claim =
+            crate::vm::instance_snapshot::MachineLifecycleLock::acquire("held-child").unwrap();
+
+        let taken = pool.take_unclaimed().unwrap();
+
+        let names: Vec<_> = taken.iter().map(|t| t.handle.id.as_str()).collect();
+        assert_eq!(names, ["free"]);
+        assert_eq!(
+            taken[0].child_gate.as_ref().map(|g| g.name()),
+            Some("free-child"),
+            "the drain keeps the child's gate for its teardown"
+        );
+        let left: Vec<_> = pool.list().unwrap().into_iter().map(|h| h.id).collect();
+        assert_eq!(left, ["held"]);
+    }
+
+    /// Draining takes every unclaimed record and leaves a claimed one to the
+    /// launcher consuming it. It signals nothing: the records name this test's
+    /// own pid, which a drain that killed through the record would end.
+    #[test]
+    fn draining_takes_unclaimed_records_and_signals_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        for (id, state) in [
+            ("idle", StandbyState::Idle),
+            ("parked", StandbyState::Parked),
+            ("claimed", StandbyState::Claimed),
+        ] {
+            pool.record(&handle(id, "k", state)).unwrap();
+        }
+
+        let mut taken: Vec<_> = pool
+            .take_unclaimed()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.handle.id)
+            .collect();
+        taken.sort();
+
+        assert_eq!(taken, ["idle", "parked"]);
+        let left: Vec<_> = pool.list().unwrap().into_iter().map(|h| h.id).collect();
+        assert_eq!(left, ["claimed"]);
     }
 
     /// A fully populated `StandbyHandle` for tests that don't care about the

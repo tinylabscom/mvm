@@ -90,6 +90,69 @@ pub fn watch_idle(idle_timeout: Duration) {
     }
 }
 
+/// Release everything this host keeps for launches that have not happened
+/// yet: every unclaimed standby and every idle Firecracker process.
+///
+/// Each standby VM, parent and preloaded child, goes through the teardown a
+/// machine gets ([`crate::LocalBackend::stop_machine_in_lifecycle`]); one with
+/// nothing running is left with no state, the way that teardown ends. What a
+/// launch owns is left alone: a claimed standby, one whose preloaded child a
+/// claim holds, and an idle process a refill is still starting. Records go
+/// before their VMs, so a failed teardown leaves a standby VM with no record
+/// for the next `machine stop --all` to stop.
+///
+/// # Errors
+///
+/// If the pool cannot be read, or a standby VM could not be released; the
+/// others are still released.
+pub fn drain(client: &crate::LocalBackend) -> Result<()> {
+    let mut failed = Vec::new();
+    for taken in SupervisorStandbyPool::open()?.take_unclaimed()? {
+        let parent = crate::lifecycle::MachineLifecycleLock::acquire(&taken.handle.id);
+        let gates = std::iter::once(parent).chain(taken.child_gate.map(Ok));
+        for gate in gates {
+            if let Err(error) = gate.and_then(|gate| release_standby_vm(client, &gate)) {
+                failed.push(format!("{}: {error:#}", taken.handle.id));
+            }
+        }
+    }
+    mvm_vmm::fc::idle_pool::drain();
+    anyhow::ensure!(
+        failed.is_empty(),
+        "could not release standby VM(s): {}",
+        failed.join("; ")
+    );
+    Ok(())
+}
+
+/// The VM names unclaimed standbys hold, parents and preloaded children: what
+/// [`drain`] would release. Empty when the pool cannot be read.
+#[must_use]
+pub fn unclaimed_standby_vms() -> Vec<String> {
+    SupervisorStandbyPool::open()
+        .and_then(|pool| pool.list())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|h| matches!(h.state, StandbyState::Idle | StandbyState::Parked))
+        .flat_map(|h| std::iter::once(h.id).chain(h.preloaded_child_vm_name))
+        .collect()
+}
+
+/// Stop the standby VM `lifecycle` names, then remove what it left. A saved-state
+/// standby has no VM to stop; its state goes as a stopped machine's does, and
+/// the stop's error matters only while something still runs out of it.
+fn release_standby_vm(
+    client: &crate::LocalBackend,
+    lifecycle: &crate::lifecycle::MachineLifecycleLock,
+) -> Result<()> {
+    let id = crate::dto::MachineId(lifecycle.name().to_string());
+    let stopped = client.stop_machine_in_lifecycle(&id, lifecycle, None);
+    if lifecycle.reap_unowned_state()? {
+        return Ok(());
+    }
+    stopped.map_err(|error| anyhow::anyhow!(error))
+}
+
 /// What the host budget leaves for standbys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HostRoom {
@@ -315,6 +378,109 @@ mod tests {
             preloaded_child_vm_name: None,
             vsock_egress: false,
         }
+    }
+
+    /// What `machine stop --all` / `rm --all` drain: every unclaimed standby,
+    /// with its state dir and the separate `/tmp` socket dir a deep home puts
+    /// its sockets in, and every idle-pool entry nobody is adopting. A claimed
+    /// standby and its state belong to the launcher consuming it.
+    #[test]
+    fn drain_leaves_nothing_but_what_a_live_launcher_owns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("d".repeat(60));
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(&home);
+        let pool = SupervisorStandbyPool::open().unwrap();
+        let mut claimed = idle_handle("standby-claimed", 0);
+        claimed.state = StandbyState::Claimed;
+        let mut parked = idle_handle("standby-parked", 0);
+        parked.state = StandbyState::Parked;
+        for handle in [idle_handle("standby-idle", 0), parked, claimed] {
+            pool.record(&handle).unwrap();
+            let state_dir = mvm_core::config::vm_state_dir(&handle.id);
+            std::fs::create_dir_all(&state_dir).unwrap();
+            mvm_core::config::secure_fallback_socket_dir_at(&state_dir).unwrap();
+        }
+        let idle_entry = mvm_core::config::fc_idle_pool_dir().join("idle-left");
+        std::fs::create_dir_all(&idle_entry).unwrap();
+        std::fs::File::open(&idle_entry)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
+        let socket_dir =
+            |id: &str| mvm_core::config::vm_socket_dir_at(&mvm_core::config::vm_state_dir(id));
+        assert_ne!(
+            socket_dir("standby-idle"),
+            mvm_core::config::vm_state_dir("standby-idle")
+        );
+
+        let drained = drain(&crate::LocalBackend::with_hypervisor("mock"));
+
+        let left: Vec<_> = pool.list().unwrap().into_iter().map(|h| h.id).collect();
+        let leaked: Vec<_> = ["standby-idle", "standby-parked"]
+            .into_iter()
+            .filter(|id| mvm_core::config::vm_state_dir(id).exists() || socket_dir(id).exists())
+            .collect();
+        let claimed_kept = mvm_core::config::vm_state_dir("standby-claimed").is_dir();
+        for id in ["standby-idle", "standby-parked", "standby-claimed"] {
+            let _ = std::fs::remove_dir_all(socket_dir(id));
+        }
+        assert!(drained.is_ok(), "{drained:?}");
+        assert_eq!(left, ["standby-claimed"]);
+        assert!(leaked.is_empty(), "left behind: {leaked:?}");
+        assert!(claimed_kept, "a claimed standby's state is its launcher's");
+        assert_eq!(
+            std::fs::read_dir(mvm_core::config::fc_idle_pool_dir())
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    /// A standby whose VM is running is stopped by the drain through the
+    /// machine teardown, not only a saved-state one whose state is removed.
+    #[tokio::test]
+    async fn drain_stops_a_running_standby_vm() {
+        use mvm_core::client::MvmClient as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"hashable-rootfs-bytes\n").unwrap();
+        let client = crate::LocalBackend::with_hypervisor("mock");
+        let launched = client
+            .launch(
+                crate::launch::LaunchRequest::builder(
+                    crate::launch::LifecycleMode::Persistent,
+                    rootfs
+                        .to_string_lossy()
+                        .parse::<mvm_core::rootfs_source::RootfsSource>()
+                        .expect("test image parses"),
+                )
+                .name("standby-live")
+                .build()
+                .expect("request"),
+            )
+            .await
+            .expect("launch");
+        SupervisorStandbyPool::open()
+            .unwrap()
+            .record(&idle_handle(&launched.machine.name, 0))
+            .unwrap();
+
+        drain(&client).expect("drain");
+
+        let running = client
+            .list_machines(mvm_core::client::dto::MachineFilter::all())
+            .await
+            .expect("list")
+            .into_iter()
+            .any(|m| {
+                m.name == "standby-live"
+                    && m.status == mvm_core::client::dto::MachineStatus::Running
+            });
+        assert!(!running, "the running standby VM was not stopped");
+        assert!(!mvm_core::config::vm_state_dir("standby-live").exists());
     }
 
     #[test]

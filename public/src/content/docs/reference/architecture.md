@@ -136,10 +136,20 @@ process per guest size and two in all, under `$MVM_HOME/fc-idle`; it is off unde
 So a launch can leave three processes behind after `mvmctl` exits: the idle `firecracker`
 (its socket under `$MVM_HOME/fc-idle/idle-*`), and its reaper, a detached
 `sh -c … mvm-fc-idle-reaper` with a `sleep 1200` child. They are not a machine: they hold
-no guest, `machine ps` does not list them, the admission budget does not count them, and
-`machine stop`/`machine rm` leave them alone. When the sleep ends the reaper stops the
-idle process unless a launch claimed it first (a claim kills the reaper), then removes its
-directory; deleting `$MVM_HOME/fc-idle` makes the reaper stop it at that point regardless.
+no guest, `machine ps` does not list them, and the admission budget does not count them.
+When the sleep ends the reaper stops the idle process unless a launch claimed it first (a
+claim kills the reaper), then removes its directory; a reaper whose `$MVM_HOME/fc-idle`
+has been deleted stops its process at that point regardless.
+
+`machine stop --all` and `machine rm --all` drain the pool together with every unclaimed
+standby: each idle process and its reaper are stopped through the identity checks a claim
+uses, and each standby VM goes through the same teardown as a machine. Two things are left
+to their owners: a standby another launch has claimed, and an idle process a refill is
+still starting. The registry reconcile pass that runs before lifecycle commands, and
+`mvmctl cache prune`, take only what a crashed process left: an entry whose process never
+came up and a claim whose launcher died mid-adoption. The tenant host agent and its
+signer are shared, not per-launch, and exit on their own 300 s after their last
+registration.
 
 ## Workspace Structure
 

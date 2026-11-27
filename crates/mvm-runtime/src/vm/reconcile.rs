@@ -519,7 +519,7 @@ impl FsReconcileActions {
 
 impl ReconcileActions for FsReconcileActions {
     fn tear_down(&self, _name: &str, reg: &VmRegistration) -> Result<(), String> {
-        remove_state_dir(Path::new(&reg.vm_dir))
+        remove_runtime_dirs(Path::new(&reg.vm_dir))
     }
     fn reap_orphan(&self, dir: &str) -> Result<bool, String> {
         reap_unowned_state_dir(&self.vms_root.join(dir), &self.instances_root.join(dir))
@@ -620,6 +620,7 @@ pub fn converge(opts: &ConvergeOpts) -> ConvergeReport {
         },
     };
     if !opts.dry_run {
+        mvm_vmm::fc::idle_pool::recover();
         emit_audit(&report);
         for (machine, action) in reconcile_snapshot_staging(&mvm_core::config::instances_root()) {
             mvm_core::audit_emit!(RegistryReconcile, vm: machine.as_str(), "action={action}");
@@ -1358,6 +1359,68 @@ mod tests {
             .tear_down("vm1", registry.lookup("vm1").unwrap())
             .unwrap();
         assert!(!Path::new(&dir).exists());
+    }
+
+    /// A dead machine's teardown removes its sockets' short `/tmp` dir with
+    /// its state dir. Once the state dir is gone the hashed name cannot be
+    /// recomputed from anything on disk, so a dir left here leaks for good.
+    #[test]
+    fn fs_actions_tear_down_removes_the_separate_socket_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("d".repeat(120)).join("vms");
+        let dir = make_state_dir(&root, "dead", None);
+        let socket_dir = mvm_core::config::vm_socket_dir_at(Path::new(&dir));
+        assert_ne!(
+            socket_dir,
+            Path::new(&dir),
+            "the fixture must keep its sockets apart"
+        );
+        mvm_core::config::secure_fallback_socket_dir_at(Path::new(&dir)).unwrap();
+        let mut registry = VmNameRegistry::default();
+        registry
+            .register(RegisterParams::minimal("dead", &dir, "default"))
+            .unwrap();
+
+        let torn_down =
+            FsReconcileActions::new(&root).tear_down("dead", registry.lookup("dead").unwrap());
+        let socket_left = socket_dir.exists();
+        let _ = std::fs::remove_dir_all(&socket_dir);
+
+        assert_eq!(torn_down, Ok(()));
+        assert!(!Path::new(&dir).exists());
+        assert!(!socket_left, "{} was left behind", socket_dir.display());
+    }
+
+    /// Reconcile finishes what a crashed launcher left in the Firecracker idle
+    /// pool: an interrupted claim and an entry whose process never came up.
+    #[test]
+    fn converge_recovers_what_a_crash_left_in_the_idle_pool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
+        let pool = mvm_core::config::fc_idle_pool_dir();
+        let claimed = pool.join("claimed-idle-a-aabbccdd");
+        let abandoned = pool.join("idle-b");
+        for dir in [&claimed, &abandoned] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(
+            claimed.join("claim.journal"),
+            tmp.path().join("vms/x").to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for dir in [&claimed, &abandoned] {
+            std::fs::File::open(dir)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        }
+
+        let report = converge(&ConvergeOpts::default());
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(std::fs::read_dir(&pool).unwrap().count(), 0);
     }
 
     #[test]
