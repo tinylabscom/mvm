@@ -388,12 +388,34 @@ not paraphrase this row without them.
    racing each other can both read the same total and both be admitted,
    overshooting by one boot; closing that needs a host-wide lock held across
    measure-and-start. Its CPU arm sums only *granted* shares, so an ungranted
-   workload is uncapped and contributes nothing. And its liveness and record
-   reads fail open in the undercount direction — an unreadable charge record
-   makes one machine invisible rather than refusing every boot on the host
-   (`fn:an_unreadable_charge_record_is_skipped_rather_than_fatal`). Each is a
-   deliberate choice of the undercount failure over the lockout failure, which
-   is the same judgement limit 4's counting rule makes.
+   workload is uncapped and contributes nothing. No unreadable record, marker or
+   stray file under `vms/` turns into an accounting error that refuses
+   unrelated boots. A machine held in the configured-budget ledger counts once
+   through its hold. Any other machine counts at its charge record, or at the
+   charge its persisted admitted plan implies when that record is missing or
+   unreadable. With neither readable it is invisible rather than refusing every
+   boot on the host, and a file that exists but will not read is warned about
+   once per process (`fn:an_unreadable_charge_record_is_skipped_rather_than_fatal`,
+   `fn:an_unreadable_charge_record_with_no_plan_hides_only_that_machine`). The
+   two sums differ in their liveness test:
+   - The ledger counts a machine while any pid marker leaves it possibly
+     running. A marker that cannot be read keeps it counted until its
+     directory is removed, unless one of its markers is a link.
+   - The advisory live-machine sum (default sizing, standby room) counts only a
+     marker that names a live process.
+   - Both judge a dir holding a link (a live-handoff child's marker, linked to
+     its standby parent's) by whether some marker names a live process. So a
+     dangling link, or a malformed marker beside a link, counts nothing. In
+     the ledger, a link whose target is not a small regular file still keeps
+     the machine counted. Every marker read is non-blocking and bounded, so no
+     marker can stall an admission.
+
+   A charge too large to add saturates. It reads as the whole host, which the
+   headroom check then refuses. An idle standby carries no record or plan, so
+   admission does not count it, by design; the standby budget bounds it
+   instead. Each of these is a deliberate choice of the undercount failure over
+   the lockout failure, which is the same judgement limit 4's counting rule
+   makes.
 6. **Memory and task ceilings at spawn hold only on a Linux host with a systemd
    user session. (PARTIAL, by host.)** Where they hold, every VMM spawn —
    Firecracker cold boots and every Firecracker snapshot load (fork, pool

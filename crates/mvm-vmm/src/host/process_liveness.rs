@@ -129,8 +129,48 @@ pub fn read_pid_file(path: &Path) -> Option<i32> {
 }
 
 fn recorded_pid(path: &Path) -> Option<EndpointPid> {
-    EndpointPid::parse(&std::fs::read_to_string(path).ok()?)
-        .filter(|record| is_signalable(record.pid))
+    EndpointPid::parse(&read_pid_marker(path).ok()??).filter(|record| is_signalable(record.pid))
+}
+
+/// Upper bound on a PID marker: a pid and a start time fit many times over.
+const MAX_PID_MARKER_BYTES: u64 = 256;
+
+/// The text of a supervisor PID marker, `None` when there is none.
+///
+/// A marker may be a link (a live-handoff child's), so whatever it names is
+/// opened non-blocking and read only if it is a small regular file: a FIFO,
+/// device or huge file there must not stall the caller, which may be holding
+/// a host-wide lock.
+///
+/// # Errors
+///
+/// When the marker exists but is not a regular file of at most
+/// `MAX_PID_MARKER_BYTES`, or cannot be read.
+pub fn read_pid_marker(path: &Path) -> std::io::Result<Option<String>> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.len() > MAX_PID_MARKER_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "pid marker {} is not a regular file of at most {MAX_PID_MARKER_BYTES} bytes",
+                path.display()
+            ),
+        ));
+    }
+    let mut text = String::new();
+    file.take(MAX_PID_MARKER_BYTES).read_to_string(&mut text)?;
+    Ok(Some(text))
 }
 
 /// A recorded pid as a signal target, or `None` when it cannot name exactly one
@@ -1070,6 +1110,38 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(!pid_file_has_live_process(&path));
+    }
+
+    /// Run `probe` on its own thread, failing the test if it blocks.
+    fn returns_promptly<T: Send + 'static>(probe: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(probe()));
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("reading a pid marker must never block")
+    }
+
+    #[test]
+    fn a_marker_that_is_a_fifo_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hvf.pid");
+        let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path and a plain mode.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let probed = path.clone();
+        assert!(!returns_promptly(move || pid_file_has_live_process(
+            &probed
+        )));
+        assert!(returns_promptly(move || read_pid_marker(&path).is_err()));
+    }
+
+    #[test]
+    fn an_oversize_marker_is_refused() {
+        let (_dir, path) = marker(&format!("{}{}", std::process::id(), " ".repeat(4096)));
+        assert!(read_pid_marker(&path).is_err());
+        assert!(!pid_file_has_live_process(&path));
+        let (_dir, absent) = marker("");
+        std::fs::remove_file(&absent).unwrap();
+        assert!(read_pid_marker(&absent).unwrap().is_none());
     }
 
     #[test]

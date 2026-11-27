@@ -50,3 +50,52 @@ pub(crate) fn install_runtime_overlay(mvm_home: &Path) {
     )
     .expect("assemble fixture initramfs");
 }
+
+/// Run `f` with a subscriber installed, returning its value and everything
+/// that was logged.
+///
+/// A test that only asserts "admitted" cannot tell a warned admission from
+/// a silent one, and the difference is the whole dev half of the rule.
+pub(crate) fn capturing_warnings<T>(f: impl FnOnce() -> T) -> (T, String) {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log sink poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let sink = Sink(Arc::new(Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .finish();
+    // Another thread may have cached a callsite as uninteresting before
+    // this per-thread subscriber existed; recompute before running `f`.
+    let value = tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        f()
+    });
+    let logged = String::from_utf8(sink.0.lock().expect("log sink poisoned").clone())
+        .expect("log output is utf-8");
+    (value, logged)
+}

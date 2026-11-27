@@ -2,6 +2,7 @@
 
 use super::test_support::*;
 use super::*;
+use crate::test_fixtures::capturing_warnings;
 
 #[test]
 fn local_retention_requires_a_configured_host_ceiling() {
@@ -21,55 +22,6 @@ fn local_retention_requires_a_configured_host_ceiling() {
     assert!(enforce_mailbox_retention(Some(&grant), Some(9_999)).is_err());
     assert!(enforce_mailbox_retention(Some(&grant), Some(10_000)).is_ok());
     assert!(enforce_mailbox_retention(Some(&grant), Some(20_000)).is_ok());
-}
-
-/// Run `f` with a subscriber installed, returning its value and everything
-/// that was logged.
-///
-/// A test that only asserts "admitted" cannot tell a warned admission from
-/// a silent one, and the difference is the whole dev half of the rule.
-fn capturing_warnings<T>(f: impl FnOnce() -> T) -> (T, String) {
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Clone)]
-    struct Sink(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for Sink {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .expect("log sink poisoned")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
-        type Writer = Self;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    let sink = Sink(Arc::new(Mutex::new(Vec::new())));
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(sink.clone())
-        .with_max_level(tracing::Level::WARN)
-        .with_ansi(false)
-        .finish();
-    // Another thread may have cached a callsite as uninteresting before
-    // this per-thread subscriber existed; recompute before running `f`.
-    let value = tracing::subscriber::with_default(subscriber, || {
-        tracing::callsite::rebuild_interest_cache();
-        f()
-    });
-    let logged = String::from_utf8(sink.0.lock().expect("log sink poisoned").clone())
-        .expect("log output is utf-8");
-    (value, logged)
 }
 
 #[cfg(target_os = "macos")]

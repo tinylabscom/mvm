@@ -177,7 +177,7 @@ impl HostBudgetPermit {
                 .values()
                 .filter(|r| r.phase.is_charged())
             {
-                total = checked_plus(total, record.charge)?;
+                total = total.plus(record.charge);
             }
             super::admits(budget, total, charge)?;
             ledger.reservations.insert(
@@ -336,7 +336,7 @@ impl HostBudgetPermit {
                 .values()
                 .filter(|record| record.phase.is_charged())
             {
-                total = checked_plus(total, record.charge)?;
+                total = total.plus(record.charge);
             }
             super::admits(&budget, total, MachineCharge::default())?;
             ensure!(
@@ -697,19 +697,6 @@ fn validate_digest(digest: &str) -> Result<()> {
     Ok(())
 }
 
-fn checked_plus(left: MachineCharge, right: MachineCharge) -> Result<MachineCharge> {
-    Ok(MachineCharge {
-        memory_mib: left
-            .memory_mib
-            .checked_add(right.memory_mib)
-            .context("host memory accounting overflow")?,
-        cpu_millicores: left
-            .cpu_millicores
-            .checked_add(right.cpu_millicores)
-            .context("host CPU accounting overflow")?,
-    })
-}
-
 fn legacy_committed(home: &Path, ledger: &Ledger) -> Result<MachineCharge> {
     let directory = mvm_core::config::vms_dir_at(home);
     let entries = match std::fs::read_dir(directory) {
@@ -719,63 +706,113 @@ fn legacy_committed(home: &Path, ledger: &Ledger) -> Result<MachineCharge> {
         }
         Err(error) => return Err(error.into()),
     };
+    // Sums saturate: a charge too large to add claims the whole host, which the
+    // headroom check then refuses as such.
     let mut total = MachineCharge::default();
     for entry in entries {
         let entry = entry?;
-        ensure!(
-            entry.file_type()?.is_dir(),
-            "unexpected object in machine state directory"
-        );
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(bytes) = platform::read_legacy(&entry.path().join(super::CHARGE_FILE), 4096)?
-        else {
-            let recorded = ledger
-                .reservations
-                .values()
-                .any(|record| record.vm_name == name && record.phase.is_charged());
-            if !recorded
-                && mvm_vmm::host::process_liveness::PID_FILE_NAMES
-                    .iter()
-                    .any(|file| entry.path().join(file).symlink_metadata().is_ok())
-            {
-                ensure!(
-                    platform::machine_is_confirmed_dead(&entry.path())?,
-                    "possibly live machine has no admitted charge"
-                );
-            }
-            continue;
-        };
-        let charge: MachineCharge =
-            serde_json::from_slice(&bytes).context("invalid legacy host charge")?;
-        if platform::machine_is_confirmed_dead(&entry.path())? {
+        // A stray file (a Finder `.DS_Store`, say) is not a machine.
+        if !entry.file_type()?.is_dir() {
             continue;
         }
-        if let Some(record) = ledger
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // A charged hold already counts its machine, whatever its legacy
+        // record says.
+        let held = ledger
             .reservations
             .values()
-            .find(|record| record.vm_name == name && record.phase.is_charged())
-        {
-            ensure!(
-                record.charge == charge,
-                "legacy charge differs from host reservation"
-            );
+            .any(|record| record.vm_name == name && record.phase.is_charged());
+        if held || !may_be_live(&entry.path(), &name) {
             continue;
         }
-        total = checked_plus(total, charge)?;
+        if let Some(charge) = super::machine_charge(&entry.path(), |path| {
+            platform::read_legacy(path, MAX_MACHINE_EVIDENCE_BYTES)
+        }) {
+            total = total.plus(charge);
+        }
     }
     Ok(total)
 }
 
+/// Upper bound on a charge record or persisted plan read for accounting.
+const MAX_MACHINE_EVIDENCE_BYTES: usize = 1024 * 1024;
+
+/// Whether a state dir's pid markers leave its machine possibly running.
+///
+/// No marker is no machine. A live-handoff child's marker is a link to the
+/// marker of the standby parent whose VMM it took over, which the owner-only
+/// reader refuses to follow; the shared liveness probe judges the process that
+/// marker names, and a dangling link names none. Any marker that cannot be
+/// read safely (a link to anything but a small regular file, or a malformed
+/// marker in a dir with no link) proves nothing either way, so that machine
+/// stays counted: over-counting one machine costs headroom, refusing on it
+/// would cost every boot.
+fn may_be_live(directory: &Path, name: &str) -> bool {
+    use mvm_vmm::host::process_liveness::{
+        PID_FILE_NAMES, read_pid_marker, state_dir_has_live_process,
+    };
+    let markers: Vec<_> = PID_FILE_NAMES
+        .iter()
+        .map(|file| directory.join(file))
+        .filter_map(|path| path.symlink_metadata().ok().map(|meta| (path, meta)))
+        .collect();
+    if markers.is_empty() {
+        return false;
+    }
+    let unreadable = |error: &dyn std::fmt::Display| {
+        super::warn_once(
+            name,
+            format!(
+                "unreadable machine PID evidence; counting this machine as possibly live: {error:#}"
+            ),
+        );
+        true
+    };
+    let links: Vec<_> = markers
+        .iter()
+        .filter(|(_, meta)| meta.file_type().is_symlink())
+        .collect();
+    if !links.is_empty() {
+        if let Some(error) = links
+            .iter()
+            .find_map(|(path, _)| read_pid_marker(path).err())
+        {
+            return unreadable(&error);
+        }
+        return state_dir_has_live_process(directory);
+    }
+    match platform::machine_is_confirmed_dead(directory) {
+        Ok(dead) => !dead,
+        Err(error) => unreadable(&error),
+    }
+}
+
+/// Remove a retiring hold's legacy record, but only one that is provably its.
+///
+/// A record that differs or cannot be read may belong to a later machine of the
+/// same name, so it is left for [`legacy_committed`] to judge by that machine's
+/// own evidence.
 fn remove_legacy_charge(home: &Path, record: &Reservation) -> Result<()> {
     let path = super::charge_path_at(home, &record.vm_name);
-    if let Some(bytes) = platform::read_legacy(&path, 4096)? {
-        let charge: MachineCharge = serde_json::from_slice(&bytes)?;
-        ensure!(
-            charge == record.charge,
-            "legacy charge differs from retiring reservation"
-        );
-        std::fs::remove_file(&path)?;
-        atomic_io::sync_dir(path.parent().context("charge parent missing")?)?;
+    let legacy = platform::read_legacy(&path, MAX_MACHINE_EVIDENCE_BYTES).and_then(|bytes| {
+        bytes
+            .map(|bytes| serde_json::from_slice::<MachineCharge>(&bytes).map_err(Into::into))
+            .transpose()
+    });
+    match legacy {
+        Ok(None) => {}
+        Ok(Some(charge)) if charge == record.charge => {
+            std::fs::remove_file(&path)?;
+            atomic_io::sync_dir(path.parent().context("charge parent missing")?)?;
+        }
+        Ok(Some(_)) => tracing::warn!(
+            machine = record.vm_name,
+            "legacy charge differs from the retiring hold; leaving it in place"
+        ),
+        Err(error) => tracing::warn!(
+            machine = record.vm_name,
+            "unreadable legacy charge left in place for the retiring hold: {error:#}"
+        ),
     }
     Ok(())
 }
