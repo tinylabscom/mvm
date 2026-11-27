@@ -29,7 +29,7 @@ and ships as a signed asset with each `mvmctl` release; `mvmctl` assembles
 the runtime overlay, initramfs and SDK sidecars from it (ADR-054). A
 contributor build pair-builds workload images from a sibling or
 `MVM_IMAGES_DIR` checkout of mvm-images; an official release binary only
-downloads verified artifacts (ADR-030).
+downloads verified artifacts (ADR-004).
 
 ## Crates, low to high
 
@@ -64,7 +64,7 @@ dev-only BDD harness (`--features bdd`). `ShellEnvironment` /
   checkout, every change in a worktree, `source scripts/dev-env.sh`).
 - **Host Nix is never used**: `mvmctl` never shells out to a host `nix`, a
   `nix-darwin` linux-builder or a `nix-daemon`; every Nix evaluation runs in a
-  VM we launched (ADR-004, ADR-030).
+  VM we launched (ADR-004).
 - **No SSH in any microVM or the builder VM**; both are headless. The only
   interactive path is the dev-only PTY-over-vsock console.
 - **Guests have no NIC.** Every workload backend and the builder VM boot with

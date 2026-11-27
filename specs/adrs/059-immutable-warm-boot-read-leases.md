@@ -16,7 +16,7 @@ owner/descriptor API review and live witnesses.
 ## Context
 
 ADR-001 trusts the host, not a compromised guest or another local process.
-ADR-025 permits fresh children of a clean, authority-free parent but refuses
+ADR-004 permits fresh children of a clean, authority-free parent but refuses
 reuse of a dirty guest. The composable-pack contract requires fresh admission
 and <300 ms cold / <50 ms warm launch including admission. Today
 `TrustedSnapshotBackend::materialize` returns a writable destination, the

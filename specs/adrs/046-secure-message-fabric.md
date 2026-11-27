@@ -18,7 +18,7 @@ shipped and required design for those paths. ADR-035 also remains historical rat
 redaction, bounded telemetry retention, explicit gaps, hash chaining, sealed
 roots, fan-out, and operator debugging.  
 **Complements:** ADR-001, ADR-014, ADR-054, ADR-020, ADR-023,
-ADR-042, and ADR-063.  
+ADR-003, and ADR-063.  
 **Consumed by:** ADR-045 and its plan, which depend on this fabric and define
 no message types of their own.  
 **Reconciled by:** ADR-062 §0, then narrowed by ADR-057. ADR-057's

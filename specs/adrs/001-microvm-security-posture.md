@@ -651,7 +651,7 @@ second path or socket owner fails CI, while a projection test proves all flow
 classes share the same admitted object graph.
 
 **The retired `l3-vsock` path.** Two earlier ADRs historically supplied an
-opt-in raw-packet compatibility mode. ADR-042 superseded them, and the public
+opt-in raw-packet compatibility mode. ADR-003 retired them, and the public
 mode, guest TUN and agent, packet protocol, policy branch, host forwarders,
 VMM hooks, dependencies, packaging, and temporary migration ratchets are now
 deleted. Stale serialized declarations fail at the outer compatibility
@@ -1768,7 +1768,7 @@ and the missing walk, not Sigstore. The published `v0.28.0-rc.2`, `rc.4` and
   and admission mechanics.
 - `specs/adrs/020-host-services-broker.md` — claims 12 and 13's broker
   architecture, and the resident-daemon trust-gradient ledger.
-- `specs/adrs/021-pid0-portability-boundary.md` — the guest control
+- `specs/adrs/004-sealed-signed-builder-image.md` — the guest control
   surface the boundary-language decision above governs.
 - `specs/adrs/023-secrets-subsystem-egress-substitution.md` — the
   substitution mechanism behind claim 13 and preview claim 16.

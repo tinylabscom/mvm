@@ -115,17 +115,11 @@ const PENDING: &[&str] = &[
     "specs/adrs/014-signed-audited-execution-plans.md",
     "specs/adrs/015-hostd-protocol-versioning.md",
     "specs/adrs/020-host-services-broker.md",
-    "specs/adrs/021-pid0-portability-boundary.md",
     "specs/adrs/022-target-architecture.md",
     "specs/adrs/023-secrets-subsystem-egress-substitution.md",
     "specs/adrs/024-wasm-sandbox-backend.md",
-    "specs/adrs/025-warm-snapshot-prior-art-adoption-boundary.md",
     "specs/adrs/027-cli-surface-consolidation.md",
-    "specs/adrs/030-libkrun-pivot.md",
-    "specs/adrs/032-egress-connect-completion-and-in-seam-dns.md",
-    "specs/adrs/033-rust-vmm-virtio-primitives.md",
     "specs/adrs/035-workload-stream-plane.md",
-    "specs/adrs/042-single-flow-vsock-networking.md",
 ];
 
 #[derive(Debug)]

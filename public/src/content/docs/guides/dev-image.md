@@ -10,7 +10,7 @@ There are two paths:
 1. **Boot a shell with zero config** — no flake needed: `mvmctl machine run --image alpine -it -- /bin/sh`. Good for "I just want a sandboxed Linux shell to poke around in." See [The fastest path](#the-fastest-path) below.
 2. **Write your own dev image** — declare it in your project's flake using `mvm.lib.<system>.mkGuest`. Adds your packages, your services, your config. The mvm repository's internals stay untouched — you're a consumer of the library, not a fork. See [Writing your own dev image](#writing-your-own-dev-image) below.
 
-Per [ADR-030](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/030-libkrun-pivot.md), the dev/prod distinction is encoded in the entrypoint shape (`shell` → accessible, `command`/`services` → sealed). The same `mvm.lib.<system>.mkGuest` API serves both.
+The dev/prod distinction is encoded in the entrypoint shape (`shell` → accessible, `command`/`services` → sealed). The same `mvm.lib.<system>.mkGuest` API serves both.
 
 ## Writing your own dev image
 

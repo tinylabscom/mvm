@@ -600,7 +600,7 @@ moves to Shipped only with an ADR and a witness.
   and exists only to run Nix builds. The shell is a dev image booted with
   `machine run -it`.
 - **WASM as a core goal — Cut.** It remains a claim-free portability tier only.
-- **TUN/TAP over vsock — Cut.** Superseded by one flow-aware path (ADR-042).
+- **TUN/TAP over vsock — Cut.** Superseded by one flow-aware path (ADR-003).
 - **A Docker or container fallback — Cut.** Retired.
 - **Encryption of "every piece of data on the host" — Cut as a blanket
   promise.** Checkpoints are encrypted at rest; a full at-rest inventory has not

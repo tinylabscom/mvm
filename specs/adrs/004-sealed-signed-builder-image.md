@@ -31,6 +31,12 @@ model are unchanged.
   `mvm-host-vm-init` prefers that copy. An ABI 2 image carries no mvm binary,
   and its cache key folds no mvm binary source.
 
+**Folded in 2026-11-27**
+([#4839](https://github.com/tinylabscom/mvm/issues/4839)): the still-current
+decisions on the execution substrate, image source, guest control contract,
+virtio device primitives and warm snapshots, as the sections below. The old
+libkrun-as-macOS-default decision is gone with macOS below 26.
+
 ## Context
 
 Every artifact `mvmctl` produces — a workload rootfs, a kernel, a template —
@@ -57,7 +63,10 @@ for code that isn't the user's, it's mvm's own.
 **Nix is the only build authority mvm ever runs, and it always runs inside a
 VM mvm launched.** The host's own Nix — even if the operator has one
 installed and configured — is never consulted, never shelled out to, and
-never a fallback.
+never a fallback: no host `nix` binary, no host-configured remote builder,
+no `nix-daemon` URL. `xtask check-no-host-nix` enforces it in CI. There is
+no intermediate Linux VM either: a guest action goes from the host straight
+to the HVF, Firecracker or libkrun guest that runs it.
 
 **The first Nix on a fresh host is seeded from a hash-pinned, upstream Nix
 release tarball — no PGP, no third-party distribution, no external
@@ -238,6 +247,62 @@ It is signed keylessly under the release pipeline's own CI identity.
 `mvmctl` verifies this signature on download and again on every cache
 reuse, and treats a manifest past its expiry or on a revocation list as
 untrusted.
+
+### Image source in a source checkout
+
+A source checkout with an `mvm-images` checkout selected (`MVM_IMAGES_DIR`,
+or a sibling `../mvm-images`) builds Linux-layer images from it and never
+silently substitutes a download. The builder image builds locally only when
+`MVM_ALLOW_LOCAL_BUILDER_BUILD=1` opts in; otherwise it is fetched from the
+pinned set. Without a checkout, `mvmctl` fetches the signed image set
+`images.lock` pins and verifies it. `MVM_BOOT_IMAGE=fetch` fetches the
+published builder image even with a checkout selected, but the default
+workload image refuses it while a checkout is selected: to compare against a
+signed release, deselect the checkout. An official release binary always
+downloads verified artifacts. The guest runtime is not an image; ADR-054
+owns how it is built and shipped.
+
+### Guest control contract
+
+Every workload backend gives the guest virtio-vsock, and control-plane
+traffic travels only there: never over virtio-net, virtio-fs, a block device
+or any other side channel. Every control payload is a `SealedFrame` (session
+id, sequence, timestamp, signer, signature) checked before dispatch. The
+first message of a session is `ProtocolHello`; a version mismatch is a typed
+`ProtocolMismatch` before anything else is dispatched. Kernel command-line
+flags a backend adds use the `mvm.*` prefix (`mvm.roothash`,
+`mvm.runtime_roothash`, `mvm.seccomp`). The guest assumes no host path is
+visible, carries no SSH, and runs its agent through `mvm-setpriv
+--no-new-privs` with a narrowed capability bounding set. A backend that
+cannot meet this is not a valid mvm backend, whatever language its guest
+side is written in.
+
+### Virtio device primitives in the in-house VMM
+
+The in-house VMM's device model (`mvm-vmm`) uses three rust-vmm crates
+instead of hand-rolled ring code: `vm-memory` for the guest-memory boundary,
+`virtio-queue` for the split virtqueue, and `virtio-vsock` for the vsock
+packet header. A validated `Queue` rejects a zero, oversized or
+non-power-of-two size, and its descriptor walk is bounded, so a hostile
+guest cannot reach a divide-by-zero, an unbounded chain or a rewound used
+ring. Both ring cursors are device state across drains — no device reads
+`used.idx` back from guest memory — and are rewound only when the driver
+writes `QueueReady` 0 (that queue) or `Status` 0 (every queue); a redundant
+`QueueReady` 1 is a no-op. The crates stay on the host VMM path: never in
+`mvm-agentd`, `mvm-core`, `mvm-contract` or the embedded builder binaries.
+Vendoring or forking them is rejected, because the point is an audited
+upstream tracked by the advisory database.
+
+### Warm snapshots, never warm guests
+
+The warm path forks fresh children from one clean, paused parent. Each child
+gets its own identity and post-resume hygiene and its own fresh admission;
+a guest is never reused across workloads, because a reused guest is a
+multi-workload guest carrying un-admitted residue across the audit boundary.
+Two limits bind any future mechanism, neither built today: priming the page
+cache at freeze time may touch only the read-only, verity-sealed root, never
+volumes or secrets; and same-page merging, if added, is confined to one fork
+family and never crosses tenants or images.
 
 ### Host platforms and the Windows promotion gate
 
