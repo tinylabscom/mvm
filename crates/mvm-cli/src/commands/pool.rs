@@ -573,6 +573,7 @@ pub(crate) fn try_warm_claim_with_admission(
     // the key recorded. The rootfs digest comes from the sidecar cache plan
     // admission just populated, so this costs a read, not a re-hash.
     let want = compat_for_launch(cfg)?;
+    mvm_core::launch_trace::lap("warm_claim.standby_compat");
     let pool = SupervisorStandbyPool::open()?;
     // Selection is the CLI's only warm-pool mechanism. The client facade owns
     // retained-parent verification, claim context, authority transfer and
