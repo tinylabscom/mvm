@@ -1,12 +1,12 @@
 # capture fixture: rust-hello
 
-This tiny Rust binary is a deterministic project fixture for `mvm-capture`.
+This tiny Rust binary is a deterministic project fixture for `mvm_cli::capture`.
 It represents the minimum conventional Cargo application that project capture
 must recognize and resolve into a runnable workload.
 
 ## Who uses it
 
-The capture CLI integration tests and `mvm-capture` fixture tests copy or
+The capture CLI integration tests and `mvm-cli`'s capture fixture tests copy or
 inspect this directory. It is not an example intended for publication, and no
 production crate links it as a dependency.
 

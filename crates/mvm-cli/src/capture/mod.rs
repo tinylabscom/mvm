@@ -1,15 +1,14 @@
-#![deny(unreachable_pub)]
-//! `mvm-capture` — project-environment capture frontend for mvm.
+//! Project-environment capture frontend for mvm.
 //!
-//! This crate implements the isolated host-inspection component for the
+//! This module implements the isolated host-inspection component for the
 //! `mvm capture` workflow. It produces a versioned, evidence-oriented
 //! [`CaptureReportV1`](report::CaptureReportV1) and resolves it into the
 //! existing canonical MVM [`Workload`](mvm_contract::ir::Workload) so the
 //! existing Nix renderer can consume it unchanged.
 //!
-//! Host inspection is read-only by default and gated by platform: the crate
+//! Host inspection is read-only by default and gated by platform: the module
 //! compiles everywhere, but Linux-specific collectors only run on Linux.
-//! The crate never executes discovered files; only commands explicitly
+//! It never executes discovered files; only commands explicitly
 //! supplied by the user may be traced.
 
 pub mod collect;

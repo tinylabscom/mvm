@@ -6,8 +6,8 @@
 //! builder VM and replays the command as the guest entrypoint. Both require
 //! `mvmctl __builder-shell-job` and a usable Linux builder VM.
 
-use crate::CaptureError;
-use crate::report::{VerificationRecord, VerificationStatus};
+use crate::capture::CaptureError;
+use crate::capture::report::{VerificationRecord, VerificationStatus};
 use mvm_vmm::host::aux_bin::{CliSpawn, HostProcess};
 use std::path::{Path, PathBuf};
 

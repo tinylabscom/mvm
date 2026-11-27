@@ -15,29 +15,29 @@ fn fixture_root() -> PathBuf {
 
 #[test]
 fn capture_report_is_versioned_and_contains_manifests() {
-    let opts = mvm_capture::collect::CollectOptions {
+    let opts = mvm_cli::capture::collect::CollectOptions {
         project_path: fixture_root(),
         explicit_commands: vec!["cargo run".to_owned()],
         ..Default::default()
     };
-    let report = mvm_capture::collect::collect_project(&opts).expect("collect succeeds");
+    let report = mvm_cli::capture::collect::collect_project(&opts).expect("collect succeeds");
 
     assert_eq!(
         report.schema_version,
-        mvm_capture::report::CAPTURE_SCHEMA_VERSION
+        mvm_cli::capture::report::CAPTURE_SCHEMA_VERSION
     );
     assert!(!report.observations.is_empty());
 
     assert!(
         report.observations.iter().any(|o| {
-            o.kind == mvm_capture::report::ObservationKind::ProjectManifest
+            o.kind == mvm_cli::capture::report::ObservationKind::ProjectManifest
                 && o.path.as_deref() == Some("Cargo.toml")
         }),
         "Cargo.toml observed"
     );
     assert!(
         report.observations.iter().any(|o| {
-            o.kind == mvm_capture::report::ObservationKind::Lockfile
+            o.kind == mvm_cli::capture::report::ObservationKind::Lockfile
                 && o.path.as_deref() == Some("Cargo.lock")
         }),
         "Cargo.lock observed"
@@ -52,11 +52,11 @@ fn secret_value_is_not_emitted_in_report() {
         "DATABASE_URL=postgres://admin:super_secret_value_12345@db/app\n",
     )
     .expect("write secret fixture");
-    let opts = mvm_capture::collect::CollectOptions {
+    let opts = mvm_cli::capture::collect::CollectOptions {
         project_path: project.path().to_path_buf(),
         ..Default::default()
     };
-    let report = mvm_capture::collect::collect_project(&opts).expect("collect succeeds");
+    let report = mvm_cli::capture::collect::collect_project(&opts).expect("collect succeeds");
     let json = serde_json::to_string_pretty(&report).expect("serializable");
 
     assert!(
@@ -69,8 +69,8 @@ fn secret_value_is_not_emitted_in_report() {
     );
 
     let env_obs = report.observations.iter().find(|o| {
-        o.kind == mvm_capture::report::ObservationKind::ConfigurationFile
-            && o.evidence.sensitivity == mvm_capture::report::Sensitivity::Secret
+        o.kind == mvm_cli::capture::report::ObservationKind::ConfigurationFile
+            && o.evidence.sensitivity == mvm_cli::capture::report::Sensitivity::Secret
     });
     assert!(env_obs.is_some(), ".env observed");
     let env_obs = env_obs.unwrap();
@@ -83,13 +83,13 @@ fn secret_value_is_not_emitted_in_report() {
 
 #[test]
 fn resolve_produces_canonical_workload_with_unresolved_items() {
-    let opts = mvm_capture::collect::CollectOptions {
+    let opts = mvm_cli::capture::collect::CollectOptions {
         project_path: fixture_root(),
         explicit_commands: vec!["cargo run".to_owned()],
         ..Default::default()
     };
-    let report = mvm_capture::collect::collect_project(&opts).expect("collect succeeds");
-    let result = mvm_capture::resolve::resolve_report(&report).expect("resolve succeeds");
+    let report = mvm_cli::capture::collect::collect_project(&opts).expect("collect succeeds");
+    let result = mvm_cli::capture::resolve::resolve_report(&report).expect("resolve succeeds");
 
     assert_eq!(result.workload.id, "captured-project");
     assert_eq!(result.workload.apps.len(), 1);
@@ -117,13 +117,13 @@ fn resolve_produces_canonical_workload_with_unresolved_items() {
 
 #[test]
 fn rendered_nix_contains_expected_flake_and_launch_json() {
-    let opts = mvm_capture::collect::CollectOptions {
+    let opts = mvm_cli::capture::collect::CollectOptions {
         project_path: fixture_root(),
         explicit_commands: vec!["cargo run".to_owned()],
         ..Default::default()
     };
-    let report = mvm_capture::collect::collect_project(&opts).expect("collect succeeds");
-    let result = mvm_capture::resolve::resolve_report(&report).expect("resolve succeeds");
+    let report = mvm_cli::capture::collect::collect_project(&opts).expect("collect succeeds");
+    let result = mvm_cli::capture::resolve::resolve_report(&report).expect("resolve succeeds");
 
     let out = tempfile::tempdir().expect("tempdir");
     mvm_compiler::compile(&result.workload, out.path(), &fixture_root())
@@ -160,11 +160,11 @@ fn capture_honours_ignore_files_and_leaves_the_project_unchanged() {
     std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"p\"\n").expect("manifest");
 
     let before = tree_contents(root);
-    let opts = mvm_capture::collect::CollectOptions {
+    let opts = mvm_cli::capture::collect::CollectOptions {
         project_path: root.to_path_buf(),
         ..Default::default()
     };
-    let report = mvm_capture::collect::collect_project(&opts).expect("collect succeeds");
+    let report = mvm_cli::capture::collect::collect_project(&opts).expect("collect succeeds");
 
     assert!(
         report

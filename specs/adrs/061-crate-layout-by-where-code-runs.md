@@ -315,12 +315,13 @@ in the workspace.
 | `crates/mvm-vmm`, `crates/mvm-backends` | `"crates/vmm"`; backends folds into it |
 | `crates/mvm-agentd`, `crates/mvm-setpriv`, `crates/mvm-builder-guest`, `crates/mvm-host-services` | `"crates/guest/mvm-agentd"`, `"crates/guest/mvm-setpriv"`, `"crates/guest/mvm-builder-guest"`, `"crates/guest/mvm-host-services"` |
 | `crates/mvm-hostd` | `"crates/host/mvm-hostd"` for supervisor; extracted roles at `"crates/host/mvm-host-audit"`, `"crates/host/mvm-host-egress"`, `"crates/host/mvm-host-admission"`, `"crates/host/mvm-host-broker"` |
-| `crates/mvm-sdk`, `crates/mvm-hostlib`, `crates/mvm-compiler`, `crates/mvm-capture` | `"crates/sdk/mvm-sdk"`, `"crates/sdk/mvm-hostlib"`, `"crates/sdk/mvm-compiler"`, `"crates/sdk/mvm-capture"` |
+| `crates/mvm-sdk`, `crates/mvm-hostlib`, `crates/mvm-compiler` | `"crates/sdk/mvm-sdk"`, `"crates/sdk/mvm-hostlib"`, `"crates/sdk/mvm-compiler"` |
 | `crates/mvm-http`, `crates/mvm-fs` | `"crates/deps/mvm-http"`, `"crates/deps/mvm-fs"` |
 | `crates/deps/libkrun-sys`, `crates/deps/mvm-macho-sign` | Unchanged |
 | `crates/mvm-build`, `crates/mvm-runtime`, `crates/mvm-cli` | `"crates/build"`, `"crates/runtime"`, `"crates/cli"` |
 | `crates/mvm-client`, `crates/mvm-gpu`, `crates/mvm-conformance`, root package, `xtask` | Unchanged; client relocation awaits coordinated Studio changes |
 | `mvm-net` (folded into `mvm_core::net`), `mvm-bundler` (folded into `mvm_core::plan::bundle::export`) | Fold into core as specified above |
+| `mvm-capture` (folded into `mvm_cli::capture`) | Fold into its only consumer, `mvm-cli` |
 | `runmvm-client` (deleted) | Retire with its publish/registry-smoke lane; retain contract publication |
 
 Nested fuzz workspaces travel with their owner, except the VMM geometry harness

@@ -1,7 +1,7 @@
 # ADR-050: `mvm capture` — Project-Environment Capture Frontend
 
 Backing: shipped-source
-Validation: `cargo test -p mvm-capture` and capture CLI integration tests
+Validation: `cargo test -p mvm-cli capture` and capture CLI integration tests
 
 ## Status
 
@@ -24,16 +24,17 @@ file, user, service, or hardware detail of the source machine.
 ## Decision
 
 Add a new `mvm capture` capability to the CLI and a new `mvm-capture` crate
-that implements the isolated host-inspection component.
+that implements the isolated host-inspection component. The crate has since
+folded into `mvm-cli` as the `mvm_cli::capture` module, its only consumer.
 
 ### Architecture
 
 ```text
 Linux project and selected commands
                 ↓
-        raw Capture Report IR   (mvm-capture)
+        raw Capture Report IR   (mvm_cli::capture)
                 ↓
- deterministic resolution and policy (mvm-capture)
+ deterministic resolution and policy (mvm_cli::capture)
                 ↓
        existing MVM environment IR   (mvm_contract::ir)
                 ↓
@@ -42,8 +43,8 @@ Linux project and selected commands
  clean build, boot, and command verification
 ```
 
-The host-inspection logic lives in `crates/mvm-capture/`. It is gated by
-platform so the crate compiles on macOS and Windows as a safe stub, while
+The host-inspection logic lives in `crates/mvm-cli/src/capture/`. It is gated by
+platform so the module compiles on macOS and Windows as a safe stub, while
 Linux-specific collectors run only on Linux. The CLI group in
 `crates/mvm-cli/src/commands/capture/` orchestrates the three user-facing
 commands: `capture project`, `capture resolve`, and `capture verify`.
@@ -91,7 +92,7 @@ backend.
 
 ## Consequences
 
-- `mvm-capture` adds a small dependency surface: it reuses `mvm-contract`,
+- Capture adds a small dependency surface: it reuses `mvm-contract`,
   `serde`, `sha2`, and a few workspace utilities.
 - Linux-specific collectors (`dpkg`, `which`, executable metadata) are
   isolated; non-Linux builds remain green.
@@ -102,6 +103,6 @@ backend.
 
 ## Related
 
-- `crates/mvm-capture/`
+- `crates/mvm-cli/src/capture/`
 - `crates/mvm-cli/src/commands/capture/`
 - `tests/fixtures/capture/rust-hello/`

@@ -10,6 +10,7 @@
 pub mod approval;
 pub mod bench;
 pub mod bootstrap;
+pub mod capture;
 pub mod commands;
 pub mod config_watcher;
 pub mod doctor;

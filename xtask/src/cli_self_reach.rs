@@ -12,9 +12,9 @@
 //!   route through `refuse_cli_spawn`, `CliSpawn` or `resolve_verified_for`
 //!   (which refuses first), so a library embedder refuses instead of running
 //!   `mvmctl`.
-//! - No crate below the CLI may depend on `mvm-cli` or `mvm-capture`, the two
-//!   crates whose job is to run the CLI. Reaching them transitively through
-//!   the client would make every guard above moot.
+//! - No crate below the CLI may depend on `mvm-cli`, the crate whose job is
+//!   to run the CLI. Reaching it transitively through the client would make
+//!   every guard above moot.
 //!
 //! `src/bin/` entry points are separate processes with their own role and are
 //! not library code an embedder links.
@@ -31,10 +31,10 @@ use crate::rust_source::{
 };
 
 /// Crates whose purpose is to run the CLI, or to test it.
-const CLI_SIDE: &[&str] = &["mvm-cli", "mvm-capture", "mvm-conformance"];
+const CLI_SIDE: &[&str] = &["mvm-cli", "mvm-conformance"];
 
 /// Crates nothing below the CLI may depend on.
-const NOT_LINKABLE: &[&str] = &["mvm-cli", "mvm-capture"];
+const NOT_LINKABLE: &[&str] = &["mvm-cli"];
 
 /// Files that build a process and resolve the CLI today. Some only hold the
 /// resolver or run a test binary; the list pins the set, not a verdict.
@@ -44,7 +44,7 @@ const KNOWN_REACHES: &[&str] = &[
     "crates/mvm-backends/src/driver/qemu_process.rs",
     "crates/mvm-build/src/builder_egress_process.rs",
     "crates/mvm-build/src/builder_vm_bootstrap.rs",
-    "crates/mvm-capture/src/verify.rs",
+    "crates/mvm-cli/src/capture/verify.rs",
     "crates/mvm-cli/src/commands/build/kernel.rs",
     "crates/mvm-cli/src/commands/env/builder_vm/vm_helpers.rs",
     "crates/mvm-cli/src/commands/env/uninstall.rs",
@@ -255,7 +255,6 @@ mod tests {
         let src = "fn f() { helper_command(current_exe().unwrap()); }";
         for file in [
             "crates/mvm-cli/src/x.rs",
-            "crates/mvm-capture/src/x.rs",
             "crates/mvm-hostd/src/bin/endpoint.rs",
             "crates/mvm-vmm/tests/x.rs",
             "crates/mvm-vmm/src/host/x_tests.rs",
@@ -270,8 +269,8 @@ mod tests {
 
     #[test]
     fn linking_the_cli_side_is_flagged() {
-        let dep = "[dependencies]\nmvm-capture.workspace = true\n";
-        assert_eq!(cli_side_dependency(dep), Some("mvm-capture"));
+        let dep = "[dependencies]\nmvm-cli.workspace = true\n";
+        assert_eq!(cli_side_dependency(dep), Some("mvm-cli"));
         assert_eq!(
             cli_side_dependency("mvm-cli = { path = \"x\" }\n"),
             Some("mvm-cli")

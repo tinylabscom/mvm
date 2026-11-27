@@ -1,12 +1,12 @@
 //! Host-side project and environment collectors.
 //!
 //! The public entry point is [`collect_project`], which returns a
-//! [`CaptureReportV1`](crate::report::CaptureReportV1). Linux-specific
+//! [`CaptureReportV1`](crate::capture::report::CaptureReportV1). Linux-specific
 //! collectors live in `linux.rs`; other platforms get a safe stub that
 //! still parses manifests and records platform facts.
 
-use crate::CaptureError;
-use crate::report::{CaptureReportV1, Evidence, Observation, ObservationKind};
+use crate::capture::CaptureError;
+use crate::capture::report::{CaptureReportV1, Evidence, Observation, ObservationKind};
 use std::path::{Path, PathBuf};
 
 mod elf;
@@ -55,7 +55,7 @@ pub struct CollectOptions {
 /// Non-file parameters for [`inspect_executable`].
 pub(crate) struct InspectMeta<'a> {
     pub source: &'a str,
-    pub confidence: crate::report::Confidence,
+    pub confidence: crate::capture::report::Confidence,
     pub name: Option<&'a str>,
     pub warnings: Vec<String>,
     pub provenance: Vec<String>,
@@ -179,7 +179,7 @@ fn read_prefix(path: &Path, max_bytes: u64) -> Result<Vec<u8>, CaptureError> {
 /// Remove any accidental secret material from a report in place.
 fn redact_secrets(report: &mut CaptureReportV1) {
     for obs in &mut report.observations {
-        if obs.evidence.sensitivity == crate::report::Sensitivity::Secret {
+        if obs.evidence.sensitivity == crate::capture::report::Sensitivity::Secret {
             obs.evidence.content_hash = None;
             obs.evidence.build_id = None;
             obs.path = None;
@@ -223,7 +223,7 @@ pub(crate) fn read_limited(path: &Path, max_bytes: u64) -> Result<Vec<u8>, Captu
 #[cfg(test)]
 mod tests {
     use super::{InspectMeta, TraverseLimits, inspect_executable};
-    use crate::report::{CaptureReportV1, Confidence};
+    use crate::capture::report::{CaptureReportV1, Confidence};
     use std::io::Write;
     use std::path::Path;
 

@@ -1,6 +1,6 @@
 //! Non-Linux stub collector.
 
-use crate::report::CaptureReportV1;
+use crate::capture::report::CaptureReportV1;
 
 pub(crate) fn record_unsupported(report: &mut CaptureReportV1) {
     report.warnings.push(
