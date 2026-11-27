@@ -155,9 +155,9 @@ and other applies. It needs a durable binding from each live workload to
 the policy inputs and effective generation it was admitted under. An apply
 that cannot identify or fence every affected workload refuses publication;
 it must not guess from a VM's name or re-read a mutable policy file and
-call that the already-admitted policy. A default or project policy, a
-named profile/group, and a tenant bundle are different input sources,
-but must resolve through the same policy owner. An unsupported source
+call that the already-admitted policy. A default or project policy and a
+named profile/group are different input sources, but must resolve
+through the same policy owner. An unsupported source
 cannot silently opt out of live policy updates.
 
 This owner is local to MVM, not `mvmd`. Today the CLI calls

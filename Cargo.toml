@@ -251,10 +251,8 @@ landlock = "0.4"
 notify = "8"
 notify-debouncer-mini = "0.7"
 
-# IP/CIDR matching for the L4 egress proxy's allow-list rules.
-# Plan 60 Phase 3 Slice B. `serde` feature serialises `IpNet` as
-# the canonical CIDR string ("10.0.0.0/24"), which is the wire
-# format the policy bundle TOML uses.
+# IP/CIDR matching for the egress gate's canonical rules. The `serde`
+# feature serialises `IpNet` as the canonical CIDR string ("10.0.0.0/24").
 ipnet = { version = "2", features = ["serde"] }
 async-trait = "=0.1.89"
 

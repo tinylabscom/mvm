@@ -68,11 +68,11 @@ pub enum LocalAuditKind {
     /// `plan.admitted` event: this is the local CLI verb that
     /// hands the plan to the supervisor.
     PlanSubmit,
-    /// Policy bundle install or replacement. Public policy rollout
-    /// is owned by mvmd; this keeps the local audit kind stable.
+    /// Policy install or replacement. No `mvmctl` verb emits it; the kind
+    /// stays so audit chains that carry it keep parsing.
     PolicyApply,
-    /// Policy bundle rollback. Public policy rollout is owned by mvmd;
-    /// this keeps the local audit kind stable.
+    /// Policy rollback. No `mvmctl` verb emits it; the kind stays so audit
+    /// chains that carry it keep parsing.
     PolicyRollback,
     /// `mvmctl host trust set` — add or remove a trusted signer key
     /// from the supervisor's trust store. Affects which signed plans

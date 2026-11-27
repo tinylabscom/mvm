@@ -7,19 +7,141 @@ use mvm_core::network_policy::{HostPort, is_banned_ssh_port};
 ///
 /// # Errors
 ///
-/// Empty hosts, malformed explicit ports, and SSH destinations are refused.
+/// Empty hosts, malformed explicit ports, hosts that
+/// [`check_destination_host`] refuses, and SSH destinations are refused.
 pub fn parse_allow_host(entry: &str) -> Result<HostPort> {
-    let parsed = match entry.rsplit_once(':') {
-        Some(_) => entry
-            .parse()
-            .with_context(|| format!("invalid --allow-host {entry:?}")),
-        None if entry.is_empty() => anyhow::bail!("--allow-host cannot be empty"),
-        None => Ok(HostPort::new(entry, 443)),
-    }?;
+    let parsed = match bracketed_ipv6(entry) {
+        Some(parsed) => parsed,
+        None => parse_unbracketed(entry),
+    }
+    .with_context(|| format!("invalid --allow-host {entry:?}"))?;
+    check_destination_host(&parsed.host)
+        .with_context(|| format!("invalid --allow-host {entry:?}"))?;
     if is_banned_ssh_port(parsed.port) {
         anyhow::bail!(
             "--allow-host {entry:?} requests TCP/22, but SSH sessions are banned in microVMs"
         );
     }
     Ok(parsed)
+}
+
+/// `[v6]` or `[v6]:port`, the bracketed spelling of an IPv6 literal. `None`
+/// when `entry` is not brackets around an IPv6 address.
+fn bracketed_ipv6(entry: &str) -> Option<Result<HostPort>> {
+    let (inner, tail) = entry.strip_prefix('[')?.split_once(']')?;
+    let addr = inner.parse::<std::net::Ipv6Addr>().ok()?;
+    let port = match tail.strip_prefix(':') {
+        _ if tail.is_empty() => Ok(443),
+        Some(port) => port
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("invalid port {port:?}")),
+        None => Err(anyhow::anyhow!("unexpected {tail:?} after the address")),
+    };
+    Some(port.map(|port| HostPort::new(addr.to_string(), port)))
+}
+
+fn parse_unbracketed(entry: &str) -> Result<HostPort> {
+    match entry.rsplit_once(':') {
+        Some(_) => Ok(entry.parse()?),
+        None if entry.is_empty() => anyhow::bail!("--allow-host cannot be empty"),
+        None => Ok(HostPort::new(entry, 443)),
+    }
+}
+
+/// Refuse an egress destination host the endpoint's gate could never pin.
+///
+/// The gate admits a destination only as an IP literal or a DNS name it
+/// resolves at endpoint start, and one entry it cannot pin turns the whole
+/// allow-list into deny-all. So a wildcard, CIDR text, a bracketed
+/// non-address or anything else that is not a host name is refused here, by shape. A
+/// well-formed name that does not resolve is not caught: that needs a DNS
+/// lookup, which admission does not do.
+///
+/// # Errors
+///
+/// Names the refused host and why.
+pub fn check_destination_host(host: &str) -> Result<()> {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+    let reason = if host.contains('*') {
+        "a wildcard is not a host; list each host"
+    } else if host.contains('/') {
+        "CIDR ranges are not supported; list each host or address"
+    } else if host.starts_with('[') || host.ends_with(']') {
+        "only an IPv6 address may be bracketed"
+    } else if is_dns_name(host) {
+        return Ok(());
+    } else {
+        "not a host name"
+    };
+    anyhow::bail!("{host:?}: {reason}")
+}
+
+fn is_dns_name(host: &str) -> bool {
+    let name = host.strip_suffix('.').unwrap_or(host);
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_names_and_ip_literals_are_accepted() {
+        for host in [
+            "api.github.com",
+            "localhost",
+            "my-service_1.internal",
+            "93.184.216.34",
+            "2001:db8::1",
+        ] {
+            check_destination_host(host).unwrap_or_else(|e| panic!("{host}: {e:#}"));
+        }
+        assert_eq!(parse_allow_host("api.github.com").unwrap().port, 443);
+        assert_eq!(parse_allow_host("::1:8443").unwrap().host, "::1");
+        let bracketed = parse_allow_host("[2001:db8::1]:8443").unwrap();
+        assert_eq!(
+            (bracketed.host.as_str(), bracketed.port),
+            ("2001:db8::1", 8443)
+        );
+        assert_eq!(parse_allow_host("[::1]").unwrap().port, 443);
+    }
+
+    #[test]
+    fn shapes_the_gate_cannot_pin_are_refused_naming_the_entry() {
+        for (entry, hint) in [
+            ("*.example.com", "wildcard"),
+            ("*.example.com:443", "wildcard"),
+            ("10.0.0.0/8:443", "CIDR"),
+            ("[api.example.com]:443", "bracket"),
+            ("[::1]:http", "invalid port"),
+            ("exa mple.com", "not a host name"),
+            ("bad..name", "not a host name"),
+            ("-lead.example.com", "not a host name"),
+            ("trail-.example.com", "not a host name"),
+        ] {
+            let err = format!("{:#}", parse_allow_host(entry).unwrap_err());
+            assert!(err.contains(entry), "{entry}: {err}");
+            assert!(err.contains(hint), "{entry}: {err}");
+        }
+    }
+
+    #[test]
+    fn an_overlong_name_is_refused() {
+        let label = "a".repeat(64);
+        assert!(check_destination_host(&format!("{label}.com")).is_err());
+        let name = vec!["a".repeat(60); 5].join(".");
+        assert!(check_destination_host(&name).is_err());
+    }
 }

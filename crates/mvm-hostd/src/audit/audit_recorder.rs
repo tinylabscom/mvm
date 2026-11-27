@@ -78,7 +78,7 @@ pub enum EventCategory {
     Flow,
     /// ExecutionPlan lifecycle. `plan.<verb>`.
     Plan,
-    /// Policy bundle operations. `policy.<verb>`.
+    /// Policy operations. `policy.<verb>`.
     Policy,
     /// Encryption key rotation / release. `key.<verb>`.
     Key,

@@ -2728,6 +2728,65 @@ pub(crate) mod admit_plan_tests {
         let (plan, content) = admit("vm-open", NetworkPolicy::unrestricted());
         assert_eq!(plan.network_policy.0, format!("{}:vm-open", plan.tenant.0));
         assert!(!content.contains("plan.egress_destinations"), "{content}");
+
+        // A preset's hosts are recorded as the preset expands them.
+        let preset = mvm_core::network_policy::NetworkPreset::Agent;
+        let (_, content) = admit("vm-preset", NetworkPolicy::preset(preset));
+        let entry = content
+            .lines()
+            .find(|line| line.contains("\"plan.egress_destinations\""))
+            .unwrap_or_else(|| panic!("no plan.egress_destinations entry: {content}"));
+        let expected = self::policy::egress_destinations(&NetworkPolicy::preset(preset));
+        assert!(!expected.is_empty());
+        assert!(
+            entry.contains(&format!("\"destination_count\":\"{}\"", expected.len())),
+            "{entry}"
+        );
+        for (host, _) in &expected {
+            assert!(
+                entry.contains(&format!("\"{host}\"")),
+                "missing {host}: {entry}"
+            );
+        }
+    }
+
+    /// A destination the egress gate could never pin is refused before the
+    /// plan is signed, naming the entry, whatever source supplied it — not
+    /// signed, audited as admitted, and then silently denied at the endpoint.
+    #[test]
+    fn admission_refuses_a_destination_the_gate_cannot_pin() {
+        let _home = isolated_home();
+        use mvm_core::network_policy::{HostPort, NetworkPolicy};
+
+        for host in ["*.example.com", "10.0.0.0/8", "[::1]", "bad..name"] {
+            let keys_dir = tempfile::tempdir().unwrap();
+            let audit_dir = tempfile::tempdir().unwrap();
+            let rootfs_dir = tempfile::tempdir().unwrap();
+            let rootfs = write_rootfs(rootfs_dir.path(), b"unpinnable");
+            let ledger = InMemoryNonceLedger::new();
+            let err = admit_plan_for_boot(AdmitPlanForBootParams {
+                bundle_sizing: Default::default(),
+                mailbox: None,
+                vm_name: "vm-unpinnable",
+                cpus: 1,
+                mem_mib: 128,
+                keys_dir: Some(keys_dir.path()),
+                audit_dir: Some(audit_dir.path()),
+                network_policy: NetworkPolicy::allow_list(vec![
+                    HostPort::new("api.github.com", 443),
+                    HostPort::new(host, 443),
+                ]),
+                ..pinning_params(&rootfs, &ledger)
+            })
+            .err()
+            .unwrap_or_else(|| panic!("{host} must be refused"));
+            let msg = format!("{err:#}");
+            assert!(msg.contains(host), "{host}: {msg}");
+            assert!(
+                !audit_dir.path().join("local.jsonl").exists(),
+                "{host}: nothing is admitted or audited as admitted"
+            );
+        }
     }
 
     #[test]

@@ -67,6 +67,24 @@ pub fn resolve_network_policy_pins(
     reg
 }
 
+/// The allow-list hosts `pins` holds no address for, in rule order. Any one
+/// of them makes the gate projection fail and the whole policy fall back to
+/// deny-all, so the endpoint names them when that happens.
+pub fn unpinned_hosts(
+    policy: &crate::policy::network_policy::NetworkPolicy,
+    pins: &DnsPinRegistry,
+) -> Vec<String> {
+    let mut hosts: Vec<String> = policy
+        .resolve_rules()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|hp| pins.lookup(&hp.host).is_none_or(|pin| pin.ips.is_empty()))
+        .map(|hp| hp.host)
+        .collect();
+    hosts.dedup();
+    hosts
+}
+
 /// Order an address set IPv4-first, stable within each family. Host resolvers
 /// commonly return IPv6 first (macOS `getaddrinfo` does), which strands an
 /// admitted connect when the host has no IPv6 egress. Pinning IPv4-first makes
@@ -140,6 +158,30 @@ mod tests {
                 ip("2606:4700:10::ac42:93f3"),
             ]
         );
+    }
+
+    #[test]
+    fn unpinned_hosts_names_every_host_with_no_address() {
+        use crate::policy::network_policy::{HostPort, NetworkPolicy};
+        let policy = NetworkPolicy::allow_list(vec![
+            HostPort::new("93.184.216.34", 443),
+            HostPort::new("typo.invalid", 443),
+            HostPort::new("missing.invalid", 8443),
+        ]);
+        let mut pins = DnsPinRegistry::new();
+        pins.add(new_pin(
+            "93.184.216.34",
+            vec![ip("93.184.216.34")],
+            Duration::hours(1),
+        ));
+        pins.add(new_pin("typo.invalid", Vec::new(), Duration::hours(1)));
+        assert_eq!(
+            unpinned_hosts(&policy, &pins),
+            vec!["typo.invalid".to_string(), "missing.invalid".to_string()]
+        );
+        assert!(unpinned_hosts(&NetworkPolicy::unrestricted(), &DnsPinRegistry::new()).is_empty());
+        let literal = NetworkPolicy::allow_list(vec![HostPort::new("1.1.1.1", 443)]);
+        assert!(unpinned_hosts(&literal, &resolve_network_policy_pins(&literal)).is_empty());
     }
 
     #[test]

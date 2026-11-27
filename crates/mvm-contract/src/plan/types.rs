@@ -806,8 +806,8 @@ impl AdmissionProfile {
 /// strict policy gates).
 ///
 /// Mirrors `passthru.variant` from Nix-side `mkGuest`. The supervisor
-/// resolves it from the workload's `SignedImageRef.name` suffix or
-/// from the policy bundle's bound variant; `audit::AuditEntry::variant`
+/// resolves it from the workload's `SignedImageRef.name` suffix;
+/// `audit::AuditEntry::variant`
 /// records this for every entry, so the value flows through the audit
 /// chain unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

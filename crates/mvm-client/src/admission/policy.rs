@@ -139,7 +139,12 @@ pub fn shares_from_volume_cfg(
 /// unrestricted), `None` (synthesis writes `local-default`) when it grants
 /// none. The label names the policy asset identity that binds the
 /// `NetworkPolicy` digest into the plan; nothing resolves it into a file.
-pub fn generated_policy_ref(
+///
+/// Refuses, before anything is signed, a destination host the endpoint's
+/// gate could never pin (see [`mvm_policy::allow_host::check_destination_host`]),
+/// whichever source supplied it. A well-formed name that does not resolve
+/// is not refused here.
+pub(crate) fn generated_policy_ref(
     tenant: &str,
     vm_name: &str,
     policy: &mvm_core::network_policy::NetworkPolicy,
@@ -149,6 +154,14 @@ pub fn generated_policy_ref(
     }
     if !policy.allows_egress() {
         return Ok(None);
+    }
+    for rule in policy.resolve_rules().unwrap_or_default() {
+        mvm_policy::allow_host::check_destination_host(&rule.host).with_context(|| {
+            format!(
+                "egress destination {}:{} cannot be enforced",
+                rule.host, rule.port
+            )
+        })?;
     }
     if !valid_component(tenant) {
         anyhow::bail!(
@@ -166,7 +179,9 @@ pub fn generated_policy_ref(
 /// The `(host, port)` destinations a launch's network policy admits, sorted
 /// and de-duplicated, for the `plan.egress_destinations` audit record.
 /// Empty for deny-all and for unrestricted egress, which names no list.
-pub fn egress_destinations(policy: &mvm_core::network_policy::NetworkPolicy) -> Vec<(String, u16)> {
+pub(crate) fn egress_destinations(
+    policy: &mvm_core::network_policy::NetworkPolicy,
+) -> Vec<(String, u16)> {
     let mut destinations: Vec<(String, u16)> = policy
         .resolve_rules()
         .unwrap_or_default()
