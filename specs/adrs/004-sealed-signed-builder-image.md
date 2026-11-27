@@ -140,6 +140,15 @@ meaning is fixed once released:
   cannot supply a payload refuses an image above ABI 0 before booting it,
   naming both numbers; and a persistent builder booted with other builder
   binaries is stopped rather than reused.
+- *Where the code is.* `builder_boot_cmdline` is the one kernel command
+  line every backend boots with, and `stage_builder_boot` decides each boot.
+  The guest digest-checks the payload before pivoting into the read-only
+  image and runs the builder binaries from `/run/mvm/host-bins`.
+  `mvm-host-vm-init` forks the guest agent under the payload's
+  `mvm-setpriv` and falls back to the image's `/sbin` copy only when the boot
+  carried none. mkGuest's `withSetpriv = false` builds an image without the
+  baked copy; declaring ABI 2 for the published builder image is
+  `mvm-images`' change to make.
 
 Only the payload's digest and the image's ABI cross the boundary. In a
 release, the builder's host binaries are authenticated by the `mvmctl`

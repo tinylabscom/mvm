@@ -1505,6 +1505,262 @@ keeping that subprocess minimal and security-reviewed. The host signer is
 a single point of admission availability; loss of the key means no plan
 can be admitted, with no recovery path today.
 
+## Appendix: Claim implementation notes
+
+Where each claim lives in the code, and the corrections earlier prose needed.
+The ledger above binds; these notes do not add a claim or a witness, and a
+witness the ledger already names is not repeated here.
+
+### NIC-less guests (claims 10 and 13)
+
+Every workload microVM backend boots the guest with a virtio-vsock device and
+no net device: Firecracker's config sequence omits `/network-interfaces`,
+libkrun pins `NetworkingMode::VsockDirect` (which never attaches a net
+device), HVF's device model has none (`apple-container` is that device model
+with a different kernel image, holding an `HvfRunner`), and the QEMU workload
+driver emits no `-netdev`. Egress leaves only over the `NetworkFlow` channel
+to the per-VM `mvm-network-endpoint`, whose `EgressGate` is the one decision
+point; because the endpoint originates every outbound connection it can
+authorize, substitute and log it. Wasm has no guest network and is outside
+this funnel.
+
+The builder VM is NIC-less on every backend, QEMU included: `nix build`
+substituter traffic and dependency installs (`uv` / `pnpm`) ride the same
+vsock relay under `NetworkPolicy::trusted_build_egress()`, through the one
+proxy environment the guest init hands every builder job, and an install on a
+builder booted without vsock egress is refused rather than dialed direct.
+`xtask check-single-network-path` fails if a guest NIC, raw-packet stack,
+second spawn site or socket owner appears, if builder code opens a socket
+other than the egress client's readiness probe, if a host-binary manifest
+names the retired guest-side `mvm-egress-proxy`, or if the QEMU builder gains
+a NIC argument.
+
+### Claim 1
+
+Admission raises the seccomp tier from `standard` to `network` when the launch
+admits egress, an ingress mapping or a host service, and signs the raised tier
+(`workload_seccomp_tier`). The host names it on the guest kernel cmdline as
+`mvm.seccomp=<tier>` (`seccomp_cmdline_token`), not in `ActivateEnvironment`,
+whose `deny_unknown_fields` would make older guest agents refuse activation.
+The agent admits it at activation (`admit_from_cmdline`) and installs it,
+after the child's other pre-exec setup, in entrypoint runs and the worker
+pool, exec, process control, detached runs, the console, lifecycle hooks and
+health probes; a denied call fails with `EPERM`. A warm-claimed child gets its
+tier from the claiming launch's signed plan: the runner hands it over on the
+post-restore handshake (`ChildIdentity`), the child's agent admits it once
+(`admit_restored`), and the claim is refused unless the agent reports holding
+exactly that tier (`require_admitted_seccomp_tier`). An agent too old for the
+field refuses the handshake, and so does a worker pool started unfiltered in
+the parent. A cold boot whose guest agent predates the token still applies no
+tier, including the agent in the pinned image set a release binary boots until
+it assembles its own guest runtime.
+
+### Claim 3
+
+No CI lane boots a tampered rootfs under KVM; the witnesses check artifact
+emission, snapshot-tamper rejection and a flipped data byte against the
+recorded root hash.
+
+### Claim 4
+
+`scripts/check-prod-agent-no-exec.sh`, run by the
+`guest-agent-runtime-boundary` job in `.github/workflows/security.yml`,
+exercises the runtime profile and signed grant boundary.
+
+### Claim 5
+
+The guest-protocol fuzz targets live under `crates/mvm-agentd/fuzz/`; the
+supervisor-config target is
+`crates/deps/libkrun-sys/fuzz/fuzz_targets/fuzz_supervisor_config.rs`. The
+third-party virtio-net frame parsers once tracked as an upstream fuzz gap have
+no in-tree caller since the userspace network gateways were deleted with the
+guest-NIC path; `specs/adrs/003-hypervisor-egress-policy.md` is written around
+the vsock-only chokepoint.
+
+### Claim 6
+
+The production path is `acquire_image_set()` in
+`crates/mvm-cli/src/commands/env/artifact_verify.rs`, which calls
+`PublishedImageSet::acquire_from`. `fetch_expected_hashes` and
+`verify_artifact_hash` in that module are test-only helpers, not evidence for
+the production path. Image-set acquisition does not read
+`MVM_SKIP_HASH_VERIFY`; the hatch still skips the bootstrap-kernel checks and
+the per-binary checksums inside an already digest-verified overlay archive.
+Never set it in CI. Retired members parse as
+`ImageSetRole::RetiredGuestRuntime`. No function by this name exists, and
+earlier doc comments that cited it were corrected:
+
+<!-- absent:begin -->
+
+`download_dev_image`
+
+<!-- absent:end -->
+
+### Claim 7
+
+The `cargo-deny` and `cargo-audit` jobs in `security.yml` run nightly and on
+release tags; `security.yml` has no `pull_request` trigger.
+
+### Claim 8
+
+The host keypair is `~/.mvm/keys/host-signer.ed25519` (mode 0600); plans
+verify through `mvm_core::plan::verify_plan` (`plan` is a module of
+`mvm-core`, not a crate). Entries go to `~/.mvm/audit/<tenant>.jsonl` and are
+checked by `mvm_hostd::supervisor::verify_audit_chain`, surfaced by
+`mvmctl trust audit verify`, which exits nonzero on drift. The chain rotates
+into `<tenant>.seg-NNNNNN.jsonl` segments at `MVM_AUDIT_SEGMENT_BYTES` (4 MiB
+default); nothing is deleted, every segment after the first opens with a
+signed `chain.continued` handoff, and `mvmctl doctor` checks the live segment
+plus the handoffs while `trust audit verify` walks every retired interior.
+Tail truncation of whole sessions, or of a session that never sealed, stays
+undetectable without an off-host witnessed root. Rejection paths are
+exercised by workspace `cargo test` through `synthesize_plan`,
+`host_signer::load_or_init_at`, `admit_for_run` and `AuditEmitter`;
+`xtask check-no-display-on-secret-types` protects the host signer's redacted
+`Debug`.
+
+### Claim 9
+
+The rejection ladder is exercised through
+`mvm_core::plan::bundle::read_and_verify_bundle` and
+`mvm_core::plan::bundle::verify_plan_bundle`; `mvmctl bundle fetch`
+round-trip and `admit_for_run` tests assert refusal on pin-without-context and
+pin-archive mismatch.
+
+### Claim 10
+
+An unrecognised preset name refuses rather than falling through to a
+permissive default, at the CLI and on the wire alike
+(`crates/mvm-contract/tests/egress_predicate_algebra.rs`). There is no
+unrestricted-policy acknowledgement or warning: `mvmctl up` is not a
+dispatched verb, and the acknowledgement variable earlier prose described is
+read nowhere (its only mention is a doc comment in `mvm-contract::stream::edge`
+saying another mechanism is shaped after it). Building one is tracked in the
+issues.
+
+<!-- absent:begin -->
+
+`MVM_ACK_UNRESTRICTED_NETWORK`.
+
+<!-- absent:end -->
+
+### Claim 11
+
+The builder VM (`mvm-host-vm-init` plus the `LibkrunBuilderVm::run_build`
+Install arm) installs dependencies into `~/.mvm/volumes/deps/<volume_hash>/`.
+`mvm_build::app_deps` calls `mvm_core::deps_audit::verify_sealed_volume` when
+the build cache reuses a volume. Every launch builds its plan with
+`deps_volume: None`, and `verify_deps_volume_binding` has no production
+caller. The seal-time lane applies
+`mvm_build::app_deps_gate::apply_install_gate` and fails closed on
+high/critical findings or a stub SBOM/CVE; production launch does not call
+that gate, and the dormant-control manifest pins that limitation. The
+`app-deps-audit` job in `.github/workflows/security.yml` runs nightly and on
+release tags, not per PR: it runs `mvmctl dev compile` on
+`examples/python/hello-app-with-deps/`, seals a clean and a high-CVE fixture
+with `mvm-build`'s `mvm-app-deps-fixture-tool` example, checks
+`mvmctl deps inspect --json`, the prod and dev gates, and that a byte-flip on
+`cve.json` makes inspect refuse. A full builder-VM round trip (a real
+`uv pip install` plus `pip-audit`) is not run by that lane.
+
+### Claim 12
+
+Payload-freedom for the stream plane's own audit entries is witnessed by
+`stream_audit_entries_carry_the_binding_and_no_payload_bytes`. Earlier prose
+for this claim named four tests, a fuzz target and three
+`xtask check-handler-*` gates that never existed:
+
+<!-- absent:begin -->
+
+`service_call_denied_when_unbound`,
+`service_call_denied_outside_profile`,
+`audit_chain_contains_service_call_entries`,
+`audit_chain_carries_no_payload_bytes`, and a
+`fuzz_service_call.rs` target.
+
+<!-- absent:end -->
+
+### Claim 13
+
+There is no secret-returning `host.secrets.v1` broker handler. Placeholders
+reach the workload with each entrypoint call, never on the kernel command
+line; the `mvm.secret_env` cmdline token and its encoder were deleted because
+no booted guest read them. Six test names earlier prose listed do not exist:
+
+<!-- absent:begin -->
+
+`host_secrets_v1_denied_outside_allowed_destinations`,
+`zeroize_drop_zeros_secret_bytes`,
+`handler_inter_call_memory_hygiene`,
+`host_secrets_v1_signed_payload_jcs_roundtrip`,
+`secrets_subprocess_cannot_reach_supervisor_memory`,
+`placeholder_in_outbound_request_dropped_and_audited`.
+
+<!-- absent:end -->
+
+### Claim 14
+
+`mvmctl image pull` unpacks layers through
+`mvm_fs::oci::unpack::unpack_layer` and materializes the ext4 rootfs
+in-process with the pure-Rust writer, falling back to the builder VM for trees
+too large or fragmented for it; the builder VM carries no extended attributes,
+so a tree with `security.capability` or ACL xattrs that falls back is refused
+rather than emitted without them. `mvmctl run --image` admits the plan and
+then emits `plan.oci_provenance` through `AuditEmitter::emit_oci_provenance`
+(`crates/mvm-hostd/src/audit/emitter.rs`). The `unpack_layer` fuzz
+harness runs in `security.yml`'s `fuzz` job, and the six OCI hardening lanes
+(`layer-unpack-adversarial`, `digest-mismatch-reject`, `malformed-manifest`,
+`mutable-tag-prod-reject`, `reproducibility`, `image-runner-smoke`) are the
+`oci-hardening` matrix in the same workflow; none gates a PR, and the ledger
+row cites none of them.
+
+### Claim 15
+
+The sole interactive path is the agent-served PTY-over-vsock console
+(`crates/mvm-agentd/src/console.rs`). The backend captures the guest console
+write-only to `console.log` with no host input fd
+(`mvm_vmm::host::console_capture::open_console_capture`), and the host
+`enforce_accessible_gate` refuses `mvmctl machine console` on a sealed VM.
+Serial-console passthrough was considered and rejected (fatal on an
+input-less console).
+
+### Preview 17 and 18
+
+Preview 17's input gate is `crates/mvm-hostd/src/stream/input_gate.rs`; the
+fleet stream-edge workflow in `mvmd` is its second production caller, which
+closes no limit. Preview 18's admission ceiling is the operator config keys
+`max_cpu_millicores`, `max_memory_mib` and `max_wall_clock_secs`, and its
+budget `host_budget_memory_mib` and `host_budget_cpu_millicores`
+(`crates/mvm-hostd/src/admission_budget.rs`); the spawn scope carries
+`TasksMax=1024`.
+
+### Claim 20
+
+The self-update verifier once shelled out to `cosign` and returned `Ok` when
+it was absent; it now uses the in-process verifier, so an `mvmctl` built
+without `manifest-verify` cannot self-update. `MVM_SKIP_HASH_VERIFY` does not
+waive the checksum-manifest signature, and `--skip-verify` waives only the
+tarball's own bundle. `install.sh` verifies with the installed
+`mvmctl env verify-release`, or with `cosign`, and tolerates only a 404 for
+the guest runtime of releases that predate it (`tests/install_sh.rs`). A copy
+of the guest runtime found beside `mvmctl` is held to its own manifest, not
+re-verified against the signature at assembly. Under
+`MVM_SKIP_COSIGN_VERIFY` the release guest runtime may be downloaded but never
+installed: installing takes an `AuthenticatedReleaseArchive`, which
+`authenticated_archive` will not build from an unverified result, so
+bootstrap, first-use preparation, the image path and the two `mvmctl dev`
+assembly verbs refuse it. Elsewhere the hatch still waives verification of
+what is installed (an `env update` tarball, a builder image), so during a
+Sigstore outage a fresh release install cannot bootstrap. Members are checked
+against the manifest before signing (`check_release_archive`) and at
+acquisition and assembly (`install_release_guest_runtime`), not at launch,
+which reads only the first entry (`read_release_manifest`;
+`a_launch_does_not_compare_members_with_the_manifest`,
+`installing_an_authenticated_archive_still_walks_its_members`); the launch tests
+use a stand-in signature check private to `mvm-build`, so they witness order
+and the missing walk, not Sigstore. The published `v0.28.0-rc.2`, `rc.4` and
+`rc.5` releases carry the guest-runtime asset.
+
 ## References
 
 - `specs/adrs/007-vmbackend-single-trait.md` — the `VmBackend` trait
@@ -1521,5 +1777,5 @@ can be admitted, with no recovery path today.
   substitution mechanism behind claim 13 and preview claim 16.
 - `specs/adrs/024-wasm-sandbox-backend.md` — the `wasm-sandbox` backend's
   own decision record.
-- `CLAUDE.md` §"Security model" — the narrative summary kept in lockstep
-  with the claims ledger above.
+- `CLAUDE.md` §"Security model" — a one-line-per-claim index pointing at
+  this ADR; the ledger above stays authoritative.

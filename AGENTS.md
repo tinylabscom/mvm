@@ -92,18 +92,11 @@ direction here is not evidence that an unshipped target works.
 
 ## Documentation and editing hygiene
 
-- **No placeholders in shipped docs or guidance.** Do not land `TODO`,
-  `TBD`, `placeholder`, `<...>`, or similar stand-ins where contributors need
-  concrete instructions.
 - **Task context has one route.** Start from the GitHub issue, read only the
   ADRs/contracts it links, then use Trail for implementation discovery. Never
   recursively read `specs/` or treat a legacy plan as current work.
-- **Docs update with behavior changes.** If commands, flags, or behavior move,
-  update the matching docs in the same change, including
-  `public/src/content/docs/reference/cli-commands.md` when CLI surface changes.
-- **No scratch files in the repo tree.** Never write temporary/intermediate
-  files under the working tree; use `/tmp` instead (except local
-  `.agent-memory/notes/` findings).
+- Placeholders, docs that must move with behavior, and scratch files are
+  covered under "No placeholders" and "Documentation and scratch files" below.
 
 ## Execution boundaries
 
@@ -303,7 +296,7 @@ which measures the wall before and after over at least ten merge-group runs.
 No task is complete without all of:
 
 1. **Tests first**: Write or update tests covering the new/changed behavior before marking a task done. Unit tests for logic, integration tests for CLI and cross-crate interactions.
-2. **All tests green**: Run `cargo test --workspace` and confirm zero failures. New tests must pass alongside all existing tests.
+2. **All tests green**: Run `cargo nextest run --workspace` and `cargo test --workspace --doc` (nextest skips doctests) and confirm zero failures. New tests must pass alongside all existing tests.
 3. **Zero clippy warnings/errors**: Run `cargo clippy --workspace -- -D warnings` and fix all findings before calling a feature done. Never suppress a clippy lint with `#[allow(...)]` — fix the underlying issue instead.
 4. **Compiling workspace**: Run `cargo check --workspace` (or full `cargo test`/`cargo build`) and fix any errors before you finish. Never leave the workspace in a non-compiling state. **`--all-targets` is not exhaustive**: it silently skips targets behind `required-features` (the `mvm-conformance` cucumber runner needs `--features bdd`), and on macOS it cannot compile `cfg(target_os = "linux")` files at all — including Linux-gated _test_ files, which `just check linux` also misses because that recipe is `--lib` only. Changing the shape of a shared type (adding a struct field, a trait method, an enum variant) therefore needs `just check gated` before pushing. Skipping it costs a CI round trip: the break surfaces there as a compile error in the "Build workspace tests" job.
 5. **Keep the issue authoritative**: GitHub issues own work status, remaining
@@ -569,7 +562,8 @@ placeholder.
 ## Documentation and scratch files
 
 User-facing behavior changes update the matching docs in the same PR, including
-the CLI reference for commands, flags, defaults, or environment variables.
+the CLI reference (`public/src/content/docs/reference/cli-commands.md`) for
+commands, flags, defaults, or environment variables.
 Keep guides aligned with shipped behavior, not aspirational features; do not
 mark work done while docs are stale. Verify the changed reference against code.
 

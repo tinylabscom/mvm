@@ -1,1069 +1,152 @@
-# mvm -- Firecracker MicroVM Development Tool
+# mvm -- secure microVM workload tool
 
 Backing: shipped-source
 Validation: check-claim-catalog
 
-Read `AGENTS.md` before changing this repository. Its product and design
-boundaries govern new work; this file describes the current implementation,
-while ADR-001 and its witnessed backend matrix govern shipped security claims.
-
-## Project Overview
-
-Rust CLI for building and running Firecracker microVMs on macOS and Linux. Handles the full dev lifecycle: bootstrapping, Nix-based image builds, single-VM management, and reusable template creation.
-
-Multi-tenant fleet orchestration (tenants, pools, instances, agents, coordinators) lives in the separate [mvmd](https://github.com/tinylabscom/mvmd) repository. Building, verification, signing, and publication of the system-image train live in the separate [mvm-images](https://github.com/tinylabscom/mvm-images) repository. That train is the Linux layer: the builder VM, the default and rootless workload kernels and root filesystems, and the Stage 0 seeds. The published sets still list three pieces compiled from this tree's source through mvm-images' `mvm` flake input — the runtime overlay, the glibc and musl SDK sidecars, and the universal initramfs — but they are no longer part of the image-set contract: `mvmctl` parses them as retired roles (`ImageSetRole::RetiredGuestRuntime`), never requires, selects or fetches them, and assembles all three from its own guest runtime instead. A contributor build discovers a sibling `mvm-images` checkout automatically (override with `MVM_IMAGES_DIR`).
-
-That boundary is decided (ADR-054, tracking issue [#4100](https://github.com/tinylabscom/mvm/issues/4100)), and this repository's side has moved; mvm-images' source no longer has an `mvm` input, but its newest published set (`image-set/v0.2.4`) predates that change and still lists the three pieces. mvm-images will build only the Linux layer: kernels, base root filesystems carrying no mvm binary and no mvm-authored `/init`, the builder image and the Stage 0 seeds, with no `mvm` input. The guest runtime — guest agent and helpers, the initramfs agent, `mvm-setpriv`, `libmvm_host_services.so` for glibc and musl, the GPU shims, the Python SDK tree — will ship with each `mvmctl` release as one signed asset, and `mvmctl` will assemble the runtime overlay, the initramfs and the SDK sidecar from it at boot. Packs in [mvm-packs](https://github.com/tinylabscom/mvm-packs) become the image registry. `mkGuest` stays in this repository as the workload-author library. Describe the image set as the Linux layer: a set that still lists the overlay, sidecars and initramfs is accepted with those members ignored. The one remaining reader of those members is a portable `.mvmpkg`'s boot assets (`BOOT_ASSET_OVERLAY_ROLE`, `BOOT_ASSET_INITRAMFS_ROLE`), whose replacement is decided in [#3928](https://github.com/tinylabscom/mvm/issues/3928).
-
-```
-macOS Host (this CLI) -> libkrun Linux VM -> Firecracker microVM (/dev/kvm)
-Linux Host (this CLI) -> Firecracker microVM (/dev/kvm)
-```
-
-Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Plan 72 W0–W6 + Plan 75 W0). libkrun is never auto-selected on any host and runs only when a source build names it; macOS below 26 is not supported, and both `install.sh` and `mvmctl` (`unsupported_host_message`) refuse there, naming the supported hosts; HVF (the in-house Hypervisor.framework VMM, vsock-only) is the macOS 26+ Apple Silicon default; Firecracker is the Linux KVM path. There is no `--lima` flag and no Lima fallback. The Apple Virtualization.framework backend was **removed** (Plan 226 R1P1) — HVF is the destination macOS workload backend, with libkrun as the explicitly selected alternative, and the removed backend's `--hypervisor` value is gone. `xtask check-no-vz` enforces exactly two things: no Virtualization.framework / Containerization API, Swift import, or SwiftPM manifest anywhere under the workspace root, and no bare `vz` / `Vz` / `VZ` word in the Rust we own. What it does **not** forbid — and explicitly permits — is the `apple-container` backend, which still exists: `BackendKind::AppleContainer`, selector `--hypervisor apple-container` (alias `container`), is the HVF workload runner booting Apple's prebuilt container kernel, a fetched binary artifact carrying no Swift and no VZ. It is opt-in only; auto-detect never returns it.
-
-## Host dependencies (macOS)
-
-The libkrun-backed builder VM (never started automatically; it runs only when named by `--builder libkrun` / `MVM_BUILDER_BACKEND=libkrun`) needs two Homebrew packages installed:
-
-```sh
-brew install slp/krun/libkrun slp/krun/libkrunfw
-```
-
-- `libkrun` — the in-process VMM. `mvm-libkrun-supervisor` links against it.
-- `libkrunfw` — bundles the TSI-patched Linux kernel libkrun's guests boot. Plan 86 / Plan 72 W5.D bullet 10 — `libkrun-sys::extract_bundled_kernel()` pulls the kernel out of the dylib's `.rodata` at runtime.
-
-There is no third package and no gateway binary. Every libkrun lane — builder
-VM, Stage 0, and workload — boots with an explicit virtio-vsock device and no
-guest NIC, so there is nothing for a userspace network gateway to sit between.
-The `MVM_NETWORKING` and `MVM_GATEWAY_BIN` knobs that used to select one are
-gone, and `xtask check-single-network-path` fails the build if a gateway,
-guest NIC, or second endpoint path comes back.
-
-`mvmctl doctor` reports the libkrun install state and emits hints when it is missing.
-
-For source-checkout contributors only: a **pinned** zig + cargo-zigbuild are
-needed so `crates/mvm-cli/build.rs` can cross-compile the embedded host-vm
-binaries (`mvm-host-vm-init`, `mvm-builderd`) as static
-`aarch64-unknown-linux-musl` (the builder VM rootfs has no dynamic loader).
-See Plan 115 / ADR-004.
-
-That cross-compile is the only work `build.rs` still does, and it runs only
-when the `embed-host-bins` feature is on. No profile and no environment variable
-turns it on: a plain `cargo build --release` is the same fast, unembedded build
-as a debug one, and `cargo check`, clippy and nextest never cross-compile. The
-feature fails the build hard when the pinned toolchain is missing, because it
-was asked for by name.
-
-Use the feature when the `mvmctl` you build has to carry the Linux host
-binaries itself: `just build embed` (which also builds the per-VM helpers beside it),
-the tag-push release workflow (so a downloaded binary is self-sufficient), and
-any CI lane that needs a builder VM without a checkout to build the payload
-from. Do not use it for the edit, check and test loop, or to run `mvmctl` from
-your own checkout: that binary builds the payload from its checkout the first
-time it needs a builder VM and caches it.
-
-Every build **restores** the payload from the content store at
-`~/.cache/mvm/embed` when the store holds bytes keyed to this tree — the key is
-the dependency closure + `Cargo.lock` + pinned toolchain, and each entry carries
-the SHA-256 it was published with, so a changed entry is refused rather than
-embedded. That is why a debug `cargo build` usually carries the payload too.
-
-An `mvmctl` that still has no payload builds it **in-process** the first time it
-needs a builder VM: from the source checkout it was compiled from, into that
-same store, with the same `cargo zigbuild` the build script runs
-(`host_binaries::source`). It prints one line on stderr first saying what it is
-building and roughly how long it takes; `-v` streams the compiler output. It
-never compiles a second `mvmctl`. The next plain `cargo build` restores those
-bytes and embeds them without compiling. Only `mvmctl` does this — a test binary
-or other consumer of `mvm-cli` gets the refusal from `host_binaries::extract`
-instead — and only in a source checkout: an official release binary always
-carries its payload.
-
-`just build embed` remains for building every host binary in one go:
-
-```sh
-just build embed                    # build and invoke ./target/debug/mvmctl
-just build embed --release          # build and invoke ./target/release/mvmctl
-```
-
-On macOS the recipe also replaces any globally configured compiler-cache
-wrapper with `scripts/rustc-macos-loader.sh` for this explicit build. Cargo
-constructs a new dynamic-library search path before invoking rustc, so the
-wrapper restores the pinned Rust sysroot's `lib/` directory through
-`DYLD_FALLBACK_LIBRARY_PATH` at the compiler boundary; ordinary builds keep
-their configured wrapper. Some nightly distributions give `rust-objcopy` an
-incorrect RPATH; without the repair cargo-zigbuild repeatedly warns that
-`libLLVM.dylib` is missing and embeds larger, unstripped binaries even though
-the library exists. Cargo may replay warning text cached by compilation units
-built before this repair; a new warning has a new `dyld[PID]` and indicates the
-current strip step still failed.
-
-The tag-push release workflow always turns the feature on, so a downloaded
-binary is self-sufficient.
-
-After changing the guest-facing C ABI in `crates/mvm-host-services`, refresh
-the source sidecar explicitly:
-
-```sh
-./target/debug/mvmctl dev sdk-sidecar build
-```
-
-It packs both libc variants on the host from this checkout's guest-runtime
-archive (`pack_sdk_sidecars` over `build_sdk_sidecar_from_guest_runtime`, the
-pure-Rust ext4 writer), building the archive first if it is not cached, with no
-mvm-images checkout and no builder VM. Each variant is stamped with the cdylib
-source fingerprint a launch compares against this checkout, and with the digest
-of the archive it was packed from. The packed image carries no loader and no
-`libc.so.6`; the workload process that loads the library already has its own.
-Outside a source checkout `auto` packs them from the published guest runtime of
-this version instead; there is no `--source download`, because the image set
-carries no sidecar. A launch only resolves prepared sidecars, so a stale or
-missing one is a warning or a refusal naming this verb or bootstrap, never an
-implicit rebuild.
-
-`mvmctl bootstrap` on a source build prewarms all four pieces (overlay,
-initramfs, both sidecars) the same way, from one resolved archive
-(`mvm_build::runtime_pieces::assemble_runtime_pieces`), whatever
-`MVM_RUNTIME_OVERLAY_ACQUIRE_MODE` says: a source build's guest runtime is its
-tree, and the image set it used to install from in download mode carries none.
-The selector still decides how the OCI guest runtime is keyed (by the source
-under `build`, by this version otherwise) and opts bootstrap into source-built
-host helpers, which an unreleased version needs. `mvmctl dev runtime-overlay
-build` assembles the overlay from the same archive, and a selected
-`MVM_IMAGES_DIR` checkout no longer turns it into a pair build. Each assembled
-piece records its archive digest in a file beside its files
-(`ARCHIVE_ORIGIN_FILE`), and `mvmctl doctor`'s `guest runtime` line names, per
-piece, the archive it came from and whether it is this tree's or this
-release's.
-
-Provision the toolchain with one command — it installs the exact pinned zig
-(from the `ziglang` PyPI package, read out of
-`[workspace.metadata.mvm.toolchain]`), the musl rust targets, and the pinned
-cargo-zigbuild:
-
-```sh
-just setup toolchain
-```
-
-Do **not** `brew install zig`: Homebrew's zig drifts to newer releases that are
-incompatible with the pinned `cargo-zigbuild` and fail with a cryptic
-`CacheCheckFailed`. The build script and `mvmctl` both auto-detect the
-`ziglang`-installed zig and, if the pinned zig is missing, name the exact fix.
-Override the zig binary with `MVM_EMBED_ZIG=/path/to/zig` if needed.
-
-End-users running a downloaded mvmctl don't need any of this — the
-binaries are already embedded.
-
-**macOS 26+ Apple Silicon** users need no Homebrew prerequisites: hvf is the auto-detect default on that tier and now bootstraps its own builder VM (see "Builder backend selection" below).
-
-That last part is recent, and it is the whole reason the Homebrew requirement is gone. Stage 0 — the bootstrap that builds the builder image from nothing — used to have a hand-written body per VMM and none on hvf, so the dispatch lowered every hvf selection onto libkrun. Stage 0 now runs through `BuilderRunner<D: VmmDriver>` like every other builder job, as a `Stage0Vm<D>` generic over the driver, and `mvmctl` registers one per backend at startup. **Nothing lowers onto libkrun any more**: a backend with no registered Stage 0 refuses and names itself, because a missing registration is our wiring bug and should not present as "install these Homebrew packages".
-
-Its bootstrap kernel is fetched rather than built: it cannot be built, because Stage 0 is what makes local kernel builds possible. `mvm_build::stage0_kernel` classifies it as a **bootstrap seed** — the same classification Stage 0 already gives its Nix root tarball — so it is fetched and digest-verified even in a source checkout. This is a deliberate, narrow exception to building images from a selected mvm-images checkout; it covers that one kernel and nothing else, and the workload kernel still builds from the checkout when one is selected, as does the builder image when `MVM_ALLOW_LOCAL_BUILDER_BUILD=1` opts into local builder builds.
-
-## Builder backend selection (Plan 98)
-
-The builder VM (the Linux guest that runs `nix build` inside `mvmctl machine build` / `mvmctl machine run --flake`) picks between four host VMMs:
-
-- **hvf** — the HVF builder (Hypervisor.framework, no Homebrew deps). Default on macOS 26+ Apple Silicon. macOS-only.
-- **firecracker** — the Firecracker builder, the same VMM the Linux workload tier runs on, so a Linux host needs no second hypervisor to build with. Default on Linux-with-KVM. Bootstraps (Stage 0) and serves one-shot builds and shell jobs from the image Stage 0 produced, booted as-is; only the persistent builder refuses it by name. Live-proven on x86_64; aarch64 is untested.
-- **libkrun** — third-party in-process VMM via the two `slp/krun/*` Homebrew packages. **Never auto-detected, and never fallen back to**; it runs only when named by `--builder libkrun` / `MVM_BUILDER_BACKEND=libkrun`. No builder path reaches it otherwise: a backend with no Stage 0 refuses and says so rather than lowering onto libkrun.
-- **qemu** — QEMU/microvm_nix builder (Linux dev/test substrate). Auto-detected on every host that is neither macOS 26+ Apple Silicon nor Linux-with-KVM; opt-in elsewhere.
-
-(The Apple Virtualization.framework builder was removed in Plan 226 R1P1.)
-
-Selection priority (highest first):
-
-1. `--builder <libkrun|qemu|hvf|firecracker>` global CLI flag.
-2. `MVM_BUILDER_BACKEND=libkrun|qemu|hvf|firecracker` env var (case-insensitive, whitespace-trimmed; unrecognised values — including any retired backend name — log a warning and fall through to auto-detect).
-3. Auto-detect (`auto_detect_default_for`): **macOS 26+ Apple Silicon → hvf; Linux-with-KVM → firecracker; every other host → qemu.** libkrun appears nowhere in it.
-
-   macOS below 26 never reaches this ladder: `mvmctl` refuses the host before any command runs.
-
-`mvmctl doctor` reports the resolved choice on the `builder backend` line with format `<backend> — <source> — <availability>` so the override path is observable.
-
-**Auto-fallback is not wired.** `builder_attempt_order` returns a
-single-element vector in every branch, so a builder that cannot create its VM
-surfaces that failure rather than retrying another backend. The policy seam
-(`builder_attempt_order` + `run_with_builder_fallback`) is still the one place
-every builder entry point goes through, so restoring a fallback is a change to
-one function — but do not describe the hvf → libkrun retry as something that
-happens today, because it does not. A genuine build error surfaces unchanged
-either way.
-
-The rootfs-backed libkrun builder does boot and build on Linux/KVM (the guest
-kernel parses libkrun's virtio-mmio cmdline devices, and a poweroff-fallback
-halt defers to the on-disk build result); it is reachable only via an explicit
-`--builder libkrun`.
-
-The backends produce byte-identical `BuilderArtifacts` (kernel + rootfs from the same mvm-images builder image), so switching backends mid-development is supported.
-
-**mvm's builder binaries travel beside the builder image, not inside it.**
-Every builder boot on every backend carries a *builder boot payload*: an
-initramfs `mvmctl` assembles per boot from its embedded `mvm-host-vm-init`,
-`mvm-builderd` and `mvm-setpriv`, digest-checked by the guest before it
-pivots into the read-only image and runs them from `/run/mvm/host-bins`. The
-image and the payload agree on a versioned builder boot ABI
-(`/etc/mvm/builder-boot-abi`; `builder_boot_abi` in a signed image set): 0 is
-a legacy image that bakes the builder binaries and `mvm-setpriv`, 1 bakes
-only `mvm-setpriv`, and 2 carries no mvm binary.
-The contract lives in `mvm_build::builder_boot` and is recorded in ADR-004;
-`builder_boot_cmdline` is the one kernel command line every backend boots
-with, and `stage_builder_boot` decides each boot. A persistent builder booted
-with other builder binaries is stopped rather than reused.
-
-The currently published ABI 1 builder image still bakes `mvm-setpriv`,
-compiled from this tree by mvm-images. `mvm-host-vm-init` forks the guest
-agent under the payload's copy and falls back to the image's `/sbin` copy only
-when the boot carried none. mkGuest's `withSetpriv = false` builds an image
-without the baked copy; declaring ABI 2 for the published builder image is
-mvm-images' change to make.
-
-Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, distinguished by name prefix (`mvm-persistent-builder-vm-*` for libkrun, `mvm-persistent-builder-hvf-*` for hvf). The Stage 0 reaper (Plan 99 PR-1) is prefix-agnostic so all backends participate in `mvmctl cache prune` without code changes.
-
-## Architecture
-
-### Workspace Structure
-
-Cargo workspace under `crates/` (including `crates/deps/`) (Bar-A consolidation took 32→16; `mvm-vmm`, `mvm-backends`, and `mvm-http` were split back out afterwards, `mvm-host-services` was split out of `mvm-sdk`, `mvm-hostlib` was added at the top of the graph, the four GPU API-remoting crates `mvm-gpu` and `mvm-gpu-*-shim` were added, `mvm-setpriv` was split out of `mvm-agentd` as a leaf, `mvm-bundler` was split out of `mvm-cli`, `mvm-builder-guest` was split out of `mvm-build`, `mvm-compiler` was split out of `mvm-sdk`, `mvm-net` was folded into `mvm-core` as `mvm_core::net`, and `mvm-bundler` was folded into `mvm-core` as `mvm_core::plan::bundle::export`), plus the root `mvmctl` package, `xtask`, and `mvm-conformance`. Root facade (`src/lib.rs`) re-exports the libraries.
-
-**Libraries, low → high:**
-
-- `mvm-contract` -- `#![no_std]` + alloc, `forbid(unsafe_code)`; the wasm/browser-capable foundation. The audit-log verifier (and, incrementally, the `Workload` IR + wire protocol + policy DTOs). Builds on `wasm32-unknown-unknown`.
-- `mvm-core` -- std: types, IDs, config/paths (`MVM_HOME`), crypto, signing, routing. Absorbs `plan` (typed signed `ExecutionPlan`), `policy`, `crypto` (attestation/keystore/secret_store/snapshot + opt-in cosign behind `manifest-verify`), and the former `mvm-net` as `net::{channel, provider, registry}` (the typed `GuestService` vsock channels and the `NetworkProvider` contract with its registry). The former `mvm-bundler` is `plan::bundle::export`, behind `host-state`: `export_bundle_with_signer` reads the kernel, rootfs, optional initrd, dm-verity pair and guest sidecar, builds the manifest, and signs it under a caller-supplied `BundleSigner`, which keeps signing authority; it decides what an exported bundle contains, while the format stays in the parent `plan::bundle`. Verity probing and template resolution stay with the caller. `mvmctl build` reaches it through `mvm_client::bundle`, which adds `HostBundleSigner` over the host key. **Default build has no async deps**: `tokio` is optional, pulled only by the off-by-default `hostd-transport` or `manifest-verify` features. `xtask check-core-runtime-free` asserts `cargo tree -p mvm-core -e no-dev` carries no `tokio`.
-- `mvm-fs` -- image → mountable rootfs: OCI distribution client (registry/manifest/layer fetch + allow-listed `unpack/`) + a pure-Rust, memory-safe, deterministic ext4 writer (no `mkfs`, no subprocess) + `overlay`. Absorbs the old `mvm-ext4` + `mvm-oci`.
-- `mvm-build` -- Nix builder pipeline + artifact cache; hosts the builder-VM-only `[[bin]]`s (`mvm-host-vm-init` etc., cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
-- `mvm-vmm` -- backend-agnostic VMM device model and hypervisor seam: guest memory, FDT, arm64 kernel loading, virtio-mmio, the `hv::HypervisorVm`/`HypervisorVcpu` traits, the `driver::VmmDriver` seam, and the vsock transport. Low enough that `mvm-backends` can implement a backend without depending on `mvm-runtime`'s orchestration.
-- `mvm-backends` -- the concrete VMM mechanics behind that seam: `driver/{fc,hvf,libkrun,qemu}.rs` (the `VmmDriver` impls), their `*_process.rs` host-process siblings, `fc/`, and `mock.rs`. There is no `legacy` module — the `*_process.rs` files were briefly named `*_legacy` during the backend split and nothing in them is legacy. Orchestration stays in `mvm-runtime`; this crate owns only how a VM is built and run.
-- `mvm-http` -- a minimal HTTP/1.1-over-rustls client, deliberately smaller than a general one (no HTTP/2, redirects, pooling, proxy, compression), to keep the hyper/tower stack out of the shipped `mvmctl` closure.
-- `mvm-runtime` -- the big runtime crate (absorbs `mvm` + `mvm-backend` + `mvm-base`): the `VmBackend` trait and the `AnyBackend` dispatch over every backend, VM lifecycle (`vm/` templates + checkpoints), `microvm/` (Firecracker driver), `base/` (shell/ui/linux_env/cow host substrate), `storage/` (dm-thin). Re-exports the `mvmctl::runtime`/`::backend` contract.
-- `mvm-client` -- the local/remote client facade: `LocalBackend` (default) + `GatewayBackend` (the `remote` feature), the canonical host-wide machine inventory (`inventory`, which backs `mvmctl machine ls` and non-CLI consumers), plus a re-export of `mvm-core`'s `MvmClient` trait and its `stream` reader. Rust embedders use it for execution: it also re-exports the launch request's parts (`RootfsSource`, `Grants`, `HostPort`), the guest payload types in its `guest` module, inventory records, plan types, and the error codes. Build-time workload authoring requires a direct `mvm-sdk` dependency and `mvm_sdk` imports; `mvm_client::authoring` is removed, with no optional SDK dependency in the client. This is a source compatibility break, not a change to common IR or wire semantics. There is **no `dyn MvmClient` facade in the CLI** — `mvm-cli` uses `AnyBackend` directly for the backend surface, and the routing-everything-through-the-client refactor has not landed. Say what the code does, not what the plan said.
-- `mvm-cli` -- Clap CLI (the `mvmctl` surface), bootstrap/doctor/build/run/machine commands; `build.rs` embeds the host binaries. Its `observability` module owns the tracing subscriber assembly (fmt, span-timing and OTLP layers) for the host-side binaries. Its private `mcp` module adapts bounded stdio JSON-RPC to `MvmClient`.
-- `mvm-host-services` -- the in-guest host-services C ABI: one JSON-in/JSON-out entry point over the vsock broker, built as the `libmvm_host_services.so` cdylib every language SDK `dlopen`s. The package name is what makes cargo emit that filename directly. Its closure is deliberately tiny (no C, no async runtime) because it is compiled into every guest — `check-sdk-transport-free` holds that line, and the SDK sidecar's staleness fingerprint watches this crate and its dependencies rather than `mvm-sdk`.
-- `mvm-capture` -- project-environment capture frontend.
-- `mvm-builder-guest` -- what runs inside the builder VM and the contract it shares with the host that boots it: `mvm-host-vm-init`, `mvm-builderd` and `stage0-init`, plus the modules both sides read (`builder_boot`, job and protocol types). `mvm-build` re-exports its modules under their old paths.
-- `mvm-compiler` -- language-neutral workload compilation: source and dependency analysis, lowering, and deterministic build artifacts (flake generation, archives). It runs no builds, uses no network and signs nothing.
-
-**Daemons, SDK, and FFI:**
-
-- `mvm-hostd` -- host-side daemon roles, one crate with separate `[[bin]]`s (the process moat): the `supervisor` + `jailer` libs, the `broker`/`host_signer`/`audit_signer` subprocess bins, and the per-VM supervisor bins `mvm-libkrun-supervisor`/`mvm-hvf-supervisor`. Absorbs `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`/`mvm-vm-host`.
-- `mvm-agentd` -- the in-guest daemon: vsock protocol (`vsock/`), console, integrations, entrypoint runtime, the `mvm-guest-agent` `[[bin]]`, and the addon/egress helper bins (`mvm-addon-dns`/`mvm-addon-vsock-bridge`, gated behind the off-by-default `addons` feature so the sealed agent stays tokio-free). Absorbs `mvm-guest` + `mvm-guest-helpers`.
-- `mvm-setpriv` -- the guest's static privilege-drop and exec helper (`mvm-setpriv` `[[bin]]`), plus the descriptor hygiene it applies before exec, which `mvm-agentd` re-exports as `fd_hygiene`. A leaf whose only dependency is `libc`. The published ABI 1 builder image still compiles it from this tree, so its closure is part of that image's cache key. At ABI 2 it arrives in the builder boot payload and leaves the image's key. ADR-054 also moves it into the guest runtime that ships with `mvmctl` for workloads through the runtime overlay ([#4106](https://github.com/tinylabscom/mvm/issues/4106)). `mvm-agentd` depends on it, never the reverse.
-- `mvm-sdk` -- SDK: decorator parser → canonical `Workload` IR → Nix template, and runtime record mode. Language SDK surfaces live under `crates/mvm-sdk/sdks/`. The in-guest host-services C-ABI cdylib is **not** here: `libmvm_host_services.so` is emitted by `mvm-host-services`, a separate crate whose package name is what makes cargo produce that filename directly rather than `libmvm_sdk.so` plus a rename. This matters beyond bookkeeping — the SDK sidecar's staleness fingerprint hashes `mvm-host-services` and its dependencies, so an edit under `crates/mvm-sdk` does not invalidate a cached sidecar.
-- `mvm-hostlib` -- the host library the language SDKs load in-process instead of running `mvmctl`: one versioned C ABI (`mvm_hostlib_abi_version`, `mvm_hostlib_abi_is_compatible`, `mvm_hostlib_call`, `mvm_hostlib_free`) over the `MvmClient` surface, answered by `LocalBackend`, plus the admitted local launch (`machine.run`/`machine.create`, through `LaunchRequest`), the DevOnly `guest.*` process and file methods, answered by `mvm_client::guest` (the implementation `mvmctl machine proc`/`fs`/`cp` use), and handle-and-poll process output streams (`guest.proc.stream.*`). A call before `mvm_hostlib_abi_is_compatible` succeeds is refused. The SDKs never run `mvmctl` and have no subprocess fallback; `xtask check-no-cli-shellout` fails the build if SDK source reaches for a process API. On first use it declares the process a library embedder, so any path that would spawn `mvmctl` refuses, and declares its own directory as the helper-binary directory. Nothing depends on it, so linking `mvm-client` cannot form a cycle.
-- `crates/deps/mvm-macho-sign` -- byte-only ad-hoc Mach-O signing (code directory and signature blobs, entitlements DER); no filesystem, process, key or network operations, so the caller keeps signing authority.
-- `crates/deps/libkrun-sys` -- the libkrun C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`). Was `mvm-libkrun`; lives low so `mvm-build`/`mvm-runtime` consume the wrapper.
-
-`xtask` -- tooling + claim-gate lints. `mvm-conformance` -- dev-only cucumber-rs BDD harness running the security-claim scenarios against `mvmctl` (not a dependency of any shipped crate).
-
-Root package: `src/lib.rs` (facade: `mvmctl::core`=mvm-core, `mvmctl::runtime`/`::backend`=mvm-runtime, `mvmctl::build`=mvm-build, `mvmctl::guest`=mvm-agentd, `mvmctl::security`=`mvm_core::crypto`) + `src/main.rs` (thin entry → `mvm_cli::run()`).
-
-Binary: `mvmctl` (from root, delegates to mvm-cli)
-
-**Dependency direction (high → low):** `mvm-cli` → {`mvm-runtime`, `mvm-hostd`, `mvm-client`, `mvm-sdk`} → `mvm-client` → `mvm-runtime` → {`mvm-fs`, `mvm-build`} → `mvm-core` → `mvm-contract`. `mvm-contract` (no_std) is the foundation; `mvm-core` builds on it. `mvm-agentd` is a mid-graph guest-protocol and runtime library: ten shipped workspace crates consume it directly, in addition to development-only consumers. Its binaries are top-level processes, but the crate is not a dependency leaf. Per-role binaries stay thin entries over their owning libraries.
-
-**Key module locations:**
-
-mvm-contract: `verify` (audit-log verifier), `ir/` (Workload IR), wire/policy DTOs.
-
-mvm-core: `plan/` (ExecutionPlan, bundle, signing, validity), `net/` (guest-service channels, network provider contract, session, telemetry), `policy/` (security, audit, network_policy, bundle/resolver), `crypto/` (attestation, keystore, secret_store, snapshot_*), `protocol.rs`, `agent.rs`, `catalog.rs`, `config.rs` (paths/`MVM_HOME`)
-
-mvm-runtime: `backend.rs` (`AnyBackend` dispatch + `FirecrackerBackend`), `driver/` + `workload_runner/` (the converged runner seam every claim-bearing workload boots through), `backends/hvf/`, `wasm_backend.rs`, `apple_container_backend.rs`, `mock.rs`; the libkrun/qemu/hvf VMM impls themselves live in `mvm-backends` (`driver/{libkrun,qemu,hvf}.rs`) and are re-exported from `lib.rs`; the raw HVF substrate (`hv_impl.rs`, `kernel_boot.rs`, …) stays in `mvm-runtime/src/backends/hvf/`. Also `microvm/` (Firecracker driver), `vm/` (templates + `template/lifecycle/`, checkpoints), `agent_session/` (filesystem store for durable agent sessions, the checkpoint analog), `base/` (shell, ui, linux_env, cow), `storage/`, `codesign.rs`, `artifacts/`
-
-mvm-fs: `oci/unpack/` (allow-listed unpacker), `oci/`, the ext4 writer, `overlay`
-
-mvm-agentd: `vsock/`, `console.rs`, `integrations.rs`, `src/bin/mvm-guest-agent/` (the agent bin), `runner/`
-
-mvm-hostd: `supervisor/`, `broker/`, `host_signer/`, `audit_signer/`, `jailer/`, `src/bin/{mvm-broker,mvm-host-signer,mvm-audit-signer}.rs`, the per-VM supervisor bins
-
-mvm-cli: `commands/` (env, build/run, `machine`, guest RPC, artifacts/trust, local ops); `doctor/`, `commands/vm/up/`, `commands/image/`, `bench/` are decomposed module trees. Tenant lifecycle + deploy-to-control-plane commands live in mvmd, not mvmctl.
-
-### Trait Architecture
-
-`BuildEnvironment` is split into two traits in `mvm-core/src/build_env.rs`:
-
-```
-ShellEnvironment (base)
-  shell_exec(), shell_exec_stdout(), shell_exec_visible()
-  log_info(), log_success(), log_warn()
-
-BuildEnvironment : ShellEnvironment (extends)
-  load_pool_spec(), load_tenant_config()
-  ensure_bridge(), setup_tap(), teardown_tap()
-  record_revision()
-```
-
-- **Dev mode** (`mvmctl dev compile`, `mvmctl machine build`): uses `dev_build()` with `&dyn ShellEnvironment`
-- **Fleet mode** (in mvmd): uses `pool_build()` with `&dyn BuildEnvironment`
-
-The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `BuildEnvironment` impl lives in mvmd-runtime.
-
-### Key Design Decisions
-
-- **Firecracker on Linux; HVF on macOS 26+ Apple Silicon; libkrun only when named**: no Docker/containers on any auto-detected runtime path. The only container-tier backend is `--hypervisor apple-container` (Apple's prebuilt container kernel on the in-house HVF VMM), and `auto_select` returns it only when explicitly selected; it is not a fallback. Builds run Nix inside the selected builder VM: HVF on macOS 26+ Apple Silicon, Firecracker on native Linux, and QEMU on other hosts; libkrun remains explicit-only. A selected builder failure surfaces rather than silently switching VMMs. The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload. Egress default-deny is enforced at one seam for every workload runner — Firecracker, libkrun, HVF, QEMU, and `apple-container`, which holds an `HvfRunner` and substitutes only the kernel image, so it inherits that seam verbatim: the per-VM `mvm-network-endpoint`, whose shared `EgressGate` is the sole claim-10 decision point. `xtask check-single-network-path` pins every runner to that one spawn site and endpoint binary so a backend cannot grow a second gate. Wasm has no guest network and remains outside the microVM funnel.
-- **Workload microVMs have no NIC**: every workload _microVM_ backend boots the guest with a virtio-vsock device and **no net device at all** — Firecracker's config sequence omits `/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect` (which never calls a net attach), HVF's device model has no net device (and `apple-container` is that same device model with a different kernel image), and the QEMU workload driver emits no `-netdev`. The non-microVM tiers reach the same end differently: the Wasm tier mediates no networking at all. Egress leaves the guest only over the `NetworkFlow` channel to the host-side endpoint. This is what makes claim 10 (default-deny), claim 13 (no raw secret to the guest), and the audit chain mechanically enforceable: the host endpoint _originates_ every outbound connection, so it can authorize, substitute, and log it. `xtask check-single-network-path` fails closed if a guest NIC, raw-packet stack, alternate spawn implementation, or second workload socket owner appears. The builder VM is **also NIC-less** on every backend, QEMU included: its `nix build` substituter traffic and its dependency installs (`uv` / `pnpm`) ride the same vsock `NetworkFlow` relay under `NetworkPolicy::trusted_build_egress()`, through the one proxy environment the guest init hands every builder job. An install on a builder booted without vsock egress is refused rather than dialed direct. `check-single-network-path` fails if builder code opens a socket other than the egress client's readiness probe, if a host-binary manifest names the retired guest-side `mvm-egress-proxy`, or if the QEMU builder gains a NIC argument.
-- **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The builder VM (where Nix builds run) is headless too — no interactive shell or console, just a build engine you debug through its logs. See **Security model** below for the full posture.
-- **Trust-first over product parity**: a source-level comparison against a competing hosted microVM platform (ADR-058) settled the sequencing. The trust chain — the NIC-less guest behind one egress gate, signed admission, verified boot, the hash-chained audit — is the spine, and it is not traded for a wider command surface, a hosted service, or a host platform we do not support. The fleet authority in `mvmd` becomes operable before any hosted-service parity is pursued, because the advantage on that axis is operational maturity rather than authority design. ADR-058 §Decisions records the posture and the prior-art boundary; the findings and their evidence are tracked in issue #5013.
-- **Builder VM is headless**: there is no interactive shell into it. The builder VM exists solely to run `nix build` on behalf of `mvmctl build` / `mvmctl machine run`; `mvmctl bootstrap` optionally pre-fetches/builds its image ahead of time, but builds auto-bootstrap it on first use if you skip that step. On macOS 26+ Apple Silicon, the automatic choice is a long-lived HVF builder VM with Nix + build tools. On native Linux with KVM, it is Firecracker; other hosts select QEMU. Libkrun remains an explicit-only contributor choice. None of these start or SSH into a workload microVM — the builder VM and workload microVMs are always separate.
-- **Headless microVMs**: `mvmctl run` and `mvmctl machine start` boot the selected workload backend as a daemon. Interactive access via `mvmctl machine console` (PTY-over-vsock, dev-mode only).
-- **Local-command isolation**: `mvmctl machine start` / `machine stop` use a completely separate code path from orchestration.
-- **Shell scripts inside run_in_vm**: complex ops are bash scripts handed to the active `LinuxEnv` backend (libkrun / HVF / Firecracker). Deliberate — they run inside the Linux VM, not on the macOS/Linux host.
-- **Idempotent setup**: every step checks if already done before acting.
-- **Templates use dev_build path**: `mvmctl build` runs `nix build` locally inside the builder VM (no ephemeral FC builder VMs). The `mvmctl template *` mutation namespace was removed; `template` is a read-only registry browser (`list`/`search`/`info`).
-- **mvm-core keeps only shared foundation code**: dead public modules are deleted, and modules with exactly one in-repository consumer live in that consumer's crate. The remaining core has overlapping consumer sets and stays whole. The pack implementation also stays here: `packs` depends on core architecture, plan-key, digest-shape, and image-verification code, while core image-set and trust/cache modules consume pack types. Extracting it alone would create a dependency cycle; resolving that ownership requires a broader `mvm-core`/`mvm-contract` boundary decision, not a third shared-types crate.
-- **No `clippy::too_many_arguments`**: `#[allow(clippy::too_many_arguments)]` is banned outright — no exceptions in hand-written code (the only legitimate use is bindgen-generated FFI like `crates/deps/libkrun-sys/src/sys.rs`). When a function trips the lint, introduce a dedicated struct with a builder (Rust best practice) carrying those arguments and pass the built value. See AGENTS.md §"Clippy: Zero Warnings, Always".
-- **Reuse first — never reimplement what exists**: before writing anything, search the workspace (`rg`, the facade re-exports, the owning module) for a helper, type, trait impl, or crate that already does the job, and call it. Duplicated logic drifts and is this repo's most common bug source. If an existing helper is _almost_ right, extend it — don't fork a second copy. Concrete standing rules: all `~/.mvm` paths go through `mvm-core::config` helpers (`mvm_home`, `vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, …) — never build them inline with `std::env::var("HOME")` + `.join(...)` (that ignores `MVM_HOME` and breaks worktree isolation); shell/VM ops go through the `ShellEnvironment`/`BuildEnvironment` traits.
-- **Best-practice construction**: prefer many small single-purpose functions (each trivially unit-testable) over large branchy ones; use the **builder pattern** for types with more than a couple of (especially optional) fields instead of long positional constructors; express behavior that varies by backend/env/mode as a **trait with impls** (`VmBackend`, `ShellEnvironment`), not a `match` scattered across call sites; group related values into named config/params **structs** rather than threading bare arguments through layers; make illegal states unrepresentable with newtypes/enums over stringly-typed flags; and don't over-abstract (YAGNI) — reach for a trait/builder only when there's a real second case. If you can't write a focused test for a function, it's too big — split it. (See AGENTS.md §"Reuse First; Compose Small, Testable Units".)
-- **Images are built in mvm-images; a contributor build builds them from a checkout of it when one is present**: the compiled distribution channel is authoritative. Image construction — the builder image, workload images, kernels — lives in the [mvm-images](https://github.com/tinylabscom/mvm-images) repository. The runtime overlay, the SDK sidecars and the initramfs are not images: they are guest runtime, and no build of `mvmctl` takes them from mvm-images or the image set. A source checkout builds one guest-runtime archive from this tree (`resolve_or_build_source_guest_runtime`, cached by the archive's digest) and assembles all three from it on the host — the runtime overlay with its GPU shims and Python SDK tree through the pure-Rust ext4 writer and in-process verity (`build_runtime_overlay_from_guest_runtime`), the universal initramfs from the archive's sealed initramfs agent through the Rust newc cpio writer, and the SDK sidecar as above. That holds with or without an mvm-images checkout selected. A contributor-built `mvmctl` that finds an mvm-images checkout (named by `MVM_IMAGES_DIR`, or a sibling `../mvm-images`) pair-builds source-matched workload images and kernels from it against this checkout; it builds the builder image from that checkout only when `MVM_ALLOW_LOCAL_BUILDER_BUILD=1` is set, and fetches the pinned one otherwise. Without a checkout it fetches and verifies the published image set `crates/mvm-core/images.lock` pins. Guest program source — the guest agent and runtime binaries, the SDK host-services library — is still this tree's and still builds from it. An official release binary always downloads verified, version-matched artifacts even when invoked from inside a clone. Filesystem proximity must never turn an official binary into a compiler frontend. A contributor modifying the builder flake in their mvm-images checkout sees their change the next time the builder VM boots — via `mvmctl bootstrap` or auto-bootstrap on the next build, with local builder builds enabled — with no release-pipeline round-trip. ADR-030 §Decision records that resolution rule and ADR-030 §Consequences records the rationale. ADR-054 (which amends ADR-030 decision 4; [#4100](https://github.com/tinylabscom/mvm/issues/4100)) moves the guest runtime out of the image set, and this repository's side has landed: the guest runtime ships as a signed asset with each `mvmctl` release, and `mvmctl bootstrap` on a release binary assembles the overlay, the initramfs, both sidecars and the OCI guest runtime from it (`mvm_build::runtime_pieces::assemble_release_runtime_pieces`), recording which archive it adopted. The image-set contract no longer names those pieces (`ImageSetRequirement::current_train`), and there is no image-set fallback: a launch attaches only the version-keyed pieces this CLI assembled, and a miss names `mvmctl bootstrap`. A release binary that has not bootstrapped since it was installed — right after `mvmctl env update`, say — refuses its first launch with that pointer rather than booting another tree's copies. Fetch-when-unchanged is gone, along with its environment variable; `mvmctl image dev ensure` without a selected checkout installs the pinned set's dev members, which are Linux layer. The guest-agent protocol is likewise the CLI's own: `images.lock` no longer copies the set's `guest_agent_protocol` range, and nothing decides on it. What a set's workload base root filesystems promise the guest runtime is the base-image contract version (`BaseImageContract`), which the base root filesystem declares in the file `BASE_IMAGE_CONTRACT_MARKER` names and the signed set carries in its compatibility section; `mvmctl` checks it before fetching any member. A set that declares none — every set up to image-set/v0.2.4 — is checked as the legacy contract 0 (`base_image_contract_or_legacy`), never skipped; this CLI boots 0 and 1. What remains is publication: mvm-images' source has dropped the `mvm` input and declares the base-image contract (tinylabscom/mvm-images#64), but the newest published set (`image-set/v0.2.4`) predates both, so `images.lock` still pins a set that lists the three pieces and declares no contract. **`MVM_BOOT_IMAGE=fetch` is narrower than it sounds**: the builder image honours it even with a checkout selected, but the default workload image refuses it while a checkout is selected (`default_microvm.rs`), because the selector is explicit in both directions — to compare against a signed release, deselect the checkout instead. Without a checkout, a fetched default image records `source: fetched` in its sidecar, so a stale prebuilt cannot later be mistaken for a build of the working tree; and `mvmctl doctor`'s `boot image` line reports which arm ran and why. Explicit acquisition overrides remain explicit; the channel governs automatic defaults.
-- **Host Nix is never used by mvmctl**, even when present: `mvmctl` does not shell out to a host `nix` binary, does not consult `nix-darwin`'s `linux-builder`, and does not honor `nix-daemon` URLs in any code path. Every Nix evaluation goes through a VM we launched; builds run inside that builder VM via HVF, Firecracker, or explicitly selected QEMU/libkrun. The reason is determinism and consistency: the same `mvmctl` produces the same artifacts on every host regardless of what the host happens to have installed. A contributor with host Nix installed must not see different behavior from a contributor without it. ADR-004 §Decision and ADR-030 §Decision both record this invariant.
+Read `AGENTS.md` before changing this repository: it owns the product and
+design boundaries, the git and worktree rules, the Definition of Done and the
+coding rules. This file is what every task needs about the current code.
+ADR-001 and its claims ledger govern every security claim.
+
+## What this repository is
+
+`mvmctl`, a Rust CLI that builds and runs microVM workloads from signed,
+audited execution plans on macOS and Linux. Workload backends: HVF (the
+in-house Hypervisor.framework VMM) on macOS 26+ Apple Silicon, Firecracker on
+Linux with `/dev/kvm`; libkrun, QEMU (dev/test only, never used by `mvmd`),
+`apple-container` (Apple's prebuilt container kernel on the HVF VMM) and Wasm
+run only when selected. Auto-detect never picks libkrun or `apple-container`,
+and `mvmctl` refuses macOS below 26. Builds run Nix inside a builder VM
+(selection: `public/src/content/docs/guides/builder-vm.md`).
+
+Neighbouring repositories: [mvmd](https://github.com/tinylabscom/mvmd) owns
+fleet orchestration; [mvm-images](https://github.com/tinylabscom/mvm-images)
+owns the Linux layer (builder image, kernels, base root filesystems, Stage 0
+seeds); [mvm-packs](https://github.com/tinylabscom/mvm-packs) publishes packs.
+The guest runtime (guest agent and helpers, initramfs agent, `mvm-setpriv`,
+`libmvm_host_services.so`, GPU shims, Python SDK tree) is built from this tree
+and ships as a signed asset with each `mvmctl` release; `mvmctl` assembles
+the runtime overlay, initramfs and SDK sidecars from it (ADR-054). A
+contributor build pair-builds workload images from a sibling or
+`MVM_IMAGES_DIR` checkout of mvm-images; an official release binary only
+downloads verified artifacts (ADR-030).
+
+## Crates, low to high
+
+A crate depends only on crates on its own line or above; each `lib.rs` documents its scope.
+
+1. `mvm-contract` (`no_std` Workload IR, wire protocol, policy DTOs, audit verifier; builds for wasm), `mvm-crypto` (primitives), `mvm-http` (minimal HTTP/1.1 client), `mvm-setpriv` (guest privilege-drop helper), `crates/deps/mvm-macho-sign`.
+2. `mvm-core` -- types, config and `~/.mvm` paths, signed `ExecutionPlan` and `.mvmpkg` bundles, policy, crypto, guest-service channels; no tokio by default (`check-core-runtime-free`); keeps only code several crates share.
+3. `mvm-policy` (authored policy composition), `mvm-fs` (OCI client, allow-listed unpacker, pure-Rust ext4 writer), `crates/deps/libkrun-sys` (FFI + safe wrapper), `mvm-agentd` (guest agent, vsock protocol, console), `mvm-compiler` (workload compilation; no builds, network or signing), `mvm-gpu` (host GPU endpoint; guest shims are its cdylib examples).
+4. `mvm-vmm` (device model, hypervisor traits, `VmmDriver` seam), `mvm-host-services` (guest `libmvm_host_services.so`), `mvm-builder-guest` (builder-VM binaries + contract), `mvm-capture`.
+5. `mvm-backends` (Firecracker/HVF/libkrun/QEMU drivers), `mvm-build` (Nix builder pipeline, artifact cache, runtime-piece assembly).
+6. `mvm-runtime` -- `VmBackend` + `AnyBackend`, VM lifecycle, workload runners.
+7. `mvm-hostd` -- supervisor, broker, signers, jailer, per-VM supervisors.
+8. `mvm-client` (`MvmClient`, `LocalBackend`, machine inventory); `mvm-sdk` (decorators to IR; language SDKs in `crates/mvm-sdk/sdks/`).
+9. `mvm-cli` (the `mvmctl` surface) and `mvm-hostlib` (C ABI the language SDKs load in-process).
+
+Root package `mvmctl` (`src/lib.rs` facade, `src/main.rs` calls
+`mvm_cli::run()`); `xtask` holds tooling and gates; `mvm-conformance` is the
+dev-only BDD harness (`--features bdd`). `ShellEnvironment` /
+`BuildEnvironment` are split in `crates/mvm-core/src/build_env.rs`.
+
+## Rules agents trip on
+
+- **Scratch goes under `/tmp`**, never anywhere in the working tree, not even
+  a gitignored path. `.agent-memory/notes/` (below) is the only exception.
+- **Reuse first.** Search for an existing helper before writing one; extend it
+  rather than fork it. All `~/.mvm` paths go through `mvm-core::config`
+  helpers (`mvm_home`, `vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, ...),
+  never `std::env::var("HOME")` + `.join(...)`, which ignores `MVM_HOME`.
+- **`#[allow(clippy::too_many_arguments)]` is banned**; introduce a params
+  struct with a builder. Only bindgen output (`crates/deps/libkrun-sys/src/sys.rs`) is exempt.
+- **Worktrees and git**: follow AGENTS.md exactly (git only from the main
+  checkout, every change in a worktree, `source scripts/dev-env.sh`).
+- **Host Nix is never used**: `mvmctl` never shells out to a host `nix`, a
+  `nix-darwin` linux-builder or a `nix-daemon`; every Nix evaluation runs in a
+  VM we launched (ADR-004, ADR-030).
+- **No SSH in any microVM or the builder VM**; both are headless. The only
+  interactive path is the dev-only PTY-over-vsock console.
+- **Guests have no NIC.** Every workload backend and the builder VM boot with
+  vsock and no net device; egress crosses vsock to the per-VM
+  `mvm-network-endpoint`, whose `EgressGate` is the only decision point.
+  `xtask check-single-network-path` fails on a second path.
 
 ## Security model
 
-mvm makes eighteen CI-enforced security claims (numbered 1–15 and 19–21),
-plus three
-`Preview` claims: 16 (egress-substitution leak-gate, ADR-023), 17
-(workload input plane) and 18 (workload resource bounding — admission
-ceiling + host-wide budget + spawn-time CPU scope). For all three,
-witnesses are machine-checked but
-promotion into ADR-001's numbered prose is a pending maintainer
-decision, mirroring claim 14's path. Each one is
-backed by a test or a workflow gate. Claim 21 (OCI base-image package and
-kernel inventory, CVE scan and SBOM) has no narrative below; its ledger row
-is the account. **ADR-001
-(`specs/adrs/001-microvm-security-posture.md`) is the source of truth**
-for the claim numbering, threat model, and per-backend tier matrix;
-this section is the summary.
+ADR-001 (`specs/adrs/001-microvm-security-posture.md`) owns the threat model,
+the per-backend tier matrix and the claims. **The ledger table in ADR-001 is
+authoritative**: `xtask check-claim-catalog` fails when a witness
+(`fn:<test>` / `ci:<job>`) stops existing, and `model/claims.toml` is the
+conformance ID register `check-conformance` reads. Claim prose and code
+locations are in ADR-001 §"The claims" and §"Appendix: Claim implementation
+notes". Eighteen numbered claims (1-15, 19-21) plus three `Preview` (16-18):
 
-**The ledger is the claims table inside ADR-001**, not a separate
-catalog file: `xtask check-claim-catalog` parses that table (rows 1–21,
-witnesses spelled `fn:<test_name>` / `ci:<job_name>`) and fails when a
-named witness stops existing. `model/claims.toml` is the parallel
-conformance ID register that `xtask check-conformance` reads. There is
-no `specs/claims/` directory today; it existed and was deleted by the v1
-simplification restructure. Historical plans may still describe that removal,
-but live claim authority belongs to ADR-001 and `model/claims.toml`. Do not
-infer ADR existence from a numeric range: the numbers run from ADR-001 to ADR-064
-and ADR-110 to ADR-112, with gaps where deleted ADRs left their numbers unused,
-and no number between 064 and 110 has a file. Resolve every citation against
-`specs/adrs/`; `check-adr-coverage` enforces that rule.
+| # | Claim |
+|---|---|
+| 1 | No host-fs access from a guest beyond explicit shares |
+| 2 | No guest binary can elevate to uid 0 |
+| 3 | A tampered rootfs ext4 fails to boot (block+ext4 backends) |
+| 4 | A production-safe run cannot invoke DevOnly guest-agent verbs |
+| 5 | Vsock framing, supervisor-config JSON and FlowMux decoding are fuzzed |
+| 6 | The pre-built dev image is hash-verified |
+| 7 | Cargo dependencies are checked on dependency PRs, nightly and before release |
+| 8 | Every workload runs from a signed, audited `ExecutionPlan` |
+| 9 | Every published bundle is content-addressed, key_id-pinned, re-verified at fetch and admit |
+| 10 | No untrusted workload reaches the network unless policy admits it |
+| 11 | Application-dependency volumes are CVE-scanned and SBOM-enumerated when sealed |
+| 12 | Every broker service is bound to a signed plan binding, enforced and audited |
+| 13 | The managed substitution path hands the guest placeholders, never raw secrets |
+| 14 | Every OCI image admission records provenance in the audit log |
+| 15 | A sealed production microVM has no shell, no DevOnly verbs, no PTY |
+| 16 | *Preview*: egress substitution keeps a raw secret off the guest |
+| 17 | *Preview*: workload stdin is grant-gated, single-writer, secret-scanned, audited |
+| 18 | *Preview*: resource use is bounded at admission, and at spawn where the host can |
+| 19 | Named assets carry content-derived identities; a drifted pinned share fails closed |
+| 20 | Every release artifact is authenticated under the release workflow's identity |
+| 21 | OCI base images are inventoried, CVE-scanned and SBOM-enumerated at pull |
 
-Keep the ADR-001 table in sync when you rename or move a witness. The
-prose below is the narrative and the table is the ledger — and when the
-two disagree, **the table is right**: it is gated and the prose is not.
-Do not name a test here without checking it exists (`rg 'fn <name>'`);
-several of the names below were fabricated and survived for months
-precisely because nothing checks this file. `check-witness-citations`
-checks it now — a backticked symbol in this file must appear in code,
-and a comment or a string literal mentioning it does not count.
+Never paraphrase a claim, especially a Preview one, without its ledger limits.
+A malicious host, multi-tenant guests and hardware key attestation are out of
+scope. `mvmctl doctor` reports the live posture on a host.
 
-The opposite direction is checked too. Prose recording that a name was
-**never written** goes inside an absence region:
+Prose gates: `check-witness-citations` requires every backticked identifier in
+this file, `README.md`, `AGENTS.md`, ADR-001, ADR-035 and every Accepted ADR to
+exist in code (comments and string literals do not count). Record a name that
+was never written inside an absence region (`<!-- absent:begin -->` ...
+`<!-- absent:end -->`); `check-asserted-absence` fails if it starts to exist.
+ADR numbers are not contiguous: resolve every citation against `specs/adrs/`
+(`check-adr-coverage`).
 
-```markdown
-<!-- absent:begin -->
-
-`a_name_that_does_not_exist`
-
-<!-- absent:end -->
-```
-
-`check-asserted-absence` fails if anything in there starts resolving, so
-a correction cannot rot into a stale denial, and it fails on a region
-that names nothing — a region asserting nothing would pass forever.
-Inside a region the citation gate stands down, so the two can never
-demand opposite things of the same name.
-
-Claim lineage:
-
-- Claims 1–7 ship with ADR-001's original posture.
-- Claim 8 was added by the supervisor-wiring plan — see ADR-014
-  (`specs/adrs/014-signed-audited-execution-plans.md`).
-- Claim 9 (signed bundles content-addressed) is Sprint 52 W2.
-- Claim 10 (default-deny egress) is Sprint 52 W3.
-- Claim 11 (app-dep volume sealed) was added by ADR-014 / Plan 73
-  Followups A + B.1/B.2/B.3 + C + D
-  (`specs/adrs/014-signed-audited-execution-plans.md`).
-- Claims 12 + 13 (host services broker — binding-gated dispatch and
-  no raw secret over broker channel) were added by Plan 104 / ADR-020
-  (`specs/adrs/020-host-services-broker.md`) /
-  ADR-023 (`specs/adrs/023-secrets-subsystem-egress-substitution.md`).
-- Claim 15 (no interactive access to a sealed production microVM) was
-  added by Plan 165 WS-C — the same interactive-access threat family as
-  claim 4 / `do_exec`.
-
-OCI image provenance recorded in the chain-signed audit log is row 14
-of the ADR-001 table, enforced under the claim 8 admission flow.
-
-Companion doc: the Cardoso minimum-viable-policy mapping lives in
-ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
-
-1. **No host-fs access from a guest beyond explicit shares.** Per-service
-   uid, the admitted seccomp tier, `mvm-setpriv --no-new-privs`, and the
-   agent's `PR_CAPBSET_DROP` bounding-set narrowing confine each service.
-   The tier is `standard` unless the launch admits egress, an ingress mapping
-   or a host service, in which case admission raises it to `network` and signs
-   the raised tier (`workload_seccomp_tier`). The host names it on the guest
-   kernel cmdline as `mvm.seccomp=<tier>` (`seccomp_cmdline_token`) — not in
-   `ActivateEnvironment`, whose `deny_unknown_fields` would make every older
-   guest agent refuse activation. The agent admits it at activation
-   (`admit_from_cmdline`) and installs it, with `no_new_privs` and after the
-   child's other pre-exec setup, in every workload process it starts:
-   entrypoint runs and the worker pool, exec, process control, detached runs,
-   the console, lifecycle hooks and health probes. A denied call fails with
-   `EPERM`. Witnessed on Linux by
-   `an_exec_under_the_admitted_standard_tier_cannot_open_a_socket`,
-   `a_started_process_under_the_admitted_standard_tier_cannot_open_a_socket`
-   and `an_exec_child_reports_a_seccomp_filter_and_no_new_privs` in the
-   `seccomp-functional` lane. A standby parent boots with no plan, so its
-   cmdline names no tier and a child warm-claimed out of it — the default
-   unnamed launch — gets its tier from the claiming launch's signed plan
-   instead: the runner hands it over on the post-restore handshake
-   (`ChildIdentity`), the child's agent admits it once (`admit_restored`)
-   before the claim commits, and the claim is refused unless the agent reports
-   holding exactly that tier (`require_admitted_seccomp_tier`). An agent too
-   old for the field refuses the handshake, so the claim fails rather than
-   running unfiltered; so does a warm-process worker pool started unfiltered
-   in the parent. Witnessed by
-   `a_warm_claimed_child_under_standard_cannot_open_a_socket` and
-   `a_warm_claimed_childs_workload_reports_a_seccomp_filter`. Before #4305 the
-   tier was admitted and audited and applied to nothing. It still applies to
-   nothing on a cold boot whose guest agent is older than the token —
-   including the one in the pinned image set a release binary boots until it
-   assembles its own guest runtime. ADR-001's claim-1 row carries the limits.
-2. **No guest binary can elevate to uid 0.** `mvm-setpriv --no-new-privs`
-   in the launch path; the rootfs is mounted read-only (dm-verity
-   sealed) so a compromised service can't rewrite
-   `/etc/{passwd,group,nsswitch.conf}` to mint a uid 0 entry.
-3. **A tampered rootfs ext4 fails to boot.** dm-verity sidecar +
-   roothash delivered in `ActivateEnvironment` over vsock + the universal
-   initramfs agent's verity check (the separate verity-init PID 1 is gone;
-   ADR-018 records the change). The runtime overlay's roothash is computed
-   on the host when the overlay is assembled from a guest-runtime archive —
-   the source build's, or on a release binary the signed archive its own
-   release ships. No build takes the overlay or its roothash from the image
-   set.
-   See the claim-3 row of `specs/adrs/001-microvm-security-posture.md`'s "Claims ledger
-   (claim → witness)" table — there is no separate runbook section).
-   CI lane `verified-boot-artifacts` in `security.yml` asserts the
-   artifacts are emitted; `verify_and_resume_rejects_tampered_mem`
-   confirms a tampered snapshot is rejected before resume, and the
-   verified-boot conformance scenario confirms a flipped data byte no
-   longer matches the recorded root hash. No CI lane boots a tampered
-   rootfs under KVM today.
-4. **A production-safe run cannot invoke DevOnly guest-agent verbs.**
-   `scripts/check-prod-agent-no-exec.sh`, run by the
-   `guest-agent-runtime-boundary` job in `.github/workflows/security.yml`,
-   exercises the universal agent's runtime profile and signed grant boundary.
-   The unit and conformance tests enumerate the complete DevOnly
-   request set.
-5. **Vsock framing + supervisor-config JSON are fuzzed.** `cargo-fuzz`
-   targets at `crates/mvm-agentd/fuzz/` cover `GuestRequest` and
-   `AuthenticatedFrame`. Plan 88 W6 adds
-   `crates/deps/libkrun-sys/fuzz/fuzz_targets/fuzz_supervisor_config.rs` against the
-   host-side `SupervisorConfig` parser the `mvm-libkrun-supervisor`
-   binary reads on stdin. `#[serde(deny_unknown_fields)]` on every
-   host↔guest type ensures unexpected fields fail-closed. The
-   third-party virtio-net frame parsers this section used to track as
-   an upstream fuzz gap are no longer reachable from any lane: the
-   userspace network gateways were deleted along with the guest-NIC
-   path, so there is no in-tree caller and no frame for them to parse.
-   `specs/adrs/003-hypervisor-egress-policy.md` is written around the
-   vsock-only chokepoint.
-6. **Pre-built dev image is hash-verified.** No such function exists —
-
-   <!-- absent:begin -->
-
-   `download_dev_image`
-
-   <!-- absent:end -->
-
-   defines nothing and never did; the five doc comments that named it were
-   corrected on 2026-09-01, along with a second fabricated name they carried.
-   The production path is `acquire_image_set()` in
-   `crates/mvm-cli/src/commands/env/artifact_verify.rs`, which calls
-   `PublishedImageSet::acquire_from`. It checks the pinned manifest digest
-   and publisher signature before parsing, then verifies each fetched
-   member's declared size and digest; a mismatched member is removed.
-   `fetch_expected_hashes` and `verify_artifact_hash` in that CLI module
-   are test-only helpers and are not evidence for the production path.
-   Image-set acquisition does not read `MVM_SKIP_HASH_VERIFY`
-   (`the_hash_skip_hatch_does_not_admit_a_member_the_root_does_not_describe`);
-   the hatch still skips the bootstrap-kernel checks and the per-binary
-   checksums inside an already digest-verified overlay archive. Never set
-   it in CI.
-
-   What the image set covers is the Linux layer: the kernels, the base root
-   filesystems, the builder image and the Stage 0 seeds. It still publishes
-   runtime-overlay, SDK-sidecar and initramfs members too, but `mvmctl` reads
-   them only as retired roles (`ImageSetRole::RetiredGuestRuntime`) and never
-   attaches one to a launch. The guest runtime it assembles those pieces from
-   is not an image-set member. It is a CLI release asset,
-   verified under claim 20, so this claim says nothing about it.
-
-7. **Cargo deps are audited nightly and on release tags.** `deny.toml` + the
-   `cargo-deny` and `cargo-audit` jobs in `security.yml`, which has no
-   `pull_request` trigger: a dependency advisory is caught by the next nightly
-   run, not by the PR that introduces it. Nothing at PR time runs either tool.
-   Reproducibility double-build (same workflow) catches non-determinism that
-   could mask injection.
-8. **Every workload runs from a signed, audited `ExecutionPlan`.**
-   `mvmctl machine run` synthesizes a typed `ExecutionPlan`, signs it under
-   the host's Ed25519 keypair at `~/.mvm/keys/host-signer.ed25519`
-   (mode 0600), verifies it through `mvm_core::plan::verify_plan`
-   (`mvm_plan` is not a crate — `plan` is a module of `mvm-core`),
-   enforces the G4 validity window + nonce replay-store, and only
-   then dispatches the backend. Each admission emits
-   `plan.admitted` / `plan.launched` / `plan.failed` chain-signed
-   entries to `~/.mvm/audit/<tenant>.jsonl`; tampering breaks
-   `mvm_hostd::supervisor::verify_audit_chain` (surfaced via
-   `mvmctl trust audit verify`, which exits nonzero on detected drift).
-   The chain rotates into sequenced segments once the active file reaches
-   `MVM_AUDIT_SEGMENT_BYTES` (4 MiB default): `<tenant>.seg-NNNNNN.jsonl`
-   beside the live `<tenant>.jsonl`. Nothing is deleted — rotation only
-   splits. Every segment after the first opens with a signed
-   `chain.continued` record naming its predecessor and that predecessor's
-   final chain hash, so `verify_audit_chain` attests "unbroken from
-   genesis **or** from a signed handoff", and `verify_segment_set` attests
-   the set is ordered and complete: a removed segment is reported by
-   number rather than passing silently. `mvmctl doctor` checks the live
-   segment plus the handoffs and says that is what it checked;
-   `mvmctl trust audit verify` walks every retired interior. A
-   session that reaches its end is closed by a chain-signed
-   `session.sealed` record (entry count, first/last entry, chain head,
-   RFC 6962 root over the session's entries, link to the previous
-   seal), and truncating through a seal turns the session `UNSEALED`,
-   which `trust audit verify <session>` reports field by field. Tail
-   truncation of whole sessions, or of a session that never sealed,
-   stays undetectable without an off-host witnessed root — exactly as
-   it was before rotation (Plan 319).
-   Workspace `cargo test` exercises rejection paths on every PR
-   (plan 64 W1–W4 — `synthesize_plan`, `host_signer::load_or_init_at`,
-   `admit_for_run`, `AuditEmitter`; `xtask check-no-display-on-secret-types`
-   protects the host signer's redacted `Debug`).
-9. **Every published bundle is content-addressed, key_id-pinned, and
-   re-verified at fetch and at admit time.** Sprint 52 W2 +
-   admit-time re-verify follow-on.
-   `mvm_core::plan::bundle::read_and_verify_bundle`
-   - `mvm_core::plan::bundle::verify_plan_bundle` exercise the
-     rejection ladder on every PR: unknown-key, tampered manifest,
-     key_id mismatch, tampered artifact, missing artifact, unsafe
-     path, schema bump, pin-archive sha256 drift, pin-signature
-     drift. `mvmctl bundle fetch` round-trip + `admit_for_run` tests
-     assert refusal on pin-without-context and pin-archive mismatch.
-10. **No untrusted workload reaches the network unless explicitly
-    admitted by policy.** Sprint 52 W3. `policy_default_is_deny_all`
-    and `run_net_default_is_deny_all` (the ADR-001 row's witnesses)
-    assert the default-deny posture. An unrecognised preset name refuses
-    rather than falling through to a permissive default, at the CLI and on
-    the wire alike (`crates/mvm-contract/tests/egress_predicate_algebra.rs`).
-
-    This bullet used to claim that "`mvmctl up` emits an opt-in warning when
-    the resolved policy is `unrestricted`", with an escape hatch of
-    `MVM_ACK_UNRESTRICTED_NETWORK=1`. **None of that exists.** `up` is not a
-    dispatched verb and its leftover `Args` struct has been deleted. The acknowledgement env var is read nowhere in the workspace;
-    its only occurrence is a doc comment in `mvm-contract::stream::edge`
-    saying another mechanism is "shaped after" it:
-
-    <!-- absent:begin -->
-
-    `MVM_ACK_UNRESTRICTED_NETWORK`.
-
-    <!-- absent:end -->
-
-    There is no unrestricted
-    acknowledgement, so nothing is being bypassed — but nothing warns either,
-    and a retired plan cited the non-existent hatch as prior art for its E7
-    redaction opt-out. Building the acknowledgement is tracked in the issues.
-    Cardoso-flavoured
-    audit of DNS / vsock control-plane carve-out / Plan 104 broker
-    channels as covert egress is tracked in Plan 111 Workstream A.
-
-11. **Every application-dep volume is CVE-scanned and SBOM-enumerated
-    when sealed, then hash-locked, attestation-checked, and bound to the
-    workload's audit chain.** ADR-014 / Plan 73 Followups A +
-    B.1/B.2/B.3 + C + D wire the sealed-volume lifecycle: the builder VM
-    (`mvm-host-vm-init` +
-    `LibkrunBuilderVm::run_build` Install arm) installs deps into a
-    sealed volume at `~/.mvm/volumes/deps/<volume_hash>/` carrying
-    `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, and a
-    hash-chained `meta.json`; `mvm_build::app_deps` calls
-    `mvm_core::deps_audit::verify_sealed_volume` when the build cache reuses a
-    volume, and `mvmctl deps inspect` / `deps audit` run it too. No launch path
-    attaches a dependency volume or verifies one at admission (issue #5962): every launch builds its plan with
-    `deps_volume: None`, and `verify_deps_volume_binding` has no production
-    caller. The seal-time security lane applies
-    `mvm_build::app_deps_gate::apply_install_gate` and fails closed on
-    high/critical CVE findings or stub SBOM/CVE; production launch does not
-    currently call that severity gate, and the dormant-control manifest pins
-    that limitation. `mvmctl deps inspect` / `mvmctl deps audit` surface the
-    sealed sidecars without
-    a VM spawn. The `app-deps-audit` job lives in
-    `.github/workflows/security.yml` (Followup D), not `ci.yml` — it runs
-    on the nightly cron and on release tags, so this lane does **not**
-    gate every PR. It lived in a dispatch-only workflow
-    that never ran until 2026-08-21; that workflow is deleted. It exercises
-    `mvmctl dev compile` on
-    `examples/python/hello-app-with-deps/`, seals a clean + a high-CVE
-    fixture via `mvm-build`'s `mvm-app-deps-fixture-tool` example,
-    asserts `mvmctl deps inspect --json` reports a well-formed report,
-    asserts the prod gate refuses the high-CVE fixture and the dev
-    gate admits it, and asserts a byte-flip on `cve.json` makes
-    inspect refuse via `verify_sealed_volume`. Full builder-VM round-trip
-    (real `uv pip install` + `pip-audit` inside a booted builder VM) is not
-    run by this lane; the CI lane exercises every code path that doesn't
-    require a working microVM backend.
-12. **Every host-side service the broker exposes is bound to a signed
-    `ExecutionPlan.services` binding, enforced before handler
-    dispatch, and audited via the chain-signed log.** Plan 104 W2 /
-    ADR-020. Witnesses, per the ADR-001 row:
-    `unbound_service_returns_not_bound` and
-    `service_call_rejects_unknown_envelope_fields`.
-
-    Earlier revisions of this bullet named four tests, a fuzz target, and
-    three `xtask check-handler-*` gates that **do not exist** and never did
-    on this branch:
-
-    <!-- absent:begin -->
-
-    `service_call_denied_when_unbound`,
-    `service_call_denied_outside_profile`,
-    `audit_chain_contains_service_call_entries`,
-    `audit_chain_carries_no_payload_bytes`, and a
-    `fuzz_service_call.rs` target.
-
-    <!-- absent:end -->
-
-    That list used to be held in quotes rather than backticks, by hand,
-    because backticks assert a real identifier. It is now a gate:
-    `check-asserted-absence` fails if any of those names appears in the
-    tree, so the correction cannot decay into a stale denial. The ADR-001 row was
-    always correct, so `check-claim-catalog` never went red — only this
-    file was wrong, which is why the ledger and not the narrative is
-    authoritative. Payload-freedom for the stream plane's own audit
-    entries is witnessed by
-    `stream_audit_entries_carry_the_binding_and_no_payload_bytes`.
-
-13. **The managed substitution path hands the guest placeholders, never raw
-    secret values.** The host-side substitution endpoint mints the environment
-    delivered to the guest and resolves the real credential only while
-    preparing an admitted outbound request. There is no secret-returning
-    `host.secrets.v1` broker handler; that retired name is not part of the SDK
-    host-service surface. Plan 104 W5 / ADR-023. Witnesses, per the ADR-001
-    row: `handed_placeholders_never_contain_the_secret_value` and
-    `endpoint_bin_serves_substitution_and_refuses_unbound_destination`.
-    The placeholders reach the workload with each entrypoint call, never on the
-    kernel command line; the `mvm.secret_env` cmdline token and its encoder
-    were deleted because no booted guest read them. The six test names this
-    bullet used to list do not exist in the tree:
-
-    <!-- absent:begin -->
-
-    `host_secrets_v1_denied_outside_allowed_destinations`,
-    `zeroize_drop_zeros_secret_bytes`,
-    `handler_inter_call_memory_hygiene`,
-    `host_secrets_v1_signed_payload_jcs_roundtrip`,
-    `secrets_subprocess_cannot_reach_supervisor_memory`,
-    `placeholder_in_outbound_request_dropped_and_audited`.
-
-    <!-- absent:end -->
-
-14. **Every `mvmctl run --image <oci-ref>` admission records the OCI
-    image provenance in the chain-signed audit log.** Row 14 of the
-    ADR-001 table. Plan 85 Phase E + F wire the user-facing OCI image
-    runner to the same audit chain that backs claim 8.
-    `mvmctl image pull` materializes the layer set in `mvm-fs`'s
-    allow-listed unpacker (`mvm_fs::oci::unpack::unpack_layer`),
-    materializes an ext4 rootfs — by default in-process on the host
-    via the memory-safe pure-Rust writer (`mvm_build::rootfs::
-materialize_ext4_pure`; ADR-004 supersedes ADR-017's builder-VM
-    `mkfs` mechanism while preserving its roothash guarantee, and
-    auto-falls-back to the builder VM for trees too large or fragmented
-    for it; the builder VM carries no extended attributes, so a tree
-    carrying `security.capability` or ACL xattrs that falls back is
-    refused rather than emitted without them) — and persists provenance metadata (registry host, repo, supplied
-    reference, resolved manifest digest, layer digest list, trust
-    policy, cosign verdict). `mvmctl run --image` admits an
-    `ExecutionPlan` (claim 8 path) and then emits a
-    `plan.oci_provenance` entry via
-    `AuditEmitter::emit_oci_provenance`
-    (`crates/mvm-cli/src/commands/vm/audit_chain.rs`) carrying those
-    labels; `mvm_hostd::supervisor::verify_audit_chain` continues to detect
-    drift, surfaced via `mvmctl trust audit verify`. `--prod` refuses
-    mutable references before any network fetch
-    (`crates/mvm-cli/src/commands/image/pull_core.rs::
-prod_pull_requires_digest_pin_before_network` and
-    `prod_run_image_requires_digest_pin_before_network` — `image` is a
-    directory of modules, not a single `image.rs` file), demands an
-    explicit registry policy, and requires cosign verification of the
-    resolved digest before cache admission or boot. The OCI
-    `unpack_layer` fuzz harness lives in
-    `.github/workflows/security.yml`'s `fuzz` job (release-tag pushes
-    - nightly cron + manual dispatch); the six OCI hardening lanes
-      (`layer-unpack-adversarial`, `digest-mismatch-reject`,
-      `malformed-manifest`, `mutable-tag-prod-reject`, `reproducibility`,
-      `image-runner-smoke`) are the `oci-hardening` matrix in
-      `.github/workflows/security.yml`, not `ci.yml` — so none of the six
-      gate a PR; they run nightly and on release tags. They were six
-      separate dispatch-only jobs in a since-deleted workflow and had never
-      been run. Note that ADR-001's ledger does not cite them:
-      claim 14's row names no `ci:` witness, so this paragraph is prose
-      about lanes the gate does not check, and the table is what binds.
-15. **A sealed production microVM has no shell, no DevOnly guest-agent
-    verbs, and no PTY.** The sole
-    interactive path into a guest is the agent-served PTY-over-vsock
-    console (`crates/mvm-agentd/src/console.rs`). The universal agent
-    dispatches it only when the runtime profile and signed grant authorize
-    the request. Plan 165 WS-C. Five independent layers: (1) only a dev image
-    is served a shell; (2) the prod rootfs is dm-verity sealed
-    (claim 3); (3) the backend captures the guest console **write-only**
-    to `console.log` with no host input fd
-    (`mvm_runtime::libkrun::open_console_capture` — `mvm_backend` is
-    not a crate, this is a function in `mvm-runtime` — and
-    `following_the_console_never_writes_to_it`); (4) the host
-    `enforce_accessible_gate` refuses `mvmctl machine console` on a sealed VM
-    (`console_refused_on_sealed_image`); (5) the agent console and DevOnly
-    handlers are grant-gated. CI: the `guest-agent-runtime-boundary` job in
-    `.github/workflows/security.yml` runs the runtime refusal suite.
-    Serial-console passthrough
-    was considered and rejected (fatal on an input-less console); there
-    is exactly one interactive transport and it is dev-only.
-    This claim used to read "no interactive access", holding by
-    **absence** — a sealed VM had no host→guest byte path at all. The
-    workload input plane built one, so the claim shrank to the part that
-    still holds by absence, which is what its three witnesses check. The
-    input plane's own properties (stdin only, no program selection, no
-    argv or env change, refused without a plan grant) are policy enforced
-    by host code, and are claimed separately as `Preview` claim 17 with
-    their limits.
-
-`Preview` claim 17 — **workload stdin is grant-gated, single-writer,
-secret-scanned across frames, and every refusal audited**
-(`crates/mvm-hostd/src/stream/input_gate.rs`). Every leg has a production
-caller: `mvmctl machine run --entrypoint --stdin -` opens the route under the
-plan that boot was admitted under, the sealed-tier shell-entrypoint refusal
-classifies an entrypoint resolved from the image's own `mvm-meta.json`
-sidecar and fails closed when it cannot resolve one, and the secret scan is
-populated — the per-VM substitution endpoint (the one process holding a
-workload's credentials in the clear) fingerprints each secret it resolves
-and `StreamPlane::open_input` installs that set. Only the fingerprint — a
-length, a rolling hash and a category — crosses into the scanning process;
-never a value. It stays a preview and not a numbered claim because of what
-the enforcement is rather than whether it runs: a fingerprint match is a
-length-and-hash match, not an identity, and encoding, derivation and a
-window-straddling split defeat the scan permanently. ADR-001's ledger
-carries the full limits note, marked closed or open individually; do not
-paraphrase this row as enforced without it.
-The fleet stream-edge workflow in mvmd is now the input plane's second
-production caller; that closes no remaining limit and does not promote the
-claim.
-
-`Preview` claim 18 — **a workload's resource consumption is bounded at
-admission, and bound at spawn where the host has a mechanism**. Admission
-is the strong half and holds everywhere: an operator-configured
-per-workload ceiling (`max_cpu_millicores` / `max_memory_mib` /
-`max_wall_clock_secs`) plus a host-wide budget
-(`host_budget_memory_mib` / `host_budget_cpu_millicores`) that refuses a
-boot whose memory, on top of every live machine's admitted charge, would
-exceed the headroom (`crates/mvm-hostd/src/admission_budget.rs`). The
-budget counts only machines carrying a live pid marker — the same probe
-the fork path trusts, so a crashed VM cannot lock the host out — and
-counts each machine's configured maximum rather than the balloon's
-current commitment. CPU is the partial half: a granted share wraps the VMM spawn in a
-systemd transient scope on Linux and the achieved tier is read back off
-`cpu.max`. On the in-house HVF VMM on macOS there is no host-level quota
-primitive, so the run loop enforces the share in-process using the summed Mach
-CPU time of every vCPU thread — the sum, so the bound stays a bound on the
-machine rather than on one CPU of an SMP guest; the achieved tier is read back
-from the scheduler's measured record and audited. libkrun has no in-process vCPU control, so a CPU
-grant there stays `declared` and `--prod` refuses it. Memory and tasks are
-bounded at spawn on that same scope, for every VMM spawn and not only a granted
-one, but only on a Linux host with a systemd user session: the scope carries
-`MemoryMax=` of guest RAM plus a fixed 256 MiB overhead margin (swap excluded)
-and `TasksMax=1024`, `memory.max` and `pids.max` are read back with their values
-into the same `plan.grants_enforced` entry, and a scope the OOM killer ended is
-recorded as `plan.memory_limit_exceeded` when a waited run's exit is reported. A
-service manager that never creates the scope fails the launch after 10 s instead
-of hanging it. macOS, and a Linux host without the mechanism, record both as
-`declared`, and that is not a `--prod` refusal: nobody asked for these ceilings,
-so their absence refuses nothing. The admission budget still charges guest RAM
-only, not the margin. Wall clock is enforced
-by the per-VM supervisor on libkrun and HVF: the process that owns the guest
-for its whole life arms a timer from the admitted plan, and a workload that
-outruns its bound is killed with exit `124` and a chain-signed entry. A bound
-whose kill could not be audited refuses to boot rather than running unbounded.
-Firecracker has no such supervisor process and is not covered. The wasm
-backend wires admitted fuel and wall-clock bounds into wasmtime fuel
-consumption and epoch interruption. A restore never inherits the
-parent's plan, since auditing a child's kill under its parent's identity would
-write a wrong entry rather than a missing one. An HVF forked child carries its
-own admitted plan: its supervisor verifies it (host key, validity window,
-names this child; no nonce re-spent) and arms the wall clock from the restore,
-audited under the child's identity. Other restored or warm-claimed children are
-admission-bounded without the host-side CPU control or the timer re-armed.
-ADR-001's ledger carries the "Preview 18 limits" note; do not paraphrase
-this row as enforced without it.
-
-19. **Every dataset, model, prompt, agent, policy, and compute environment
-    named by a workload carries a content-derived identity in the signed plan,
-    and a pinned host share that drifts after admission fails closed.** Row 19
-    of the ADR-001 table, `Shipped`. `--asset KIND:PATH` hashes the asset into
-    `AssetIdentity` records inside the signed `ExecutionPlan`; admission also
-    pins each directory share's content digest and re-verifies it at mount
-    enforcement, so a post-admission edit of the host directory is refused
-    (`admitted_share_digest_refuses_directory_changed_after_admission`).
-    Synthesis derives the compute-environment identity from the measured
-    image/kernel/verity state
-    (`synthesized_plan_records_share_and_caller_asset_identities`), and a
-    `plan.asset_identities` chain-signed entry carries the kind, locator and
-    digest labels. Note this claim is numbered 19 in the ledger even though it
-    is `Shipped` and rows 16–18 are `Preview`: the ledger numbers rows in the
-    order claims were added, not by status.
-
-20. **Every published release artifact is authenticated under the release
-    workflow's identity, directly or through a signed checksum manifest, and
-    the build, fetch, install, and self-update paths refuse an artifact whose required
-    signature is missing or invalid.** Row 20, `Shipped`. `release.yml` signs archives and
-    checksum manifests keyless through GitHub OIDC and publishes bundles
-    carrying the Fulcio certificate and Rekor inclusion proof. Raw kernels,
-    root filesystems, and metadata are covered by the signed manifests rather
-    than individual bundles. The `verify-release` job re-downloads the
-    published set, verifies the signatures against an identity regexp pinned
-    to this workflow at a tag, and checks the covered blobs against their
-    authenticated digests. The build gate refuses a missing bundle
-    (`a_missing_bundle_refuses_and_names_the_asset`) and accepts only the
-    versioned release workflow
-    (`accepted_identities_are_the_versioned_release_workflow`); the
-    image-set acquisition refuses an unsigned pinned root before parsing it
-    (`acquire_refuses_a_root_without_a_signature`) and
-    the hash-skip hatch does not waive the signature
-    (`the_hash_skip_hatch_does_not_waive_the_root_signature`).
-
-    The self-update path used to be the exception: `verify_signature` shelled
-    out to `cosign` and returned `Ok` with a warning when it was absent. It now
-    calls the same in-process verifier with the CLI release train, so it
-    refuses a missing bundle (`an_archive_without_a_bundle_is_refused`) and
-    verifies a real one only under its own tag
-    (`a_real_release_bundle_verifies_under_its_tag`). An `mvmctl` built without
-    `manifest-verify` therefore cannot self-update. The `checksums-sha256.txt`
-    it compares the tarball against is verified first, under the same
-    tag-bound identity and before a line of it is parsed
-    (`self_update_refuses_an_unsigned_checksum_manifest_before_parsing`,
-    `self_update_refuses_a_checksum_manifest_signed_for_another_tag`);
-    `MVM_SKIP_HASH_VERIFY` does not waive it, and `--skip-verify` waives only
-    the tarball's own bundle. `install.sh` verifies with the installed
-    `mvmctl env verify-release`, or with `cosign`; on a host with neither it
-    authenticates the archive against the hash the published installer
-    carries before running its `mvmctl` as the verifier, or fetches a
-    hash-pinned `cosign` (`fresh_install_has_no_unsigned_fallback`). ADR-001's
-    "Claim 20 boundaries" note records the installer's trust root.
-
-    The guest runtime (`mvm-guest-bins-v<version>.tar.gz`) — the archive a
-    release binary assembles its runtime overlay, initramfs and SDK sidecars
-    from — is one of these signed release archives. `release.yml` will not
-    publish without exactly one, named for the tag, and signs it and its
-    `.sha256` sidecar; `verify-release-assets.sh` checks both signatures, the
-    sidecar against the bytes, and the archive's manifest.
-    `acquire_release_guest_runtime` holds a download to that digest
-    (`a_release_runtime_that_misses_its_digest_is_refused_before_its_signature`)
-    and then to the signature at exactly its own version before parsing or
-    caching it (`an_unsigned_release_runtime_is_refused_and_nothing_is_cached`).
-    `install.sh` checks it against the checksum manifest and its own bundle
-    before staging it beside `mvmctl`, and tolerates only a 404, for releases
-    that predate the asset (tested in `tests/install_sh.rs`). A
-    copy found beside `mvmctl` is held to its own manifest, not re-verified
-    against the signature when the runtime is assembled. A cached copy, and
-    every download before it is cached, is checked with the launch's own
-    verifier, so the cache holds only the files that verified
-    (`the_cached_files_are_the_bytes_that_were_verified`).
-    `MVM_SKIP_COSIGN_VERIFY` skips the signature at download time as it does
-    everywhere. For the release guest runtime it accepts an unverified
-    download, never an unverified install: such a download is never written to
-    that release cache, and bootstrap, first-use preparation, the image path,
-    `mvmctl dev runtime-overlay build` and `mvmctl dev sdk-sidecar build`
-    refuse it right after acquisition
-    (`bootstrap_keeps_a_hatched_download_out_of_the_install`,
-    `bootstrap_refuses_a_hatched_download_before_any_other_step`): installing
-    takes an `AuthenticatedReleaseArchive`, which `authenticated_archive` will
-    not make from an `Unverified` result, so nothing reaches the object store,
-    the launch pieces, the OCI shims or the adoption record, and the refusal
-    says to unset the hatch and run `mvmctl bootstrap` again. Elsewhere the
-    hatch still waives verification of what is installed: under it
-    `mvmctl env update` installs an `mvmctl` tarball whose signature was not
-    checked, and bootstrap installs a builder image whose verification was
-    waived. `env update` acquires the guest runtime without installing
-    anything from it, replaces the binary, and its follow-up bootstrap refuses,
-    so the update ends with a warning. During a Sigstore outage, then, a fresh
-    release install cannot bootstrap. The Firecracker launch proof is stricter: it re-verifies the
-    archive's signed bundle at every launch and `MVM_SKIP_COSIGN_VERIFY` does
-    not waive it, so a locally built archive can be assembled from but never
-    launched under Firecracker.
-
-    Every release launch, on every backend, authenticates the archive's bytes
-    — its digest against the signed checksum, and both bundles — and reads the
-    manifest from the archive's first entry (`read_release_manifest`); it does
-    not decompress or hash the members, and it refuses an archive whose
-    manifest is not the first entry. Whether the members agree with the
-    manifest is established before signing (`check_release_archive`) and again
-    at acquisition and assembly (`install_release_guest_runtime`), not at
-    launch
-    (`a_launch_reads_the_manifest_of_authenticated_bytes_without_walking_members`,
-    `a_launch_does_not_compare_members_with_the_manifest`,
-    `installing_an_authenticated_archive_still_walks_its_members`). Those
-    launch tests use a stand-in signature check private to `mvm-build`'s own
-    tests, so they witness the order and the missing walk, not Sigstore. The
-    published `v0.28.0-rc.2`, `rc.4` and `rc.5` releases carry the asset.
-
-    The release job also attests build provenance for the binary tarballs
-    (`actions/attest-build-provenance`, verifiable with `gh attestation
-verify`), which witnesses this claim because the attestation is signed
-    under the same workflow identity. It is SLSA Build **L2**: the attestation
-    is produced by the same workflow that produces the artifact, so a
-    compromised release job forges both. Provenance adds the commit and build
-    inputs in a machine-readable predicate; it is not evidence the build was
-    uncorrupted, and `ci:reproducibility` under claim 7 remains the control
-    that speaks to that.
-
-The guest agent itself runs as uid 901 through `mvm-setpriv --no-new-privs`;
-its own `PR_CAPBSET_DROP` calls narrow the capability bounding set. The
-host-side vsock proxy socket is mode 0700 (W1.2), the proxy port
-allowlist drops anything outside the agent and forward ranges
-(W1.3), and `~/.mvm` (and every child, `~/.mvm/cache` included) is mode 0700 (W1.5).
-
-Out of scope (named in ADR-001):
-
-- A malicious _host_. mvmctl trusts the host with the hypervisor and
-  private build keys.
-- Multi-tenant guests. One guest = one workload.
-- Hardware-backed key attestation.
-
-`mvmctl doctor` reports the live posture on the running host
-(plan 40 folded the standalone `security` verb into doctor's
-unified diagnostics report). Architecture detail, the claims ledger,
-and the per-backend tier matrix are all in
-`specs/adrs/001-microvm-security-posture.md`.
-
-## Testing
-
-No task is done without tests. Before marking any feature complete:
+## Build, test, gates
 
 ```bash
-cargo fmt --all -- --check           # workspace-wide fmt; --all matters
-cargo nextest run --workspace        # all tests must pass (process-parallel)
-cargo test --workspace --doc         # doctests — nextest does NOT run these
-cargo clippy --workspace -- -D warnings  # zero warnings
+cargo build && cargo run -- --help    # every verb self-documents; reference: public/src/content/docs/reference/cli-commands.md
+cargo fmt --all -- --check             # --all matters: without it only one crate is checked
+cargo nextest run --workspace          # the test gate (`just test`)
+cargo test --workspace --doc           # nextest skips doctests (`just test doc`)
+cargo clippy --workspace -- -D warnings
+cargo run -p xtask -- check-all        # the xtask gates; CI workflows hold the full list
 ```
 
-`cargo nextest run --workspace` (what `just test` and CI run) is the named
-test gate — it's process-parallel and faster than `cargo test` on this
-~4,350-test suite. The one gap: **nextest skips doctests**, so the
-`cargo test --workspace --doc` line above (wrapped as `just test doc`, and
-folded into `just ci`) keeps doc-fence coverage gated. `cargo test
---workspace` still works as a fallback if nextest isn't installed.
-
-**`--all-targets` has two blind spots**, and a change to a shared type's shape
-(a new struct field, trait method, or enum variant) walks into both. It skips
-any target behind `required-features` — `mvm-conformance`'s cucumber runner
-needs `--features bdd`, and without it the same broken tree reports zero
-errors — and on macOS it cannot compile `cfg(target_os = "linux")` files at
-all, including Linux-gated _test_ files, which `just check linux` misses too
-because that recipe is `--lib` only. `just check gated` covers both. Skipping
-it costs a CI round trip: the break surfaces there as a compile error in the
-"Build workspace tests" job, which compiles every workspace test target on
-Linux.
-
-**Always pass `--all` to `cargo fmt`.** Without it, fmt only checks the
-manifest crate (whichever one the manifest points at), silently missing
-drift in every other workspace member. CI runs `cargo fmt --all --
---check`; if you only check the local crate, the merge will still fail.
-The pre-commit hook at `.githooks/pre-commit` auto-fixes with `cargo
-fmt --all` and re-stages — `just setup hooks` wires
-`core.hooksPath` to `.githooks/` so it fires on every commit.
-
-The Justfile recipes wrap this correctly: `just lint fmt`, `just
-lint clippy`, `just lint` (both), `just ci` (lint + test + doctests). Prefer
-those over raw cargo invocations.
-
-Every new module, type, or function needs test coverage:
-
-- Types: serde roundtrip, default values
-- Protocol/wire code: mock I/O roundtrip, tampered data rejection, error paths
-- CLI: integration tests in `tests/cli.rs` for help text and argument parsing
-- Security: positive path, negative path (wrong key, tampered, replay), edge cases
-
-## Scratch & temporary files
-
-Never write scratch, temporary, or intermediate files anywhere inside the repo working tree — not the root, not a subdirectory, not a hidden dotfile, not a gitignored path. This covers **every** kind of agent-created scratch (analysis lists, command output, intermediate JSON/TSV, logs, ad-hoc scripts, `git merge-file` inputs), not just screenshots/binaries. Write them under `/tmp/` instead. See AGENTS.md §"Screenshots & Temporary Files" for the full rule.
-
-`.agent-memory/notes/` is the one exception, and it is not an exception to the
-rule so much as a different thing: scratch is what you produce while working, a
-note is what you learned. It is gitignored, so writing one does not put anything
-in the repository.
+`just lint`, `just ci` (lint, tests, doctests, BDD) and `just test scoped
+<crate> <filter>` wrap these. A change to a shared type's shape also needs
+`just check gated` (AGENTS.md, Definition of Done 4). `just setup hooks`
+installs the pre-commit hook. Contributor setup (pinned zig, `embed-host-bins`,
+guest-runtime pieces, libkrun): `public/src/content/docs/contributing/development.md`.
 
 ## Local findings (`.agent-memory/`)
 
-**These notes are local to your checkout.** `.agent-memory/` is gitignored and
-untracked; it was committed until 2026-09-03 and was deliberately made
-local-only again. Nothing here is reviewed, shared, or carried to another clone,
-and a note you write is a note only you will read.
+Gitignored and local to your checkout: one finding per
+`.agent-memory/notes/<slug>.md` (`title`, `date`, `tags` frontmatter); `just
+mem recall|notes|remember`; checked by `xtask check-agent-notes`, which is not
+in `check-all`. Recall before you investigate; record what the diff will not
+say, above all what proved false. Anything others need goes somewhere tracked;
+ADRs and the ledger win over a note.
 
-One finding per file under `.agent-memory/notes/<slug>.md`, with `title`,
-`date` and `tags` frontmatter. `just mem recall <terms>` searches them, `just
-mem notes` lists them, `just mem remember <slug>` scaffolds one. `xtask
-check-agent-notes` holds the shape and refuses a `[[link]]` to a note that does
-not exist — run it yourself; it is not in `check-all`, because in CI the
-directory does not exist and the gate has nothing to check.
+## Where things live
 
-**Recall before you investigate.** A measurement already in there is one you do
-not have to pay for twice.
-
-Write one when you learn something the diff will not say — and especially when
-you learn something is _false_. The falsifications are the notes that earn
-their keep: `teardown-scales-with-guest-ram` records the obvious fix, the A/B
-that refuted it, and why it could not have worked, which is the difference
-between a day spent and a paragraph read. Say what not to retry, and say why.
-
-Because the notes are local, anything another contributor needs to know has to
-go somewhere tracked — a `specs/` doc, an ADR, a comment, or the PR body. A note
-is where you keep a measurement for your own next session, not how you tell
-anyone else. Machine-specific context — host names, fleet layout, ssh targets,
-local paths — is exactly what it is for.
-
-These notes are observations, not authority. `specs/adrs/` owns decisions and
-the claims ledger owns what is enforced; where a note disagrees with one of
-those, the owner wins and the note is stale.
-
-## Build and Run
-
-```bash
-cargo build
-cargo run -- --help   # full verb surface: machine/run/dev/template/image/network/init/cache/doctor/…
-```
-
-Every subcommand is self-documenting via `--help`; the complete reference is
-`public/src/content/docs/reference/cli-commands.md`. Contributor compilation,
-validation, and artifact-preparation verbs live under `dev`; `console` is an
-interactive PTY, dev-mode only.
-
-## Documentation
-
-- `public/src/content/docs/contributing/development.md` -- contributor guide, testing, CI/CD
-- `public/src/content/docs/guides/nix-flakes.md` -- writing Nix flakes for microVM images (mkGuest API)
-- `public/src/content/docs/guides/troubleshooting.md` -- common issues and fixes
-- `public/src/content/docs/reference/cli-commands.md` -- complete CLI command reference
-- `specs/prd.md` -- the product requirements document
-- `specs/adrs/` and `specs/contracts/` -- durable decisions and stable contracts
-- `specs/README.md` -- current specs policy and retention rules
-
-## Work tracking and specifications
-
-GitHub issues are the only source of truth for work status, remaining scope,
-dependencies, and acceptance criteria. Pull requests record delivery and
-validation. Do not maintain a parallel sprint, refactor, delivery, or progress
-dashboard under `specs/`.
-
-`specs/` is reserved for durable decisions and contracts plus technical design
-material that is still useful while an issue is open. A plan may explain the
-implementation, but its checkboxes do not own status and need not be updated as
-work lands. Legacy documents may still instruct readers to update retired
-dashboards; those instructions are historical and are superseded by this
-section and `specs/README.md`.
+- `AGENTS.md` -- working agreement; `public/src/content/docs/contributing/` -- contributor guides, repository layout
+- `specs/adrs/` (decisions, e.g. ADR-001 security, ADR-004 builder trust, ADR-054 image boundary, ADR-058 trust-first sequencing) and `specs/contracts/`
+- `specs/prd.md`, `specs/README.md` -- requirements and specs policy; GitHub issues own work status
+- `public/src/content/docs/guides/nix-flakes.md` (mkGuest), `guides/troubleshooting.md`
