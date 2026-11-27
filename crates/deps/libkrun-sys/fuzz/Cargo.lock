@@ -606,6 +606,7 @@ dependencies = [
  "mvm-contract",
  "mvm-crypto",
  "mvm-macho-sign",
+ "mvm-setpriv",
  "plist",
  "rand",
  "rustix",
@@ -637,6 +638,13 @@ dependencies = [
  "plist",
  "sha1",
  "sha2",
+]
+
+[[package]]
+name = "mvm-setpriv"
+version = "0.28.0-rc.11"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
