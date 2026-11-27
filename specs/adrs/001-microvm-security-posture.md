@@ -388,12 +388,17 @@ not paraphrase this row without them.
    racing each other can both read the same total and both be admitted,
    overshooting by one boot; closing that needs a host-wide lock held across
    measure-and-start. Its CPU arm sums only *granted* shares, so an ungranted
-   workload is uncapped and contributes nothing. And its liveness and record
-   reads fail open in the undercount direction — an unreadable charge record
-   makes one machine invisible rather than refusing every boot on the host
-   (`fn:an_unreadable_charge_record_is_skipped_rather_than_fatal`). Each is a
-   deliberate choice of the undercount failure over the lockout failure, which
-   is the same judgement limit 4's counting rule makes.
+   workload is uncapped and contributes nothing. And no one machine's
+   accounting evidence refuses an unrelated boot, in both the live-machine sum
+   and the configured-budget ledger. A machine counts only while a pid marker
+   leaves it possibly running; one whose marker cannot be read stays counted.
+   It counts at its charge record, or at the charge its persisted admitted plan
+   implies when that record is missing or unreadable. With neither readable it
+   is invisible, with a warning naming it, rather than refusing every boot on
+   the host (`fn:an_unreadable_charge_record_is_skipped_rather_than_fatal`,
+   `fn:an_unreadable_charge_record_with_no_plan_hides_only_that_machine`). Each
+   is a deliberate choice of the undercount failure over the lockout failure,
+   which is the same judgement limit 4's counting rule makes.
 6. **Memory and task ceilings at spawn hold only on a Linux host with a systemd
    user session. (PARTIAL, by host.)** Where they hold, every VMM spawn —
    Firecracker cold boots and every Firecracker snapshot load (fork, pool

@@ -727,55 +727,78 @@ fn legacy_committed(home: &Path, ledger: &Ledger) -> Result<MachineCharge> {
             "unexpected object in machine state directory"
         );
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(bytes) = platform::read_legacy(&entry.path().join(super::CHARGE_FILE), 4096)?
-        else {
-            let recorded = ledger
-                .reservations
-                .values()
-                .any(|record| record.vm_name == name && record.phase.is_charged());
-            if !recorded
-                && mvm_vmm::host::process_liveness::PID_FILE_NAMES
-                    .iter()
-                    .any(|file| entry.path().join(file).symlink_metadata().is_ok())
-            {
-                ensure!(
-                    platform::machine_is_confirmed_dead(&entry.path())?,
-                    "possibly live machine has no admitted charge"
-                );
-            }
-            continue;
-        };
-        let charge: MachineCharge =
-            serde_json::from_slice(&bytes).context("invalid legacy host charge")?;
-        if platform::machine_is_confirmed_dead(&entry.path())? {
-            continue;
-        }
-        if let Some(record) = ledger
+        // A charged hold already counts its machine, whatever its legacy
+        // record says.
+        let held = ledger
             .reservations
             .values()
-            .find(|record| record.vm_name == name && record.phase.is_charged())
-        {
-            ensure!(
-                record.charge == charge,
-                "legacy charge differs from host reservation"
-            );
+            .any(|record| record.vm_name == name && record.phase.is_charged());
+        if held || !may_be_live(&entry.path(), &name) {
             continue;
         }
-        total = checked_plus(total, charge)?;
+        if let Some(charge) = super::machine_charge(&entry.path(), |path| {
+            platform::read_legacy(path, MAX_MACHINE_EVIDENCE_BYTES)
+        }) {
+            total = checked_plus(total, charge)?;
+        }
     }
     Ok(total)
 }
 
+/// Upper bound on a charge record or persisted plan read for accounting.
+const MAX_MACHINE_EVIDENCE_BYTES: usize = 1024 * 1024;
+
+/// Whether a state dir's pid markers leave its machine possibly running.
+///
+/// No marker is no machine. A marker that cannot be read proves nothing either
+/// way, so that machine stays counted: over-counting one machine costs
+/// headroom, refusing on it would cost every boot.
+fn may_be_live(directory: &Path, name: &str) -> bool {
+    let has_marker = mvm_vmm::host::process_liveness::PID_FILE_NAMES
+        .iter()
+        .any(|file| directory.join(file).symlink_metadata().is_ok());
+    if !has_marker {
+        return false;
+    }
+    match platform::machine_is_confirmed_dead(directory) {
+        Ok(dead) => !dead,
+        Err(error) => {
+            tracing::warn!(
+                machine = name,
+                "unreadable machine PID evidence; counting this machine as possibly live: \
+                 {error:#}"
+            );
+            true
+        }
+    }
+}
+
+/// Remove a retiring hold's legacy record, but only one that is provably its.
+///
+/// A record that differs or cannot be read may belong to a later machine of the
+/// same name, so it is left for [`legacy_committed`] to judge by that machine's
+/// own evidence.
 fn remove_legacy_charge(home: &Path, record: &Reservation) -> Result<()> {
     let path = super::charge_path_at(home, &record.vm_name);
-    if let Some(bytes) = platform::read_legacy(&path, 4096)? {
-        let charge: MachineCharge = serde_json::from_slice(&bytes)?;
-        ensure!(
-            charge == record.charge,
-            "legacy charge differs from retiring reservation"
-        );
-        std::fs::remove_file(&path)?;
-        atomic_io::sync_dir(path.parent().context("charge parent missing")?)?;
+    let legacy = platform::read_legacy(&path, MAX_MACHINE_EVIDENCE_BYTES).and_then(|bytes| {
+        bytes
+            .map(|bytes| serde_json::from_slice::<MachineCharge>(&bytes).map_err(Into::into))
+            .transpose()
+    });
+    match legacy {
+        Ok(None) => {}
+        Ok(Some(charge)) if charge == record.charge => {
+            std::fs::remove_file(&path)?;
+            atomic_io::sync_dir(path.parent().context("charge parent missing")?)?;
+        }
+        Ok(Some(_)) => tracing::warn!(
+            machine = record.vm_name,
+            "legacy charge differs from the retiring hold; leaving it in place"
+        ),
+        Err(error) => tracing::warn!(
+            machine = record.vm_name,
+            "unreadable legacy charge left in place for the retiring hold: {error:#}"
+        ),
     }
     Ok(())
 }

@@ -101,19 +101,214 @@ fn legacy_live_charge_and_pending_hold_share_one_total() {
     assert!(HostBudgetPermit::reserve_at(home.path(), &budget(), "new", charge()).is_err());
 }
 
-#[test]
-fn malformed_legacy_accounting_is_never_proof_of_free_capacity() {
-    for corrupt_charge in [false, true] {
-        let home = tempfile::tempdir().unwrap();
-        super::super::record_charge_at(home.path(), "legacy", charge()).unwrap();
-        let directory = mvm_core::config::vm_state_dir_at(home.path(), "legacy");
-        if corrupt_charge {
-            std::fs::write(directory.join(super::super::CHARGE_FILE), b"bad").unwrap();
-        } else {
-            atomic_io::write_private(&directory.join("hvf.pid"), b"2147483647 corrupt").unwrap();
-        }
-        assert!(HostBudgetPermit::reserve_at(home.path(), &budget(), "new", charge()).is_err());
+/// What a neighbour machine leaves in its state dir for these tests.
+struct Neighbour<'a> {
+    record: Option<&'a [u8]>,
+    marker: Option<&'a [u8]>,
+    plan: bool,
+}
+
+fn neighbour(home: &Path, name: &str, evidence: Neighbour<'_>) {
+    let directory = mvm_core::config::vm_state_dir_at(home, name);
+    mvm_core::config::create_private_dir(&directory).unwrap();
+    if let Some(record) = evidence.record {
+        atomic_io::write_private(&directory.join(super::super::CHARGE_FILE), record).unwrap();
     }
+    if let Some(marker) = evidence.marker {
+        atomic_io::write_private(&directory.join("hvf.pid"), marker).unwrap();
+    }
+    if evidence.plan {
+        let plan = serde_json::to_vec(&plan(name)).unwrap();
+        atomic_io::write_private(&directory.join(super::super::PLAN_FILE), &plan).unwrap();
+    }
+}
+
+fn live_marker() -> Vec<u8> {
+    platform::current_owner().unwrap().into_bytes()
+}
+
+fn wider() -> HostBudget {
+    HostBudget {
+        max_total_memory_mib: Some(1024),
+        ..budget()
+    }
+}
+
+/// Whether the neighbour is counted: a 512 MiB boot fits a 1024 MiB host
+/// either way, and fits a 512 MiB host only when the neighbour is not counted.
+/// Neither answer may be a refusal that has nothing to do with headroom.
+fn neighbour_is_counted(home: &Path) -> bool {
+    HostBudgetPermit::reserve_at(home, &wider(), "unrelated", charge())
+        .expect("one neighbour's evidence must never refuse an unrelated boot that fits");
+    match HostBudgetPermit::reserve_at(home, &budget(), "second", charge()) {
+        Ok(_) => false,
+        Err(error) => {
+            assert!(
+                format!("{error:#}").contains("budget"),
+                "only the headroom may refuse: {error:#}"
+            );
+            true
+        }
+    }
+}
+
+#[test]
+fn an_unreadable_charge_record_falls_back_to_the_machines_plan() {
+    for record in [&b"bad"[..], b""] {
+        let home = tempfile::tempdir().unwrap();
+        let marker = live_marker();
+        neighbour(
+            home.path(),
+            "torn",
+            Neighbour {
+                record: Some(record),
+                marker: Some(&marker),
+                plan: true,
+            },
+        );
+        assert!(
+            neighbour_is_counted(home.path()),
+            "a live machine whose plan names its charge stays counted"
+        );
+    }
+}
+
+#[test]
+fn an_unreadable_charge_record_with_no_plan_hides_only_that_machine() {
+    for record in [&b"bad"[..], b""] {
+        let home = tempfile::tempdir().unwrap();
+        let marker = live_marker();
+        neighbour(
+            home.path(),
+            "torn",
+            Neighbour {
+                record: Some(record),
+                marker: Some(&marker),
+                plan: false,
+            },
+        );
+        assert!(!neighbour_is_counted(home.path()));
+    }
+}
+
+#[test]
+fn a_live_machine_with_no_charge_record_is_counted_from_its_plan() {
+    let home = tempfile::tempdir().unwrap();
+    let marker = live_marker();
+    neighbour(
+        home.path(),
+        "booting",
+        Neighbour {
+            record: None,
+            marker: Some(&marker),
+            plan: true,
+        },
+    );
+    assert!(neighbour_is_counted(home.path()));
+}
+
+#[test]
+fn a_live_machine_with_no_charge_evidence_hides_only_that_machine() {
+    let home = tempfile::tempdir().unwrap();
+    let marker = live_marker();
+    neighbour(
+        home.path(),
+        "unknown",
+        Neighbour {
+            record: None,
+            marker: Some(&marker),
+            plan: false,
+        },
+    );
+    assert!(!neighbour_is_counted(home.path()));
+}
+
+#[test]
+fn a_charge_record_with_no_pid_marker_is_not_a_live_machine() {
+    let home = tempfile::tempdir().unwrap();
+    let record = serde_json::to_vec(&charge()).unwrap();
+    neighbour(
+        home.path(),
+        "stopped",
+        Neighbour {
+            record: Some(&record),
+            marker: None,
+            plan: true,
+        },
+    );
+    assert!(!neighbour_is_counted(home.path()));
+}
+
+#[test]
+fn unreadable_pid_evidence_keeps_the_machine_counted() {
+    let home = tempfile::tempdir().unwrap();
+    let record = serde_json::to_vec(&charge()).unwrap();
+    neighbour(
+        home.path(),
+        "unprovable",
+        Neighbour {
+            record: Some(&record),
+            marker: Some(b"2147483647 corrupt"),
+            plan: false,
+        },
+    );
+    assert!(neighbour_is_counted(home.path()));
+}
+
+#[test]
+fn a_held_machine_with_a_torn_charge_record_is_counted_once_through_its_hold() {
+    let home = tempfile::tempdir().unwrap();
+    let permit = HostBudgetPermit::reserve_at(home.path(), &budget(), "held", charge()).unwrap();
+    let plan = plan("held");
+    permit.bind_plan(&plan).unwrap();
+    permit.mark_dispatching(&plan).unwrap();
+    let marker = live_marker();
+    neighbour(
+        home.path(),
+        "held",
+        Neighbour {
+            record: Some(b"bad"),
+            marker: Some(&marker),
+            plan: true,
+        },
+    );
+    assert!(neighbour_is_counted(home.path()));
+    let roomier = HostBudget {
+        max_total_memory_mib: Some(1536),
+        ..budget()
+    };
+    let _unrelated = HostBudgetPermit::reserve_at(home.path(), &wider(), "unrelated", charge());
+    assert!(
+        HostBudgetPermit::reserve_at(home.path(), &roomier, "third", charge()).is_ok(),
+        "the hold and its torn record are one machine, not two"
+    );
+}
+
+#[test]
+fn retiring_a_dead_machine_with_a_torn_charge_record_does_not_refuse_the_next_boot() {
+    let home = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let identity =
+        mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(child.id()).render();
+    let permit = HostBudgetPermit::reserve_at(home.path(), &budget(), "first", charge()).unwrap();
+    let plan = plan("first");
+    permit.bind_plan(&plan).unwrap();
+    permit.mark_dispatching(&plan).unwrap();
+    let directory = mvm_core::config::vm_state_dir_at(home.path(), "first");
+    mvm_core::config::create_private_dir(&directory).unwrap();
+    atomic_io::write_private(&directory.join("hvf.pid"), identity.as_bytes()).unwrap();
+    permit.record_started("first").unwrap();
+    drop(permit);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    std::fs::write(directory.join(super::super::CHARGE_FILE), b"").unwrap();
+    assert!(
+        HostBudgetPermit::reserve_at(home.path(), &budget(), "second", charge()).is_ok(),
+        "a dead machine's unreadable record must not stand between the host and its next boot"
+    );
 }
 
 #[test]
