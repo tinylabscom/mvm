@@ -282,6 +282,7 @@ pub(super) fn boot_transient_vm(
     // spares resident until a manual `cache prune`. Best-effort; never blocks.
     crate::commands::pool::reap_stale_standbys_best_effort();
     report_phase("standby_reap");
+    mvm_core::launch_trace::lap("start.standby_reap");
 
     if let Some(marks) = warm_claim_marks.as_mut() {
         marks.claim_started = phase_timing.then(std::time::Instant::now);
@@ -316,6 +317,7 @@ pub(super) fn boot_transient_vm(
     };
     let warm_claimed = cold_reason.is_none();
     report_phase("warm_claim");
+    mvm_core::launch_trace::lap("start.warm_claim");
 
     if !warm_claimed && template_acceleration == TemplateAcceleration::Disabled {
         ui::notice(
@@ -353,6 +355,7 @@ pub(super) fn boot_transient_vm(
             "Booting the VM ({})",
             attempt.backend.name()
         ));
+        mvm_core::launch_trace::lap("start.cold_preamble");
         sub.start(SubPhase::VmmCreate);
         let start = if let Some(admission) = attempt.admission.filter(|_| admitted_cold) {
             let owner = admission
@@ -414,6 +417,7 @@ pub(super) fn boot_transient_vm(
         // — a backend that confirms boot before returning leaves almost
         // nothing for the span below. Splitting VMM setup from guest boot
         // needs marks inside the driver, not here.
+        mvm_core::launch_trace::lap("finalize.dispatch_return");
         sub.finish(SubPhase::VmmCreate);
         sub.start(SubPhase::GuestKernelEntry);
         phase.finish();
@@ -941,6 +945,82 @@ mod tests {
             .expect_err("an emptied owner is refused");
         assert!(format!("{error:#}").contains("no signed admission owner"));
         check_admitted_projection(None, &config).expect("no admission, nothing to check");
+    }
+
+    /// The cold path names every stage it crosses, in order, and the laps
+    /// partition the boot: their sum is the wall time of the call, so nothing
+    /// between two stages goes unattributed. Tracing changes no signed bytes.
+    #[test]
+    fn a_traced_admitted_cold_boot_laps_every_stage_in_order_and_sums_to_its_wall_time() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().expect("home");
+        env.isolate_mvm_home(home.path());
+        env.remove("MVM_RESIDENCY");
+        env.set(mvm_core::launch_trace::PHASE_TIMING_ENV, "1");
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"mock rootfs").expect("rootfs");
+        let name = "traced-admitted-cold";
+        let (owner, config) = admitted_mock_cold(name, &rootfs, home.path());
+        let signed = config.plan_json.clone().expect("signed plan projection");
+        let admitted = std::cell::RefCell::new(Some(owner));
+        let backend =
+            AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_required_bridge_plan());
+        let mut images = Vec::new();
+        let mut attempt = BootAttempt {
+            backend: &backend,
+            start_config: &config,
+            verified_release: None,
+            admission: Some(&admitted),
+            mailbox_posture: None,
+            user_named: true,
+            writable_images: &mut images,
+        };
+        let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
+
+        let before = mvm_core::launch_trace::recorded_laps().len();
+        let started = std::time::Instant::now();
+        mvm_core::launch_trace::lap_reset(None);
+        let booted = boot_transient_vm(
+            name.into(),
+            TemplateAcceleration::AdmittedRestoreDisabled,
+            &mut attempt,
+            None,
+            &mut sub,
+        );
+        let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(booted.expect("admitted mock start").name, name);
+
+        let laps = &mvm_core::launch_trace::recorded_laps()[before..];
+        let names: Vec<&str> = laps.iter().map(|lap| lap.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "start.standby_reap",
+                "start.warm_claim",
+                "start.cold_preamble",
+                "gate.post_admission_gates",
+                "gate.dispatch_runtime_and_mailbox",
+                "gate.persist_sealed_plan",
+                "gate.host_budget_dispatching",
+                "gate.stash_plan_for_bridge",
+                "finalize.containment_recheck",
+                "finalize.grants",
+                "finalize.charge_audit_and_mailbox",
+                "finalize.dispatch_return",
+            ]
+        );
+        let lapped_ms: f64 = laps.iter().map(|lap| lap.ms).sum();
+        assert!(
+            lapped_ms <= wall_ms && wall_ms - lapped_ms < 5.0_f64.max(wall_ms * 0.05),
+            "laps sum to {lapped_ms:.3} ms of a {wall_ms:.3} ms boot"
+        );
+        assert_eq!(
+            std::fs::read_to_string(mvm_core::config::vm_state_dir(name).join("plan.json"))
+                .expect("bridge plan"),
+            signed,
+            "tracing leaves the signed plan untouched"
+        );
+        backend.stop(&VmId(name.into())).expect("stop mock");
     }
 
     #[test]

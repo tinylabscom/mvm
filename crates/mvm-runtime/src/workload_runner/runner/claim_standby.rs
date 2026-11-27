@@ -79,8 +79,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let claim_started = Instant::now();
         let mut claim_debug = mvm_vmm::agent_debug::open();
         macro_rules! claim_phase {
-            ($phase:expr) => {
+            ($phase:literal) => {
                 warm_claim::record_phase(claim_started, &mut claim_debug, $phase);
+                mvm_core::launch_trace::lap(concat!("warm_claim.", $phase));
             };
         }
         let resident_handoff = self.driver.supports_resident_handoff();
@@ -123,6 +124,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         .map_err(|error| {
             StandbyError::ClaimFailed(format!("verify inherited runtime: {error:#}"))
         })?;
+        mvm_core::launch_trace::lap("warm_claim.runtime_verified");
 
         // (2) + (4) Bind the admitted plan's image digest to the verified parent.
         // A missing plan or a digest mismatch refuses before any child side effect.
@@ -178,6 +180,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             &mvm_core::user_config::load(None).grant_ceiling(),
         )
         .map_err(refuse)?;
+        mvm_core::launch_trace::lap("warm_claim.plan_and_grant_binds");
 
         // (6a) Fresh, registry-unique identity for the child.
         let child = match preloaded_child_name.clone() {
@@ -199,6 +202,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         if preloaded_child_name.is_some() {
             cleanup.track_preloaded_child(child.0.clone());
         }
+        mvm_core::launch_trace::lap("warm_claim.child_identity_and_lock");
 
         // (3) A resident handoff transfers the already-paused HVF machine and
         // creates only the fresh child state directory. Saved-state backends
@@ -527,6 +531,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         if resident_handoff {
             schedule_resident_checkpoint_reclaim(ctx, &parent);
         }
+        mvm_core::launch_trace::lap("warm_claim.commit");
         Ok(crate::backend::OwnedWarmClaim {
             id: child,
             lifecycle,

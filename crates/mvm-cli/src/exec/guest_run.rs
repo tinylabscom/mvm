@@ -47,6 +47,7 @@ pub(super) fn run_in_guest(
         emit_guest_console_diagnostic(vm_name);
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
+    mvm_core::launch_trace::lap("ready.agent_probe");
     // The guest is up, so a session on its endpoint is now possible — and its
     // absence means something. Checked here rather than at spawn time on
     // purpose: the endpoint binds and reports ready before the guest boots, so
@@ -56,6 +57,7 @@ pub(super) fn run_in_guest(
         vm_name,
         &mvm_core::config::vm_state_dir(vm_name),
     )?;
+    mvm_core::launch_trace::lap("ready.endpoint_session");
     phase.finish();
     // Agent reachable over vsock: the command is about to be dispatched.
     let vsock_ready = std::time::Instant::now();

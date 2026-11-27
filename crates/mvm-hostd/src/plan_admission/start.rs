@@ -641,7 +641,9 @@ pub fn claim_cli_transient(
         prepared.volumes.iter().all(|volume| volume.read_only),
         "warm claim cannot transfer writable volume custody"
     );
+    mvm_core::launch_trace::lap("warm_claim.dispatch_gates");
     crate::seal_gate::persist_sealed_plan(&config.name, admitted.plan())?;
+    mvm_core::launch_trace::lap("warm_claim.persist_sealed_plan");
     let audit = mvm_vmm::host::audit_substrate::compute_audit_substrate(
         &config.name,
         prepared.tenant_id.as_deref(),
@@ -676,9 +678,13 @@ pub fn claim_cli_transient(
     // No plan JSON can create this authority: only admission owns this value.
     // Spend it before the runner can fork or resume the child.
     admitted.dispatched = true;
+    mvm_core::launch_trace::lap("warm_claim.claim_assembly");
     match backend.claim_standby_owned_via_runner(ctx, handle, &claim) {
         Ok(owned) => match super::containment_recheck::still_admitted(admitted.plan()) {
-            Ok(()) => Ok(WarmClaimDispatch::Claimed(owned)),
+            Ok(()) => {
+                mvm_core::launch_trace::lap("warm_claim.containment_recheck");
+                Ok(WarmClaimDispatch::Claimed(owned))
+            }
             Err(error) => Err(super::containment_recheck::stop_claimed(
                 backend, owned, error,
             )),
@@ -810,6 +816,7 @@ fn start_admitted_with_finalization(
             });
         }
     };
+    mvm_core::launch_trace::lap("gate.post_admission_gates");
     if params.assurance.is_some() {
         let proxy = crate::assurance_session::prepare_controller_proxy(&config.name)
             .context("preparing admitted assurance controller proxy")?;
@@ -846,6 +853,7 @@ fn start_admitted_with_finalization(
         }
         return Err(err);
     }
+    mvm_core::launch_trace::lap("gate.dispatch_runtime_and_mailbox");
     // A unit admitted under a topology reads as sealed only through its
     // persisted plan, so that write is part of the launch. It goes first: the
     // bridge stash below replaces it with the signed envelope, which reads as
@@ -863,6 +871,7 @@ fn start_admitted_with_finalization(
             err
         });
     }
+    mvm_core::launch_trace::lap("gate.persist_sealed_plan");
     if (persistent || fork || entrypoint) && super::persists_plan_before_start(backend.name()) {
         super::stash_plan_for_bridge(&config).inspect_err(|err| {
             if !fork
@@ -899,6 +908,7 @@ fn start_admitted_with_finalization(
         return Err(error.context("host-budget dispatch refused"));
     }
     admitted.dispatched = true;
+    mvm_core::launch_trace::lap("gate.host_budget_dispatching");
     if cli_transient
         && (mvm_runtime::catalog::descriptor(backend.kind()).is_workload
             // The hermetic mock is not a shipped workload backend, but it
@@ -908,6 +918,7 @@ fn start_admitted_with_finalization(
     {
         return Err(CliStartFailure::Unrecorded(err).into());
     }
+    mvm_core::launch_trace::lap("gate.stash_plan_for_bridge");
     let start = if let Some(slot) = actor_owner.as_mut() {
         backend
             .start_owned_actor_with_bootstrap(&config, verified_runtime, bootstrap)
@@ -983,6 +994,7 @@ fn start_admitted_with_finalization(
                     undo_start(undo, &mut actor_owner)
                 });
             }
+            mvm_core::launch_trace::lap("finalize.containment_recheck");
             // A VM whose grants could not be applied is running without the
             // bounds it was admitted under; the helper stops it rather than
             // leaving a run whose only record says it was bounded.
@@ -1046,6 +1058,7 @@ fn start_admitted_with_finalization(
                 )?)
             };
 
+            mvm_core::launch_trace::lap("finalize.grants");
             // Record what this boot committed, so every later admission counts
             // it. A machine running without a record is invisible to the
             // budget, and an undercounted host is precisely the state the
@@ -1231,6 +1244,7 @@ fn start_admitted_with_finalization(
             {
                 tracing::warn!(%error, "persisting entrypoint plan failed (non-fatal)");
             }
+            mvm_core::launch_trace::lap("finalize.charge_audit_and_mailbox");
             Ok(StartTailResult {
                 vm_id,
                 admitted,

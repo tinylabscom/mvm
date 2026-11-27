@@ -15,6 +15,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use mvm_core::checkpoint::CheckpointId;
+use mvm_core::launch_trace::lap;
 use mvm_fs::clone::CloneStrategy;
 use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId, SnapshotStore};
 use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
@@ -60,7 +61,9 @@ pub fn materialize_child_from_parent(
     if parent.protection.is_unprotected() {
         verify_content(checkpoint_store, &parent)?;
     }
+    lap("materialize_child.verify_content");
     verify_lineage(checkpoint_store, parent_id, anchor)?;
+    lap("materialize_child.verify_lineage");
 
     let snapshot_id = parent.snapshot_id.as_deref().ok_or_else(|| {
         anyhow::anyhow!("checkpoint '{parent_id}' has no staged snapshot binding")
@@ -69,7 +72,9 @@ pub fn materialize_child_from_parent(
     let strategy = snapshot_store
         .materialize(&SnapshotId::new(snapshot_id), dst)
         .with_context(|| format!("materializing staged snapshot at {}", dst.display()))?;
+    lap("materialize_child.snapshot_copy");
     materialize_chunked_blobs(checkpoint_store, &parent, dst)?;
+    lap("materialize_child.chunk_rebuild");
     Ok(strategy)
 }
 
@@ -93,6 +98,7 @@ pub fn materialize_child_from_trusted_parent(
 ) -> Result<CloneStrategy> {
     let parent = checkpoint_store.read_meta(parent_id)?;
     verify_lineage(checkpoint_store, parent_id, anchor)?;
+    lap("materialize_child.verify_lineage");
     let snapshot_id = parent.snapshot_id.as_deref().ok_or_else(|| {
         anyhow::anyhow!("checkpoint '{parent_id}' has no trusted snapshot binding")
     })?;
@@ -106,9 +112,11 @@ pub fn materialize_child_from_trusted_parent(
                 backend.name()
             )
         })?;
+    lap("materialize_child.snapshot_copy");
     if parent.protection.is_sealed() {
         materialize_chunked_blobs(checkpoint_store, &parent, dst)?;
     }
+    lap("materialize_child.chunk_rebuild");
     Ok(strategy)
 }
 

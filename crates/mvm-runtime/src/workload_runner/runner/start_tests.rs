@@ -1566,6 +1566,54 @@ fn activation_waits_for_the_admission_sync() {
     assert_eq!(driver.booted_specs().len(), 1);
 }
 
+/// A traced cold start names the runner's stages in order, with the
+/// runtime check timed apart from the selection work before it.
+#[test]
+fn a_traced_runner_start_laps_its_stages_in_order() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.set("MVM_HOME", home.path());
+    env.set(mvm_core::launch_trace::PHASE_TIMING_ENV, "1");
+
+    let driver = MockDriver::default();
+    let runner = WorkloadRunner::new(
+        driver.clone(),
+        RecordingSpawner::new("/run/ep.sock"),
+        RecordingBrokerRegistrar::new(),
+    );
+    let vm = "runner-traced-start";
+    let (_image, rootfs) = overlay_aware_rootfs(vm);
+    let cfg = checked_source_config(vm, rootfs);
+    let activation = spawn_activation_guest(driver.clone(), vm);
+
+    let before = mvm_core::launch_trace::recorded_laps().len();
+    mvm_core::launch_trace::lap_reset(None);
+    runner
+        .start_custodied(&cfg, Vec::new())
+        .expect("the traced launch starts");
+    activation.join().expect("activation guest");
+
+    let names: Vec<String> = mvm_core::launch_trace::recorded_laps()[before..]
+        .iter()
+        .map(|lap| lap.name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "start.runner_preflight",
+            "start.lifecycle_lease",
+            "runtime_evidence.provenance_and_selection",
+            "runtime_evidence.source_runtime_check",
+            "start.runtime_bind",
+            "start.kernel_bind",
+            "start.runner_boot",
+        ]
+    );
+}
+
 /// A sync that fails means the admission cannot be shown afterwards. The
 /// booted guest is never sent `ActivateEnvironment` — the runner never
 /// even connects to its agent — and the VMM is killed, not left running.

@@ -1289,7 +1289,9 @@ fn memory_counter_stats(
 ///
 /// The name set is discovered from the samples, in first-seen order, because
 /// each backend names its own phases; a fixed list here would silently drop a
-/// phase the moment a second backend is traced.
+/// phase the moment a second backend is traced. A name one launch records
+/// more than once (a check called on several paths) counts its total, so no
+/// recorded time is dropped from the report.
 fn backend_phase_stats(raw: &[ColdLaunchSample]) -> Vec<(String, SpanStats)> {
     let mut order: Vec<String> = Vec::new();
     for sample in raw {
@@ -1308,8 +1310,9 @@ fn backend_phase_stats(raw: &[ColdLaunchSample]) -> Vec<(String, SpanStats)> {
                     sample
                         .backend_phases
                         .iter()
-                        .find(|phase| phase.name == name)
+                        .filter(|phase| phase.name == name)
                         .map(|phase| phase.ms)
+                        .reduce(|total, ms| total + ms)
                 })
                 .collect();
             let stats = SpanStats::from_samples(&values);
@@ -1424,6 +1427,20 @@ mod tests {
             }],
             degraded: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_phase_recorded_twice_in_one_launch_reports_its_total() {
+        let mut sample = cold_sample(1, 100.0);
+        let lap = |ms| TracePhase {
+            name: "runtime_evidence.source_runtime_check".to_string(),
+            ms,
+        };
+        sample.backend_phases = vec![lap(0.5), lap(4.0)];
+        let stats = backend_phase_stats(&[sample]);
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].1.samples, 1);
+        assert_eq!(stats[0].1.p50, Some(4.5));
     }
 
     #[test]
