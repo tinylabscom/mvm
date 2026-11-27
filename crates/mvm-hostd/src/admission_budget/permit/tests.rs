@@ -118,13 +118,118 @@ fn neighbour(home: &Path, name: &str, evidence: Neighbour<'_>) {
         atomic_io::write_private(&directory.join("hvf.pid"), marker).unwrap();
     }
     if evidence.plan {
-        let plan = serde_json::to_vec(&plan(name)).unwrap();
-        atomic_io::write_private(&directory.join(super::super::PLAN_FILE), &plan).unwrap();
+        atomic_io::write_private(
+            &directory.join(super::super::PLAN_FILE),
+            signed_plan_json(name).as_bytes(),
+        )
+        .unwrap();
     }
+}
+
+/// `plan.json` as the launch path stashes it: the signed envelope.
+fn signed_plan_json(name: &str) -> String {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    serde_json::to_string(&mvm_core::plan::sign_plan(&plan(name), &key, "test-host")).unwrap()
 }
 
 fn live_marker() -> Vec<u8> {
     platform::current_owner().unwrap().into_bytes()
+}
+
+/// A start-time marker naming a process that has exited.
+fn dead_marker() -> Vec<u8> {
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let identity =
+        mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(child.id()).render();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    identity.into_bytes()
+}
+
+/// A live handoff: the claimed child's `hvf.pid` is a link to the marker of
+/// the standby parent whose VMM it took over. The parent's dir keeps that
+/// marker and no charge evidence; the child carries the record and plan.
+fn handed_off(home: &Path, parent_marker: &[u8]) {
+    neighbour(
+        home,
+        "standby-parent",
+        Neighbour {
+            record: None,
+            marker: Some(parent_marker),
+            plan: false,
+        },
+    );
+    let record = serde_json::to_vec(&charge()).unwrap();
+    neighbour(
+        home,
+        "claimed-child",
+        Neighbour {
+            record: Some(&record),
+            marker: None,
+            plan: true,
+        },
+    );
+    std::os::unix::fs::symlink(
+        mvm_core::config::vm_state_dir_at(home, "standby-parent").join("hvf.pid"),
+        mvm_core::config::vm_state_dir_at(home, "claimed-child").join("hvf.pid"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_live_handoff_child_is_counted_once_through_its_linked_marker() {
+    let home = tempfile::tempdir().unwrap();
+    handed_off(home.path(), &live_marker());
+    assert!(neighbour_is_counted(home.path()));
+}
+
+#[test]
+fn a_dead_handoff_child_is_not_counted() {
+    let home = tempfile::tempdir().unwrap();
+    handed_off(home.path(), &dead_marker());
+    assert!(!neighbour_is_counted(home.path()));
+}
+
+#[test]
+fn a_stray_file_beside_the_machine_dirs_does_not_refuse_a_boot() {
+    let home = tempfile::tempdir().unwrap();
+    let vms = mvm_core::config::vms_dir_at(home.path());
+    mvm_core::config::create_private_dir(&vms).unwrap();
+    std::fs::write(vms.join(".DS_Store"), b"finder").unwrap();
+    assert!(!neighbour_is_counted(home.path()));
+}
+
+#[test]
+fn an_absurd_charge_is_refused_by_headroom_not_by_overflow() {
+    let home = tempfile::tempdir().unwrap();
+    let held = HostBudgetPermit::reserve_at(home.path(), &budget(), "held", charge()).unwrap();
+    let plan = plan("held");
+    held.bind_plan(&plan).unwrap();
+    held.mark_dispatching(&plan).unwrap();
+    let record = serde_json::to_vec(&MachineCharge {
+        memory_mib: u64::MAX,
+        cpu_millicores: u32::MAX,
+    })
+    .unwrap();
+    let marker = live_marker();
+    neighbour(
+        home.path(),
+        "absurd",
+        Neighbour {
+            record: Some(&record),
+            marker: Some(&marker),
+            plan: false,
+        },
+    );
+    let error = HostBudgetPermit::reserve_at(home.path(), &wider(), "next", charge())
+        .expect_err("a live machine claiming the whole host leaves no headroom");
+    assert!(
+        format!("{error:#}").contains("budget"),
+        "the refusal is the headroom, not an accounting failure: {error:#}"
+    );
 }
 
 fn wider() -> HostBudget {
@@ -277,7 +382,8 @@ fn a_held_machine_with_a_torn_charge_record_is_counted_once_through_its_hold() {
         max_total_memory_mib: Some(1536),
         ..budget()
     };
-    let _unrelated = HostBudgetPermit::reserve_at(home.path(), &wider(), "unrelated", charge());
+    let _unrelated =
+        HostBudgetPermit::reserve_at(home.path(), &wider(), "unrelated", charge()).unwrap();
     assert!(
         HostBudgetPermit::reserve_at(home.path(), &roomier, "third", charge()).is_ok(),
         "the hold and its torn record are one machine, not two"
@@ -753,4 +859,39 @@ fn a_group_writable_config_is_refused_with_its_path_and_the_fix() {
     // Saving again replaces the file at its private mode.
     mvm_core::user_config::save(&Default::default(), Some(&config_dir)).unwrap();
     assert!(budget_at(home.path()).is_ok());
+}
+
+#[test]
+fn a_standby_and_a_handoff_child_are_normal_states_and_log_no_warning() {
+    let home = tempfile::tempdir().unwrap();
+    handed_off(home.path(), &live_marker());
+    let (_, logged) = crate::test_fixtures::capturing_warnings(|| {
+        neighbour_is_counted(home.path());
+        super::super::committed_at(home.path())
+    });
+    assert!(logged.is_empty(), "{logged}");
+}
+
+#[test]
+fn a_persistently_unreadable_record_is_warned_about_once() {
+    let home = tempfile::tempdir().unwrap();
+    let marker = live_marker();
+    neighbour(
+        home.path(),
+        "torn-and-repeated",
+        Neighbour {
+            record: Some(b"bad"),
+            marker: Some(&marker),
+            plan: false,
+        },
+    );
+    let (_, logged) = crate::test_fixtures::capturing_warnings(|| {
+        neighbour_is_counted(home.path());
+        neighbour_is_counted(home.path());
+    });
+    assert_eq!(
+        logged.matches("torn-and-repeated").count(),
+        1,
+        "one warning for one bad machine, however often it is evaluated: {logged}"
+    );
 }

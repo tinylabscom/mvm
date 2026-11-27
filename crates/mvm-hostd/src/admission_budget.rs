@@ -127,13 +127,18 @@ fn read_if_present(path: &Path) -> Result<Option<Vec<u8>>> {
 ///
 /// Its charge record when that reads; otherwise the charge its persisted
 /// admitted plan implies, which is the figure admission charged it from.
-/// `None` when neither yields one: that machine alone goes uncounted, with a
-/// warning naming it, rather than one bad file refusing every boot.
+/// `None` when neither yields one: that machine alone goes uncounted rather
+/// than one bad file refusing every boot. Neither file existing is the normal
+/// state of an idle standby, which admission does not charge, so only a file
+/// that exists but will not read is warned about.
 fn machine_charge(
     dir: &Path,
     read: impl Fn(&Path) -> Result<Option<Vec<u8>>>,
 ) -> Option<MachineCharge> {
-    let machine = dir.file_name().map(|name| name.to_string_lossy());
+    let machine = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let record = read(&dir.join(CHARGE_FILE)).and_then(|bytes| {
         bytes
             .map(|bytes| serde_json::from_slice(&bytes).context("parsing the charge record"))
@@ -158,23 +163,53 @@ fn machine_charge(
     match (plan, record_error) {
         (Ok(Some(charge)), None) => Some(charge),
         (Ok(Some(charge)), Some(error)) => {
-            tracing::warn!(
-                ?machine,
-                "unreadable admitted-charge record; counting this machine at the charge \
-                 its admitted plan implies: {error:#}"
+            warn_once(
+                &machine,
+                format!(
+                    "unreadable admitted-charge record; counting this machine at the charge \
+                     its admitted plan implies: {error:#}"
+                ),
             );
             Some(charge)
         }
+        (Ok(None), None) => {
+            tracing::debug!(machine, "no admitted charge or plan; not counted");
+            None
+        }
         (plan, record_error) => {
-            tracing::warn!(
-                ?machine,
-                record = ?record_error.map(|error| format!("{error:#}")),
-                plan = ?plan.err().map(|error| format!("{error:#}")),
-                "no readable admitted-charge record or admitted plan; this possibly live \
-                 machine is not counted against the host budget"
+            let record = record_error.map_or_else(|| "absent".to_owned(), |e| format!("{e:#}"));
+            let plan = plan
+                .err()
+                .map_or_else(|| "absent".to_owned(), |e| format!("{e:#}"));
+            warn_once(
+                &machine,
+                format!(
+                    "no readable admitted-charge record (record: {record}; plan: {plan}); \
+                     this possibly live machine is not counted against the host budget"
+                ),
             );
             None
         }
+    }
+}
+
+/// Warn about one machine's bad accounting evidence once per process.
+///
+/// Every admission re-reads every machine, so a persistent bad file would
+/// otherwise repeat the same warning on each launch; later repeats go to debug.
+fn warn_once(machine: &str, message: String) {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    let first = WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .map_or(true, |mut warned| {
+            warned.insert(format!("{machine}\n{message}"))
+        });
+    if first {
+        tracing::warn!(machine, "{message}");
+    } else {
+        tracing::debug!(machine, "{message}");
     }
 }
 
@@ -390,13 +425,46 @@ mod tests {
         assert_eq!(committed_at(home.path()), MachineCharge::default());
     }
 
+    /// `plan.json` as the launch path stashes it: the signed envelope.
     fn persist_plan(home: &Path, name: &str, mem_mib: u64) {
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
         plan.resources.mem_mib = mem_mib;
         plan.grants = None;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let signed = mvm_core::plan::sign_plan(&plan, &key, "test-host");
         let dir = mvm_core::config::vm_state_dir_at(home, name);
-        std::fs::write(dir.join(PLAN_FILE), serde_json::to_vec(&plan).unwrap())
+        std::fs::write(dir.join(PLAN_FILE), serde_json::to_vec(&signed).unwrap())
             .expect("persisting the plan");
+    }
+
+    /// The claimed child's marker links to its standby parent's; the parent's
+    /// dir has no charge evidence of its own.
+    fn handed_off(home: &Path, live: bool) {
+        machine(home, "standby-parent", charge(0), live);
+        std::fs::remove_file(
+            mvm_core::config::vm_state_dir_at(home, "standby-parent").join(CHARGE_FILE),
+        )
+        .expect("a standby carries no record");
+        record_charge_at(home, "claimed-child", charge(1024)).expect("recording the charge");
+        std::os::unix::fs::symlink(
+            mvm_core::config::vm_state_dir_at(home, "standby-parent").join("libkrun.pid"),
+            mvm_core::config::vm_state_dir_at(home, "claimed-child").join("libkrun.pid"),
+        )
+        .expect("linking the child's marker");
+    }
+
+    #[test]
+    fn a_live_handoff_child_is_counted_once_through_its_linked_marker() {
+        let (_env, home) = crate::test_fixtures::isolated_mvm_home();
+        handed_off(home.path(), true);
+        assert_eq!(committed_at(home.path()).memory_mib, 1024);
+    }
+
+    #[test]
+    fn a_dead_handoff_child_is_not_counted() {
+        let (_env, home) = crate::test_fixtures::isolated_mvm_home();
+        handed_off(home.path(), false);
+        assert_eq!(committed_at(home.path()), MachineCharge::default());
     }
 
     #[test]

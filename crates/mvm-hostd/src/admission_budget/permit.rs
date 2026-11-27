@@ -177,7 +177,7 @@ impl HostBudgetPermit {
                 .values()
                 .filter(|r| r.phase.is_charged())
             {
-                total = checked_plus(total, record.charge)?;
+                total = total.plus(record.charge);
             }
             super::admits(budget, total, charge)?;
             ledger.reservations.insert(
@@ -336,7 +336,7 @@ impl HostBudgetPermit {
                 .values()
                 .filter(|record| record.phase.is_charged())
             {
-                total = checked_plus(total, record.charge)?;
+                total = total.plus(record.charge);
             }
             super::admits(&budget, total, MachineCharge::default())?;
             ensure!(
@@ -697,19 +697,6 @@ fn validate_digest(digest: &str) -> Result<()> {
     Ok(())
 }
 
-fn checked_plus(left: MachineCharge, right: MachineCharge) -> Result<MachineCharge> {
-    Ok(MachineCharge {
-        memory_mib: left
-            .memory_mib
-            .checked_add(right.memory_mib)
-            .context("host memory accounting overflow")?,
-        cpu_millicores: left
-            .cpu_millicores
-            .checked_add(right.cpu_millicores)
-            .context("host CPU accounting overflow")?,
-    })
-}
-
 fn legacy_committed(home: &Path, ledger: &Ledger) -> Result<MachineCharge> {
     let directory = mvm_core::config::vms_dir_at(home);
     let entries = match std::fs::read_dir(directory) {
@@ -719,13 +706,15 @@ fn legacy_committed(home: &Path, ledger: &Ledger) -> Result<MachineCharge> {
         }
         Err(error) => return Err(error.into()),
     };
+    // Sums saturate: a charge too large to add claims the whole host, which the
+    // headroom check then refuses as such.
     let mut total = MachineCharge::default();
     for entry in entries {
         let entry = entry?;
-        ensure!(
-            entry.file_type()?.is_dir(),
-            "unexpected object in machine state directory"
-        );
+        // A stray file (a Finder `.DS_Store`, say) is not a machine.
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().into_owned();
         // A charged hold already counts its machine, whatever its legacy
         // record says.
@@ -739,7 +728,7 @@ fn legacy_committed(home: &Path, ledger: &Ledger) -> Result<MachineCharge> {
         if let Some(charge) = super::machine_charge(&entry.path(), |path| {
             platform::read_legacy(path, MAX_MACHINE_EVIDENCE_BYTES)
         }) {
-            total = checked_plus(total, charge)?;
+            total = total.plus(charge);
         }
     }
     Ok(total)
@@ -750,23 +739,33 @@ const MAX_MACHINE_EVIDENCE_BYTES: usize = 1024 * 1024;
 
 /// Whether a state dir's pid markers leave its machine possibly running.
 ///
-/// No marker is no machine. A marker that cannot be read proves nothing either
+/// No marker is no machine. A live-handoff child's marker is a link to the
+/// marker of the standby parent whose VMM it took over, which the owner-only
+/// reader refuses to follow; the shared liveness probe judges the process that
+/// marker names. Any other marker that cannot be read proves nothing either
 /// way, so that machine stays counted: over-counting one machine costs
 /// headroom, refusing on it would cost every boot.
 fn may_be_live(directory: &Path, name: &str) -> bool {
-    let has_marker = mvm_vmm::host::process_liveness::PID_FILE_NAMES
+    use mvm_vmm::host::process_liveness::{PID_FILE_NAMES, state_dir_has_live_process};
+    let markers: Vec<_> = PID_FILE_NAMES
         .iter()
-        .any(|file| directory.join(file).symlink_metadata().is_ok());
-    if !has_marker {
+        .filter_map(|file| directory.join(file).symlink_metadata().ok())
+        .collect();
+    if markers.is_empty() {
         return false;
+    }
+    if markers.iter().any(|meta| meta.file_type().is_symlink()) {
+        return state_dir_has_live_process(directory);
     }
     match platform::machine_is_confirmed_dead(directory) {
         Ok(dead) => !dead,
         Err(error) => {
-            tracing::warn!(
-                machine = name,
-                "unreadable machine PID evidence; counting this machine as possibly live: \
-                 {error:#}"
+            super::warn_once(
+                name,
+                format!(
+                    "unreadable machine PID evidence; counting this machine as possibly live: \
+                     {error:#}"
+                ),
             );
             true
         }
