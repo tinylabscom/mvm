@@ -125,6 +125,24 @@ identically regardless of which backend produced the entries.
   legacy `~/.mvm/log/audit.jsonl` operator-facing stream (a different
   log, unrelated to plan signing, used by day-to-day CLI verbs).
 
+### `mvmd` is the only production launch authority
+
+A signed plan is necessary for every boot but does not by itself make a launch
+production. The only launch that may run in production is one initiated by the
+authenticated `mvmd` control plane, which owns production placement, admission
+and launch authority; `mvm` executes the admitted request. Every other launch
+is development mode without exception: local `mvmctl` and SDK launches, direct
+library or host-daemon calls, test and benchmark harnesses, and developer
+tooling. None of them may be inferred to be production from an artifact
+profile, an environment variable, or an operator flag; production is
+identified by authenticated `mvmd` origin, and the `mvm`/`mvmd` boundary must
+carry the origin and admission evidence `mvm` needs to refuse the production
+posture anywhere else. The rule governs launch, not artifact preparation:
+local tooling may still build, inspect or validate a sealed,
+production-shaped artifact, and docs and APIs describe local `--prod`-shaped
+operations as preparation or validation unless they are part of an `mvmd`
+launch.
+
 ## Consequences
 
 - Every boot is forensically explainable: `mvmctl trust audit show

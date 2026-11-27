@@ -237,7 +237,7 @@ consumer cannot verify them, it must refuse production.
 ## Production launch and latency acceptance
 
 This is an owner-approved **requirement**, not a shipped composable production
-launch or a measured speed claim. Under [ADR-037](../adrs/037-mvmd-only-production-launch.md),
+launch or a measured speed claim. Under [ADR-014](../adrs/014-signed-audited-execution-plans.md),
 only an authenticated `mvmd` request can initiate production. Local `mvmctl`
 builds and previews remain development operations, including when they inspect
 a production-shaped archive.

@@ -264,6 +264,38 @@ install, exercises list/add/remove where an optional component exists, launches
 through the selected backend, and proves teardown. Source-built binaries and
 an extracted-but-uninstalled component do not count as release evidence.
 
+## GPU: compute by API remoting, no device model
+
+**GPU compute is a declared backend capability served by API remoting over
+vsock, with no GPU device in any guest.** One opt-in flag (`--gpu`, or
+`gpu = true` in a manifest) adds three things to a launch: guest shim libraries
+(`libcuda.so.1`, `libcudart.so`, `libnvidia-ml.so.1`) on the loader path, a
+dedicated vsock channel (port 5256, `GPU_RPC_PORT` in
+`mvm_contract::protocol::gpu`), and a per-VM `mvm-gpu-endpoint` host process
+spawned by the workload runner and reaped with the VM. Every microVM backend
+advertises the capability because the channel is only a vsock port; the wasm,
+browser and mock tiers refuse it through capability negotiation, before boot.
+The endpoint `dlopen`s the real NVIDIA driver when present and otherwise serves
+a stub device that names itself as one; `--backend native` refuses rather than
+fall back. Nothing links a GPU vendor library, so no GPU is ever required to
+build or run mvm. Guest handles are opaque `u64`s minted by the endpoint; a
+forged handle is a lookup miss, never a host address. The host parses only
+length-capped JSON frames, the same trust shape as the broker channel. v1 covers
+a named subset of the CUDA Driver and Runtime APIs plus NVML device queries;
+MLX on Apple Silicon is the named direction for a second backend family behind
+the same endpoint.
+
+**No backend wires a virtio-gpu device, and passthrough stays out of scope.**
+libkrun's paravirtual-GPU hooks (`krun_set_gpu_options`) are bound in
+`crates/deps/libkrun-sys` and never called. If paravirtual display is ever
+built it is dev-tier only, off by default, never linked into the sealed
+production path, and must first carry fuzzing for the guest-supplied
+venus/virgl command stream, a new untrusted-input parser. VFIO compute
+passthrough is reopened only on named customer demand for in-VM compute and a
+workload-bearing VFIO-capable backend in the tree; it also never composes with
+fork, which API remoting does. Beginner-facing docs never present GPU as an
+available default; `xtask check-machine-doc-guards` enforces the wording.
+
 ## Consequences
 
 Adding a backend is "write one `impl VmBackend`" (or one driver, if it uses

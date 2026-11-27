@@ -111,6 +111,26 @@ set, so the certificate and the enforcement cannot disagree. Unknown secrets,
 secrets with no binding, and out-of-allow-list destinations are refused before
 the VM boots.
 
+**Named providers author the allow-list; enforcement never reads them.**
+`mvmctl secret set --provider NAME` takes the destination hosts, auth type and
+SigV4 service from a catalog compiled into the binary
+(`mvm_contract::service_catalog`, listed by `mvmctl secret providers`), so the
+most dangerous hand-typed field, `--host`, is not typed for a catalogued
+service. `--provider` and `--host`/`--type` are mutually exclusive, and the
+explicit form stays for destinations the catalog does not carry. The provider
+is expanded once, at `set` time: the binding stores the literal hosts and
+records the provider name only as provenance, and the egress path never
+consults the catalog. A binding therefore means what it meant the day it was
+written, a later catalog edit cannot widen it, and `mvmctl secret ls` and the
+audit chain show the hosts actually enforced. An unrecognised provider refuses
+and names the known ones; it never falls through to the explicit form or a
+default. The SigV4 region is never inferred, because it belongs to the
+operator's account, not the provider. Witnessed by
+`provider_resolves_to_its_catalog_hosts_and_auth_type`,
+`unknown_provider_refuses_rather_than_falling_through`,
+`binding_records_resolved_hosts_not_the_provider_name` and
+`catalog_entry_rejects_mismatched_auth_scope`.
+
 ### Resolver — pluggable, identical story with or without a fleet control plane
 
 A `SecretResolver` trait resolves a secret reference (name + auth-type +

@@ -68,7 +68,7 @@ witnessed.
 **Platforms, GPU, artifacts, and performance.** They ship a native Windows
 host and a graphics path through a paravirtualized GPU. We ship no Windows
 host, and our GPU posture is compute-by-remoting only, which
-`specs/adrs/053-gpu-compute-over-vsock.md` records; there is no graphics path
+`specs/adrs/007-vmbackend-single-trait.md` records; there is no graphics path
 on our side at all, and our own reference material says so. Their CUDA support
 and ours both remote the API over vsock rather than passing a device through,
 so on compute the shapes are close; the graphics lane is theirs alone. On
