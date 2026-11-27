@@ -1007,8 +1007,8 @@ tmpfs /tmp tmpfs rw 0 0
             }];
             sample
         };
-        // The slow warm-up that used to abort the lane, then a measured set
-        // with one claim inside the ceiling and two outside it.
+        // A warm-up over the ceiling, then a measured set with one claim
+        // inside the ceiling and two outside it.
         let mvmctl = fake_mvmctl(
             tmp.path(),
             &[warm(773.7), warm(717.2), warm(250.0), warm(696.0)],
