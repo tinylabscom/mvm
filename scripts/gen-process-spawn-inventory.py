@@ -398,9 +398,10 @@ def disposition(key, cls, auth, linked, guard_text):
 
     open-review is the honest remainder: a program the client closure can
     start that is neither the product's own VMM/role process nor refused for
-    a library embedder. The process-boundary decision permits fixed-argv
-    utilities, but each is listed until its path is shown to be typed,
-    admitted and bounded; none is claimed to be a violation here.
+    a library embedder. The process-boundary decision permits a fixed-argv
+    utility only when nothing in the tree replaces it, so each is listed
+    until it is replaced or its path is shown to be typed, admitted and
+    bounded; none is claimed to be a violation here.
     """
     if auth.startswith("dev harness"):
         return "test-only"
