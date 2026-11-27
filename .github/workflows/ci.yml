@@ -420,6 +420,12 @@ jobs:
           python3 scripts/test_smoke_local_demo.py
           python3 scripts/test_task_context.py
           python3 scripts/test_watch_issues.py
+          python3 scripts/test_density_memory.py
+          python3 scripts/test_density_metadata.py
+          python3 scripts/test_density_rss.py
+          python3 -m unittest scripts.test_density_idle scripts.test_density_timings
+          python3 scripts/test_merge_queue_watch.py
+          bash scripts/check-no-ssh.test.sh
 
       - name: Disposable GCP KVM controller tests
         run: |
