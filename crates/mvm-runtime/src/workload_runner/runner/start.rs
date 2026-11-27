@@ -12,7 +12,12 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         &self,
         inputs: &WorkloadLaunchInputs<'_>,
     ) -> Result<Box<dyn RunningVm>> {
-        self.boot_bound_workload_guarded(inputs, None, Vec::new())
+        self.boot_bound_workload_guarded(
+            inputs,
+            None,
+            Vec::new(),
+            crate::runtime_evidence::UnsyncedBind::default(),
+        )
     }
 
     pub(super) fn require_caller_registration_shape(&self, config: &VmStartConfig) -> Result<()> {
@@ -156,12 +161,15 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     }
 
     /// Maps an already-bound configuration into a backend boot. Production
-    /// callers must hold the lifecycle lease and pass the verifier's paths.
+    /// callers must hold the lifecycle lease and pass the verifier's paths,
+    /// with the bind's writes still to sync: they are made durable beside the
+    /// boot, and nothing is activated until they are.
     pub(super) fn boot_bound_workload_guarded(
         &self,
         inputs: &WorkloadLaunchInputs<'_>,
         kernel: Option<&crate::kernel_custody::KernelBoundLaunch>,
         writable_images: mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+        unsynced: crate::runtime_evidence::UnsyncedBind,
     ) -> Result<Box<dyn RunningVm>> {
         anyhow::ensure!(
             (inputs.config.canonical_kernel.is_none()
@@ -204,7 +212,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             redaction: inputs.redaction,
             retention: plan_stream_retention(inputs.config.plan_json.as_deref()),
         };
-        durability::wait_for_unactivated_boot(inputs.config)?;
+        let beside_boot = durability::wait_for_unactivated_boot(inputs.config, unsynced)?;
+        // Fails closed: only a sync that ran to completion replaces it.
+        let mut synced = Err(anyhow::anyhow!(
+            "the lifecycle lease and runtime generation sync did not run"
+        ));
         if let Some(kernel) = kernel {
             kernel.before_boot(&spec)?;
         }
@@ -241,7 +253,10 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                     }
                 }
             },
-            || streamer.start(&capture),
+            || {
+                streamer.start(&capture);
+                synced = beside_boot.sync();
+            },
             || trace.mark("driver_boot"),
         );
         let vm = match boot {
@@ -272,9 +287,14 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             // resolved was refused at launch resolution, before the VMM started.
             if crate::microvm::booted_with_universal_initramfs(inputs.config) {
                 if self.actor_failed_vm.is_some() {
-                    durability::wait_for_owned_activation(inputs.config)?;
+                    synced.and_then(|()| durability::wait_for_owned_activation(inputs.config))?;
                 } else {
-                    durability::wait_for_activation(inputs.config, &*vm, &*self.console_streamer)?;
+                    durability::wait_for_activation(
+                        inputs.config,
+                        synced,
+                        &*vm,
+                        &*self.console_streamer,
+                    )?;
                 }
                 trace.mark("admission_durable");
                 crate::microvm::activate_workload(&*vm, inputs.config)

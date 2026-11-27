@@ -51,10 +51,8 @@ impl<S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
         );
         self.require_caller_registration_shape(config)?;
         let lifecycle = crate::runtime_evidence::RuntimeLifecycleLease::acquire(&config.name)?;
-        let config = match release {
-            Some(release) => lifecycle.bind_verified_release(config, release)?,
-            None => lifecycle.bind(config)?,
-        };
+        let (config, unsynced) = lifecycle.bind_unsynced(config, release)?;
+        unsynced.sync()?;
         let launch =
             crate::kernel_custody::KernelBoundLaunch::bind(config, self.driver.kind(), &lifecycle)?;
         let config = launch.config();
@@ -447,10 +445,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             "canonical kernel lifetime for this VM is still unresolved"
         );
         mvm_core::launch_trace::lap("start.lifecycle_lease");
-        let bound_config = match release {
-            Some(release) => lifecycle.bind_verified_release(inputs.config, release)?,
-            None => lifecycle.bind(inputs.config)?,
-        };
+        let (bound_config, unsynced) = lifecycle.bind_unsynced(inputs.config, release)?;
         mvm_core::launch_trace::lap("start.runtime_bind");
         let kernel_binding = crate::kernel_custody::KernelBoundLaunch::bind(
             bound_config,
@@ -478,8 +473,12 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             network_policy: inputs.network_policy,
             cmdline: bound_cmdline,
         };
-        let result =
-            self.boot_bound_workload_guarded(inputs, Some(&kernel_binding), writable_images);
+        let result = self.boot_bound_workload_guarded(
+            inputs,
+            Some(&kernel_binding),
+            writable_images,
+            unsynced,
+        );
         mvm_core::launch_trace::lap("start.runner_boot");
         result.map_err(|error| {
             cold_hvf_channel::retain_boot_error(error, (lifecycle, kernel_binding))

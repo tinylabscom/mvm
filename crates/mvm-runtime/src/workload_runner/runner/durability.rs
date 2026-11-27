@@ -1,37 +1,46 @@
 //! Where a boot waits for the admission's audit sync.
 //!
 //! A launch may start its VMM while the admission's one `fdatasync` round is
-//! still in flight, but nothing the plan authorizes may run until that sync
-//! has succeeded. Where the wait happens depends on how the guest starts its
+//! still in flight, and while its lifecycle lease and runtime generation are
+//! being synced, but nothing the plan authorizes may run until both have
+//! succeeded. Where the wait happens depends on how the guest starts its
 //! workload: a guest activated over vsock runs nothing until activation, so it
-//! boots beside the sync and waits immediately before activating; a guest
+//! boots beside the syncs and waits immediately before activating; a guest
 //! without an activation step runs its workload as soon as it boots, so it
 //! waits before the VMM starts.
 
 use anyhow::Result;
 
 use super::{ConsoleStreamer, RunningVm, VmStartConfig, vm_state_dir};
+use crate::runtime_evidence::UnsyncedBind;
 
 /// A guest that is not activated over vsock runs its workload as soon as it
-/// boots, so it cannot boot beside the admission's audit sync: the sync must
-/// finish before the VMM starts.
-pub(super) fn wait_for_unactivated_boot(config: &VmStartConfig) -> Result<()> {
-    if !crate::microvm::booted_with_universal_initramfs(config) {
-        config.wait_for_admission_durability()?;
+/// boots, so it cannot boot beside the admission's audit sync or the bind's
+/// syncs: both must finish before the VMM starts. Returns what is left to
+/// sync beside the boot.
+pub(super) fn wait_for_unactivated_boot(
+    config: &VmStartConfig,
+    unsynced: UnsyncedBind,
+) -> Result<UnsyncedBind> {
+    if crate::microvm::booted_with_universal_initramfs(config) {
+        return Ok(unsynced);
     }
-    Ok(())
+    config.wait_for_admission_durability()?;
+    unsynced.sync()?;
+    Ok(UnsyncedBind::default())
 }
 
 /// Activation is what lets workload code run, so it is where a boot that ran
-/// beside the admission's audit sync waits for it. A sync that failed means
-/// the admission cannot be shown afterwards: the guest is torn down
-/// unactivated, having run nothing.
+/// beside the bind's syncs (`synced`) and the admission's audit sync waits
+/// for them. A sync that failed means the launch's records cannot be shown
+/// afterwards: the guest is torn down unactivated, having run nothing.
 pub(super) fn wait_for_activation(
     config: &VmStartConfig,
+    synced: Result<()>,
     vm: &dyn RunningVm,
     streamer: &dyn ConsoleStreamer,
 ) -> Result<()> {
-    if let Err(error) = config.wait_for_admission_durability() {
+    if let Err(error) = synced.and_then(|()| config.wait_for_admission_durability()) {
         abandon_unactivated(vm, &config.name, streamer);
         return Err(error);
     }

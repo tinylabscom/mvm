@@ -95,8 +95,7 @@ fn bind_parent_runtime(images: &mut LiveImages, home: &Path, parent_id: &str) ->
     let retained = checked
         .snapshot_artifacts_in(&selection, &parent)
         .expect("retain checked source-runtime artifacts")
-        .persist()
-        .expect("persist checked source-runtime generation");
+        .keep();
     images.initramfs = retained.initramfs_path();
     images.runtime_overlay = retained.overlay_path();
     images.runtime_verity = retained.overlay_verity_path();

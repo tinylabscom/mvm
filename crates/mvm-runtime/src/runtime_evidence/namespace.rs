@@ -208,34 +208,58 @@ pub(super) fn private_directory_unsynced(path: &Path) -> Result<bool> {
 /// the order in which this namespace becomes durable.
 pub(super) fn sync_dir(path: &Path) -> Result<()> {
     #[cfg(test)]
-    durable_steps::record(path);
+    durable_steps::record(path)?;
     mvm_core::util::atomic_io::sync_dir(path)
 }
 
 /// [`mvm_core::util::atomic_io::sync_file`], recorded like [`sync_dir`].
 pub(super) fn sync_file(path: &Path) -> Result<()> {
     #[cfg(test)]
-    durable_steps::record(path);
+    durable_steps::record(path)?;
     mvm_core::util::atomic_io::sync_file(path)
 }
 
-/// The paths this thread has synced through [`sync_dir`] and [`sync_file`].
+/// The paths this thread has synced through [`sync_dir`] and [`sync_file`],
+/// and a hook that sees every such sync, on any thread, before it runs.
 #[cfg(test)]
-pub(super) mod durable_steps {
+pub(crate) mod durable_steps {
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    type Hook = Box<dyn Fn(&Path) -> anyhow::Result<()> + Send>;
 
     thread_local! {
         static STEPS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
     }
+    static HOOK: Mutex<Option<Hook>> = Mutex::new(None);
 
-    pub(in crate::runtime_evidence) fn record(path: &Path) {
+    pub(in crate::runtime_evidence) fn record(path: &Path) -> anyhow::Result<()> {
         STEPS.with(|steps| steps.borrow_mut().push(path.to_path_buf()));
+        match HOOK.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            Some(hook) => hook(path),
+            None => Ok(()),
+        }
     }
 
     /// Every path synced since the last call, in order.
     pub(in crate::runtime_evidence) fn take() -> Vec<PathBuf> {
         STEPS.with(RefCell::take)
+    }
+
+    /// Run `hook` before every sync, on whichever thread runs it, until the
+    /// guard drops. An `Err` fails that sync as an I/O error would.
+    pub(crate) fn hook(hook: impl Fn(&Path) -> anyhow::Result<()> + Send + 'static) -> HookGuard {
+        *HOOK.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(hook));
+        HookGuard
+    }
+
+    pub(crate) struct HookGuard;
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            *HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
     }
 }
 
