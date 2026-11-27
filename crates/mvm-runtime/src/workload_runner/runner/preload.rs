@@ -8,11 +8,15 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     /// refilled, leaving its VMM paused for a later claim. The child is not
     /// reachable by a workload yet: claim-time endpoint, broker, identity,
     /// and authenticated-vsock gates still run before resume.
+    ///
+    /// Returns the child's lifecycle gate. The caller holds it until the pool
+    /// record naming the child is published, so the orphan sweep never takes
+    /// a child whose record is still being written.
     pub fn preload_standby_child(
         &self,
         ctx: &PreloadContext<'_>,
         handle: &mut StandbyHandle,
-    ) -> std::result::Result<(), StandbyError> {
+    ) -> std::result::Result<crate::vm::instance_snapshot::MachineLifecycleLock, StandbyError> {
         if !self.driver.supports_preloaded_standby() {
             return Err(StandbyError::Unsupported {
                 backend: self.driver.name().to_string(),
@@ -70,6 +74,10 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             .ok_or_else(|| {
                 StandbyError::SpawnFailed("could not reserve a unique preloaded child name".into())
             })?;
+        let lifecycle =
+            crate::vm::instance_snapshot::MachineLifecycleLock::try_acquire(&child_name)
+                .map_err(|e| StandbyError::SpawnFailed(format!("preloaded child gate: {e:#}")))?
+                .ok_or_else(|| StandbyError::SpawnFailed("preloaded child gate is held".into()))?;
 
         let materialized = if is_trusted_snapshot_id(checkpoint) {
             let backend = mvm_fs::trusted_snapshot::platform_backend(ctx.snapshots.root())
@@ -92,7 +100,17 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 &child_dir,
             )
         };
-        if let Err(error) = materialized {
+        // Written before the VMM exists, so a refill that dies after starting
+        // it leaves a child the orphan sweep can attribute to a missing
+        // standby; a cold launch also refuses a name that carries it.
+        let marked = materialized.and_then(|_| {
+            std::fs::write(
+                child_dir.join(crate::standby_pool::PRELOADED_CHILD_RESERVATION_FILE),
+                handle.id.as_bytes(),
+            )
+            .map_err(anyhow::Error::from)
+        });
+        if let Err(error) = marked {
             let _ = std::fs::remove_dir_all(&child_dir);
             return Err(StandbyError::SpawnFailed(format!(
                 "materialize preloaded child '{}': {error}",
@@ -114,18 +132,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 return Err(error);
             }
         };
-        // The marker is what a cold launch checks before taking this name.
-        let marker = child_dir.join(crate::standby_pool::PRELOADED_CHILD_RESERVATION_FILE);
-        if let Err(error) = std::fs::write(&marker, handle.id.as_bytes()) {
-            self.force_stop(&child_name, "unmarked preloaded standby child");
-            let _ = std::fs::remove_dir_all(&child_dir);
-            return Err(StandbyError::SpawnFailed(format!(
-                "mark preloaded child '{child_name}': {error}"
-            )));
-        }
         handle.preloaded_child_vm_name = Some(child_name);
         handle.pid = loaded.pid;
         handle.control_socket = loaded.control_socket;
-        Ok(())
+        Ok(lifecycle)
     }
 }

@@ -50,9 +50,10 @@ pub struct PreloadedReservation {
 /// VM that will run.
 ///
 /// Only a launch with no host shares or disks qualifies: nothing derived from
-/// its name exists yet. Everything else the launch must satisfy is checked
-/// again after admission, which releases the reservation when the child cannot
-/// serve it.
+/// its name exists yet. What is already known to rule the child out is checked
+/// here, so such a launch never takes and then destroys one (see
+/// [`preload_known_unservable`]). Everything else is checked again after
+/// admission, which releases the reservation when the child cannot serve it.
 ///
 /// # Errors
 ///
@@ -63,7 +64,14 @@ pub fn reserve_preloaded_for_launch(
     config: &mut mvm_core::vm_backend::VmStartConfig,
     has_host_volumes: bool,
 ) -> Result<Option<PreloadedReservation>> {
-    if has_host_volumes || config.warm_pool_size == 0 || !backend.supports_preloaded_standby() {
+    if has_host_volumes
+        || config.warm_pool_size == 0
+        || !backend.supports_preloaded_standby()
+        || preload_known_unservable(
+            config,
+            mvm_core::user_config::load(None).default_cpu_millicores,
+        )
+    {
         return Ok(None);
     }
     let want = standby_compat(config)?;
@@ -74,6 +82,73 @@ pub fn reserve_preloaded_for_launch(
     };
     config.name = lifecycle.name().to_string();
     Ok(Some(PreloadedReservation { handle, lifecycle }))
+}
+
+/// Whether a launch is known before admission to be one a preloaded child
+/// cannot serve: a host default CPU share puts a CPU grant on every plan, and a
+/// launch that terminates TLS, carries a mailbox, or pins bundle boot assets is
+/// never warm-eligible at all.
+fn preload_known_unservable(
+    config: &mvm_core::vm_backend::VmStartConfig,
+    host_default_cpu_millicores: Option<u32>,
+) -> bool {
+    host_default_cpu_millicores.is_some()
+        || config.cpu_grant.is_some()
+        || config.bundle_boot_assets.is_some()
+        || mvm_vmm::host::egress_shared::launch_terminates_egress_tls(config)
+        || mvm_vmm::host::egress_bridge::mailbox_cmdline_token(config).is_some()
+}
+
+/// Whether the child reserved before admission can serve the admitted launch.
+///
+/// Admission may have changed the shape the reservation matched — a clamped
+/// vCPU count, say — so the key is compared again. A CPU grant is bound only
+/// where a claim starts the child's VMM inside a scope carrying it, which a
+/// paused child's VMM was not, so such a launch takes the fork path.
+fn preloaded_child_serves(
+    handle: &StandbyHandle,
+    config: &mvm_core::vm_backend::VmStartConfig,
+    want: &mvm_core::vm_backend::StandbyCompat,
+) -> bool {
+    config.cpu_grant.is_none()
+        && handle.is_compatible(want)
+        && handle.preloaded_child_vm_name.as_deref() == Some(config.name.as_str())
+}
+
+/// Spend an admitted launch on a warm standby: the child it reserved before
+/// admission when that child can serve it, otherwise an ordinary standby,
+/// which the released child's parent now is. `Ok(None)` means no standby is
+/// ready.
+///
+/// # Errors
+///
+/// If the pool cannot be read or the reservation cannot be released.
+pub fn claim_for_admitted_launch(
+    admission: &std::cell::RefCell<Option<crate::admission::CliAdmission>>,
+    backend: &mvm_runtime::AnyBackend,
+    pool: &SupervisorStandbyPool,
+    want: &mvm_core::vm_backend::StandbyCompat,
+    config: &mvm_core::vm_backend::VmStartConfig,
+    preloaded: Option<&PreloadedReservation>,
+) -> Result<Option<CliWarmClaimOutcome>> {
+    if let Some(reserved) = preloaded {
+        if preloaded_child_serves(&reserved.handle, config, want) {
+            return Ok(Some(claim_selected_cli_warm(
+                admission,
+                backend,
+                pool,
+                &reserved.handle,
+                Some(&reserved.lifecycle),
+            )));
+        }
+        pool.release_reserved_preload(&reserved.handle, &reserved.lifecycle)?;
+    }
+    let Some(handle) = pool.select_idle_compatible(want)? else {
+        return Ok(None);
+    };
+    Ok(Some(claim_selected_cli_warm(
+        admission, backend, pool, &handle, None,
+    )))
 }
 
 /// How often the idle watcher looks at the pool.

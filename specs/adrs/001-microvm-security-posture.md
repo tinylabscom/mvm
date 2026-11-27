@@ -497,26 +497,46 @@ On Firecracker, a standby may hold a child already restored from the parent's
 checkpoint and paused, so a claim resumes it instead of rebuilding it. These
 are limits, not guarantees:
 
-1. **Plaintext memory and rootfs at rest for the standby's lifetime.** A
+1. **Plaintext memory and rootfs at rest from preload until the run ends.** A
    restored VMM reads plaintext, so the child's state dir (mode 0700) holds the
-   parent's decrypted memory image (`mem.bin`) and rootfs from preload until
-   the child is claimed, expires, is evicted, or its reservation is released —
-   at most until the standby is reaped as idle (the residency idle timeout,
-   or the 30-minute standby TTL the launch path applies), where a saved-state
-   standby keeps only sealed chunks and decrypts them per claim. The parent is a planless factory
-   boot: no plan, tenant, secrets or volumes, so the image holds no workload's
-   data. Expiry, budget eviction and a released reservation stop the child and
-   remove that dir
+   parent's decrypted memory image (`mem.bin`) and rootfs from preload. A claim
+   resumes that same VMM, whose guest memory is backed by that `mem.bin`, so
+   the files stay for the claimed child's whole run and go when its state dir
+   is removed at the end of the run. A saved-state claim also decrypts into the
+   child's dir and runs from it, so the in-run window exists on both paths;
+   preloading adds the window before the claim. That window ends when the
+   child is claimed, expires (the residency idle timeout, or the 30-minute
+   standby TTL the launch path applies), is evicted, or has its reservation
+   released. Until then a saved-state standby keeps only sealed chunks. The
+   parent is a planless factory boot: no plan, tenant, secrets or volumes, so
+   the image holds no workload's data. Expiry, budget eviction and a released
+   reservation stop the child, signalling it only while its own pid marker
+   names it, and remove that dir
    (`fn:expiry_stops_a_preloaded_child_and_removes_its_memory_image`,
-   `fn:budget_eviction_removes_a_preloaded_childs_memory_image`). A host crash,
-   or a child that outlives the bounded wait after it is signalled, leaves the
-   dir until the orphan sweep removes it. `machine stop --all` does not drain
+   `fn:budget_eviction_removes_a_preloaded_childs_memory_image`). A refill that
+   dies after starting the paused VMM and before publishing its record leaves
+   a child no record names. The orphan sweep stops it and removes its dir,
+   using the owner marker written before the VMM starts
+   (`fn:a_preloaded_child_whose_standby_record_is_gone_is_stopped_and_reaped`).
+   A child that outlives the bounded wait after it is signalled keeps its dir
+   until the sweep finds its process gone. `machine stop --all` does not drain
    standbys of either kind.
-2. **Guest RAM is bounded by `standby_memory_mib`, not by admission.** A paused
-   child is a live standby and counts against the standby budget (and the host
-   budget's headroom when one is configured) at its full guest memory; a child
-   that does not fit is not prepared and its standby stays saved-state.
-3. **Its signed identity is chosen before admission.** The launch reserves the
+2. **Content is verified when the child is preloaded, not when it is claimed.**
+   Preload authenticates the sealed checkpoint and its lineage before it
+   decrypts it. The claim re-checks the capture manifest, the paused device
+   layout (no network interface) and the runtime evidence; it does not hash
+   `mem.bin` or the rootfs again. A process running as the same user could
+   change those files in between. That is a malicious host, which this ADR
+   places out of scope, so this is reuse of verified bytes and not cached
+   authorization only under that model.
+3. **Guest RAM is bounded by `standby_memory_mib`, not by admission.** A paused
+   child is a live standby and counts against the standby budget at its full
+   guest memory; a child that does not fit is not prepared and its standby
+   stays saved-state. The host budget's headroom is checked only at the
+   moment a child is preloaded. Admission does not count paused children,
+   which carry no admitted charge, so guest RAM on the host can reach
+   `host_budget_memory_mib` plus `standby_memory_mib`.
+4. **Its signed identity is chosen before admission.** The launch reserves the
    child by taking its lifecycle gate, then admits its plan under the child's
    name, so the plan, the dispatch charge, the endpoint, the broker
    registration and the audit entries name the VM that runs; the claim refuses

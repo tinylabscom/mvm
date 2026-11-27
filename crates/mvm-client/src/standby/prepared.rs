@@ -189,9 +189,10 @@ fn refill_planless(
                     continue;
                 }
                 let mut handle = handle;
-                preload_within_budget(backend, pool, &checkpoints, &mut handle);
+                // Held until the record naming the child is published.
+                let child_gate = preload_within_budget(backend, pool, &checkpoints, &mut handle);
                 if let Err(error) = pool.record(&handle) {
-                    let handle = discard_unpublished_preload(pool, handle)?;
+                    let handle = discard_unpublished_preload(pool, handle, child_gate.as_ref())?;
                     discard_parent(backend, &checkpoints, &handle, &mut warm_guard).with_context(
                         || {
                             format!(
@@ -243,9 +244,9 @@ fn preload_within_budget(
     pool: &SupervisorStandbyPool,
     checkpoints: &CheckpointStore,
     handle: &mut StandbyHandle,
-) {
+) -> Option<mvm_runtime::vm::instance_snapshot::MachineLifecycleLock> {
     if !backend.supports_preloaded_standby() {
-        return;
+        return None;
     }
     match preload_fits(pool, handle.mem_mib) {
         Ok(true) => {}
@@ -254,14 +255,14 @@ fn preload_within_budget(
                 standby = %handle.id,
                 "standby stays saved-state: a paused child does not fit `standby_memory_mib`"
             );
-            return;
+            return None;
         }
         Err(error) => {
             tracing::warn!(standby = %handle.id, error = %format!("{error:#}"), "standby stays saved-state: cannot read the standby budget");
-            return;
+            return None;
         }
     }
-    let preloaded = (|| -> Result<()> {
+    let preloaded = (|| -> Result<_> {
         let id = CheckpointId::new(
             handle
                 .parent_checkpoint
@@ -272,7 +273,7 @@ fn preload_within_budget(
             mvm_fs::snapshot_store::FsSnapshotStore::new(mvm_core::config::snapshots_dir())?;
         let anchor = PlanlessWarmParentAnchor::for_checkpoint(checkpoints, &id)?;
         let registry_path = mvm_runtime::vm::name_registry::registry_path();
-        backend.preload_standby_via_runner(
+        Ok(backend.preload_standby_via_runner(
             &mvm_runtime::workload_runner::PreloadContext {
                 checkpoints,
                 snapshots: &snapshots,
@@ -280,12 +281,13 @@ fn preload_within_budget(
                 registry_path: &registry_path,
             },
             handle,
-        )?;
-        Ok(())
+        )?)
     })();
-    if let Err(error) = preloaded {
-        tracing::warn!(standby = %handle.id, error = %format!("{error:#}"), "standby stays saved-state: preload failed");
-    }
+    preloaded
+        .inspect_err(|error| {
+            tracing::warn!(standby = %handle.id, error = %format!("{error:#}"), "standby stays saved-state: preload failed");
+        })
+        .ok()
 }
 
 /// Whether one more paused child of `mem_mib` fits beside the standbys that
@@ -310,9 +312,10 @@ fn preload_fits(pool: &SupervisorStandbyPool, mem_mib: u32) -> Result<bool> {
 fn discard_unpublished_preload(
     pool: &SupervisorStandbyPool,
     mut handle: StandbyHandle,
+    child_gate: Option<&mvm_runtime::vm::instance_snapshot::MachineLifecycleLock>,
 ) -> Result<StandbyHandle> {
     if handle.preloaded_child_vm_name.is_some() {
-        pool.discard(&handle)?;
+        pool.discard(&handle, child_gate)?;
         handle.preloaded_child_vm_name = None;
         handle.pid = 0;
         handle.control_socket = String::new();
@@ -743,6 +746,48 @@ mod tests {
         assert_eq!(result.spawned, 1, "{:?}", result.failures);
         assert_eq!(result.failed, 0, "{:?}", result.failures);
         assert_eq!(pool.idle_count_compatible(&compat).unwrap(), 1);
+    }
+
+    /// Refill preloads a child into the record it publishes, and releases
+    /// the child's gate once the record names it, so a launch can reserve it.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn refill_publishes_a_preloaded_child_a_launch_can_reserve() {
+        let _lock = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let mut paused =
+            mvm_runtime::mock::MockBackend::spawn_stand_in_vmm().expect("stand-in paused VMM");
+        let prepared = PreparedWarmParent::from_resolved(
+            AnyBackend::Mock(
+                mvm_runtime::mock::MockBackend::new().with_preloaded_standby(paused.id()),
+            ),
+            planless_config(home.path()),
+            None,
+            None,
+        )
+        .unwrap();
+        let compat = prepared.compat().clone();
+        let pool = SupervisorStandbyPool::at(home.path().join("pool"));
+
+        let result = prepared.refill_to(&pool, 1).unwrap();
+
+        assert_eq!(result.spawned, 1, "{:?}", result.failures);
+        let (handle, lifecycle) = pool
+            .reserve_preloaded_compatible(&compat)
+            .unwrap()
+            .expect("the published record names a paused child");
+        assert_eq!(handle.pid, paused.id());
+        assert_eq!(
+            handle.preloaded_child_vm_name.as_deref(),
+            Some(lifecycle.name())
+        );
+        drop(lifecycle);
+        let _ = paused.kill();
+        let _ = paused.wait();
     }
 
     #[cfg(feature = "test-support")]

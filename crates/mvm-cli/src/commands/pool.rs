@@ -31,9 +31,7 @@ use mvm_core::checkpoint::CheckpointId;
 use mvm_core::user_config::MvmConfig;
 #[cfg(test)]
 use mvm_core::vm_backend::{RuntimeSourceRootStrategy, StandbySpec};
-use mvm_core::vm_backend::{
-    StandbyCompat, StandbyError, StandbyHandle, VmStartConfig, WarmClaimRefusal,
-};
+use mvm_core::vm_backend::{StandbyCompat, StandbyError, VmStartConfig, WarmClaimRefusal};
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 
@@ -594,47 +592,16 @@ fn claim_for_launch(
     let want = compat_for_launch(cfg)?;
     mvm_core::launch_trace::lap("warm_claim.standby_compat");
     let pool = SupervisorStandbyPool::open()?;
-    if let Some(reserved) = preloaded {
-        if preloaded_child_serves(&reserved.handle, cfg, &want) {
-            return map_client_claim_outcome(
-                mvm_client::standby::claim_selected_cli_warm(
-                    admission,
-                    backend,
-                    &pool,
-                    &reserved.handle,
-                    Some(&reserved.lifecycle),
-                ),
-                claim_required(),
-            );
-        }
-        pool.release_reserved_preload(&reserved.handle, &reserved.lifecycle)?;
-    }
     // Selection is the CLI's only warm-pool mechanism. The client facade owns
-    // retained-parent verification, claim context, authority transfer and
-    // dispatch; this adapter maps only Optional/Required policy.
-    let Some(handle) = pool.select_idle_compatible(&want)? else {
-        return outcome_for_refusal(WarmClaimRefusal::NoCompatibleParent, claim_required());
-    };
-    map_client_claim_outcome(
-        mvm_client::standby::claim_selected_cli_warm(admission, backend, &pool, &handle, None),
-        claim_required(),
-    )
-}
-
-/// Whether the child reserved before admission can serve the admitted launch.
-///
-/// Admission may have changed the shape the reservation matched — a clamped
-/// vCPU count, say — so the key is compared again. A CPU grant is bound only
-/// where a claim starts the child's VMM inside a scope carrying it, which a
-/// paused child's VMM was not, so such a launch takes the fork path.
-fn preloaded_child_serves(
-    handle: &StandbyHandle,
-    cfg: &VmStartConfig,
-    want: &StandbyCompat,
-) -> bool {
-    cfg.cpu_grant.is_none()
-        && handle.is_compatible(want)
-        && handle.preloaded_child_vm_name.as_deref() == Some(cfg.name.as_str())
+    // the reserved child, retained-parent verification, claim context,
+    // authority transfer and dispatch; this adapter maps only Optional/Required
+    // policy.
+    match mvm_client::standby::claim_for_admitted_launch(
+        admission, backend, &pool, &want, cfg, preloaded,
+    )? {
+        Some(outcome) => map_client_claim_outcome(outcome, claim_required()),
+        None => outcome_for_refusal(WarmClaimRefusal::NoCompatibleParent, claim_required()),
+    }
 }
 
 fn map_client_claim_outcome(
@@ -705,90 +672,6 @@ mod tests {
 
     fn sha256_hex_of(bytes: &[u8]) -> String {
         hex::encode(Sha256::digest(bytes))
-    }
-
-    fn preloaded_parent(child: &str) -> StandbyHandle {
-        StandbyHandle {
-            id: "standby-pre".into(),
-            template_id: None,
-            control_socket: "/pool/standby-pre/control.sock".into(),
-            pid: 4242,
-            kernel_sha256: "aa".repeat(32),
-            vcpus: 2,
-            mem_mib: 1024,
-            binding_nonce: "ab".repeat(32),
-            spawned_unix_secs: 1,
-            state: StandbyState::Idle,
-            image_sha256: Some("bb".repeat(32)),
-            root_strategy: Default::default(),
-            parent_checkpoint: Some("standby-pre-ckpt".into()),
-            preloaded_child_vm_name: Some(child.into()),
-            vsock_egress: false,
-        }
-    }
-
-    #[test]
-    fn a_preloaded_child_serves_only_its_own_grant_free_compatible_launch() {
-        let handle = preloaded_parent("calm-otter-01");
-        let want = handle.compat();
-        let cfg = VmStartConfig {
-            name: "calm-otter-01".into(),
-            ..eligible_cfg()
-        };
-        assert!(preloaded_child_serves(&handle, &cfg, &want));
-
-        let granted = VmStartConfig {
-            cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
-            ..cfg.clone()
-        };
-        assert!(
-            !preloaded_child_serves(&handle, &granted, &want),
-            "a CPU grant takes the fork path"
-        );
-
-        let renamed = VmStartConfig {
-            name: "another-run".into(),
-            ..cfg.clone()
-        };
-        assert!(!preloaded_child_serves(&handle, &renamed, &want));
-
-        let mut clamped = want.clone();
-        clamped.vcpus = 1;
-        assert!(
-            !preloaded_child_serves(&handle, &cfg, &clamped),
-            "a shape admission changed no longer matches"
-        );
-    }
-
-    #[test]
-    fn launches_with_host_volumes_or_no_standbys_reserve_no_preloaded_child() {
-        let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
-        let reserve = |cfg: &VmStartConfig, has_host_volumes: bool| {
-            let mut cfg = cfg.clone();
-            let reserved = mvm_client::standby::reserve_preloaded_for_launch(
-                &backend,
-                &mut cfg,
-                has_host_volumes,
-            )
-            .unwrap();
-            assert_eq!(
-                cfg.name,
-                eligible_cfg().name,
-                "an unreserved launch keeps its name"
-            );
-            reserved
-        };
-        let cfg = eligible_cfg();
-        assert!(reserve(&cfg, true).is_none());
-        let disabled = VmStartConfig {
-            warm_pool_size: 0,
-            ..cfg.clone()
-        };
-        assert!(reserve(&disabled, false).is_none());
-        assert!(
-            reserve(&cfg, false).is_none(),
-            "a backend without preload never reserves"
-        );
     }
 
     #[test]

@@ -287,6 +287,47 @@ pub fn reap_unowned_state_dir(state_dir: &Path, instance_dir: &Path) -> Result<b
     reap_unowned_state_dir_locked(state_dir)
 }
 
+/// The standby a preloaded child's marker names, if the dir carries one.
+fn preloaded_child_owner(state_dir: &Path) -> Option<String> {
+    let marker = state_dir.join(crate::standby_pool::PRELOADED_CHILD_RESERVATION_FILE);
+    let owner = std::fs::read_to_string(marker).ok()?;
+    let owner = owner.trim();
+    (!owner.is_empty()).then(|| owner.to_string())
+}
+
+/// Stop and remove a preloaded child no standby record names any more — a
+/// refill that died between starting the paused VMM and publishing its record,
+/// say. A paused VMM never exits on its own, so the ordinary rule of keeping a
+/// dir with a live process would keep it, and its decrypted memory image,
+/// until reboot. Under the child's lifecycle gate the record is read again, so
+/// a refill that published it meanwhile keeps its child; the stop itself is
+/// the identity-checked Firecracker teardown.
+fn reap_orphaned_preloaded_child(
+    state_dir: &Path,
+    instance_dir: &Path,
+    pool: &crate::standby_pool::SupervisorStandbyPool,
+    owner: &str,
+    stop_vmm: StopVmm,
+) -> Result<bool, String> {
+    let Some(_lifecycle) = crate::vm::instance_snapshot::try_lock_resume_in(instance_dir)
+        .map_err(|e| format!("{e:#}"))?
+    else {
+        return Ok(false);
+    };
+    let child = state_dir.file_name().and_then(|name| name.to_str());
+    let owned = pool
+        .load_selected(owner)
+        .map_err(|e| format!("{e:#}"))?
+        .is_some_and(|record| record.preloaded_child_vm_name.as_deref() == child);
+    if owned {
+        return Ok(false);
+    }
+    if state_dir_has_live_process(state_dir) {
+        stop_vmm(state_dir).map_err(|e| format!("{e:#}"))?;
+    }
+    reap_unowned_state_dir_locked(state_dir)
+}
+
 /// Caller retains the existing per-machine lifecycle lock for this directory.
 pub(crate) fn reap_unowned_state_dir_locked(state_dir: &Path) -> Result<bool, String> {
     if !state_dir.exists() {
@@ -448,7 +489,12 @@ impl RuntimeView for FsRuntimeView {
             // Canonical layout is `vms/<name>`, so the dir basename is the
             // registry key. A dir with a live owner is an in-flight or
             // specially-managed VM (e.g. the dev VM) — never an orphan.
-            if known.contains(name) || standbys.contains(name) || state_dir_has_live_process(&path)
+            // A live process keeps its dir, unless it is a preloaded child
+            // whose standby no longer names it: such a child is paused for
+            // good and holds a decrypted memory image.
+            if known.contains(name)
+                || standbys.contains(name)
+                || (state_dir_has_live_process(&path) && preloaded_child_owner(&path).is_none())
             {
                 continue;
             }
@@ -478,6 +524,9 @@ pub struct FsReconcileActions {
     /// machine's resume lock. `None` skips that re-read.
     registry_path: Option<PathBuf>,
     stop_vmm: StopVmm,
+    /// The standby pool a preloaded child's marker is checked against. `None`
+    /// keeps every live preloaded child.
+    standby_pool: Option<PathBuf>,
 }
 
 impl FsReconcileActions {
@@ -492,7 +541,15 @@ impl FsReconcileActions {
             instances_root,
             registry_path: None,
             stop_vmm: stop_firecracker_in,
+            standby_pool: None,
         }
+    }
+
+    /// Stop and reap preloaded children whose standby in `pool_root` no longer
+    /// names them.
+    pub fn with_standby_pool(mut self, pool_root: impl Into<PathBuf>) -> Self {
+        self.standby_pool = Some(pool_root.into());
+        self
     }
 
     /// Re-read `registry_path` before stopping an unadmitted resume.
@@ -522,7 +579,18 @@ impl ReconcileActions for FsReconcileActions {
         remove_state_dir(Path::new(&reg.vm_dir))
     }
     fn reap_orphan(&self, dir: &str) -> Result<bool, String> {
-        reap_unowned_state_dir(&self.vms_root.join(dir), &self.instances_root.join(dir))
+        let state_dir = self.vms_root.join(dir);
+        let instance_dir = self.instances_root.join(dir);
+        match (&self.standby_pool, preloaded_child_owner(&state_dir)) {
+            (Some(pool_root), Some(owner)) => reap_orphaned_preloaded_child(
+                &state_dir,
+                &instance_dir,
+                &crate::standby_pool::SupervisorStandbyPool::at(pool_root),
+                &owner,
+                self.stop_vmm,
+            ),
+            _ => reap_unowned_state_dir(&state_dir, &instance_dir),
+        }
     }
     fn stop_unadmitted(&self, name: &str) -> Result<bool, String> {
         use crate::vm::instance_snapshot::try_lock_resume;
@@ -583,7 +651,9 @@ pub fn converge_at(
     };
 
     let view = FsRuntimeView::new(vms_root).with_standby_pool(pool_root);
-    let actions = FsReconcileActions::new(vms_root).with_registry(registry_path);
+    let actions = FsReconcileActions::new(vms_root)
+        .with_registry(registry_path)
+        .with_standby_pool(pool_root);
     let mut report = sweep(&mut registry, &view, &actions, opts);
 
     let registry_changed =
@@ -711,7 +781,7 @@ pub fn reap_orphan_state_dirs_at(
         known.insert(name.to_string());
     }
     let view = FsRuntimeView::new(vms_root).with_standby_pool(pool_root);
-    let actions = FsReconcileActions::new(vms_root);
+    let actions = FsReconcileActions::new(vms_root).with_standby_pool(pool_root);
     let mut reaped = Vec::new();
     for dir in view.orphan_dirs(&known) {
         if matches!(actions.reap_orphan(&dir), Ok(true)) {
@@ -1615,6 +1685,94 @@ mod tests {
         );
         assert!(report.orphan_state_reaped.is_empty(), "{report:?}");
         assert!(vms_root.join("standby-1").exists());
+    }
+
+    /// Stands in for the Firecracker teardown: the VMM is gone once its pid
+    /// marker is.
+    fn stop_by_clearing_the_marker(state_dir: &Path) -> anyhow::Result<()> {
+        std::fs::remove_file(state_dir.join("libkrun.pid"))?;
+        Ok(())
+    }
+
+    /// A paused preloaded child (a live process) marked with its standby.
+    fn preloaded_child_dir(vms_root: &Path, child: &str, owner: &str) -> PathBuf {
+        make_state_dir(
+            vms_root,
+            child,
+            Some(i32::try_from(std::process::id()).unwrap()),
+        );
+        let dir = vms_root.join(child);
+        std::fs::write(
+            dir.join(crate::standby_pool::PRELOADED_CHILD_RESERVATION_FILE),
+            owner,
+        )
+        .unwrap();
+        dir
+    }
+
+    fn preloaded_sweep(tmp: &Path) -> (PathBuf, PathBuf, FsRuntimeView, FsReconcileActions) {
+        let vms_root = tmp.join("vms");
+        let pool_root = tmp.join("pool");
+        std::fs::create_dir_all(&pool_root).unwrap();
+        let view = FsRuntimeView::new(&vms_root).with_standby_pool(&pool_root);
+        let actions = FsReconcileActions::new(&vms_root)
+            .with_standby_pool(&pool_root)
+            .with_stop_vmm(stop_by_clearing_the_marker);
+        (vms_root, pool_root, view, actions)
+    }
+
+    /// A refill that died after starting the paused VMM and before publishing
+    /// its record leaves a live child no record names. The sweep stops it and
+    /// removes its decrypted state.
+    #[test]
+    fn a_preloaded_child_whose_standby_record_is_gone_is_stopped_and_reaped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (vms_root, _pool_root, view, actions) = preloaded_sweep(tmp.path());
+        let dir = preloaded_child_dir(&vms_root, "orphan-child", "standby-gone");
+        std::fs::write(dir.join("mem.bin"), b"plaintext").unwrap();
+
+        assert_eq!(
+            view.orphan_dirs(&BTreeSet::new()),
+            vec!["orphan-child".to_string()]
+        );
+        assert_eq!(actions.reap_orphan("orphan-child"), Ok(true));
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_preloaded_child_its_standby_still_names_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (vms_root, pool_root, view, actions) = preloaded_sweep(tmp.path());
+        let dir = preloaded_child_dir(&vms_root, "owned-child", "standby-1");
+        let mut standby = saved_state_standby("standby-1");
+        standby.preloaded_child_vm_name = Some("owned-child".into());
+        crate::standby_pool::SupervisorStandbyPool::at(&pool_root)
+            .record(&standby)
+            .unwrap();
+
+        assert!(view.orphan_dirs(&BTreeSet::new()).is_empty());
+        assert_eq!(
+            actions.reap_orphan("owned-child"),
+            Ok(false),
+            "recheck under the gate"
+        );
+        assert!(dir.join("libkrun.pid").exists());
+    }
+
+    /// A refill still publishing its record holds the child's gate.
+    #[test]
+    fn a_preloaded_child_whose_gate_is_held_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (vms_root, _pool_root, _view, actions) = preloaded_sweep(tmp.path());
+        let dir = preloaded_child_dir(&vms_root, "busy-child", "standby-new");
+        let _gate = crate::vm::instance_snapshot::try_lock_resume_in(
+            &tmp.path().join("instances/busy-child"),
+        )
+        .unwrap()
+        .expect("the refill's gate");
+
+        assert_eq!(actions.reap_orphan("busy-child"), Ok(false));
+        assert!(dir.join("libkrun.pid").exists());
     }
 
     #[test]

@@ -56,7 +56,11 @@ pub fn claim_selected_cli_warm(
     match result {
         SelectedClaim::Claimed { owner, claim } => {
             *admission.borrow_mut() = Some(owner);
-            let _ = pool.remove(&handle.id);
+            // A record left behind is `Claimed`, which expiry removes without
+            // touching the claimed VM.
+            if let Err(error) = pool.remove(&handle.id) {
+                tracing::warn!(standby = %handle.id, error = %format!("{error:#}"), "claimed standby record not removed");
+            }
             mvm_core::launch_trace::lap("warm_claim.pool_remove");
             CliWarmClaimOutcome::Claimed(claim)
         }
@@ -481,5 +485,246 @@ mod tests {
             fixture.pool.load(&fixture.handle.id).is_ok(),
             "client removes a selected record only after successful claim"
         );
+    }
+
+    /// A stand-in for a paused VMM, which every release signals.
+    fn paused_vmm() -> std::process::Child {
+        mvm_runtime::mock::MockBackend::spawn_stand_in_vmm().expect("stand-in paused VMM")
+    }
+
+    /// The fixture's parent with a paused child preloaded by the mock backend,
+    /// recorded, and reserved the way a launch reserves it before admission.
+    /// The fixture admitted its plan under the child's name.
+    fn reserved_preload(
+        process: &std::process::Child,
+    ) -> (Fixture, crate::standby::PreloadedReservation) {
+        let backend = AnyBackend::Mock(
+            mvm_runtime::mock::MockBackend::new().with_preloaded_standby(process.id()),
+        );
+        let mut fixture = prepared_fixture(backend, "selected-parent-child");
+        let AnyBackend::Mock(mock) = &fixture.backend else {
+            panic!("mock backend");
+        };
+        let gate = mock
+            .preload_standby(&mut fixture.handle)
+            .expect("mock preload");
+        fixture
+            .pool
+            .record(&fixture.handle)
+            .expect("publish preloaded record");
+        drop(gate);
+        let (handle, lifecycle) = fixture
+            .pool
+            .reserve_preloaded_compatible(&fixture.handle.compat())
+            .expect("pool readable")
+            .expect("reserved before admission");
+        (
+            fixture,
+            crate::standby::PreloadedReservation { handle, lifecycle },
+        )
+    }
+
+    #[test]
+    fn an_admitted_launch_resumes_the_child_it_reserved_under_that_childs_name() {
+        let mut process = paused_vmm();
+        let (fixture, reserved) = reserved_preload(&process);
+
+        let outcome = crate::standby::claim_for_admitted_launch(
+            &fixture.slot,
+            &fixture.backend,
+            &fixture.pool,
+            &fixture.handle.compat(),
+            &fixture.config,
+            Some(&reserved),
+        )
+        .expect("pool readable");
+
+        let Some(CliWarmClaimOutcome::Claimed(claim)) = outcome else {
+            panic!("the reserved child must be claimed");
+        };
+        let (id, lifecycle) = claim.into_parts();
+        assert_eq!(
+            id.0, "selected-parent-child",
+            "the VM that runs is the admitted name"
+        );
+        assert!(lifecycle.is_none(), "the launcher keeps the one gate");
+        assert!(
+            fixture.pool.load(&fixture.handle.id).is_err(),
+            "one claim per child"
+        );
+        let chain =
+            std::fs::read_to_string(fixture.audit.path().join("local.jsonl")).expect("audit chain");
+        assert_eq!(chain.matches("plan.admitted").count(), 1, "{chain}");
+        assert!(chain.contains("selected-parent-child"), "{chain}");
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+
+    #[test]
+    fn a_cpu_granted_launch_releases_its_child_and_forks_from_the_parent() {
+        let mut process = paused_vmm();
+        let (fixture, reserved) = reserved_preload(&process);
+        let granted = mvm_core::vm_backend::VmStartConfig {
+            cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
+            ..fixture.config.clone()
+        };
+
+        let outcome = crate::standby::claim_for_admitted_launch(
+            &fixture.slot,
+            &fixture.backend,
+            &fixture.pool,
+            &fixture.handle.compat(),
+            &granted,
+            Some(&reserved),
+        )
+        .expect("pool readable");
+
+        assert!(
+            !process.wait().expect("released child").success(),
+            "child stopped"
+        );
+        // The fork's admission scratch reuses the admitted name's dir; the
+        // child's own state, marker included, went with the release.
+        let child_state = mvm_core::config::vm_state_dir("selected-parent-child");
+        assert!(
+            !child_state
+                .join(mvm_runtime::standby_pool::PRELOADED_CHILD_RESERVATION_FILE)
+                .exists()
+                && !child_state.join("fc.pid").exists(),
+            "its state is gone"
+        );
+        let Some(CliWarmClaimOutcome::Claimed(claim)) = outcome else {
+            panic!("the launch forks from the released parent");
+        };
+        assert_eq!(
+            claim.into_parts().0.0,
+            "selected-parent",
+            "a fork, not the child"
+        );
+    }
+
+    #[test]
+    fn a_lost_reservation_keeps_the_admission_for_the_cold_boot() {
+        let mut process = paused_vmm();
+        let (mut fixture, reserved) = reserved_preload(&process);
+        fixture.backend = AnyBackend::Mock(
+            mvm_runtime::mock::MockBackend::new()
+                .with_preloaded_standby(process.id())
+                .with_lost_standby_reservation(),
+        );
+
+        let outcome = crate::standby::claim_for_admitted_launch(
+            &fixture.slot,
+            &fixture.backend,
+            &fixture.pool,
+            &fixture.handle.compat(),
+            &fixture.config,
+            Some(&reserved),
+        )
+        .expect("pool readable");
+
+        assert!(matches!(
+            outcome,
+            Some(CliWarmClaimOutcome::ReservationLost)
+        ));
+        assert_exact_capability(&fixture);
+        // The launcher then releases the child so the cold boot can take its name.
+        fixture
+            .pool
+            .release_reserved_preload(&reserved.handle, &reserved.lifecycle)
+            .expect("release");
+        assert!(
+            mvm_runtime::vm::name_custody::NameCustody::require_cold_state("selected-parent-child")
+                .is_ok(),
+            "the admitted name is free for the cold boot"
+        );
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+
+    /// Each fact known before admission decides on its own; the baseline
+    /// launch does reserve.
+    #[test]
+    fn launches_known_to_be_unservable_reserve_no_preloaded_child() {
+        let mut process = paused_vmm();
+        let (fixture, reserved) = reserved_preload(&process);
+        drop(reserved);
+        let kernel = fixture._home.path().join("vmlinux");
+        std::fs::write(&kernel, b"kernel").expect("kernel");
+        let base = mvm_core::vm_backend::VmStartConfig {
+            warm_pool_size: 1,
+            kernel_path: Some(kernel.display().to_string()),
+            cpus: u32::from(fixture.handle.vcpus),
+            memory_mib: fixture.handle.mem_mib,
+            ..fixture.config.clone()
+        };
+        let mut matching = fixture.handle.clone();
+        let want = crate::standby::standby_compat(&base).expect("compat");
+        matching.kernel_sha256 = want.kernel_sha256.clone();
+        matching.image_sha256 = want.image_sha256.clone();
+        matching.vsock_egress = want.vsock_egress;
+        matching.root_strategy = want.root_strategy;
+        fixture
+            .pool
+            .record(&matching)
+            .expect("record matching standby");
+        let reserve = |config: &mvm_core::vm_backend::VmStartConfig, host_volumes: bool| {
+            let mut config = config.clone();
+            crate::standby::reserve_preloaded_for_launch(
+                &fixture.backend,
+                &mut config,
+                host_volumes,
+            )
+            .expect("reserve")
+        };
+
+        let disabled = mvm_core::vm_backend::VmStartConfig {
+            warm_pool_size: 0,
+            ..base.clone()
+        };
+        let granted = mvm_core::vm_backend::VmStartConfig {
+            cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
+            ..base.clone()
+        };
+        assert!(reserve(&base, true).is_none(), "host volumes");
+        assert!(reserve(&disabled, false).is_none(), "standbys disabled");
+        assert!(
+            reserve(&granted, false).is_none(),
+            "a CPU grant already known"
+        );
+        assert!(
+            crate::standby::preload_known_unservable(&base, Some(250)),
+            "a host default CPU share"
+        );
+        let mut config = base.clone();
+        let reserved =
+            crate::standby::reserve_preloaded_for_launch(&fixture.backend, &mut config, false)
+                .expect("reserve")
+                .expect("the baseline launch reserves");
+        assert_eq!(
+            config.name, "selected-parent-child",
+            "named after the child"
+        );
+        drop(reserved);
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+
+    #[test]
+    fn a_backend_without_preload_reserves_nothing() {
+        let fixture = prepared_fixture(
+            AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby()),
+            "no-preload",
+        );
+        let mut config = mvm_core::vm_backend::VmStartConfig {
+            warm_pool_size: 1,
+            ..fixture.config.clone()
+        };
+        assert!(
+            crate::standby::reserve_preloaded_for_launch(&fixture.backend, &mut config, false)
+                .expect("reserve")
+                .is_none()
+        );
+        assert_eq!(config.name, "no-preload");
     }
 }

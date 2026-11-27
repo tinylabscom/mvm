@@ -521,7 +521,16 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             seccomp_tier: Some(admitted_seccomp_tier(&plan)),
             volumes: late_volume_configs,
         };
-        if let Err(refusal) = self.take_fresh_child_identity(&child.0, identity) {
+        // A resumed child is no longer a standby: without the marker the
+        // orphan sweep treats it as an ordinary VM, never as a paused child
+        // whose standby is gone.
+        let taken = if preloaded_child_name.is_some() {
+            release_preload_marker(&child_dir)
+        } else {
+            Ok(())
+        }
+        .and_then(|()| self.take_fresh_child_identity(&child.0, identity));
+        if let Err(refusal) = taken {
             // The child is live and still carrying its parent's random state.
             // Unwinding alone would leave running exactly the VM this refusal
             // exists to prevent, so stop it before returning. `force_stop`
@@ -631,6 +640,18 @@ fn fresh_child_id(ctx: &ClaimContext<'_>) -> std::result::Result<VmId, StandbyEr
     Err(StandbyError::ClaimFailed(
         "could not mint a registry-unique child name".into(),
     ))
+}
+
+fn release_preload_marker(child_dir: &Path) -> std::result::Result<(), StandbyError> {
+    match std::fs::remove_file(
+        child_dir.join(crate::standby_pool::PRELOADED_CHILD_RESERVATION_FILE),
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StandbyError::ClaimFailed(format!(
+            "release preloaded child marker: {error}"
+        ))),
+    }
 }
 
 /// A preloaded child already has its name and its VMM, so it can serve only

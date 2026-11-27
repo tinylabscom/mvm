@@ -1810,13 +1810,17 @@ standby would exceed it, the oldest is released first, and standbys are also
 kept within the `host_budget_memory_mib` headroom. On Firecracker a standby may
 also hold a paused child already restored from it, which a claim resumes rather
 than rebuilds; such a child counts against the same cap at its full guest
-memory, and a standby whose child does not fit stays saved-state. While it
-waits, the child's state directory (mode 0700) holds the standby's decrypted
-memory image and root filesystem, which carry no workload's data; they are
-removed when the child is claimed, released or reaped. Set
+memory, and a standby whose child does not fit stays saved-state. From the
+moment the child is prepared, its state directory (mode 0700) holds the
+standby's decrypted memory image and root filesystem, which carry no
+workload's data. A claimed child keeps running from those files until its run
+ends and its state is removed, as a child restored at claim time does. An
+unclaimed child's files are removed when it is released or reaped. Set
 `standby_memory_mib` to `0` to keep no paused children. A launch whose plan
-grants a CPU share does not resume a paused child: it restores its own, inside
-a scope carrying the grant. Separately, `default_cpu_millicores`
+grants a CPU share does not resume a paused child: the child is released, and
+the launch restores from the standby inside a scope carrying the grant. When
+`default_cpu_millicores` is set, every plan carries a CPU grant, so launches
+leave paused children alone. Separately, `default_cpu_millicores`
 and `default_wall_clock_secs` supply defaults for dimensions nothing else named.
 There is no host-wide egress default: one would open outbound access for every
 workload that never asked for any. Relative manifest volume host paths

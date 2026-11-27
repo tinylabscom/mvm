@@ -248,7 +248,7 @@ impl ProtectedPreloadedParent {
         handle.parent_checkpoint = Some(parent_id.to_string());
         let anchor = ClaimTestAnchor::audited(&parent_meta);
         let opened_before = crate::checkpoint::chunk_opens::under(store_root.path());
-        runner
+        let child_gate = runner
             .preload_standby_child(
                 &PreloadContext {
                     checkpoints: &checkpoints,
@@ -264,6 +264,7 @@ impl ProtectedPreloadedParent {
             "preparing the standby is where the parent's content is opened"
         );
         pool.record(&handle).unwrap();
+        drop(child_gate);
         Self {
             _env: env,
             _home: home,
@@ -438,6 +439,12 @@ fn preloaded_claim_marks_the_consumed_parent_for_stop_time_cleanup() {
     assert!(
         vm_state_dir(&parent_vm_name).is_dir(),
         "the parent dir must outlive the claim: the paused child was loaded from it"
+    );
+    assert!(
+        !child_dir
+            .join(crate::standby_pool::PRELOADED_CHILD_RESERVATION_FILE)
+            .exists(),
+        "a resumed child is no longer a standby the orphan sweep may stop"
     );
     assert!(
         !child_dir
