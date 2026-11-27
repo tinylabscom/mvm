@@ -301,6 +301,101 @@ keys. Hardware attestation alone does not make the active host blind to
 plaintext. ADR-001's trusted-host boundary and backend-specific evidence apply;
 an unsupported stronger profile refuses.
 
+### 10. Node-to-node workload traffic
+
+Nothing in this repository carries a workload flow to another host, and
+nothing below should be built before its prerequisites hold. Until then a plan
+naming a peer on another host is refused because the destination is not
+reachable, not admitted under a weaker rule.
+
+The hop must keep four properties:
+
+| # | Property |
+| --- | --- |
+| I1 | The remote end is authenticated. A node accepts flows only for workloads it hosts, and refuses a question about another node's workload. |
+| I2 | Default-deny survives the hop. Crossing a node boundary is never an implicit admission. |
+| I3 | The audit chain records each decision on the node that made it. |
+| I4 | No workload NIC appears. The transport is host-to-host and the guest still reaches it only over vsock. |
+
+Both nodes admit, and neither defers to the other: the source node decides
+whether this workload may reach that peer, the destination node decides whether
+that peer may reach this workload, each through the code path it runs for local
+traffic. The destination never trusts the source node's admission; a source
+node is a peer, not an authority, and trusting it would let one compromised
+node grant reach to every workload on every other.
+
+Authentication is per channel, not per packet: one mutually authenticated,
+confidential channel per node pair, with each flow inside it naming the
+workload instance on both ends by node, workload, boot and plan digest, so a
+restarted workload cannot inherit its predecessor's reach. A node answers
+nothing about a workload it does not host, and refuses "no such workload" and
+"not mine" with the same bytes so it cannot serve as a membership oracle. A flow
+naming another node is refused before its contents are read. Peer channels and
+flows per peer are capped; at capacity the new flow is dropped and no live flow
+is evicted.
+
+Prerequisites, all open:
+
+- **A cross-node issuer.** A node can verify another node only under a key that
+  is not node-scoped, learned from the issuer rather than from the peer. A
+  node-peer keypair or shared cluster secret would be a second trust root beside
+  the plan-signing root and is rejected (see §3 and §11).
+- **Peers named by identity.** A peer is named by workload identity, never by a
+  host-local address: local addressing is not unique across nodes, and a
+  colliding name would deliver to a local workload with no admission check
+  catching it.
+- **Peer-scoped policy.** The policy language needs a grant that names a peer
+  workload and an ingress declaration scoped to a source. A host-facing ingress
+  mapping admits the whole host network and is not a substitute.
+
+Rejected: stretching AF_VSOCK between machines (a CID is per-host and is not an
+authorization input); a cluster-wide pre-shared key (one compromised node forges
+every identity, and nothing distinguishes the hosting node from a claimant);
+forwarding on the source node's admission; and tunnelling node traffic through
+the ordinary egress path, which arrives as unsolicited host traffic without the
+source identity I1 needs.
+
+Open: the channel's wire format and carrier, the flow-announcement encoding,
+and whether a node pair keeps one channel or one per tenant. All depend on the
+issuer, and the concrete transport belongs to `mvmd` (§2).
+
+### 11. Node control surface: the issuer is the fleet's, verification is the node's
+
+An issuer is an authority over a set of nodes: who may issue, what the key is,
+how nodes learn it, and when it rotates are fleet decisions owned by `mvmd`. A
+single host has no vantage point from which to make them. Verifying a presented
+grant, and checking that it names this node and this boot, is the node's and is
+not delegated, because a node that trusted a peer's account of its own
+authorization would trust the party it defends against.
+
+The node-side verifier this needs keeps three properties: a grant still names
+exactly one node, and one naming another is refused before the grant is read
+(reaching a peer is a different, peer-scoped object, not a lease with its node
+check relaxed); the node holds verifying material only, since a node that can
+sign as the issuer is an issuer; and an unknown key identifier fails closed
+rather than trying every key the node has been told about.
+
+A node control surface for `mvmd`, if built, identifies its caller by kernel
+peer credentials read before the request is parsed, never by a field naming its
+own sender, and answers a caller only about machines that caller registered,
+refusing "not yours" and "no such machine" identically. A uid is not a tenant:
+tenant scoping needs a caller identity from the same missing issuer. It reports
+node capabilities by carrying the structure admission enforces rather than a
+second description, and has no request variant for fleet work the node does not
+serve. Wire types reject unknown fields, frames are capped on the length prefix,
+and the registration table is bounded and refuses at capacity rather than
+evicting a live entry.
+
+Rejected: an issuer scoped to a node pair (still a second trust root);
+authenticating callers by host-key signature alone (every process on the host
+holds that key, so it cannot tell two local callers apart; it complements peer
+credentials rather than replacing them); and answering "forbidden" for a machine
+the caller does not own, which reveals that it exists.
+
+Open: the issuer's key format and distribution, the multi-issuer verifier, the
+process that hosts the surface (it is per node, so neither a per-workload
+helper nor a per-tenant agent), and who registers machines with it.
+
 ## Missing pieces and qualification
 
 Existing host-interface, lease and mailbox primitives are integration inputs,
