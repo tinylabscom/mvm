@@ -716,6 +716,18 @@ mod tests {
         )
     }
 
+    impl PreparedVmFullFork {
+        fn dispatch_with_test_hvf(
+            self,
+            restorer: &dyn mvm_runtime::checkpoint::ForkRestorer,
+        ) -> mvm_hostd::plan_admission::VmFullForkDispatch {
+            let crate::admission::AdmissionContext { admitted, .. } = self.admission;
+            self.source
+                .bind_child(admitted, self.params)
+                .dispatch_test_hvf(&self.store, restorer, &self.anchor, &|_| Ok(()))
+        }
+    }
+
     const BUDGET_MIB: u64 = 1 << 20;
 
     #[test]
@@ -899,6 +911,42 @@ mod tests {
         assert!(
             !host_admits(BUDGET_MIB - memory_mib + 1),
             "a VMM that may still run keeps its capacity reserved"
+        );
+    }
+
+    #[test]
+    fn many_forks_fill_a_budget_sized_for_them_and_the_next_is_refused() {
+        const FORKS: u64 = 4;
+        let (_env, home, root, store, meta) = fixture();
+        let memory_mib = prepare_vm_full_fork(&store, request(&meta, root.path()))
+            .unwrap()
+            .admitted_plan()
+            .resources
+            .mem_mib;
+        configure_host_budget(home.path(), FORKS * memory_mib);
+        let restorer = |child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
+            write_pid_marker(home.path(), child.vm_name, std::process::id());
+            Ok(())
+        };
+        for fork in 0..FORKS {
+            let mut forked = request(&meta, root.path());
+            forked.child_id = CheckpointId::new(format!("child-checkpoint-{fork}"));
+            forked.child_name = format!("child-vm-{fork}");
+            forked.destination = root.path().join(&forked.child_name);
+            let prepared = prepare_vm_full_fork(&store, forked).unwrap();
+            let dispatched = prepared.dispatch_with_test_hvf(&restorer);
+            dispatched
+                .result
+                .unwrap_or_else(|e| panic!("fork {fork}: {e:#}"));
+        }
+        let mut over = request(&meta, root.path());
+        over.child_name = "one-too-many".into();
+        let error = prepare_vm_full_fork(&store, over)
+            .err()
+            .expect("a budget full of running forks refuses the next one");
+        assert!(
+            format!("{error:#}").contains("exceed this host's budget"),
+            "{error:#}"
         );
     }
 
