@@ -55,6 +55,7 @@ impl CheckpointChainAnchor for ClaimTestAnchor {
 #[derive(Default)]
 struct KeyingSpawner {
     seen_vm: Mutex<Option<String>>,
+    spawned: Mutex<Option<std::sync::mpsc::Sender<String>>>,
 }
 
 impl NetworkEndpointSpawner for KeyingSpawner {
@@ -69,6 +70,9 @@ impl NetworkEndpointSpawner for KeyingSpawner {
 
     fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint> {
         *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
+        if let Some(spawned) = self.spawned.lock().unwrap().as_ref() {
+            let _ = spawned.send(req.vm_name.to_string());
+        }
         Ok(SpawnedEndpoint {
             egress_uds: vm_network_endpoint_socket(req.vm_name),
             identity_drive: None,
@@ -561,6 +565,175 @@ fn forked_saved_state_claim_marks_no_consumed_preloaded_parent() {
     drop(env);
 }
 
+/// A saved-state parent and a claim whose start config carries `durability`.
+struct DurabilityClaim {
+    _env: TestEnv,
+    _home: tempfile::TempDir,
+    store_root: tempfile::TempDir,
+    checkpoints: CheckpointStore,
+    snapshots: FsSnapshotStore,
+    parent_id: CheckpointId,
+    parent_meta: CheckpointMeta,
+    pool: SupervisorStandbyPool,
+    handle: StandbyHandle,
+    claim: StandbyClaim,
+}
+
+impl DurabilityClaim {
+    fn seed(durability: mvm_core::admission_durability::AdmissionDurability) -> Self {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let store_root = tempfile::tempdir().unwrap();
+        let src = store_root.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent(store_root.path(), &src, true);
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let mut claim = admitted_child_claim(
+            &src.join("rootfs.ext4"),
+            signed_child_plan_json(&parent_digest),
+        );
+        claim
+            .start_config
+            .as_mut()
+            .expect("admitted claim carries a start config")
+            .admission_durability = Some(durability);
+        Self {
+            _env: env,
+            _home: home,
+            store_root,
+            checkpoints,
+            snapshots,
+            parent_id,
+            parent_meta,
+            pool,
+            handle,
+            claim,
+        }
+    }
+
+    fn claim(
+        &self,
+        runner: &WorkloadRunner<MockDriver, KeyingSpawner, RecordingBrokerRegistrar>,
+    ) -> std::result::Result<VmId, StandbyError> {
+        let registry_path = self.store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&self.parent_meta);
+        let ctx = ClaimContext {
+            pool: &self.pool,
+            checkpoints: &self.checkpoints,
+            snapshots: &self.snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &self.parent_id,
+            registry_path: &registry_path,
+            grant_issuer: None,
+        };
+        runner.claim_standby(&ctx, &self.handle, &self.claim)
+    }
+}
+
+/// The child is prepared while the admission's audit sync is in flight, but
+/// the VMM is not forked until it has finished: a restored guest runs the
+/// moment the fork resumes it, so the fork is where a warm claim waits, as
+/// activation is where a cold boot waits.
+#[test]
+fn a_warm_claim_prepares_beside_the_admission_sync_and_forks_after_it() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let durability = mvm_core::admission_durability::AdmissionDurability::spawn(move || {
+        held.recv().expect("released");
+        Ok(())
+    })
+    .expect("spawn the sync");
+    let fixture = DurabilityClaim::seed(durability);
+    let (spawned_tx, spawned) = std::sync::mpsc::channel();
+    let spawner = KeyingSpawner::default();
+    *spawner.spawned.lock().unwrap() = Some(spawned_tx);
+    let driver = MockDriver::default();
+    let runner = WorkloadRunner::new(driver.clone(), spawner, RecordingBrokerRegistrar::new());
+
+    std::thread::scope(|scope| {
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let (fixture, runner) = (&fixture, &runner);
+        scope.spawn(move || {
+            let _ = done_tx.send(fixture.claim(runner));
+        });
+        let child = spawned
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the child endpoint is spawned while the sync is held");
+        assert!(
+            done.recv_timeout(Duration::from_millis(500)).is_err(),
+            "the claim finished while the admission sync was still held"
+        );
+        assert!(
+            driver.forked_children().is_empty(),
+            "no child VMM is forked before the admission is durable"
+        );
+        release.send(()).expect("release the sync");
+        let claimed = done
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the claim finishes once the sync succeeds")
+            .expect("the claim commits");
+        assert_eq!(claimed.0, child);
+        assert_eq!(driver.forked_children().len(), 1);
+    });
+}
+
+/// A failed admission sync refuses the claim before the fork, and the claim's
+/// cleanup returns the parent and removes the prepared child.
+#[test]
+fn a_failed_admission_sync_refuses_the_warm_claim_before_the_fork() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let fixture = DurabilityClaim::seed(
+        mvm_core::admission_durability::AdmissionDurability::settled(Err(anyhow::anyhow!(
+            "injected audit sync failure"
+        ))),
+    );
+    let driver = MockDriver::default();
+    let runner = WorkloadRunner::new(
+        driver.clone(),
+        KeyingSpawner::default(),
+        RecordingBrokerRegistrar::new(),
+    );
+
+    let error = fixture
+        .claim(&runner)
+        .expect_err("a claim whose admission is not durable is refused");
+
+    assert!(
+        error.to_string().contains("injected audit sync failure"),
+        "{error}"
+    );
+    assert!(driver.forked_children().is_empty(), "nothing was forked");
+    let child = runner
+        .spawner
+        .seen_vm
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the child was prepared beside the sync");
+    assert!(
+        !vm_state_dir(&child).exists(),
+        "the prepared child is removed"
+    );
+    assert!(
+        fixture
+            .pool
+            .load("warm-parent")
+            .unwrap()
+            .state
+            .is_claimable(),
+        "the parent is returned to the pool"
+    );
+}
+
 /// A traced saved-state claim names every step, the materialize steps
 /// included, and its laps sum to the claim's wall time.
 #[test]
@@ -626,6 +799,7 @@ fn a_traced_saved_state_claim_laps_every_step_in_order() {
             "warm_claim.child_materialized",
             "warm_claim.endpoint_ready",
             "warm_claim.broker_registered",
+            "warm_claim.admission_durability",
             "warm_claim.child_forked",
             "warm_claim.identity_verified",
             "warm_claim.commit",
