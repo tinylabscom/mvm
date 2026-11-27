@@ -282,18 +282,39 @@ impl ProtectedPreloadedParent {
         &self,
         runner: &WorkloadRunner<MockDriver, KeyingSpawner, RecordingBrokerRegistrar>,
     ) -> std::result::Result<VmId, StandbyError> {
+        self.claim_as(runner, self.child_name(), None, None)
+            .map(|owned| owned.into_parts().0)
+    }
+
+    fn child_name(&self) -> &str {
+        self.handle
+            .preloaded_child_vm_name
+            .as_deref()
+            .expect("preloaded child identity")
+    }
+
+    /// Claim with a plan admitted under `plan_name` and carrying `grants`,
+    /// with or without the child's lifecycle gate held by the caller.
+    fn claim_as(
+        &self,
+        runner: &WorkloadRunner<MockDriver, KeyingSpawner, RecordingBrokerRegistrar>,
+        plan_name: &str,
+        grants: Option<mvm_contract::grants::Grants>,
+        held: Option<&crate::vm::instance_snapshot::MachineLifecycleLock>,
+    ) -> std::result::Result<crate::backend::OwnedWarmClaim, StandbyError> {
         let parent_digest = materialized_parent_rootfs_digest(&self.checkpoints, &self.parent_meta);
         let registry_path = self.store_root.path().join("vm-names.json");
         let anchor = ClaimTestAnchor::audited(&self.parent_meta);
+        let mut plan = mvm_core::plan::plan_from_admitted_json(&signed_child_plan_json_named(
+            &parent_digest,
+            plan_name,
+        ))
+        .expect("signed child fixture");
+        plan.grants = grants;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let claim = admitted_child_claim(
             &self.src.path().join("rootfs.ext4"),
-            signed_child_plan_json_named(
-                &parent_digest,
-                self.handle
-                    .preloaded_child_vm_name
-                    .as_deref()
-                    .expect("preloaded child identity"),
-            ),
+            serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test")).unwrap(),
         );
         let ctx = ClaimContext {
             pool: &self.pool,
@@ -303,8 +324,9 @@ impl ProtectedPreloadedParent {
             parent_checkpoint: &self.parent_id,
             registry_path: &registry_path,
             grant_issuer: None,
+            preloaded_child_lifecycle: held,
         };
-        runner.claim_standby(&ctx, &self.handle, &claim)
+        runner.claim_standby_owned(&ctx, &self.handle, &claim)
     }
 
     fn chunk_objects(&self) -> Vec<PathBuf> {
@@ -422,6 +444,166 @@ fn preloaded_claim_marks_the_consumed_parent_for_stop_time_cleanup() {
             .join(warm_claim::CONSUMED_RESIDENT_PARENT_FILE)
             .exists(),
         "a preloaded adoption is not a resident handoff and must not write its marker"
+    );
+}
+
+/// The launcher reserved the child by taking its lifecycle gate before it
+/// admitted the plan. The claim runs under that gate rather than waiting on a
+/// second one, and hands no second gate back.
+#[test]
+fn a_preloaded_claim_runs_under_the_gate_its_launcher_holds() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let runner = claim_runner();
+    let parent = ProtectedPreloadedParent::seed(&runner);
+    let held =
+        crate::vm::instance_snapshot::MachineLifecycleLock::acquire(parent.child_name()).unwrap();
+
+    let owned = parent
+        .claim_as(&runner, parent.child_name(), None, Some(&held))
+        .expect("claim under the held gate");
+
+    let (id, lifecycle) = owned.into_parts();
+    assert_eq!(id.0, parent.child_name());
+    assert!(lifecycle.is_none(), "the launcher keeps the one gate");
+    assert_eq!(runner.driver.forked_children().len(), 1);
+}
+
+/// The preloaded claim's own stage laps: no materialization, and the resume
+/// named apart from a fork, so the two warm paths compare stage by stage.
+#[test]
+fn a_preloaded_claim_laps_the_resume_and_no_materialization() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let runner = claim_runner();
+    let mut parent = ProtectedPreloadedParent::seed(&runner);
+    parent
+        ._env
+        .set(mvm_core::launch_trace::PHASE_TIMING_ENV, "1");
+    let held =
+        crate::vm::instance_snapshot::MachineLifecycleLock::acquire(parent.child_name()).unwrap();
+
+    let before = mvm_core::launch_trace::recorded_laps().len();
+    mvm_core::launch_trace::lap_reset(None);
+    let _claimed = parent
+        .claim_as(&runner, parent.child_name(), None, Some(&held))
+        .expect("preloaded claim");
+
+    let names: Vec<String> = mvm_core::launch_trace::recorded_laps()[before..]
+        .iter()
+        .map(|lap| lap.name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "warm_claim.parent_verified",
+            "warm_claim.runtime_verified",
+            "warm_claim.plan_and_grant_binds",
+            "warm_claim.child_identity_and_lock",
+            "warm_claim.endpoint_ready",
+            "warm_claim.broker_registered",
+            "warm_claim.admission_durability",
+            "warm_claim.preloaded_resumed",
+            "warm_claim.identity_verified",
+            "warm_claim.commit",
+        ]
+    );
+}
+
+#[test]
+fn a_preloaded_claim_refuses_a_held_gate_for_another_machine() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let runner = claim_runner();
+    let parent = ProtectedPreloadedParent::seed(&runner);
+    let other = crate::vm::instance_snapshot::MachineLifecycleLock::acquire("other-vm").unwrap();
+
+    let error = parent
+        .claim_as(&runner, parent.child_name(), None, Some(&other))
+        .expect_err("a gate for another machine is not the child's reservation");
+
+    assert!(error.to_string().contains("different machine"), "{error}");
+    assert!(runner.driver.forked_children().is_empty());
+}
+
+/// The signed plan names the VM it admits. A preloaded child already has a
+/// name, so a plan admitted under any other name cannot run as it: the paused
+/// child stays untouched and the parent returns to the pool.
+#[test]
+fn a_preloaded_child_refuses_a_plan_admitted_under_another_name() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let runner = claim_runner();
+    let parent = ProtectedPreloadedParent::seed(&runner);
+
+    let error = parent
+        .claim_as(&runner, "another-launch", None, None)
+        .expect_err("the plan names another VM");
+
+    assert!(error.to_string().contains("admitted under"), "{error}");
+    assert!(runner.driver.forked_children().is_empty());
+    assert!(
+        vm_state_dir(parent.child_name()).is_dir(),
+        "child untouched"
+    );
+    assert!(
+        parent
+            .pool
+            .load(&parent.handle.id)
+            .unwrap()
+            .state
+            .is_claimable()
+    );
+}
+
+/// A preloaded child's VMM was started before any claim, without a CPU
+/// scope, so it cannot carry a CPU grant; such a launch takes the fork path.
+#[test]
+fn a_preloaded_child_refuses_a_plan_with_a_cpu_grant() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let runner = claim_runner();
+    let parent = ProtectedPreloadedParent::seed(&runner);
+    let grants = mvm_contract::grants::Grants {
+        cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
+        ..Default::default()
+    };
+
+    let error = parent
+        .claim_as(&runner, parent.child_name(), Some(grants), None)
+        .expect_err("a CPU grant cannot bind a preloaded child");
+
+    assert!(error.to_string().contains("CPU grant"), "{error}");
+    assert!(runner.driver.forked_children().is_empty());
+    assert!(
+        parent
+            .pool
+            .load(&parent.handle.id)
+            .unwrap()
+            .state
+            .is_claimable()
+    );
+}
+
+#[test]
+fn preload_marks_the_child_state_with_its_owning_standby() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let runner = claim_runner();
+    let parent = ProtectedPreloadedParent::seed(&runner);
+
+    let marker = vm_state_dir(parent.child_name())
+        .join(crate::standby_pool::PRELOADED_CHILD_RESERVATION_FILE);
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), parent.handle.id);
+    assert!(
+        crate::vm::name_custody::NameCustody::require_cold_state(parent.child_name()).is_err(),
+        "a cold launch cannot take a preloaded child's name"
     );
 }
 
@@ -549,6 +731,7 @@ fn forked_saved_state_claim_marks_no_consumed_preloaded_parent() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     let child = runner
@@ -630,6 +813,7 @@ impl DurabilityClaim {
             parent_checkpoint: &self.parent_id,
             registry_path: &registry_path,
             grant_issuer: None,
+            preloaded_child_lifecycle: None,
         };
         runner.claim_standby(&ctx, &self.handle, &self.claim)
     }
@@ -773,6 +957,7 @@ fn a_traced_saved_state_claim_laps_every_step_in_order() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     let before = mvm_core::launch_trace::recorded_laps().len();
@@ -935,6 +1120,7 @@ fn public_claim_requires_authenticated_vm_full_runtime_observation_before_child_
                     parent_checkpoint: &parent_id,
                     registry_path: &registry_path,
                     grant_issuer: None,
+                    preloaded_child_lifecycle: None,
                 },
                 &handle,
                 &claim,
@@ -1002,6 +1188,7 @@ fn resident_claim_accepts_a_valid_signed_bundle_manifest_without_hashing_blobs()
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     verify_resident_snapshot_manifest(&ctx, &parent)
@@ -1080,6 +1267,7 @@ fn resident_claim_creates_no_child_restore_bundle() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     let child = runner
@@ -1168,6 +1356,7 @@ fn resident_claim_marks_the_consumed_parent_for_stop_time_cleanup() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     let child = runner
@@ -1310,6 +1499,7 @@ fn saved_state_claim_marks_no_consumed_resident_parent() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     let child = runner
@@ -1539,6 +1729,7 @@ fn claim_with_volumes(
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
     let result = runner.claim_standby(&ctx, &handle, &claim);
     (
@@ -1687,6 +1878,7 @@ fn claim_produces_fresh_identity_and_isolated_endpoint() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: Some(&grant_issuer),
+        preloaded_child_lifecycle: None,
     };
 
     let mut opted_in = claim.clone();
@@ -1884,6 +2076,7 @@ fn a_claimed_childs_endpoint_gets_its_own_launchs_allow_list() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     runner
@@ -1963,6 +2156,7 @@ impl EgressClaimFixture {
             parent_checkpoint: &self.parent_id,
             registry_path: &registry_path,
             grant_issuer: None,
+            preloaded_child_lifecycle: None,
         };
         let result = runner.claim_standby(&ctx, &handle, claim);
         let seen = runner
@@ -2193,6 +2387,7 @@ fn cold_boot_then_claim() -> ColdAndWarm {
                 parent_checkpoint: &parent_id,
                 registry_path: &registry_path,
                 grant_issuer: None,
+                preloaded_child_lifecycle: None,
             },
             &handle,
             &claim,
@@ -2410,6 +2605,7 @@ fn claim_with_scripted_handshake_and_grant(
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer,
+        preloaded_child_lifecycle: None,
     };
 
     let result = runner
@@ -2422,7 +2618,11 @@ fn claim_with_scripted_handshake_and_grant(
                     .is_none(),
                 "the returned child stays gated until caller custody capture"
             );
-            lifecycle.require_name(&child.0).unwrap();
+            lifecycle
+                .as_ref()
+                .expect("a claim without a held gate returns its own")
+                .require_name(&child.0)
+                .unwrap();
             drop(lifecycle);
             assert!(
                 crate::vm::instance_snapshot::try_lock_resume(&child.0)
@@ -2785,6 +2985,7 @@ fn claim_releases_reserved_parent_and_removes_child_dir_on_overlay_refusal() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     let err = runner
@@ -2951,6 +3152,7 @@ fn check_preloaded_refusal_cleanup(driver: MockDriver, retained: bool, with_over
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     let error = runner
@@ -3067,6 +3269,7 @@ fn claim_quarantines_unaudited_parent_without_releasing_it() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     let err = runner
@@ -3136,6 +3339,7 @@ fn claim_refuses_plan_parent_image_mismatch() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     let err = runner
@@ -3219,6 +3423,7 @@ fn claim_refuses_a_child_whose_grants_exceed_the_parents() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     let err = runner
@@ -3295,6 +3500,7 @@ fn claim_admits_a_child_that_narrows_the_parents_grants() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     runner
@@ -3364,6 +3570,7 @@ fn a_claimed_child_over_the_host_ceiling_is_refused() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     let err = runner
@@ -3434,6 +3641,7 @@ fn a_claimed_child_within_the_ceiling_is_admitted() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     runner
@@ -3589,6 +3797,7 @@ fn claim_refuses_drift_tampered_parent() {
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     let err = runner
@@ -3667,6 +3876,7 @@ fn concurrent_claims_do_not_double_claim_one_parent() {
                 parent_checkpoint: &parent_id,
                 registry_path: &registry_path,
                 grant_issuer: None,
+                preloaded_child_lifecycle: None,
             };
             runner.claim_standby(&ctx, &handle, &claim)
         });
@@ -3679,6 +3889,7 @@ fn concurrent_claims_do_not_double_claim_one_parent() {
                 parent_checkpoint: &parent_id,
                 registry_path: &registry_path,
                 grant_issuer: None,
+                preloaded_child_lifecycle: None,
             };
             runner.claim_standby(&ctx, &handle, &claim)
         });
@@ -3756,6 +3967,7 @@ fn selected_parent_removed_by_winner_reports_reservation_lost_before_child_effec
         parent_checkpoint: &parent_id,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
 
     pool.remove(&handle.id)

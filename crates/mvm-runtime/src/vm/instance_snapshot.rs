@@ -357,16 +357,6 @@ impl MachineLifecycleLock {
         super::name_custody::NameCustody::require_cold_state(&self.name)
     }
 
-    /// Admit only the selected parent's matching paused child, or an empty
-    /// name for an ordinary warm fork, while retaining this lifecycle gate.
-    pub fn require_warm_claim_state(
-        &self,
-        pool: &crate::standby_pool::SupervisorStandbyPool,
-        parent: &mvm_core::vm_backend::StandbyHandle,
-    ) -> Result<()> {
-        super::name_custody::NameCustody::require_warm_claim_state(&self.name, pool, parent)
-    }
-
     /// Authenticate a committed child before ordinary persistent lifecycle actions.
     pub fn require_persistent_lifecycle(&self) -> Result<()> {
         super::name_custody::NameCustody::require_persistent_lifecycle(&self.name)

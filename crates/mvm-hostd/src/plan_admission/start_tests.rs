@@ -1457,6 +1457,7 @@ fn lost_warm_reservation_restores_the_exact_cli_capability_for_cold_dispatch() {
         parent_checkpoint: &parent_checkpoint,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
     let handle = mvm_core::vm_backend::StandbyHandle {
         id: "selected-parent".into(),
@@ -1583,6 +1584,7 @@ fn required_cli_warm_durability_refusal_spends_authority_without_claiming() {
         parent_checkpoint: &parent_checkpoint,
         registry_path: &registry_path,
         grant_issuer: None,
+        preloaded_child_lifecycle: None,
     };
     let handle = mvm_core::vm_backend::StandbyHandle {
         id: "durability-parent".into(),

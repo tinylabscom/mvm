@@ -363,6 +363,7 @@ fn when_claim_parent(world: &mut CliWorld) {
         parent_checkpoint: parent_id,
         registry_path: &registry_path,
         grant_issuer: Some(&grant_issuer),
+        preloaded_child_lifecycle: None,
     };
 
     world.warm_claim_outcome = Some(match runner.claim_standby(&ctx, &handle, &claim) {

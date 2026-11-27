@@ -139,6 +139,10 @@ pub struct ClaimContext<'a> {
     /// final child identity. Grant-less test contexts may omit it; a plan that
     /// requests agent verbs fails closed when it is absent.
     pub grant_issuer: Option<&'a dyn ChildGrantIssuer>,
+    /// The preloaded child's lifecycle gate, when the launcher reserved the
+    /// child by taking it before admission. The claim runs under it instead of
+    /// acquiring a second, non-reentrant gate for the same machine.
+    pub preloaded_child_lifecycle: Option<&'a crate::vm::instance_snapshot::MachineLifecycleLock>,
 }
 
 /// The warm-pool substrate a spawn-and-capture needs beyond the runner's

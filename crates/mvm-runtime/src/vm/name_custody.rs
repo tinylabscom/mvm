@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use mvm_core::vm_backend::StandbyHandle;
 
 use super::instance_snapshot::MachineLifecycleLock;
 use super::name_registry::{VmNameRegistry, acquire_registry_lock, registry_path};
@@ -54,62 +53,12 @@ impl NameCustody {
         if occupied(&stopped_path(name))?
             || occupied(&state.join(".warm-claim-reservation"))?
             || occupied(&state.join(".warm-claim-committed"))?
-            || occupied(&state.join(".preloaded-child-reservation"))?
+            || occupied(&state.join(crate::standby_pool::PRELOADED_CHILD_RESERVATION_FILE))?
             || pooled_child
         {
             bail!(
                 "machine {name:?} has a warm claim or preloaded child; state is not owned by this cold launch"
             );
-        }
-        Ok(())
-    }
-
-    /// A warm claim may reuse only the paused child named by its selected
-    /// parent. Cold ownership remains strict for parents without a preload.
-    pub(crate) fn require_warm_claim_state(
-        name: &str,
-        pool: &SupervisorStandbyPool,
-        parent: &StandbyHandle,
-    ) -> Result<()> {
-        let Some(preloaded) = parent.preloaded_child_vm_name.as_deref() else {
-            return Self::require_cold_state(name);
-        };
-        anyhow::ensure!(preloaded == name, "selected parent preloaded another child");
-        let recorded = pool.load(&parent.id)?;
-        anyhow::ensure!(
-            recorded == *parent && recorded.state.is_claimable(),
-            "selected parent no longer owns this preloaded child"
-        );
-        let state = mvm_core::config::vm_state_dir(name);
-        anyhow::ensure!(
-            std::fs::symlink_metadata(&state)?.file_type().is_dir(),
-            "preloaded child state is not a directory"
-        );
-        anyhow::ensure!(
-            !confirmed_stop_exists(name)?
-                && !occupied(&state.join(".warm-claim-reservation"))?
-                && !occupied(&state.join(".warm-claim-committed"))?,
-            "preloaded child has conflicting warm or stopped state"
-        );
-        let reservation = state.join(".preloaded-child-reservation");
-        match std::fs::symlink_metadata(&reservation) {
-            Ok(metadata) => {
-                anyhow::ensure!(
-                    metadata.file_type().is_file()
-                        && std::fs::read_to_string(&reservation)? == parent.id,
-                    "preloaded child reservation belongs to another parent"
-                );
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // Older preloads did not publish a marker. Their pool record
-                // and unclaimed runtime artifacts are the remaining witness.
-                anyhow::ensure!(
-                    occupied(&state.join("runtime-artifacts.json"))?
-                        && !occupied(&state.join("plan.json"))?,
-                    "preloaded child has no unclaimed runtime evidence"
-                );
-            }
-            Err(error) => return Err(error).context("inspect preloaded child reservation"),
         }
         Ok(())
     }

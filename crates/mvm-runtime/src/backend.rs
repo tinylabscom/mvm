@@ -63,7 +63,8 @@ pub fn reap_uncertain_native_start_failure_for_test(error: anyhow::Error) {
 #[must_use]
 pub struct OwnedWarmClaim {
     pub(crate) id: VmId,
-    pub(crate) lifecycle: crate::vm::instance_snapshot::MachineLifecycleLock,
+    /// `None` when the launcher already holds the child's gate.
+    pub(crate) lifecycle: Option<crate::vm::instance_snapshot::MachineLifecycleLock>,
 }
 
 impl std::fmt::Debug for OwnedWarmClaim {
@@ -75,8 +76,14 @@ impl std::fmt::Debug for OwnedWarmClaim {
 }
 
 impl OwnedWarmClaim {
-    /// Transfer the child identity and its continuously held lifecycle gate.
-    pub fn into_parts(self) -> (VmId, crate::vm::instance_snapshot::MachineLifecycleLock) {
+    /// Transfer the child identity and its continuously held lifecycle gate,
+    /// or `None` when the launcher held that gate throughout.
+    pub fn into_parts(
+        self,
+    ) -> (
+        VmId,
+        Option<crate::vm::instance_snapshot::MachineLifecycleLock>,
+    ) {
         (self.id, self.lifecycle)
     }
 }
@@ -914,7 +921,10 @@ impl AnyBackend {
                         mvm_core::vm_backend::StandbyError::ClaimFailed(format!("{error:#}"))
                     })?;
                 let id = backend.claim_standby(handle, claim)?;
-                Ok(OwnedWarmClaim { id, lifecycle })
+                Ok(OwnedWarmClaim {
+                    id,
+                    lifecycle: Some(lifecycle),
+                })
             }
             // No warm pool on these backends: qemu and wasm are not
             // workload-bearing; apple-container is, but the HVF driver has no
@@ -2609,6 +2619,7 @@ mod tests {
                     parent_checkpoint: &self.parent,
                     registry_path: &self.registry_path,
                     grant_issuer: None,
+                    preloaded_child_lifecycle: None,
                 }
             }
         }

@@ -422,6 +422,7 @@ fn run_inner(
         cli_admission,
         template_acceleration,
         root_strategy,
+        preloaded,
         _built_runtime,
     } = launch;
     if let Some(admission) = cli_admission {
@@ -454,10 +455,17 @@ fn run_inner(
     // classified cold path. See `boot_transient_vm`.
     let mut warm_claim_marks = crate::commands::vm::phase_timing::WarmClaimMarks::default();
     let requested_vm_name = vm_name.clone();
-    let requested_lifecycle = match named_lifecycle {
-        Some(lifecycle) => lifecycle,
-        None => mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&vm_name)?,
+    // A reserved preloaded child's gate was taken before admission and is
+    // this name's gate; taking it again would wait on ourselves.
+    let acquired_lifecycle = match named_lifecycle {
+        Some(lifecycle) => Some(lifecycle),
+        None if preloaded.is_some() => None,
+        None => Some(mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&vm_name)?),
     };
+    let requested_lifecycle = acquired_lifecycle
+        .as_ref()
+        .or(preloaded.as_ref().map(|reserved| &reserved.lifecycle))
+        .context("transient launch holds no lifecycle gate")?;
     if let Some(runtime) = &_built_runtime {
         runtime.verify_config(&start_config)?;
     }
@@ -471,6 +479,7 @@ fn run_inner(
         mailbox_posture: mailbox_posture.as_ref(),
         user_named: req.name.is_some(),
         writable_images: &mut disk_images,
+        preloaded: preloaded.as_ref(),
     };
     if let Some(permit) = &host_budget {
         let plan = mvm_core::plan::plan_from_admitted_json(
@@ -522,13 +531,14 @@ fn run_inner(
     let custody = std::sync::Arc::new(RuntimeRunCustody::capture_or_stop(
         &backend,
         &vm_name,
-        effective_lifecycle.as_ref().unwrap_or(&requested_lifecycle),
+        effective_lifecycle.as_ref().unwrap_or(requested_lifecycle),
         exit_audit,
         &mut sub_marks,
     )?);
     mvm_core::launch_trace::lap("handoff.capture_custody");
     drop(effective_lifecycle);
-    drop(requested_lifecycle);
+    drop(acquired_lifecycle);
+    drop(preloaded);
     let launch_mode = booted.launch_mode;
     if let Some(sink) = posture {
         sink.set(mvm_client::admission::BootPosture {
@@ -1115,6 +1125,9 @@ pub struct ResolvedLaunch {
     /// Rootfs strategy the run-path tier gate selected — the value the run path
     /// records as `plan.boot_posture`.
     pub root_strategy: mvm_build::run_image::RootStrategy,
+    /// The paused child reserved before admission, whose name this launch was
+    /// admitted under.
+    pub(crate) preloaded: Option<crate::commands::pool::PreloadedReservation>,
     /// Retained until normal runtime lifecycle binding has taken ownership.
     _built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
 }
@@ -1178,7 +1191,7 @@ fn resolve_launch_with_admit(
 
     // A transient run owns only its state directory. Host directories are
     // attached as live virtio-fs shares; no host tree is copied or staged.
-    let vm_name = shape
+    let mut vm_name = shape
         .name
         .map(str::to_string)
         .unwrap_or_else(transient_vm_name);
@@ -1213,6 +1226,23 @@ fn resolve_launch_with_admit(
         ms = t_build.elapsed().as_secs_f64() * 1000.0,
         "admit window: build_start_config"
     );
+    // Before admission, so the signed plan names the VM that will run.
+    let preloaded = if matches!(admit, Some(LaunchAdmit::CliCold(_))) && shape.name.is_none() {
+        crate::commands::pool::reserve_preloaded_standby(
+            &backend,
+            &start_config,
+            !shape.dir_shares.is_empty() || !shape.disk_volumes.is_empty(),
+        )?
+    } else {
+        None
+    };
+    if let Some(child) = preloaded
+        .as_ref()
+        .and_then(|reserved| reserved.handle.preloaded_child_vm_name.clone())
+    {
+        start_config.name.clone_from(&child);
+        vm_name = child;
+    }
     let mut template_acceleration = boot.template_acceleration;
     let mut built_pack_check = None;
     let mut mailbox_posture = None;
@@ -1500,6 +1530,7 @@ fn resolve_launch_with_admit(
         cli_admission,
         template_acceleration,
         root_strategy: boot.root_strategy,
+        preloaded,
         _built_runtime: built_runtime,
     })
 }

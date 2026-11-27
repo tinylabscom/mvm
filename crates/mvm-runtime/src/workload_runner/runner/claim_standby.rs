@@ -129,6 +129,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // (2) + (4) Bind the admitted plan's image digest to the verified parent.
         // A missing plan or a digest mismatch refuses before any child side effect.
         let plan = claim_plan(claim)?;
+        if let Some(child) = &preloaded_child_name {
+            require_preloaded_child_admission(child, &plan)?;
+        }
         if let Some(identity) = runtime_verified.identity() {
             plan.require_runtime_identity(identity).map_err(|error| {
                 StandbyError::ClaimFailed(format!("verify inherited runtime: {error}"))
@@ -190,9 +193,23 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             }
             None => fresh_child_id(ctx)?,
         };
-        lifecycle = crate::vm::instance_snapshot::MachineLifecycleLock::acquire(&child.0).map_err(
-            |error| StandbyError::ClaimFailed(format!("acquire child lifecycle gate: {error:#}")),
-        )?;
+        lifecycle = match ctx.preloaded_child_lifecycle {
+            Some(held) => {
+                held.require_name(&child.0).map_err(|error| {
+                    StandbyError::ClaimFailed(format!("preloaded child reservation: {error:#}"))
+                })?;
+                None
+            }
+            None => Some(
+                crate::vm::instance_snapshot::MachineLifecycleLock::acquire(&child.0).map_err(
+                    |error| {
+                        StandbyError::ClaimFailed(format!(
+                            "acquire child lifecycle gate: {error:#}"
+                        ))
+                    },
+                )?,
+            ),
+        };
         // Selection precedes the gate; recheck under it before touching child state.
         verify_preloaded_child_name_is_available(ctx, &child.0)?;
         let child_dir = vm_state_dir(&child.0);
@@ -465,7 +482,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             }
             return Err(error);
         }
-        claim_phase!("child_forked");
+        if preloaded_child_name.is_some() {
+            claim_phase!("preloaded_resumed");
+        } else {
+            claim_phase!("child_forked");
+        }
 
         // Unconditional and best-effort, mirroring `start_workload`: started
         // the moment the restored guest is live, before the fallible
@@ -610,6 +631,33 @@ fn fresh_child_id(ctx: &ClaimContext<'_>) -> std::result::Result<VmId, StandbyEr
     Err(StandbyError::ClaimFailed(
         "could not mint a registry-unique child name".into(),
     ))
+}
+
+/// A preloaded child already has its name and its VMM, so it can serve only
+/// the plan admitted under that name, and only a plan that grants no CPU
+/// share: its VMM was started before the claim, outside any CPU scope. A
+/// launch with a CPU grant takes the fork path, which starts the child's VMM
+/// inside a scope carrying the grant.
+fn require_preloaded_child_admission(
+    child: &str,
+    plan: &ExecutionPlan,
+) -> std::result::Result<(), StandbyError> {
+    if plan.image.name != child {
+        return Err(StandbyError::ClaimFailed(format!(
+            "preloaded child '{child}' cannot run a plan admitted under '{}'",
+            plan.image.name
+        )));
+    }
+    if plan
+        .grants
+        .as_ref()
+        .is_some_and(|grants| grants.cpu.is_some())
+    {
+        return Err(StandbyError::ClaimFailed(format!(
+            "preloaded child '{child}' was started without a CPU scope and cannot carry a CPU grant"
+        )));
+    }
+    Ok(())
 }
 
 /// Recheck a preloaded child's registry identity immediately before claim-side

@@ -39,16 +39,20 @@ pub enum CliWarmClaimOutcome {
 /// The slot contains the same prepared capability again only for
 /// [`CliWarmClaimOutcome::ReservationLost`]. Claimed and refused outcomes retain
 /// only the deferred audit continuation, so neither can cold-dispatch.
+///
+/// `preloaded_lifecycle` is the selected standby's preloaded-child gate when
+/// the launch reserved that child before admission; the claim runs under it.
 pub fn claim_selected_cli_warm(
     admission: &std::cell::RefCell<Option<CliAdmission>>,
     backend: &AnyBackend,
     pool: &SupervisorStandbyPool,
     handle: &StandbyHandle,
+    preloaded_lifecycle: Option<&mvm_runtime::vm::instance_snapshot::MachineLifecycleLock>,
 ) -> CliWarmClaimOutcome {
     let Some(owner) = admission.borrow_mut().take() else {
         return CliWarmClaimOutcome::Refused(anyhow::anyhow!("warm claim lost its CLI admission"));
     };
-    let result = claim_selected(owner, backend, pool, handle);
+    let result = claim_selected(owner, backend, pool, handle, preloaded_lifecycle);
     match result {
         SelectedClaim::Claimed { owner, claim } => {
             *admission.borrow_mut() = Some(owner);
@@ -84,6 +88,7 @@ fn claim_selected(
     backend: &AnyBackend,
     pool: &SupervisorStandbyPool,
     handle: &StandbyHandle,
+    preloaded_lifecycle: Option<&mvm_runtime::vm::instance_snapshot::MachineLifecycleLock>,
 ) -> SelectedClaim {
     let result = build_claim_context(backend, handle);
     let (checkpoints, snapshots, anchor, parent_checkpoint, registry_path, grant_issuer) =
@@ -102,6 +107,7 @@ fn claim_selected(
         parent_checkpoint: &parent_checkpoint,
         registry_path: &registry_path,
         grant_issuer: Some(&grant_issuer),
+        preloaded_child_lifecycle: preloaded_lifecycle,
     };
     mvm_core::launch_trace::lap("warm_claim.claim_context");
     let (owner, result) = owner.claim_prepared_warm(backend, &ctx, handle);
@@ -312,6 +318,7 @@ mod tests {
             &fixture.backend,
             &fixture.pool,
             &fixture.handle,
+            None,
         ) else {
             panic!("mock facade claim must succeed");
         };
@@ -353,6 +360,7 @@ mod tests {
                 &fixture.backend,
                 &fixture.pool,
                 &fixture.handle,
+                None,
             ),
             CliWarmClaimOutcome::ReservationLost
         ));
@@ -418,6 +426,7 @@ mod tests {
             &fixture.backend,
             &fixture.pool,
             &fixture.handle,
+            None,
         ) else {
             panic!("uncertain mock claim must refuse");
         };
@@ -456,6 +465,7 @@ mod tests {
             &fixture.backend,
             &fixture.pool,
             &fixture.handle,
+            None,
         ) else {
             panic!("missing authenticated parent source must refuse");
         };

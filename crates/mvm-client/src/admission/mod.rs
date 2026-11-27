@@ -2273,6 +2273,7 @@ pub(crate) mod admit_plan_tests {
             parent_checkpoint: &parent,
             registry_path: &registry_path,
             grant_issuer: None,
+            preloaded_child_lifecycle: None,
         };
         let handle = mvm_core::vm_backend::StandbyHandle {
             id: "mock-standby".into(),
@@ -2392,6 +2393,7 @@ pub(crate) mod admit_plan_tests {
             parent_checkpoint: &parent,
             registry_path: &registry_path,
             grant_issuer: None,
+            preloaded_child_lifecycle: None,
         };
         let handle = mvm_core::vm_backend::StandbyHandle {
             id: "mock-standby".into(),

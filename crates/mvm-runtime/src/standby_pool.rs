@@ -11,8 +11,18 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use mvm_core::vm_backend::{StandbyCompat, StandbyHandle, StandbyState};
 
+use crate::vm::instance_snapshot::MachineLifecycleLock;
+
 /// Filename of the per-standby metadata JSON inside its dir.
 const HANDLE_FILE: &str = "standby.json";
+
+/// Marker in a preloaded child's state dir naming the standby that owns it.
+/// A cold launch refuses a name whose state carries it.
+pub const PRELOADED_CHILD_RESERVATION_FILE: &str = ".preloaded-child-reservation";
+
+/// Polls, with doubling delay from 10 ms, for a released standby's process to
+/// exit before its child state is removed.
+const RELEASE_EXIT_POLLS: u32 = 5;
 
 /// A parked standby is a low-cost saved-state snapshot; it may outlive the warm
 /// TTL by this factor before the reaper finally removes it.
@@ -105,11 +115,72 @@ impl SupervisorStandbyPool {
     /// claimed and dead entries. Saved-state standbys (pid=0) are considered live: their
     /// TTL controls expiry, not a process liveness check. Both `Idle` and `Parked`
     /// standbys are claimable; parked standbys resume from their saved state.
+    ///
+    /// A standby with a preloaded child is never selected here: its child can
+    /// serve only a launch admitted under that child's name, which
+    /// [`reserve_preloaded_compatible`](Self::reserve_preloaded_compatible)
+    /// arranges before admission.
     pub fn select_idle_compatible(&self, want: &StandbyCompat) -> Result<Option<StandbyHandle>> {
         Ok(self
             .list()?
             .into_iter()
-            .find(|h| h.state.is_claimable() && h.is_compatible(want) && Self::is_live_or_saved(h)))
+            .find(|h| Self::is_ordinary_candidate(h, want)))
+    }
+
+    fn is_ordinary_candidate(h: &StandbyHandle, want: &StandbyCompat) -> bool {
+        h.preloaded_child_vm_name.is_none()
+            && h.state.is_claimable()
+            && h.is_compatible(want)
+            && Self::is_live_or_saved(h)
+    }
+
+    /// Reserve one compatible standby whose paused child is ready, before the
+    /// launch is admitted, by taking that child's lifecycle gate.
+    ///
+    /// The launch then admits its plan under the child's name, so the signed
+    /// identity is the identity of the VM that runs. The gate is the
+    /// reservation: a second launcher cannot take it, and the reapers skip a
+    /// child whose gate is held. The pool record stays claimable until the
+    /// claim marks it.
+    pub fn reserve_preloaded_compatible(
+        &self,
+        want: &StandbyCompat,
+    ) -> Result<Option<(StandbyHandle, MachineLifecycleLock)>> {
+        let _claim_guard = mvm_core::atomic_io::FileLock::acquire(&self.root.join("claim"))?;
+        for h in self.list()? {
+            let Some(child) = h.preloaded_child_vm_name.as_deref() else {
+                continue;
+            };
+            if !(h.state.is_claimable() && h.is_compatible(want) && pid_alive(h.pid)) {
+                continue;
+            }
+            if let Some(lifecycle) = MachineLifecycleLock::try_acquire(child)? {
+                return Ok(Some((h, lifecycle)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Give up a reservation the launch cannot use, through the same teardown
+    /// the reapers use. The parent's checkpoint is still sound, so the standby
+    /// stays in the pool as saved-state and the launch can fork from it. A
+    /// record the claim already reserved, consumed or demoted is left as it is.
+    pub fn release_reserved_preload(
+        &self,
+        reserved: &StandbyHandle,
+        lifecycle: &MachineLifecycleLock,
+    ) -> Result<()> {
+        let _claim_guard = mvm_core::atomic_io::FileLock::acquire(&self.root.join("claim"))?;
+        let Some(current) = self.load_selected(&reserved.id)? else {
+            return Ok(());
+        };
+        if !current.state.is_claimable()
+            || current.preloaded_child_vm_name.as_deref() != Some(lifecycle.name())
+        {
+            return Ok(());
+        }
+        self.release_live(&current, Some(lifecycle), Release::KeepParent)
+            .map(|_| ())
     }
 
     /// Atomically reserve one compatible warm parent.
@@ -124,7 +195,7 @@ impl SupervisorStandbyPool {
         let Some(mut handle) = self
             .list()?
             .into_iter()
-            .find(|h| h.state.is_claimable() && h.is_compatible(want) && Self::is_live_or_saved(h))
+            .find(|h| Self::is_ordinary_candidate(h, want))
         else {
             return Ok(None);
         };
@@ -226,13 +297,11 @@ impl SupervisorStandbyPool {
             if memory_mib <= max_memory_mib {
                 break;
             }
-            if !h.is_saved_state() && pid_alive(h.pid) {
-                // SAFETY: the pid belongs to a live supervisor recorded by this
-                // pool; a subsequent claim cannot race because only idle/parked
-                // records are candidates under the budget lock.
-                unsafe { libc::kill(h.pid as libc::pid_t, libc::SIGTERM) };
+            if h.is_saved_state() {
+                self.remove(&h.id)?;
+            } else if !self.release_live(&h, None, Release::Remove)? {
+                continue;
             }
-            self.remove(&h.id)?;
             memory_mib = memory_mib.saturating_sub(u64::from(h.mem_mib));
             evicted.push(h.id);
         }
@@ -330,22 +399,109 @@ impl SupervisorStandbyPool {
                     _ => {}
                 }
             } else {
-                let alive = pid_alive(h.pid);
-                if !alive || expired {
-                    if alive {
-                        // Live but expired — SIGTERM before removing state.
-                        // SAFETY: SIGTERM to a pid this host spawned; a stale pid is a no-op.
-                        unsafe { libc::kill(h.pid as libc::pid_t, libc::SIGTERM) };
-                    }
-                    self.remove(&h.id)?;
-                    if !alive {
-                        reap_dead_standby_runtime(&h.id);
-                    }
+                if (!pid_alive(h.pid) || expired) && self.release_live(&h, None, Release::Remove)? {
                     reaped.push(h.id);
                 }
             }
         }
         Ok(reaped)
+    }
+
+    /// Tear down a standby that was never published, or whose record is gone,
+    /// through the same path as a recorded one.
+    pub fn discard(&self, h: &StandbyHandle) -> Result<bool> {
+        self.release_live(h, None, Release::Remove)
+    }
+
+    /// Stop a standby's process and remove its record: the one teardown for a
+    /// live standby, used by expiry, the memory budget and a released
+    /// reservation.
+    ///
+    /// A preloaded child holds the parent's decrypted memory image in its state
+    /// dir, so that dir goes with it, under the child's lifecycle gate. A child
+    /// whose gate another launch holds is reserved and left alone (`false`).
+    fn release_live(
+        &self,
+        h: &StandbyHandle,
+        held: Option<&MachineLifecycleLock>,
+        release: Release,
+    ) -> Result<bool> {
+        let mut acquired = None;
+        let child_gate = match (h.preloaded_child_vm_name.as_deref(), held) {
+            (None, _) => None,
+            (Some(child), Some(held)) => {
+                held.require_name(child)?;
+                Some(held)
+            }
+            (Some(child), None) => match MachineLifecycleLock::try_acquire(child)? {
+                Some(lifecycle) => Some(&*acquired.insert(lifecycle)),
+                None => return Ok(false),
+            },
+        };
+        let alive = pid_alive(h.pid);
+        if alive {
+            terminate_standby_process(h.pid);
+        }
+        let Some(gate) = child_gate else {
+            self.remove(&h.id)?;
+            if !alive {
+                reap_dead_standby_runtime(&h.id);
+            }
+            return Ok(true);
+        };
+        wait_for_exit(h.pid);
+        // A child that did not go away keeps its parent out of rotation.
+        if remove_preloaded_child_state(gate.name()) && release == Release::KeepParent {
+            self.demote_to_saved_state(&h.id)?;
+        } else {
+            self.remove(&h.id)?;
+        }
+        Ok(true)
+    }
+}
+
+/// What a released standby leaves in the pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Release {
+    /// Drop the standby entirely.
+    Remove,
+    /// Drop only its preloaded child; the parent stays claimable saved-state.
+    KeepParent,
+}
+
+/// Wait, bounded, for a signalled standby process to exit. An earlier
+/// invocation started it, so this one holds no child handle or pidfd to wait
+/// on; a process still alive after the last poll keeps its state dir, which the
+/// orphan sweep removes once the process is gone.
+fn wait_for_exit(pid: u32) {
+    let mut delay = std::time::Duration::from_millis(10);
+    for _ in 0..RELEASE_EXIT_POLLS {
+        if !pid_alive(pid) {
+            return;
+        }
+        std::thread::sleep(delay);
+        delay = delay.saturating_mul(2);
+    }
+}
+
+/// Remove a released preloaded child's state dir, plaintext memory image
+/// included. The caller holds the child's lifecycle gate. `false` when the dir
+/// stays behind.
+fn remove_preloaded_child_state(child: &str) -> bool {
+    let state_dir = mvm_core::config::vm_state_dir(child);
+    match crate::vm::reconcile::reap_unowned_state_dir_locked(&state_dir) {
+        Ok(true) => true,
+        Ok(false) => {
+            tracing::warn!(
+                child,
+                "preloaded child still running after release; the orphan sweep removes its state"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(%error, child, "removing a released preloaded child failed");
+            false
+        }
     }
 }
 
@@ -1113,5 +1269,173 @@ mod tests {
         let loaded = pool.load("sb-legacy").unwrap();
 
         assert_eq!(loaded.parent_checkpoint, None);
+    }
+
+    /// A preloaded standby: a live paused child process recorded on the
+    /// parent, whose plaintext memory image sits in the child's state dir.
+    fn preloaded_handle(
+        id: &str,
+        child_vm: &str,
+        process: &std::process::Child,
+        spawned: u64,
+    ) -> StandbyHandle {
+        let mut h = live_handle(id, process, spawned);
+        h.preloaded_child_vm_name = Some(child_vm.into());
+        let state = mvm_core::config::vm_state_dir(child_vm);
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("mem.bin"), b"plaintext guest memory").unwrap();
+        std::fs::write(state.join(PRELOADED_CHILD_RESERVATION_FILE), id).unwrap();
+        h
+    }
+
+    fn isolated_home() -> (mvm_core::util::test_env::TestEnv, tempfile::TempDir) {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        (env, home)
+    }
+
+    #[test]
+    fn ordinary_selection_never_takes_a_preloaded_standby() {
+        let (_env, _home) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut process = sleeper();
+        pool.record(&preloaded_handle("pre", "child-pre-a", &process, 1))
+            .unwrap();
+
+        assert!(
+            pool.select_idle_compatible(&compat("aa"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(pool.claim_idle_compatible(&compat("aa")).unwrap().is_none());
+
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+
+    #[test]
+    fn a_preloaded_reservation_holds_the_childs_lifecycle_gate_until_dropped() {
+        let (_env, _home) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut process = sleeper();
+        pool.record(&preloaded_handle("pre", "child-pre-b", &process, 1))
+            .unwrap();
+
+        let (handle, lifecycle) = pool
+            .reserve_preloaded_compatible(&compat("aa"))
+            .unwrap()
+            .expect("an idle preloaded standby is reserved");
+        assert_eq!(handle.id, "pre");
+        assert_eq!(lifecycle.name(), "child-pre-b");
+        assert!(
+            pool.reserve_preloaded_compatible(&compat("aa"))
+                .unwrap()
+                .is_none(),
+            "a second launcher cannot reserve the same child"
+        );
+        assert!(
+            pool.reserve_preloaded_compatible(&compat("bb"))
+                .unwrap()
+                .is_none(),
+            "an incompatible standby is never reserved"
+        );
+        drop(lifecycle);
+        assert!(
+            pool.reserve_preloaded_compatible(&compat("aa"))
+                .unwrap()
+                .is_some()
+        );
+
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+
+    #[test]
+    fn expiry_stops_a_preloaded_child_and_removes_its_memory_image() {
+        let (_env, _home) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut process = sleeper();
+        pool.record(&preloaded_handle("pre", "child-pre-c", &process, 1))
+            .unwrap();
+        let child_state = mvm_core::config::vm_state_dir("child-pre-c");
+
+        let reaped = pool
+            .reap_stale(std::time::Duration::from_secs(60), 10_000)
+            .unwrap();
+
+        assert_eq!(reaped, vec!["pre".to_string()]);
+        assert!(!process.wait().unwrap().success(), "paused child stopped");
+        assert!(!child_state.exists(), "plaintext mem.bin removed with it");
+    }
+
+    #[test]
+    fn expiry_skips_a_preloaded_standby_a_launch_has_reserved() {
+        let (_env, _home) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut process = sleeper();
+        pool.record(&preloaded_handle("pre", "child-pre-d", &process, 1))
+            .unwrap();
+        let held =
+            crate::vm::instance_snapshot::MachineLifecycleLock::acquire("child-pre-d").unwrap();
+
+        let reaped = pool
+            .reap_stale(std::time::Duration::from_secs(60), 10_000)
+            .unwrap();
+
+        assert!(reaped.is_empty(), "a reserved child is not torn down");
+        assert!(pool.load("pre").is_ok());
+        drop(held);
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+
+    #[test]
+    fn budget_eviction_removes_a_preloaded_childs_memory_image() {
+        let (_env, _home) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut process = sleeper();
+        pool.record(&preloaded_handle("pre", "child-pre-e", &process, 1))
+            .unwrap();
+
+        assert_eq!(pool.evict_to_total_memory(0).unwrap(), vec!["pre"]);
+
+        assert!(!process.wait().unwrap().success());
+        assert!(!mvm_core::config::vm_state_dir("child-pre-e").exists());
+    }
+
+    #[test]
+    fn a_released_reservation_keeps_its_parent_as_saved_state() {
+        let (_env, _home) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut process = sleeper();
+        pool.record(&preloaded_handle("pre", "child-pre-f", &process, 1))
+            .unwrap();
+        let (handle, lifecycle) = pool
+            .reserve_preloaded_compatible(&compat("aa"))
+            .unwrap()
+            .unwrap();
+
+        pool.release_reserved_preload(&handle, &lifecycle).unwrap();
+
+        assert!(!process.wait().unwrap().success());
+        assert!(!mvm_core::config::vm_state_dir("child-pre-f").exists());
+        let kept = pool.load("pre").expect("the parent stays in the pool");
+        assert_eq!(kept.preloaded_child_vm_name, None);
+        assert!(kept.is_saved_state(), "the parent is saved-state again");
+        assert!(
+            pool.select_idle_compatible(&compat("aa"))
+                .unwrap()
+                .is_some(),
+            "a launch can now fork from it"
+        );
+        // A second release of an already demoted record is a no-op.
+        pool.release_reserved_preload(&handle, &lifecycle).unwrap();
     }
 }

@@ -114,6 +114,15 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 return Err(error);
             }
         };
+        // The marker is what a cold launch checks before taking this name.
+        let marker = child_dir.join(crate::standby_pool::PRELOADED_CHILD_RESERVATION_FILE);
+        if let Err(error) = std::fs::write(&marker, handle.id.as_bytes()) {
+            self.force_stop(&child_name, "unmarked preloaded standby child");
+            let _ = std::fs::remove_dir_all(&child_dir);
+            return Err(StandbyError::SpawnFailed(format!(
+                "mark preloaded child '{child_name}': {error}"
+            )));
+        }
         handle.preloaded_child_vm_name = Some(child_name);
         handle.pid = loaded.pid;
         handle.control_socket = loaded.control_socket;

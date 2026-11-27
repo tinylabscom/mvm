@@ -1807,7 +1807,16 @@ counts each machine's configured maximum rather than its current commitment,
 which the memory balloon moves at runtime. `standby_memory_mib` caps the guest
 RAM held by idle standbys across all images (2048 MiB by default); when a new
 standby would exceed it, the oldest is released first, and standbys are also
-kept within the `host_budget_memory_mib` headroom. Separately, `default_cpu_millicores`
+kept within the `host_budget_memory_mib` headroom. On Firecracker a standby may
+also hold a paused child already restored from it, which a claim resumes rather
+than rebuilds; such a child counts against the same cap at its full guest
+memory, and a standby whose child does not fit stays saved-state. While it
+waits, the child's state directory (mode 0700) holds the standby's decrypted
+memory image and root filesystem, which carry no workload's data; they are
+removed when the child is claimed, released or reaped. Set
+`standby_memory_mib` to `0` to keep no paused children. A launch whose plan
+grants a CPU share does not resume a paused child: it restores its own, inside
+a scope carrying the grant. Separately, `default_cpu_millicores`
 and `default_wall_clock_secs` supply defaults for dimensions nothing else named.
 There is no host-wide egress default: one would open outbound access for every
 workload that never asked for any. Relative manifest volume host paths
