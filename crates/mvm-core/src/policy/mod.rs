@@ -1,6 +1,9 @@
 //! Security policy, audit log, secret bindings and network policy.
 
 pub mod audit;
+/// Authored workload policy: profiles, groups, and their composition.
+#[cfg(feature = "host-state")]
+pub mod authored;
 /// Strict DNS answer filtering for SSRF and rebinding defense. Lives in
 /// `mvm-contract` so the registry client in `mvm-fs` can share it.
 pub use mvm_contract::policy::dns_guard;

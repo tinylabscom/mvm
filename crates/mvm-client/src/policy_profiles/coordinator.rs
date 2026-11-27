@@ -143,7 +143,7 @@ pub fn read_if_activated(
     }
     let candidate = read_committed(project, barrier)?;
     if let Some(candidate) = &candidate {
-        candidate.revalidate(&mvm_policy::PolicyStore::from_config())?;
+        candidate.revalidate(&mvm_core::policy::authored::PolicyStore::from_config())?;
     }
     Ok(candidate)
 }
@@ -261,7 +261,7 @@ pub fn validate_machine_spec_generation(
 
 fn validate_spec_against_policy(
     spec: &mvm_runtime::machine::persist::MachineSpec,
-    policy: &mvm_policy::PolicyBody,
+    policy: &mvm_core::policy::authored::PolicyBody,
 ) -> Result<()> {
     use mvm_contract::grants::{CpuGrant, WallClockGrant};
 
@@ -624,9 +624,9 @@ mod tests {
             "manifest_path": canonical,
             "manifest_text": text,
             "defaults": [],
-            "platform": mvm_policy::Platform::default(),
+            "platform": mvm_core::policy::authored::Platform::default(),
             "sources": [],
-            "effective": mvm_policy::PolicyBody::default(),
+            "effective": mvm_core::policy::authored::PolicyBody::default(),
             "effective_sha256": "0".repeat(64),
             "closure_sha256": "0".repeat(64),
         }))
@@ -672,7 +672,7 @@ mod tests {
         .build()
         .unwrap();
         let mut spec = crate::launch::persisted_spec_from_request(&request, "bounded");
-        let mut policy = mvm_policy::PolicyBody::default();
+        let mut policy = mvm_core::policy::authored::PolicyBody::default();
         policy.network.deny.push("evil.test:443".into());
         policy.resources.max_cpus = Some(2);
         policy.resources.cpu_millicores = Some(750);

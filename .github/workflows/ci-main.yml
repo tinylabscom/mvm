@@ -119,6 +119,7 @@ jobs:
       - name: policy schema drift (mvm-client schema)
         if: matrix.suite == 'portable'
         run: |
+          cargo nextest run -p mvm-core --features host-state,schema -E 'test(/policy::authored::/)'
           cargo nextest run -p mvm-client --features schema -E 'test(/policy_profiles::/)'
       # Instruction-file provenance: the keyless half verifies a real Sigstore
       # bundle only under `manifest-verify`, and the committed policy schema is

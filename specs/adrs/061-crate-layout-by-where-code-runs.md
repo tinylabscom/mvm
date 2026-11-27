@@ -321,7 +321,7 @@ in the workspace.
 | `crates/deps/libkrun-sys`, `crates/deps/mvm-macho-sign` | Unchanged |
 | `crates/mvm-build`, `crates/mvm-runtime`, `crates/mvm-cli` | `"crates/build"`, `"crates/runtime"`, `"crates/cli"` |
 | `crates/mvm-client`, `crates/mvm-gpu`, `crates/mvm-conformance`, root package, `xtask` | Unchanged; client relocation awaits coordinated Studio changes |
-| `mvm-net` (folded into `mvm_core::net`), `mvm-bundler` (folded into `mvm_core::plan::bundle::export`) | Fold into core as specified above |
+| `mvm-net` (folded into `mvm_core::net`), `mvm-bundler` (folded into `mvm_core::plan::bundle::export`), `mvm-policy` (folded into `mvm_core::policy::authored`, behind `host-state`) | Fold into core as specified above |
 | `mvm-capture` (folded into `mvm_cli::capture`) | Fold into its only consumer, `mvm-cli` |
 | `runmvm-client` (deleted) | Retire with its publish/registry-smoke lane; retain contract publication |
 

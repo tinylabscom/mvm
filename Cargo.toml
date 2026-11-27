@@ -39,7 +39,6 @@ members = [
     "crates/mvm-host-services",
     "crates/mvm-cli",
     "crates/mvm-hostd",
-    "crates/mvm-policy",
     "crates/mvm-client",
     # The host library the language SDKs load in-process instead of running
     # mvmctl. Top of the graph: nothing depends on it.
@@ -299,7 +298,6 @@ tree-sitter-typescript = "0.23.2"
 mvm-contract = { path = "crates/mvm-contract", version = "0.28.0-rc.11", default-features = false, features = ["protocol"] }
 mvm-crypto = { path = "crates/mvm-crypto", version = "0.28.0-rc.11" }
 mvm-core = { path = "crates/mvm-core", version = "0.28.0-rc.11" }
-mvm-policy = { path = "crates/mvm-policy", version = "0.28.0-rc.11" }
 mvm-compiler = { path = "crates/mvm-compiler", version = "0.28.0-rc.11" }
 mvm-client ={ path = "crates/mvm-client", version = "0.28.0-rc.11" }
 mvm-agentd = { path = "crates/mvm-agentd", version = "0.28.0-rc.11" }

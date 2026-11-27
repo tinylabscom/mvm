@@ -56,11 +56,10 @@ manifest-verify = ["mvm-core/manifest-verify"]
 # their emitters. Off by default so no shipped closure carries schemars;
 # mvm-contract/schema covers policy endpoint routes and backend kinds;
 # mvm-core/schema covers secret binding metadata.
-schema = ["dep:schemars", "mvm-contract/schema", "mvm-core/schema", "mvm-policy/schema"]
+schema = ["dep:schemars", "mvm-contract/schema", "mvm-core/schema"]
 
 [dependencies]
 mvm-core = { workspace = true, features = ["client", "host-state", "os-keyring"] }
-mvm-policy.workspace = true
 # Persistent machine spec engine (`machine::persist::{load,overwrite,apply_patch,…}`)
 # + the VmBackend implementations. mvm-runtime does NOT depend on this crate, so
 # this edge is acyclic.

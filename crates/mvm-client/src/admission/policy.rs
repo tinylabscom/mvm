@@ -141,7 +141,7 @@ pub fn shares_from_volume_cfg(
 /// `NetworkPolicy` digest into the plan; nothing resolves it into a file.
 ///
 /// Refuses, before anything is signed, a destination host the endpoint's
-/// gate could never pin (see [`mvm_policy::allow_host::check_destination_host`]),
+/// gate could never pin (see [`mvm_core::policy::authored::allow_host::check_destination_host`]),
 /// whichever source supplied it. A well-formed name that does not resolve
 /// is not refused here.
 pub(crate) fn generated_policy_ref(
@@ -156,12 +156,14 @@ pub(crate) fn generated_policy_ref(
         return Ok(None);
     }
     for rule in policy.resolve_rules().unwrap_or_default() {
-        mvm_policy::allow_host::check_destination_host(&rule.host).with_context(|| {
-            format!(
-                "egress destination {}:{} cannot be enforced",
-                rule.host, rule.port
-            )
-        })?;
+        mvm_core::policy::authored::allow_host::check_destination_host(&rule.host).with_context(
+            || {
+                format!(
+                    "egress destination {}:{} cannot be enforced",
+                    rule.host, rule.port
+                )
+            },
+        )?;
     }
     if !valid_component(tenant) {
         anyhow::bail!(

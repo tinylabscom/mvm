@@ -23,10 +23,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::env_hygiene::classify;
+use crate::network_policy::HostPort;
 use mvm_contract::grants::EgressGrant;
 use mvm_contract::policy::routes::{EgressRoute, RouteSet};
-use mvm_core::env_hygiene::classify;
-use mvm_core::network_policy::HostPort;
 use serde::Serialize;
 
 use super::model::{
@@ -229,7 +229,7 @@ fn push_unique(items: &mut Vec<Sourced<String>>, value: String, from: &str) {
 /// Canonical `host:port` for an allow entry, through the one `--allow-host`
 /// parser so a policy and the flag agree on what an entry means.
 pub fn canonical_allow(entry: &str) -> Result<String, String> {
-    crate::allow_host::parse_allow_host(entry)
+    super::allow_host::parse_allow_host(entry)
         .map(|rule| rule.to_string())
         .map_err(|error| format!("{error:#}"))
 }
@@ -334,7 +334,7 @@ fn validate_host_only(layer: &Layer, key: &str, host: &str) -> Result<(), Policy
 }
 
 fn validate_env_name(layer: &Layer, key: &str, name: &str) -> Result<(), PolicyError> {
-    if !mvm_core::vm_backend::is_secret_env_name(name) {
+    if !crate::vm_backend::is_secret_env_name(name) {
         return Err(layer_error(
             layer,
             key,
@@ -605,7 +605,7 @@ impl Accumulator {
         narrower(&mut self.wall_clock_secs, *wall_clock_secs, &layer.label);
         narrower(&mut self.max_cpus, *max_cpus, &layer.label);
         if let Some(raw) = max_memory {
-            let mib = mvm_core::util::parse_human_size(raw).map_err(|error| {
+            let mib = crate::util::parse_human_size(raw).map_err(|error| {
                 layer_error(layer, "resources.max_memory", format!("{error:#}"))
             })?;
             if mib == 0 {

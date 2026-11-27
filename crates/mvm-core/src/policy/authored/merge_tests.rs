@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::{GroupFile, ProfileFile};
+use crate::policy::authored::model::{GroupFile, ProfileFile};
 
 fn layer(label: &str, origin: LayerOrigin, toml_body: &str) -> Layer {
     let group: GroupFile = toml::from_str(toml_body).expect("test body parses");
@@ -82,10 +82,10 @@ fn signed_requests_are_limited_to_the_authenticated_owner_grant() {
     ]);
     let owner = mvm_contract::grants::EgressGrant {
         allow: vec![
-            mvm_core::network_policy::HostPort::new("shared.test", 443),
-            mvm_core::network_policy::HostPort::new("one.test", 443),
-            mvm_core::network_policy::HostPort::new("two.test", 8443),
-            mvm_core::network_policy::HostPort::new("unrequested.test", 443),
+            crate::network_policy::HostPort::new("shared.test", 443),
+            crate::network_policy::HostPort::new("one.test", 443),
+            crate::network_policy::HostPort::new("two.test", 8443),
+            crate::network_policy::HostPort::new("unrequested.test", 443),
         ],
     };
     assert_eq!(
@@ -94,9 +94,9 @@ fn signed_requests_are_limited_to_the_authenticated_owner_grant() {
             .expect("all signed requests have a grant")
             .allow,
         vec![
-            mvm_core::network_policy::HostPort::new("one.test", 443),
-            mvm_core::network_policy::HostPort::new("shared.test", 443),
-            mvm_core::network_policy::HostPort::new("two.test", 8443),
+            crate::network_policy::HostPort::new("one.test", 443),
+            crate::network_policy::HostPort::new("shared.test", 443),
+            crate::network_policy::HostPort::new("two.test", 8443),
         ],
         "an owner grant cannot add a destination absent from signed requests"
     );
@@ -124,7 +124,7 @@ fn an_ungranted_signed_request_names_its_layer_and_refuses() {
 #[test]
 fn signed_denial_and_block_stay_closed_over_an_owner_grant() {
     let owner = mvm_contract::grants::EgressGrant {
-        allow: vec![mvm_core::network_policy::HostPort::new("one.test", 443)],
+        allow: vec![crate::network_policy::HostPort::new("one.test", 443)],
     };
     let denied = merged(&[
         layer(
@@ -682,15 +682,15 @@ fn the_committed_schema_matches_the_policy_types() {
     let committed = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join(crate::model::SCHEMA_PATH),
+            .join(crate::policy::authored::model::SCHEMA_PATH),
     )
     .expect("the committed schema exists");
     assert_eq!(
         committed.trim_end(),
-        crate::model::json_schema_pretty(),
+        crate::policy::authored::model::json_schema_pretty(),
         "{} is stale; regenerate it with \
          `cargo run -p mvm-client --features schema --bin emit_policy_schema`",
-        crate::model::SCHEMA_PATH
+        crate::policy::authored::model::SCHEMA_PATH
     );
 }
 
@@ -709,5 +709,5 @@ fn the_published_schema_page_carries_the_generated_schema() {
         .nth(1)
         .and_then(|rest| rest.split("\n```").next())
         .expect("the page has a json block");
-    assert_eq!(block, crate::model::json_schema_pretty());
+    assert_eq!(block, crate::policy::authored::model::json_schema_pretty());
 }

@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use mvm_policy::PolicyStore;
+use mvm_core::policy::authored::PolicyStore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -456,7 +456,7 @@ impl GenerationStore {
             if cfg!(target_os = "linux") {
                 ensure!(
                     committed.platform
-                        == mvm_policy::Platform::current(Some(
+                        == mvm_core::policy::authored::Platform::current(Some(
                             mvm_contract::protocol::vm_backend::BackendKind::Firecracker
                         )),
                     "committed policy platform differs from this host"
@@ -523,7 +523,7 @@ fn open_record(path: &Path) -> std::io::Result<fs::File> {
 mod tests {
     use super::*;
     use mvm_contract::protocol::vm_backend::BackendKind;
-    use mvm_policy::Platform;
+    use mvm_core::policy::authored::Platform;
 
     struct Fixture {
         _root: tempfile::TempDir,
@@ -552,7 +552,7 @@ mod tests {
         .unwrap();
         let source = PolicyStore::at(&policy);
         let platform = Platform {
-            os: Some(mvm_policy::model::HostOs::Linux),
+            os: Some(mvm_core::policy::authored::model::HostOs::Linux),
             backend: Some(BackendKind::Firecracker),
             arch: Platform::current(None).arch,
         };

@@ -108,7 +108,7 @@ pub struct ProjectPolicy {
 impl ProjectPolicy {
     /// What `manifest` (read from `path`) contributes.
     #[must_use]
-    pub fn from_manifest(path: &Path, manifest: &mvm_core::manifest::Manifest) -> Self {
+    pub fn from_manifest(path: &Path, manifest: &crate::manifest::Manifest) -> Self {
         Self {
             manifest: path.to_path_buf(),
             profile: manifest.policy.profile.clone(),

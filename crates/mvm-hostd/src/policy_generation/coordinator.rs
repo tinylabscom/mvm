@@ -372,7 +372,7 @@ mod unix {
                 "policy project identity must be absolute"
             );
         }
-        let source = mvm_policy::PolicyStore::from_config();
+        let source = mvm_core::policy::authored::PolicyStore::from_config();
         let candidate = match request {
             Request::Ping => return Ok(Response::Ready),
             Request::Status => {
@@ -463,7 +463,7 @@ mod unix {
                 if let Some(candidate) = &loaded {
                     ensure!(
                         candidate.platform
-                            == mvm_policy::Platform::current(Some(
+                            == mvm_core::policy::authored::Platform::current(Some(
                                 mvm_contract::protocol::vm_backend::BackendKind::Firecracker
                             )),
                         "committed project policy platform differs from this host"

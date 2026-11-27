@@ -20,7 +20,7 @@
 use std::path::Path;
 
 use mvm_contract::policy::routes::{EgressRoute, parse_endpoint_spec};
-pub use mvm_policy::manifest::ResolvedManifest;
+pub use mvm_core::policy::authored::manifest::ResolvedManifest;
 
 use super::merge::{canonical_allow, deny_covers, split_host_port};
 use super::model::PolicyBody;

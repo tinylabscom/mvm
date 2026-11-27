@@ -1,9 +1,9 @@
 //! Authored workload-policy parsing, source resolution, and composition.
 //!
-//! The client consumes these rules; the future host admission owner can use
-//! the same rules without depending on client launch orchestration. This
-//! library does not commit a generation, sign a plan, or grant a running
-//! workload any effects.
+//! `mvm-client` and host admission in `mvm-hostd` share these rules, so the
+//! CLI, the host library and the SDKs see one policy semantics. Nothing here
+//! commits a generation, signs a plan, or grants a running workload any
+//! effect: composition only narrows what the surrounding authority allows.
 
 pub mod allow_host;
 pub mod builtin;

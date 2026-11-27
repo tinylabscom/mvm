@@ -49,10 +49,10 @@ fn lookup(table: &[(&str, &'static str)], name: &str) -> Option<&'static str> {
 mod tests {
     use std::collections::BTreeSet;
 
-    use mvm_core::network_policy::NetworkPreset;
+    use crate::network_policy::NetworkPreset;
 
     use super::*;
-    use crate::model::{GroupFile, ProfileFile};
+    use crate::policy::authored::model::{GroupFile, ProfileFile};
 
     fn hosts(group_names: &[&str]) -> BTreeSet<String> {
         group_names
