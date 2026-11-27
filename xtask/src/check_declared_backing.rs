@@ -130,8 +130,6 @@ const PENDING: &[&str] = &[
     "specs/adrs/032-egress-connect-completion-and-in-seam-dns.md",
     "specs/adrs/033-rust-vmm-virtio-primitives.md",
     "specs/adrs/035-workload-stream-plane.md",
-    "specs/adrs/040-node-to-node-transport.md",
-    "specs/adrs/041-node-control-api.md",
     "specs/adrs/042-single-flow-vsock-networking.md",
 ];
 
