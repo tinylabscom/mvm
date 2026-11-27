@@ -414,7 +414,6 @@ pub(crate) mod tests {
             keys: KeyPolicy::default(),
             audit: AuditPolicy::default(),
             wasi: Default::default(),
-            tenant_overlays: BTreeMap::new(),
         }
     }
 

@@ -866,7 +866,6 @@ pub(in crate::commands) fn run_secure_started(
             ledger: &ledger,
             keys_dir: None,
             audit_dir: None,
-            policy_dir: None,
             bundle_pin: bundle_archive.map(|archive| {
                 if admit_prod {
                     mvm_client::admission::BundlePin::boots_for_production(archive)

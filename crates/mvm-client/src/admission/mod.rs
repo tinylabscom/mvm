@@ -24,16 +24,13 @@ pub use mvm_hostd::plan_admission::{
 };
 
 use crate::admission::entrypoint_resolve::ResolvedEntrypoint;
-use crate::admission::policy_resolver::{
-    PolicyResolutionKind, ValidatedPolicy, validate_policy_refs,
-};
 use mvm_hostd::audit::emitter::AuditEmitter;
 use mvm_hostd::audit::host_keypair::load_or_init_at;
 
 use self::audit::{
-    build_default_audit_emitter, build_policy_audit_emitter, emit_bundle_environment_refused,
-    emit_bundle_posture_refused, emit_policy_audit_invalid, emit_policy_resolve_failure,
-    emit_policy_resolved,
+    PolicyResolutionKind, build_default_audit_emitter, build_policy_audit_emitter,
+    emit_bundle_environment_refused, emit_bundle_posture_refused, emit_policy_audit_invalid,
+    emit_policy_resolve_failure, emit_policy_resolved,
 };
 use self::policy::generated_policy_bundle_for_network_policy;
 
@@ -52,7 +49,6 @@ pub mod mailbox_grant;
 mod outcome;
 mod pinned_bundle;
 pub mod policy;
-pub mod policy_resolver;
 pub mod run_grants;
 pub mod run_network;
 pub mod run_routes;
@@ -155,12 +151,6 @@ pub struct AdmitPlanForBootParams<'a> {
     /// Override for the audit-chain directory (`~/.mvm/audit/`).
     /// Tests inject a tempdir; production passes `None`.
     pub audit_dir: Option<&'a std::path::Path>,
-    /// Override for the policy-bundle root (`~/.mvm/policies/`). The
-    /// resolver reads `<dir>/<tenant>/<workload>.toml` when a
-    /// plan's policy refs name a tenant-scoped bundle; tests inject a
-    /// tempdir so a bogus bundle can be staged without touching the
-    /// real user's home.
-    pub policy_dir: Option<&'a std::path::Path>,
     /// Optional path to a `.mvmpkg` bundle archive. When set, the
     /// archive is read + verified at admit time, the resulting
     /// `PlanArtifact` is embedded into the plan, and the supervisor's
@@ -1171,45 +1161,31 @@ fn admit_with_runtime_evidence(
         "admit: load host signer"
     );
 
-    // Resolve policy before constructing the final emitter so
-    // `[audit]` can control chain-signing and stream replication for
-    // every success-path audit record. If policy resolution itself
-    // fails, fall back to the default local chain for the failure
-    // record so the rejection is still visible.
-    let generated_bundle = generated_network_policy_bundle.map(|(_, bundle)| bundle);
-    let resolved = if let Some(bundle) = generated_bundle {
-        // The signed plan refs point at this generated in-memory bundle. Validate
-        // the L4 rows before using its audit policy; the bundle is then threaded
-        // to the bridge as `bundle_json`, so the signed plan path, not the bare
-        // VmStartConfig carrier, authorizes the allow-list.
-        if let Err(err) = mvm_core::policy::canonicalize_l4(&bundle.network.l4)
+    // The generated bundle's `[audit]` section configures the success-path
+    // emitter. If its L4 rows do not validate, fall back to the default local
+    // chain for the failure record so the rejection is still visible. The
+    // plan's refs name only this generated bundle or `local-default`, so there
+    // is nothing else to resolve.
+    let policy_bundle = generated_network_policy_bundle.map(|(_, bundle)| bundle);
+    if let Some(bundle) = &policy_bundle
+        && let Err(err) = mvm_core::policy::canonicalize_l4(&bundle.network.l4)
             .context("validating generated signed network policy")
-        {
-            let fallback = build_default_audit_emitter(signer.signing, p.audit_dir)
-                .context("opening fallback audit chain emitter")?;
-            emit_policy_resolve_failure(admitted.plan(), &fallback, &err);
-            return Err(err);
-        }
-        ValidatedPolicy {
-            kind: PolicyResolutionKind::GeneratedBundleValidated,
-            bundle: Some(bundle),
-        }
+    {
+        let fallback = build_default_audit_emitter(signer.signing, p.audit_dir)
+            .context("opening fallback audit chain emitter")?;
+        emit_policy_resolve_failure(admitted.plan(), &fallback, &err);
+        return Err(err);
+    }
+    let resolution = if policy_bundle.is_some() {
+        PolicyResolutionKind::GeneratedBundleValidated
     } else {
-        match resolve_policy_for_admission(admitted.plan(), p.policy_dir) {
-            Ok(resolved) => resolved,
-            Err(err) => {
-                let fallback = build_default_audit_emitter(signer.signing, p.audit_dir)
-                    .context("opening fallback audit chain emitter")?;
-                emit_policy_resolve_failure(admitted.plan(), &fallback, &err);
-                return Err(err);
-            }
-        }
+        PolicyResolutionKind::LocalDefault
     };
 
     let emitter = match build_policy_audit_emitter(
         signer.signing.clone(),
         p.audit_dir,
-        resolved.bundle.as_ref().map(|bundle| &bundle.audit),
+        policy_bundle.as_ref().map(|bundle| &bundle.audit),
     ) {
         Ok(emitter) => emitter.with_receipts(),
         Err(err) => {
@@ -1240,11 +1216,6 @@ fn admit_with_runtime_evidence(
         ms = (t_emitter - t_signer).as_secs_f64() * 1000.0,
         "admit: policy + emitter build"
     );
-    // The validated tenant bundle is loaded once and delivered to the bridge
-    // for the live L4 enforcement path. Local-default plans retain the bridge's
-    // mandatory-deny posture by carrying no bundle.
-    let policy_bundle = resolved.bundle;
-
     // The admitted L7 egress boundary recorded in the chain-signed log so a
     // receipt can name the destinations without re-resolving policy refs.
     let egress_destinations = policy_bundle
@@ -1291,7 +1262,7 @@ fn admit_with_runtime_evidence(
         // that sit in the batch rather than syncing each on its own.
         // Folding them in saves two serial F_FULLFSYNCs (~15ms on
         // Apple silicon, ~84ms on KVM arrays) with no ordering loss.
-        emit_policy_resolved(admitted.plan(), &emitter, resolved.kind);
+        emit_policy_resolved(admitted.plan(), &emitter, resolution);
         if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {
             tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
         }
@@ -1402,30 +1373,6 @@ fn resolve_image_sha256(
     }
 }
 
-/// Run the policy resolver against the admitted plan and return the
-/// validated bundle for audit configuration and bridge enforcement.
-///
-/// `policy_dir` is the override for `~/.mvm/policies/`; production
-/// callers pass `None` and the resolver resolves it from `$HOME`.
-/// Tests inject a tempdir to stage / omit bundles deterministically.
-///
-pub fn resolve_policy_for_admission(
-    plan: &mvm_core::plan::ExecutionPlan,
-    policy_dir: Option<&std::path::Path>,
-) -> Result<ValidatedPolicy> {
-    match validate_policy_refs(plan, policy_dir) {
-        Ok(validated) => {
-            tracing::info!(
-                plan_id = %plan.plan_id.0,
-                policy_resolution = validated.kind.audit_label(),
-                "policy refs resolved",
-            );
-            Ok(validated)
-        }
-        Err(rerr) => Err(anyhow::Error::new(rerr).context("resolving plan policy refs")),
-    }
-}
-
 // ── admit_plan_for_boot tests ────────────────────────────
 //
 // These tests stay scoped to the helper rather than `cmd_run` itself
@@ -1531,7 +1478,6 @@ pub(crate) mod admit_plan_tests {
             ledger,
             keys_dir: None,
             audit_dir: None,
-            policy_dir: None,
             bundle_pin: None,
             bundle_posture: None,
             deps_volume: None,
@@ -2168,7 +2114,6 @@ pub(crate) mod admit_plan_tests {
                 mem_mib: 128,
                 keys_dir: Some(keys_dir.path()),
                 audit_dir: Some(audit_dir.path()),
-                policy_dir: None,
                 bundle_pin: None,
                 bundle_posture: None,
                 deps_volume: None,
@@ -2682,16 +2627,11 @@ pub(crate) mod admit_plan_tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Policy resolver wired into admission
+    // Policy resolution recorded at admission
     //
-    // The default synthesized plan ships `local-default` policy refs,
-    // so the happy-path admission must succeed and emit
-    // `plan.policy_resolved` with `resolution="local-default"`. Tests that
-    // need to exercise the resolver-failure path manually stage a
-    // bogus bundle into a tempdir + drive admission with a plan
-    // whose refs name that tenant. Tests use the existing
-    // `policy_dir` test seam so they can stage / omit bundles
-    // deterministically.
+    // A deny-all launch ships `local-default` policy refs, so the
+    // happy-path admission must succeed and emit `plan.policy_resolved`
+    // with `resolution="local-default"`.
     // ──────────────────────────────────────────────────────────────
 
     #[test]
@@ -2702,7 +2642,6 @@ pub(crate) mod admit_plan_tests {
         // record that resolution without implying a live control.
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
-        let policy_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"local-default-payload");
         let ledger = InMemoryNonceLedger::new();
@@ -2714,7 +2653,6 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: Some(policy_dir.path()),
             ..pinning_params(&rootfs, &ledger)
         })
         .expect("admission");
@@ -2754,7 +2692,6 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
             bundle_pin: None,
             bundle_posture: None,
             deps_volume: None,
@@ -2774,7 +2711,7 @@ pub(crate) mod admit_plan_tests {
         assert_eq!(ctx.admitted.plan().audit_labels["seccomp_tier"], "network");
         assert_ne!(
             ctx.admitted.plan().network_policy.0,
-            policy_resolver::LOCAL_DEFAULT
+            mvm_core::plan::DEFAULT_POLICY_REF
         );
         assert_eq!(
             ctx.admitted.plan().network_policy.0,
@@ -2817,7 +2754,6 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
             bundle_pin: None,
             bundle_posture: None,
             deps_volume: None,
@@ -2830,7 +2766,7 @@ pub(crate) mod admit_plan_tests {
 
         assert_ne!(
             ctx.admitted.plan().network_policy.0,
-            policy_resolver::LOCAL_DEFAULT
+            mvm_core::plan::DEFAULT_POLICY_REF
         );
         let bundle = ctx.policy_bundle.expect("generated policy bundle");
         assert_eq!(bundle.egress.mode.as_deref(), Some("open"));
@@ -3035,7 +2971,6 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
             bundle_pin: None,
             bundle_posture: None,
             deps_volume: None,
@@ -3078,7 +3013,6 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
             bundle_pin: None,
             bundle_posture: None,
             deps_volume: None,
@@ -3149,7 +3083,6 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
             bundle_pin: None,
             bundle_posture: None,
             deps_volume: None,
@@ -3197,7 +3130,6 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
             bundle_pin: None,
             bundle_posture: None,
             deps_volume: None,
@@ -3239,7 +3171,6 @@ pub(crate) mod admit_plan_tests {
             mem_mib: 128,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
             bundle_pin: None,
             bundle_posture: None,
             deps_volume: None,
@@ -3740,7 +3671,6 @@ allow_hosts = ["localhost:8443"]
             cpus: 4,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
             bundle_pin: None,
             bundle_posture: None,
             deps_volume: None,
@@ -3898,7 +3828,6 @@ allow_hosts = ["localhost:8443"]
             cpus: 4,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
             bundle_pin: None,
             bundle_posture: None,
             deps_volume: None,
@@ -3949,7 +3878,6 @@ allow_hosts = ["localhost:8443"]
             vm_name: "vm-ungranted",
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
             bundle_pin: None,
             bundle_posture: None,
             deps_volume: None,

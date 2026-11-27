@@ -187,7 +187,6 @@ pub fn generated_policy_bundle_for_network_policy(
                     ..Default::default()
                 },
                 wasi: WasiCapPolicy::default(),
-                tenant_overlays: std::collections::BTreeMap::new(),
             },
         )));
     };
@@ -268,7 +267,6 @@ pub fn generated_policy_bundle_for_network_policy(
             ..Default::default()
         },
         wasi: WasiCapPolicy::default(),
-        tenant_overlays: std::collections::BTreeMap::new(),
     };
     mvm_core::policy::canonicalize_l4(&bundle.network.l4)
         .context("validating generated signed network policy L4 rules")?;

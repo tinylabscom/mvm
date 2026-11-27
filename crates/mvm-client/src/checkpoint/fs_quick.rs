@@ -499,7 +499,6 @@ impl MaterializedFsQuickFork {
                     ledger: &ledger,
                     keys_dir: None,
                     audit_dir: None,
-                    policy_dir: None,
                     bundle_pin: parent_bundle.as_ref().map(InheritedBundle::pin),
                     bundle_posture: None,
                     deps_volume: None,

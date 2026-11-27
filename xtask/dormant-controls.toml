@@ -41,8 +41,8 @@ dormant = true
 why = """
 `ExecutionPlan::sdk_uses_sidecar` is a two-sided assertion — `true` makes \
 admission *require* the SDK sidecar, `false` makes it *forbid* one — but no \
-production path can produce `false`. Both construction sites hardcode `true` \
-(`plan/synthesis.rs`, `admission/policy_resolver.rs`), there is no CLI flag, \
+production path can produce `false`. Every construction site hardcodes `true`, \
+there is no CLI flag, \
 and no workload IR field feeds it, so the forbidding half is reachable only by \
 hand-building a plan in a test.
 

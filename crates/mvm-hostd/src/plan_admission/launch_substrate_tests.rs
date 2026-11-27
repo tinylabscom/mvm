@@ -111,7 +111,6 @@ fn bundle_json_carries_a_policy_bundle_not_the_artifact_pin() {
         keys: Default::default(),
         audit: Default::default(),
         wasi: Default::default(),
-        tenant_overlays: std::collections::BTreeMap::new(),
     };
 
     let mut cfg = VmStartConfig::default();

@@ -1,9 +1,7 @@
 //! `PolicyBundle` — the bundle of policies a workload boots under.
 
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 
-use crate::plan::types::TenantId;
 use serde::{Deserialize, Serialize};
 
 use crate::policy::policies::{
@@ -44,27 +42,6 @@ pub struct PolicyBundle {
     pub audit: AuditPolicy,
     #[serde(default)]
     pub wasi: WasiCapPolicy,
-
-    /// Per-tenant overlays. Resolved by composing the bundle's
-    /// base policy with the matching tenant overlay (overlay wins
-    /// on conflict). Empty map means no per-tenant variation.
-    #[serde(default)]
-    pub tenant_overlays: BTreeMap<TenantId, TenantOverlay>,
-}
-
-/// Per-tenant overlay. Each field is optional — `None` means
-/// "inherit from the bundle base"; `Some(_)` overrides.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TenantOverlay {
-    pub network: Option<BundleNetworkPolicy>,
-    pub egress: Option<EgressPolicy>,
-    pub pii: Option<PiiPolicy>,
-    pub artifact: Option<ArtifactPolicy>,
-    pub keys: Option<KeyPolicy>,
-    pub audit: Option<AuditPolicy>,
-    #[serde(default)]
-    pub wasi: Option<WasiCapPolicy>,
 }
 
 #[cfg(test)]
@@ -87,7 +64,7 @@ mod tests {
         assert!(serde_json::from_value::<PolicyBundle>(base.clone()).is_ok());
         for legacy in [
             serde_json::json!({"tool": {"allowed": ["shell"]}}),
-            serde_json::json!({"tenant_overlays": {"tenant": {"tool": {"allowed": ["shell"]}}}}),
+            serde_json::json!({"tenant_overlays": {}}),
         ] {
             let mut value = base.clone();
             value

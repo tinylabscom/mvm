@@ -21,8 +21,8 @@
 //! - **Signing.** The `signer` module owns it — `synthesize_plan`
 //!   builds the unsigned plan; the caller signs.
 //! - **Backend dispatch.** This module is plan-shape-only, no I/O.
-//! - **Policy resolution.** The `policy_resolver` turns the plan's
-//!   `PolicyRef` fields into concrete supervisor components.
+//! - **Policy resolution.** The plan's `PolicyRef` fields are signed
+//!   labels; nothing resolves them into a policy file.
 //!
 //! ## Field source map (plan field → CLI input)
 //!
@@ -62,9 +62,7 @@ use std::collections::BTreeMap;
 /// mvmd's multi-tenant control plane is wired in.
 pub const DEFAULT_TENANT: &str = "local";
 
-/// Default policy name resolved by the policy_resolver to a Noop
-/// component-slot set. Production deployments override via the
-/// supervisor's policy bundle.
+/// Policy ref label for a launch that grants no egress.
 pub const DEFAULT_POLICY_REF: &str = "local-default";
 
 /// Default intent for direct VM boots. Higher-level callers

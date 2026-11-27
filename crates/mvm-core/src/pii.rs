@@ -187,13 +187,6 @@ impl PiiRedactor {
         Self::new(DEFAULT_RULES, Mode::Detect).expect("DEFAULT_RULES must compile")
     }
 
-    /// Validate a parsed PII policy without constructing a redactor.
-    /// Admission uses this when it needs fail-loud syntax checking but
-    /// does not own the runtime inspector chain.
-    pub fn validate_policy(policy: &crate::policy::PiiPolicy) -> Result<(), PiiPolicyError> {
-        Self::policy_config(policy).map(|_| ())
-    }
-
     /// Construct from a parsed policy. Returns `Ok(None)` for
     /// `mode = "disabled"`; unknown modes or categories fail loudly.
     pub fn from_policy(policy: &crate::policy::PiiPolicy) -> Result<Option<Self>, PiiPolicyError> {
@@ -535,22 +528,22 @@ mod tests {
     }
 
     #[test]
-    fn policy_validation_accepts_known_modes_and_categories_without_a_redactor() {
+    fn from_policy_accepts_known_modes_and_categories() {
         let policy = crate::policy::PiiPolicy {
             mode: Some("redact".to_string()),
             categories: vec!["email".to_string(), "iban".to_string()],
         };
-        PiiRedactor::validate_policy(&policy).expect("known policy must validate");
+        PiiRedactor::from_policy(&policy).expect("known policy must validate");
     }
 
     #[test]
-    fn policy_validation_refuses_unknown_modes_and_categories() {
+    fn from_policy_refuses_unknown_modes_and_categories() {
         let bad_mode = crate::policy::PiiPolicy {
             mode: Some("paranoid".to_string()),
             categories: Vec::new(),
         };
         assert!(matches!(
-            PiiRedactor::validate_policy(&bad_mode),
+            PiiRedactor::from_policy(&bad_mode),
             Err(PiiPolicyError::UnknownMode { .. })
         ));
 
@@ -559,7 +552,7 @@ mod tests {
             categories: vec!["passport".to_string()],
         };
         assert!(matches!(
-            PiiRedactor::validate_policy(&bad_category),
+            PiiRedactor::from_policy(&bad_category),
             Err(PiiPolicyError::UnknownCategory { .. })
         ));
     }

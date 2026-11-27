@@ -6,7 +6,6 @@
 //!
 //! Structure:
 //! - `audit` — `AuditSigner` trait + `NoopAuditSigner`.
-//! - `policy_validation` — operator-policy validators.
 //!
 //! Everything else lives in a responsibility group:
 //! - `admission` — caller registration and restored/warm-claimed plan checks.
@@ -24,7 +23,6 @@ pub mod datapath;
 pub mod endpoint;
 pub mod inspection;
 pub mod lifecycle;
-pub mod policy_validation;
 pub mod services;
 pub mod telemetry;
 
@@ -61,9 +59,4 @@ pub use lifecycle::balloon::{
     PsiPressureSource, SysinfoPressureSource, TickOutcome, default_pressure_source,
 };
 pub use lifecycle::balloon_runtime::{BalloonRuntimeConfig, run_balloon_loop, run_one_tick};
-pub use policy_validation::{
-    AuditPolicyValidationError, EgressPolicyValidationError, KNOWN_AUDIT_STREAM_SCHEMES,
-    KNOWN_INSPECTOR_NAMES, validate_audit_policy_stream_destinations,
-    validate_egress_policy_inspector_names,
-};
 pub use telemetry::instance_sampler::{OsSources, Sample, SampleTarget, Sources, sample_once};
