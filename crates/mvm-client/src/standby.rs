@@ -34,6 +34,48 @@ pub use prepared::{
     warm_parent_native_custody_for_test,
 };
 
+/// A standby whose paused child a launch reserved before admission. The launch
+/// is admitted under the child's name, and `lifecycle` is that child's gate,
+/// held from selection through the claim, or through the release when the
+/// launch cannot use the child.
+pub struct PreloadedReservation {
+    /// The reserved standby, as recorded when it was selected.
+    pub handle: StandbyHandle,
+    /// The preloaded child's lifecycle gate.
+    pub lifecycle: mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+}
+
+/// Reserve a compatible standby with a paused child before admission and name
+/// the launch after that child, so the plan is admitted under the name of the
+/// VM that will run.
+///
+/// Only a launch with no host shares or disks qualifies: nothing derived from
+/// its name exists yet. Everything else the launch must satisfy is checked
+/// again after admission, which releases the reservation when the child cannot
+/// serve it.
+///
+/// # Errors
+///
+/// If the launch's compatibility key cannot be computed or the pool cannot be
+/// read.
+pub fn reserve_preloaded_for_launch(
+    backend: &mvm_runtime::AnyBackend,
+    config: &mut mvm_core::vm_backend::VmStartConfig,
+    has_host_volumes: bool,
+) -> Result<Option<PreloadedReservation>> {
+    if has_host_volumes || config.warm_pool_size == 0 || !backend.supports_preloaded_standby() {
+        return Ok(None);
+    }
+    let want = standby_compat(config)?;
+    let reserved = SupervisorStandbyPool::open()?.reserve_preloaded_compatible(&want)?;
+    mvm_core::launch_trace::lap("select.preloaded_standby");
+    let Some((handle, lifecycle)) = reserved else {
+        return Ok(None);
+    };
+    config.name = lifecycle.name().to_string();
+    Ok(Some(PreloadedReservation { handle, lifecycle }))
+}
+
 /// How often the idle watcher looks at the pool.
 const WATCH_TICK: Duration = Duration::from_secs(5);
 

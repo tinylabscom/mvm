@@ -157,7 +157,7 @@ pub(super) struct BootAttempt<'a> {
     pub(super) writable_images: &'a mut mvm_vmm::driver::prepared_disks::WritableVolumeImages,
     /// The paused child reserved before admission, which this launch was
     /// admitted under the name of.
-    pub(super) preloaded: Option<&'a crate::commands::pool::PreloadedReservation>,
+    pub(super) preloaded: Option<&'a mvm_client::standby::PreloadedReservation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

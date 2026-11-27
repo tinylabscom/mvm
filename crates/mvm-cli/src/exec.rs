@@ -41,9 +41,11 @@ use image_artifacts::{ResolvedImage, resolve_image_artifacts};
 mod launch_plan;
 mod mounts;
 mod oci_boot;
+mod resolved_launch;
 use either::Either;
 pub(crate) use mounts::admitted_instruction_mounts;
 use mounts::refuse_unloadable_sidecar;
+pub use resolved_launch::ResolvedLaunch;
 mod session;
 mod sidecar_selection;
 mod startup_slo;
@@ -72,6 +74,8 @@ use transient::{
     standby_to_leave, start_mode,
 };
 pub(crate) use transient::{RuntimeRunCustody, TransientStopFailure, combine_run_and_stop};
+
+use mvm_client::standby::reserve_preloaded_for_launch;
 
 pub(crate) type CliColdAdmit<'a> =
     dyn Fn(AdmitInputs<'_>) -> Result<mvm_client::admission::CliColdAdmissionResult> + 'a;
@@ -1094,56 +1098,6 @@ fn finish_cli_cold_lowering<T, U>(
     Ok((owner, lowered))
 }
 
-/// One launch's boot shape, resolved without starting a VM.
-///
-/// This is the whole of what a launch knows about itself before
-/// [`boot_transient_vm`] runs: the backend it resolved against, a
-/// [`VmStartConfig`] carrying the rootfs and its verity sidecars, the runtime
-/// overlay and universal initramfs, the cmdline-bearing policy fields, and —
-/// when the caller supplied an admission hook — the tenant and signed plan.
-///
-/// Producing one without booting is what lets the warm pool spawn a parent that
-/// mirrors a real launch: `pool warm` resolves this, hands it to
-/// `warm_to_target`, and the spawn derives the parent's boot shape and the
-/// pool's compat key from the same value the launch will later be matched on.
-pub struct ResolvedLaunch {
-    /// The same one-use host hold returned by admission.
-    pub host_budget: Option<std::sync::Arc<mvm_hostd::admission_budget::HostBudgetPermit>>,
-    /// The backend the launch resolved against. Selected here rather than by
-    /// the caller so a warm spawn and the run it serves cannot disagree about
-    /// which backend's capabilities shaped the config.
-    pub backend: AnyBackend,
-    pub start_config: VmStartConfig,
-    /// Exact signed release bytes owned until the lifecycle generation is bound.
-    pub verified_runtime: Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
-    /// Only admission may supply Dev posture for an opted-in mailbox.
-    pub mailbox_posture: Option<mvm_hostd::plan_admission::MailboxLaunchPosture>,
-    /// Opaque host-prepared owner for the admitted CLI cold alternative.
-    pub cli_admission: Option<mvm_client::admission::CliAdmission>,
-    /// Why this source cold-boots instead of using template acceleration.
-    pub template_acceleration: TemplateAcceleration,
-    /// Rootfs strategy the run-path tier gate selected — the value the run path
-    /// records as `plan.boot_posture`.
-    pub root_strategy: mvm_build::run_image::RootStrategy,
-    /// The paused child reserved before admission, whose name this launch was
-    /// admitted under.
-    pub(crate) preloaded: Option<crate::commands::pool::PreloadedReservation>,
-    /// Retained until normal runtime lifecycle binding has taken ownership.
-    _built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
-}
-
-impl ResolvedLaunch {
-    /// Consume a planless resolution into the opaque client warm-parent facade.
-    pub(crate) fn into_warm_parent(self) -> Result<mvm_client::standby::PreparedWarmParent> {
-        mvm_client::standby::PreparedWarmParent::from_resolved(
-            self.backend,
-            self.start_config,
-            self.verified_runtime,
-            self._built_runtime,
-        )
-    }
-}
-
 /// Resolve a launch's bootable [`VmStartConfig`] **without starting a VM**.
 ///
 /// Composes four steps:
@@ -1227,22 +1181,12 @@ fn resolve_launch_with_admit(
         "admit window: build_start_config"
     );
     // Before admission, so the signed plan names the VM that will run.
-    let preloaded = if matches!(admit, Some(LaunchAdmit::CliCold(_))) && shape.name.is_none() {
-        crate::commands::pool::reserve_preloaded_standby(
-            &backend,
-            &start_config,
-            !shape.dir_shares.is_empty() || !shape.disk_volumes.is_empty(),
-        )?
-    } else {
-        None
-    };
-    if let Some(child) = preloaded
-        .as_ref()
-        .and_then(|reserved| reserved.handle.preloaded_child_vm_name.clone())
-    {
-        start_config.name.clone_from(&child);
-        vm_name = child;
-    }
+    let host_volumes = !shape.dir_shares.is_empty() || !shape.disk_volumes.is_empty();
+    let preloaded = (matches!(admit, Some(LaunchAdmit::CliCold(_))) && shape.name.is_none())
+        .then(|| reserve_preloaded_for_launch(&backend, &mut start_config, host_volumes))
+        .transpose()?
+        .flatten();
+    vm_name.clone_from(&start_config.name);
     let mut template_acceleration = boot.template_acceleration;
     let mut built_pack_check = None;
     let mut mailbox_posture = None;

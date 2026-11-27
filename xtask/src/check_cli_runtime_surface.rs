@@ -145,6 +145,11 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "same helpers as exec.rs: the in-guest dispatch leg split out of it",
     ),
     (
+        "exec/resolved_launch.rs",
+        &[Rule::AnyBackend],
+        "same helpers as exec.rs: the resolved launch value split out of it, not a new reach",
+    ),
+    (
         "bench/probe.rs",
         &[Rule::AnyBackend],
         "live benchmark probe: directly boots and stops a libkrun probe VM to sample boot marks and process footprint",

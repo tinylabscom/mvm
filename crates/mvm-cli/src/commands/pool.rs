@@ -520,42 +520,12 @@ fn placed_launch_boots_cold() -> Result<WarmClaimOutcome> {
 /// CLI admission, and a backend with a standby
 /// pool. An operator who set `MVM_RESIDENCY` on a backend without one still
 /// gets the explicit typed error.
-/// A standby whose paused child a launch reserved before admission. The launch
-/// is admitted under the child's name, and `lifecycle` is that child's gate,
-/// held from selection through the claim, or through the release when the
-/// launch cannot use the child.
-pub(crate) struct PreloadedReservation {
-    pub(crate) handle: StandbyHandle,
-    pub(crate) lifecycle: mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
-}
-
-/// Select a compatible standby with a paused child before admission, so the
-/// launch can be admitted under the name of the VM that will run.
-///
-/// Only an unnamed launch with no host shares or disks qualifies: its name is
-/// still free to choose, and nothing derived from a name has been created
-/// yet. Everything else this launch must satisfy is checked again after
-/// admission, which releases the reservation when the child cannot serve it.
-pub(crate) fn reserve_preloaded_standby(
-    backend: &AnyBackend,
-    cfg: &VmStartConfig,
-    has_host_volumes: bool,
-) -> Result<Option<PreloadedReservation>> {
-    if has_host_volumes || cfg.warm_pool_size == 0 || !backend.supports_preloaded_standby() {
-        return Ok(None);
-    }
-    let want = compat_for_launch(cfg)?;
-    let reserved = SupervisorStandbyPool::open()?.reserve_preloaded_compatible(&want)?;
-    mvm_core::launch_trace::lap("select.preloaded_standby");
-    Ok(reserved.map(|(handle, lifecycle)| PreloadedReservation { handle, lifecycle }))
-}
-
 pub(crate) fn try_warm_claim_with_admission(
     backend: &AnyBackend,
     cfg: &VmStartConfig,
     user_named: bool,
     admission: Option<&std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>>,
-    preloaded: Option<&PreloadedReservation>,
+    preloaded: Option<&mvm_client::standby::PreloadedReservation>,
 ) -> Result<WarmClaimOutcome> {
     let outcome = claim_for_launch(backend, cfg, user_named, admission, preloaded);
     // Whatever runs next under this name needs it free: a cold boot refuses a
@@ -574,7 +544,7 @@ fn claim_for_launch(
     cfg: &VmStartConfig,
     user_named: bool,
     admission: Option<&std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>>,
-    preloaded: Option<&PreloadedReservation>,
+    preloaded: Option<&mvm_client::standby::PreloadedReservation>,
 ) -> Result<WarmClaimOutcome> {
     if let Err(reason) = claim_gate(cfg, user_named, backend.late_volume_slots()) {
         if claim_required() {
@@ -793,25 +763,30 @@ mod tests {
     #[test]
     fn launches_with_host_volumes_or_no_standbys_reserve_no_preloaded_child() {
         let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
+        let reserve = |cfg: &VmStartConfig, has_host_volumes: bool| {
+            let mut cfg = cfg.clone();
+            let reserved = mvm_client::standby::reserve_preloaded_for_launch(
+                &backend,
+                &mut cfg,
+                has_host_volumes,
+            )
+            .unwrap();
+            assert_eq!(
+                cfg.name,
+                eligible_cfg().name,
+                "an unreserved launch keeps its name"
+            );
+            reserved
+        };
         let cfg = eligible_cfg();
-        assert!(
-            reserve_preloaded_standby(&backend, &cfg, true)
-                .unwrap()
-                .is_none()
-        );
+        assert!(reserve(&cfg, true).is_none());
         let disabled = VmStartConfig {
             warm_pool_size: 0,
             ..cfg.clone()
         };
+        assert!(reserve(&disabled, false).is_none());
         assert!(
-            reserve_preloaded_standby(&backend, &disabled, false)
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            reserve_preloaded_standby(&backend, &cfg, false)
-                .unwrap()
-                .is_none(),
+            reserve(&cfg, false).is_none(),
             "a backend without preload never reserves"
         );
     }

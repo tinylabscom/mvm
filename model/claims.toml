@@ -434,6 +434,7 @@ witnesses = [
     "fn:a_claimed_child_within_the_ceiling_is_admitted",
     "fn:the_refusal_names_the_ceiling_and_the_request",
     "fn:pool_matching_is_unchanged_by_the_bound",
+    "fn:a_preloaded_child_refuses_a_plan_with_a_cpu_grant",
 ]
 
 [[claim]]
