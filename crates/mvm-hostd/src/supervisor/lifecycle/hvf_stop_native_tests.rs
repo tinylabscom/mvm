@@ -2,7 +2,7 @@
 
 use super::*;
 use mvm_core::util::test_env::TestEnv;
-use mvm_vmm::host::hvf_stop::{ConnectedInstance, HvfControlRoots, OwnedInstance};
+use mvm_vmm::host::hvf_stop::{ConnectedInstance, OwnedInstance};
 use std::os::fd::AsRawFd;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -17,19 +17,7 @@ fn owned_process_helper() {
     let vm = std::env::var("MVM_OWNED_STOP_VM").unwrap();
     let mode = std::env::var("MVM_OWNED_STOP_MODE").unwrap();
     let stop = Box::leak(Box::new(AtomicBool::new(false)));
-    let owner = if matches!(mode.as_str(), "external-stop" | "wrong-terminal") {
-        StopControl::start_explicit(
-            &vm,
-            stop,
-            StopControlKeys {
-                native_control_signing: SigningKey::from_bytes(&[41; 32]),
-                provider_stop_root: SigningKey::from_bytes(&[42; 32]).verifying_key(),
-            },
-        )
-        .unwrap()
-    } else {
-        StopControl::start(&vm, stop).unwrap()
-    };
+    let owner = StopControl::start(&vm, stop).unwrap();
     let (notice, stopped) = mpsc::sync_channel(1);
     owner.authority.0.state.lock().unwrap().stop_notice = Some(notice);
     if mode == "bridge" {
@@ -63,15 +51,6 @@ fn owned_process_helper() {
         std::io::stdin().read_exact(&mut release).unwrap();
     }
     if mode != "no-terminal" {
-        if mode == "wrong-terminal" {
-            owner
-                .authority
-                .0
-                .state
-                .lock()
-                .unwrap()
-                .native_control_signing = SigningKey::from_bytes(&[42; 32]);
-        }
         owner
             .publish_terminal_status(
                 mvm_vmm::host::hvf_supervisor::ProtectedSupervisorStatus::Stopped,
@@ -118,45 +97,6 @@ fn spawn(vm: &str, mode: &str) -> Child {
         }
     }
     child
-}
-
-fn explicit_stop(vm: &str, mode: &str) -> Result<mvm_vmm::host::hvf_stop::ConfirmedExit> {
-    let mut child = Some(spawn(vm, mode));
-    let native = SigningKey::from_bytes(&[41; 32]);
-    let provider = SigningKey::from_bytes(&[42; 32]);
-    let owner = OwnedInstance::adopt_explicit(
-        &mut child,
-        vm,
-        HvfControlRoots::new(native.verifying_key(), provider.verifying_key()),
-    )?;
-    let session = owner.connect_stop_with_roots()?;
-    let authorization = session.authorization();
-    let request = broker_control::sign(
-        ControlRequest::HvfInstanceV1(HvfInstanceControl::StopHvfInstance {
-            instance: authorization.instance().clone(),
-            connection_nonce: authorization.connection_nonce(),
-            issued_at_secs: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-        }),
-        &provider.to_bytes(),
-    )?;
-    session.stop_signed(request)
-}
-
-#[test]
-#[ignore = "requires scoped control review before owned native execution"]
-fn explicit_roots_stop_and_reap_only_with_native_terminal_attestation() {
-    let mut env = TestEnv::new();
-    let home = tempfile::tempdir_in("/tmp").unwrap();
-    env.isolate_mvm_home(home.path());
-    assert!(explicit_stop("explicit-stop", "external-stop").is_ok());
-    let error = match explicit_stop("wrong-terminal", "wrong-terminal") {
-        Ok(_) => panic!("provider-signed terminal attestation must refuse"),
-        Err(error) => error,
-    };
-    assert!(
-        format!("{error:#}").contains("signature"),
-        "wrong terminal root must fail signature verification: {error:#}"
-    );
 }
 
 fn wait_readable(fd: libc::c_int, deadline: Instant) {

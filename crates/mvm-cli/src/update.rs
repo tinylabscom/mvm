@@ -12,11 +12,7 @@ const GITHUB_REPO: &str = "tinylabscom/mvm";
 const SOURCE_HELPER_RELEASE: &str = "source-builds";
 const SOURCE_HELPER_BASE_URL_ENV: &str = "MVM_SOURCE_HELPER_BASE_URL";
 const SOURCE_HELPER_COMMIT_MARKER: &str = ".mvm-host-helpers-source-commit";
-const RELEASE_HOST_BINS: &[&str] = &[
-    "mvm-hvf-supervisor",
-    "mvm-hvf-run-owner",
-    "mvm-network-endpoint",
-];
+const RELEASE_HOST_BINS: &[&str] = &["mvm-hvf-supervisor", "mvm-network-endpoint"];
 
 /// Current version compiled into the binary (from Cargo.toml).
 pub(crate) fn current_version() -> &'static str {

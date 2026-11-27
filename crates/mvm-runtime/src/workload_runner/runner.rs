@@ -74,8 +74,7 @@ mod test_support;
 mod warm_claim;
 
 pub use cold_hvf_channel::{
-    ColdHvfChannel, NativeCompletion, NativeCompletionEvidence, OriginalHvfOwnerBinding,
-    OwnedRuntimeLaunch,
+    ColdHvfChannel, NativeCompletion, NativeCompletionEvidence, OwnedRuntimeLaunch,
 };
 
 struct PreparedWorkloadBoot {

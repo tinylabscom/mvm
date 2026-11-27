@@ -1463,8 +1463,8 @@ fn macos_release_build_carries_no_libkrun_tier() {
     let build = job_block(&workflow, "build");
 
     assert!(
-        build.contains("mvm-hvf-supervisor") && build.contains("mvm-hvf-run-owner"),
-        "the macOS archive must package the HVF supervisor and the refusal-only owner"
+        build.contains("mvm-hvf-supervisor"),
+        "the macOS archive must package the HVF supervisor"
     );
     assert!(
         !workflow.to_lowercase().contains("krun"),

@@ -40,11 +40,10 @@ caller-local/console-file descriptions do not establish a cross-process HVF
 producer. This proposal preserves those guarantees rather than enabling a
 legacy plaintext fallback.
 
-[The cold entrypoint owner](hvf-entrypoint-owner.md) and
-[its recovery/lifetime contract](hvf-owner-recovery-lifetime.md) separately own
-original execution custody and recovery. Their source-only recovery requests
-and possession proofs do not authorize capture writes. Nothing here adds a
-start/dispatch verb to recovery or relaxes those contracts' activation gates.
+Original execution custody stays with the in-process HVF launch path; the
+separate cold entrypoint owner and its recovery contracts were removed
+([ADR-022](../adrs/022-target-architecture.md#cold-hvf-invocation-owner-removed-direction)).
+Nothing here adds a recovery or start/dispatch verb.
 
 ## Recommended integration
 

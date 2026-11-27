@@ -238,27 +238,22 @@ class SigningTests(unittest.TestCase):
     def test_producer_full_role_matrix_and_post_sign_hashes_without_credentials(self):
         for name in signing.ROLES:
             self.binary(name)
-        self.binary("mvm-hvf-run-owner")
         self.binary("helpers/extensionless")
         self.binary("lib/native.dylib", 6)
         self.binary("plugin.so", 8)
         with patch.dict(os.environ, {}, clear=True):
             signing.producer_sign(self.payload, self.report, True)
         calls = [c for c in self.calls if "--sign" in c]
-        self.assertEqual(len(calls), len(signing.ROLES) + 4)
+        self.assertEqual(len(calls), len(signing.ROLES) + 3)
         self.assertEqual(self.entitlements, {
             name: dict.fromkeys(keys, True) for name, keys in signing.ROLES.items()
         })
         for call in calls:
             self.assertEqual(call[call.index("--sign") + 1], "-")
             self.assertNotIn("--deep", call)
-            if call[-1].endswith("mvm-hvf-run-owner"):
-                self.assertIn("--options", call)
-                self.assertIn("runtime", call)
-            else:
-                self.assertNotIn("--options", call)
+            self.assertNotIn("--options", call)
         verifies = [c for c in self.calls if "--verify" in c]
-        self.assertEqual(len(verifies), len(signing.ROLES) + 4)
+        self.assertEqual(len(verifies), len(signing.ROLES) + 3)
         self.assertTrue(all("--strict" in c and "--all-architectures" in c for c in verifies))
         report = json.loads(self.report.read_text())
         self.assertEqual(report["status"], "ProducerAdhocVerified")
@@ -295,7 +290,6 @@ class SigningTests(unittest.TestCase):
             signing.producer_sign(self.payload, self.report, True)
         self.assertEqual(self.calls, [])
         self.binary("mvm-hvf-supervisor")
-        self.binary("mvm-hvf-run-owner")
         self.binary("mvm-libkrun-supervisor")
         for flag in ("--sign", "--verify"):
             self.fail = flag
@@ -365,12 +359,11 @@ class SigningTests(unittest.TestCase):
         helper.write_bytes(b"\xca\xfe\xba\xbe" + struct.pack(">I", 1) +
                            struct.pack(">IIIII", 0, 0, 28, len(thin), 0) + thin)
         self.binary("mvm-libkrun-supervisor")
-        self.binary("mvm-hvf-run-owner")
         argv = ["sign_macos.py", "--producer-adhoc", "--require-cli-inventory",
                 "--payload", str(self.payload), "--report", str(self.report)]
         with patch.dict(os.environ, {}, clear=True), patch.object(os.sys, "argv", argv):
             signing.main()
-        self.assertEqual(len(json.loads(self.report.read_text())["files"]), 4)
+        self.assertEqual(len(json.loads(self.report.read_text())["files"]), 3)
         self.assertFalse(any(c[0] in ("security", "xcrun") for c in self.calls))
 
     def test_producer_cli_cannot_be_skipped(self):

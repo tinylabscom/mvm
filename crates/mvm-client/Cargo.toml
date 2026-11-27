@@ -18,10 +18,6 @@ repository.workspace = true
 [package.metadata.mvm.architecture]
 substrate_server_category = "per-VM approval endpoint broker (host-local Unix socket)"
 
-[[bin]]
-name = "mvm-hvf-run-owner"
-path = "src/bin/mvm-hvf-run-owner.rs"
-
 [features]
 # Embedders must verify signed runtime and image artifacts by default, not
 # discover a missing verifier only when they first launch a machine.

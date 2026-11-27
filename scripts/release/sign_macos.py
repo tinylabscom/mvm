@@ -37,7 +37,6 @@ ROLES = {
 REQUIRED_CLI_BINARIES = {
     "mvmctl",
     "mvm-hvf-supervisor",
-    "mvm-hvf-run-owner",
 }
 # codesign treats a requirement argument without '=' as a filename.
 DEVELOPER_ID_REQUIREMENT = (
@@ -53,14 +52,6 @@ def run(*args):
     if result.returncode:
         raise RuntimeError(f"{args[0]} {args[1]} failed (exit {result.returncode})")
     return result.stdout
-
-
-def run_diagnostic(*args):
-    """Run a non-secret inspection command and return stdout plus stderr."""
-    result = subprocess.run([str(arg) for arg in args], capture_output=True, text=True)
-    if result.returncode:
-        raise RuntimeError(f"{args[0]} {args[1]} failed (exit {result.returncode})")
-    return result.stdout + result.stderr
 
 
 def macho_type(path):
@@ -150,8 +141,6 @@ def producer_sign(payload, report, require_cli_inventory=False):
         for path, kind in sorted(code, key=lambda item: item[1] == 2):
             keys = ROLES.get(path.name, []) if kind == 2 else []
             args = ["codesign", "--force", "--sign", "-", "--timestamp=none"]
-            if path.name == "mvm-hvf-run-owner":
-                args += ["--options", "runtime"]
             if keys:
                 entitlements = Path(tmp) / "entitlements.plist"
                 entitlements.write_bytes(plistlib.dumps(dict.fromkeys(keys, True)))
@@ -278,7 +267,7 @@ def main():
     parser.add_argument("--producer-adhoc", action="store_true",
                         help="sign and verify new staged Mach-O without Apple credentials")
     parser.add_argument("--require-cli-inventory", action="store_true",
-                        help="require mvmctl, the HVF supervisor and the HVF run owner")
+                        help="require mvmctl and the HVF supervisor")
     parser.add_argument(
         "--skip-unconfigured", action="store_true",
         help="exit 0 with an Unconfigured report when no Apple credential is set")

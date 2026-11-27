@@ -21,7 +21,7 @@ mod platform;
 #[path = "platforms/unsupported.rs"]
 mod platform;
 
-pub(crate) use platform::{acquire_existing_lock, acquire_lock, read_private};
+pub(crate) use platform::{acquire_lock, read_private};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

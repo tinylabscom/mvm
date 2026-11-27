@@ -7,10 +7,6 @@ pub(super) fn prepare_directory(_: &Path) -> Result<()> {
 pub(crate) fn acquire_lock(_: &Path) -> Result<mvm_core::atomic_io::FileLock> {
     bail!("host reservations require owner-only storage")
 }
-
-pub(crate) fn acquire_existing_lock(_: &Path) -> Result<mvm_core::atomic_io::FileLock> {
-    bail!("host reservations require owner-only storage")
-}
 pub(crate) fn read_private(_: &Path, _: usize) -> Result<Option<Vec<u8>>> {
     bail!("host reservations require owner-only storage")
 }
