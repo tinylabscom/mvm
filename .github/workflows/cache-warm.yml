@@ -155,8 +155,6 @@ jobs:
             -p mvm-fs -p mvm-build
           cargo test --no-run -p mvmctl --features test-support \
             --test audit_emissions_live
-          cargo check -p mvm-cli --features test-support \
-            --example verification_loop
 
   # Historical trial, before ordinary tests moved to the common stable pin:
   # those lanes used a nightly this workflow did not write for, so they restored
