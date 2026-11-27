@@ -297,8 +297,10 @@ pub struct ReleaseAssembly {
 
 /// Assemble every launch-time piece from a CLI release's own guest runtime.
 ///
-/// `archive` must already be authenticated (see
-/// [`crate::guest_runtime::install_release_guest_runtime`]). The archive is
+/// `archive` is authenticated by construction (see
+/// [`crate::guest_bins::release::ReleaseGuestRuntime::authenticated_archive`]),
+/// so a download whose signature check was skipped can never reach here. The
+/// archive is
 /// installed into the digest-keyed store, every piece is assembled from it
 /// through the same assemblers a source build uses — the overlay's verity
 /// tree and roothash computed here on the host, as claim 3 requires — and
@@ -309,7 +311,7 @@ pub fn assemble_release_runtime_pieces(
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
-    archive: &Path,
+    archive: crate::guest_bins::release::AuthenticatedReleaseArchive<'_>,
 ) -> Result<ReleaseAssembly, AssembleError> {
     let runtime =
         crate::guest_runtime::install_release_guest_runtime(cache_root, archive, version, arch)?;
@@ -387,7 +389,7 @@ mod tests {
         let arch = GuestArch::host();
         let runtime = crate::guest_runtime::install_release_guest_runtime(
             store.path(),
-            &archive,
+            crate::guest_bins::release::AuthenticatedReleaseArchive::assume_authenticated(&archive),
             VERSION,
             arch,
         )
@@ -620,9 +622,13 @@ mod tests {
             })
             .unwrap();
             assert_eq!(release.origin, ReleaseGuestRuntimeOrigin::Installed);
-            let assembly =
-                assemble_release_runtime_pieces(cache.path(), VERSION, arch, &release.archive)
-                    .unwrap();
+            let assembly = assemble_release_runtime_pieces(
+                cache.path(),
+                VERSION,
+                arch,
+                release.authenticated_archive().unwrap(),
+            )
+            .unwrap();
             assert_eq!(assembly.runtime.digest, digest);
 
             // The overlay a launch resolves is the one assembled here, and its
@@ -686,7 +692,14 @@ mod tests {
         let arch = GuestArch::X86_64;
 
         assert!(matches!(
-            assemble_release_runtime_pieces(cache.path(), VERSION, arch, &archive),
+            assemble_release_runtime_pieces(
+                cache.path(),
+                VERSION,
+                arch,
+                crate::guest_bins::release::AuthenticatedReleaseArchive::assume_authenticated(
+                    &archive
+                )
+            ),
             Err(AssembleError::GuestRuntime(_))
         ));
         assert_eq!(
@@ -706,7 +719,9 @@ mod tests {
                 other.path(),
                 VERSION,
                 arch,
-                &dir.path().join("absent")
+                crate::guest_bins::release::AuthenticatedReleaseArchive::assume_authenticated(
+                    &dir.path().join("absent")
+                )
             )
             .is_err()
         );

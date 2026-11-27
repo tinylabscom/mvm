@@ -778,23 +778,23 @@ pub fn source_guest_runtime_digest(
 /// Install a CLI release's guest runtime into the same digest-keyed object
 /// store a source build uses, and return its verified extraction.
 ///
-/// `archive` must already be authenticated: a release binary gets it from
-/// [`crate::guest_bins::release::acquire_release_guest_runtime`], which holds
-/// it to its digest and release signature, or adopts the copy an installer
-/// authenticated the same way. Here it is copied into the store and held to
-/// its own manifest again, and the host architecture's members must be
-/// complete. A copy already in the store is reverified rather than trusted. A
-/// failure is an error, never a reason to use another source.
+/// `archive` is authenticated by construction: a release binary gets it from
+/// [`crate::guest_bins::release::ReleaseGuestRuntime::authenticated_archive`],
+/// which refuses a download whose signature check was skipped. Here it is
+/// copied into the store and held to its own manifest again, and the host
+/// architecture's members must be complete. A copy already in the store is
+/// reverified rather than trusted. A failure is an error, never a reason to
+/// use another source.
 pub fn install_release_guest_runtime(
     cache_root: &Path,
-    archive: &Path,
+    archive: crate::guest_bins::release::AuthenticatedReleaseArchive<'_>,
     version: &str,
     arch: GuestArch,
 ) -> Result<GuestRuntime, GuestRuntimeError> {
     let base = cache_root.join("guest-runtime").join("v1");
     fs::create_dir_all(&base)?;
     let _lock = guest_agent_build::acquire_guest_build_lock(&base, "guest runtime")?;
-    install_archive_scoped(&base, archive, version, arch, ArchiveScope::Release)
+    install_archive_scoped(&base, archive.path(), version, arch, ArchiveScope::Release)
 }
 
 /// Validated source SDK member sets, keyed by `(archive digest, workspace root)`.
@@ -3693,8 +3693,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let archive = release_fixture::write_release_archive(temp.path(), "1.2.3");
         let cache = temp.path().join("cache");
-        let runtime =
-            install_release_guest_runtime(&cache, &archive, "1.2.3", GuestArch::X86_64).unwrap();
+        let runtime = install_release_guest_runtime(
+            &cache,
+            guest_bins::release::AuthenticatedReleaseArchive::assume_authenticated(&archive),
+            "1.2.3",
+            GuestArch::X86_64,
+        )
+        .unwrap();
         assert_eq!(runtime.digest, file_digest(&archive).unwrap());
         assert!(
             runtime

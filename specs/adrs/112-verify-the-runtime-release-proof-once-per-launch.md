@@ -150,8 +150,15 @@ The conditions that make this the same verification, not a weaker one:
    remains. Runtime binding consumes the launch's verified result and hashes
    selected artifacts while taking custody instead of repeating the archive
    signature work.
-7. **`MVM_SKIP_COSIGN_VERIFY` keeps its present meaning** for each path that
-   honours it today, and the Firecracker launch proof remains non-waivable.
+7. **`MVM_SKIP_COSIGN_VERIFY` waives a signature check on download, and the
+   Firecracker launch proof remains non-waivable** (amended 2026-11-26). For
+   the release guest runtime it accepts an unverified *download*, never an
+   unverified *install*: the download still proceeds and acquisition returns
+   it, but bootstrap, first-use preparation, the image path,
+   `mvmctl dev runtime-overlay build` and `mvmctl dev sdk-sidecar build`
+   refuse to install from it, so a hatched archive never reaches the object
+   store, the launch pieces, the OCI shims or the adoption record. Every other
+   path that honours the hatch keeps the meaning it had.
 
 The release identity (archive digest, selected artifact digests and verified
 signer) is signed as an optional top-level `ExecutionPlan.runtime_identity`

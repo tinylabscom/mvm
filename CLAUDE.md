@@ -876,9 +876,24 @@ this row as enforced without it.
     verifier, so the cache holds only the files that verified
     (`the_cached_files_are_the_bytes_that_were_verified`).
     `MVM_SKIP_COSIGN_VERIFY` skips the signature at download time as it does
-    everywhere; such a download is never written to that release cache, though
-    bootstrap still copies it into the shared object store and assembles the
-    launch pieces from it. The Firecracker launch proof is stricter: it re-verifies the
+    everywhere. For the release guest runtime it accepts an unverified
+    download, never an unverified install: such a download is never written to
+    that release cache, and bootstrap, first-use preparation, the image path,
+    `mvmctl dev runtime-overlay build` and `mvmctl dev sdk-sidecar build`
+    refuse it right after acquisition
+    (`bootstrap_keeps_a_hatched_download_out_of_the_install`,
+    `bootstrap_refuses_a_hatched_download_before_any_other_step`): installing
+    takes an `AuthenticatedReleaseArchive`, which `authenticated_archive` will
+    not make from an `Unverified` result, so nothing reaches the object store,
+    the launch pieces, the OCI shims or the adoption record, and the refusal
+    says to unset the hatch and run `mvmctl bootstrap` again. Elsewhere the
+    hatch still waives verification of what is installed: under it
+    `mvmctl env update` installs an `mvmctl` tarball whose signature was not
+    checked, and bootstrap installs a builder image whose verification was
+    waived. `env update` acquires the guest runtime without installing
+    anything from it, replaces the binary, and its follow-up bootstrap refuses,
+    so the update ends with a warning. During a Sigstore outage, then, a fresh
+    release install cannot bootstrap. The Firecracker launch proof is stricter: it re-verifies the
     archive's signed bundle at every launch and `MVM_SKIP_COSIGN_VERIFY` does
     not waive it, so a locally built archive can be assembled from but never
     launched under Firecracker.

@@ -167,11 +167,14 @@ fn assemble_sidecar_from_release(world: &mut CliWorld) {
         )
         .map_err(|e| format!("{e:#}"))
         .and_then(|release| {
+            let archive = release
+                .authenticated_archive()
+                .map_err(|e| format!("{e:#}"))?;
             mvm_build::runtime_pieces::assemble_release_runtime_pieces(
                 &cache,
                 FIXTURE_VERSION,
                 arch,
-                &release.archive,
+                archive,
             )
             .map_err(|e| format!("{e:#}"))
         })

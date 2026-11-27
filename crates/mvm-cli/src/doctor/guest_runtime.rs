@@ -27,7 +27,9 @@ enum CurrentArchive {
     NotBuilt,
     Built(String),
     /// The release guest runtime this version adopted: its archive's file
-    /// name and digest.
+    /// name and digest. The adoption record is written only from an
+    /// authenticated archive, never from one downloaded with the signature
+    /// check skipped, so "this release" names verified bytes.
     Release {
         name: String,
         digest: String,

@@ -1112,9 +1112,11 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
         verify_signature(&latest_tag, &archive_name, &archive_path)
     })?;
     // The CLI and its guest runtime are one release. The runtime is acquired
-    // and verified first, under its own signature whatever `--skip-verify`
-    // says, so a runtime that cannot be verified leaves the old binary in
-    // place rather than installing a CLI without one.
+    // first, under its own signature whatever `--skip-verify` says, so a
+    // runtime that fails verification leaves the old binary in place. With
+    // MVM_SKIP_COSIGN_VERIFY set it is not verified and this passes; the
+    // bootstrap below then refuses to install it and the update ends with a
+    // warning.
     crate::release_guest_runtime::stage_for_update(&latest_tag)?;
     extract_and_install(target, tmp_dir.path(), &current_exe)?;
 

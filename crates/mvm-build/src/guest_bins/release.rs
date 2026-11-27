@@ -24,9 +24,14 @@
 //! signature unchecked (and its digest too when `MVM_SKIP_HASH_VERIFY` is also
 //! set). Such a download is returned from a private temporary directory and is
 //! never written to [`release_guest_runtime_cache_dir`], so that directory
-//! holds only evidence that verified. Callers still treat it like any other
-//! result: bootstrap copies it into the shared object store, assembles the
-//! launch pieces and OCI shims from it and records the adoption.
+//! holds only evidence that verified. For the guest runtime the hatch accepts
+//! an unverified download, not an unverified install: nothing is installed
+//! from such a result. Installing takes an [`AuthenticatedReleaseArchive`], and
+//! [`ReleaseGuestRuntime::authenticated_archive`] refuses to make one from an
+//! [`ReleaseGuestRuntimeOrigin::Unverified`] result, so the object store, the
+//! launch pieces, the OCI shims and the adoption record stay as they were.
+//! Acquisition itself still succeeds and returns the archive, for a caller
+//! that does not install it.
 //!
 //! Whichever place answers, the archive must verify against its own manifest
 //! and that manifest must name this version and carry both architectures. A
@@ -96,6 +101,27 @@ impl std::fmt::Display for ReleaseGuestRuntimeOrigin {
     }
 }
 
+/// A release guest runtime archive that may be installed: one installed
+/// beside `mvmctl` by an installer that authenticated it, or cached or
+/// downloaded and verified against its release signature. Outside this crate
+/// the only way to make one is [`ReleaseGuestRuntime::authenticated_archive`],
+/// which refuses an [`ReleaseGuestRuntimeOrigin::Unverified`] result.
+#[derive(Debug, Clone, Copy)]
+pub struct AuthenticatedReleaseArchive<'a> {
+    path: &'a Path,
+}
+
+impl<'a> AuthenticatedReleaseArchive<'a> {
+    /// For a caller in this crate that authenticated `path` itself.
+    pub(crate) fn assume_authenticated(path: &'a Path) -> Self {
+        Self { path }
+    }
+
+    pub fn path(&self) -> &'a Path {
+        self.path
+    }
+}
+
 /// A release guest runtime that has passed every check.
 #[derive(Debug, Clone)]
 pub struct ReleaseGuestRuntime {
@@ -108,8 +134,40 @@ pub struct ReleaseGuestRuntime {
     pub unpublished: Option<std::sync::Arc<tempfile::TempDir>>,
 }
 
+impl ReleaseGuestRuntime {
+    /// The archive, for installing: copying into the object store, assembling
+    /// the launch pieces and OCI shims, and recording the adoption. Refused
+    /// when the signature check was skipped, so the hatch never turns an
+    /// unverified download into an install.
+    pub fn authenticated_archive(
+        &self,
+    ) -> Result<AuthenticatedReleaseArchive<'_>, ReleaseGuestRuntimeError> {
+        match self.origin {
+            ReleaseGuestRuntimeOrigin::Installed
+            | ReleaseGuestRuntimeOrigin::Cached
+            | ReleaseGuestRuntimeOrigin::Downloaded => Ok(
+                AuthenticatedReleaseArchive::assume_authenticated(&self.archive),
+            ),
+            ReleaseGuestRuntimeOrigin::Unverified => Err(ReleaseGuestRuntimeError::Unverified {
+                name: self
+                    .archive
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            }),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ReleaseGuestRuntimeError {
+    #[error(
+        "{name} was downloaded with {env} set, so its signature was not checked and it was kept \
+         out of the install: no launch pieces, OCI shims or adoption record were written. Unset \
+         {env} and run `mvmctl bootstrap` again",
+        env = crate::release_signature::SKIP_COSIGN_VERIFY_ENV
+    )]
+    Unverified { name: String },
     #[error("fetch the guest runtime from the release: {0}")]
     Fetch(#[source] Box<RuntimeOverlayError>),
     #[error("{} is not a valid guest runtime: {source}", path.display())]
@@ -439,6 +497,12 @@ mod tests {
         );
         assert!(!first.archive.starts_with(cache.path()));
 
+        // Acquisition returns the archive; installing it is refused.
+        assert!(matches!(
+            first.authenticated_archive(),
+            Err(ReleaseGuestRuntimeError::Unverified { name }) if name == guest_bins_archive_name(VERSION)
+        ));
+
         // Nothing was cached, so the next acquisition downloads again, and
         // the unverified copy goes when its last holder does.
         let second = acquire_release_guest_runtime(&request(&url, cache.path(), &[])).unwrap();
@@ -446,6 +510,75 @@ mod tests {
         let archive = first.archive.clone();
         drop(first);
         assert!(!archive.exists());
+    }
+
+    #[test]
+    fn only_an_unverified_download_is_refused_an_authenticated_archive() {
+        let runtime = |origin| ReleaseGuestRuntime {
+            archive: PathBuf::from("/r").join(guest_bins_archive_name(VERSION)),
+            manifest: artifact(VERSION, &RELEASE_GUEST_RUNTIME_ARCHES).manifest(),
+            origin,
+            unpublished: None,
+        };
+        for origin in [
+            ReleaseGuestRuntimeOrigin::Installed,
+            ReleaseGuestRuntimeOrigin::Cached,
+            ReleaseGuestRuntimeOrigin::Downloaded,
+        ] {
+            let release = runtime(origin);
+            assert_eq!(
+                release.authenticated_archive().unwrap().path(),
+                release.archive,
+                "{origin}"
+            );
+        }
+        let error = runtime(ReleaseGuestRuntimeOrigin::Unverified)
+            .authenticated_archive()
+            .expect_err("a download whose signature was not checked is never installed");
+        assert!(matches!(
+            &error,
+            ReleaseGuestRuntimeError::Unverified { name } if *name == guest_bins_archive_name(VERSION)
+        ));
+        // The refusal says why and what to do.
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(crate::release_signature::SKIP_COSIGN_VERIFY_ENV)
+                && rendered.contains("mvmctl bootstrap"),
+            "{rendered}"
+        );
+    }
+
+    /// With the digest hatch set as well, the download is not held to its
+    /// digest either, and installing it is refused just the same.
+    #[test]
+    fn both_hatches_still_return_the_bytes_and_still_refuse_the_install() {
+        let mut env = TestEnv::new();
+        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+        env.set(crate::runtime_overlay::SKIP_HASH_VERIFY_ENV, "1");
+        let build = TempDir::new().unwrap();
+        let bytes = std::fs::read(write_archive(
+            build.path(),
+            VERSION,
+            &RELEASE_GUEST_RUNTIME_ARCHES,
+        ))
+        .unwrap();
+        let release = TempDir::new().unwrap();
+        let url = stage_release(release.path(), b"a digest these bytes do not have");
+        std::fs::write(
+            release.path().join(guest_bins_archive_name(VERSION)),
+            &bytes,
+        )
+        .unwrap();
+        let cache = TempDir::new().unwrap();
+
+        let runtime = acquire_release_guest_runtime(&request(&url, cache.path(), &[])).unwrap();
+        assert_eq!(runtime.origin, ReleaseGuestRuntimeOrigin::Unverified);
+        assert_eq!(std::fs::read(&runtime.archive).unwrap(), bytes);
+        assert!(matches!(
+            runtime.authenticated_archive(),
+            Err(ReleaseGuestRuntimeError::Unverified { .. })
+        ));
+        assert!(std::fs::read_dir(cache.path()).unwrap().next().is_none());
     }
 
     #[test]

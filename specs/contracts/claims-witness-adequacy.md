@@ -402,7 +402,12 @@ Enforcement: `crates/mvm-build/src/release_signature.rs`,
 
 Limits carried through (ADR-001 "Claim 20 boundaries"): a copy of the guest
 runtime found beside `mvmctl` or in the cache is held to its own manifest, not
-the signature; `MVM_SKIP_COSIGN_VERIFY` skips the signature at download time;
+the signature; `MVM_SKIP_COSIGN_VERIFY` skips the signature at download time
+and nothing is installed from such a download
+(`bootstrap_keeps_a_hatched_download_out_of_the_install`,
+`bootstrap_refuses_a_hatched_download_before_any_other_step`, OUTCOME-UNIT: a
+real hatched acquisition over a `file://` release, a typed refusal before any
+other bootstrap step runs, and an empty cache);
 **no published release carries the guest-runtime asset yet**; the SLSA
 provenance is Build L2. Adequacy: strong refusal coverage in Rust; the
 installer half of the claim is witnessed only by text scans, though
