@@ -175,7 +175,7 @@ pub(crate) fn assemble_from(
     version: &str,
     arch: mvm_core::arch::GuestArch,
     release: &ReleaseGuestRuntime,
-) -> Result<mvm_build::runtime_pieces::ReleaseAssembly> {
+) -> Result<mvm_client::release::ReleaseAssembly> {
     mvm_client::release::assemble_release_pieces(
         cache_root,
         version,

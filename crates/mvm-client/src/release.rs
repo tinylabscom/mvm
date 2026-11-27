@@ -24,6 +24,7 @@ pub use mvm_build::published_image_set::{
 pub use mvm_build::release_signature::{
     ReleaseSignatureRequest, ReleaseTrain, SKIP_COSIGN_VERIFY_ENV, bundle_asset_name,
 };
+pub use mvm_build::runtime_pieces::ReleaseAssembly;
 
 /// Verify a downloaded release asset against its signature bundle, in
 /// process, under the workflow identity of the request's train and version.
@@ -118,7 +119,7 @@ pub fn assemble_release_pieces(
     version: &str,
     arch: GuestArch,
     archive: AuthenticatedReleaseArchive<'_>,
-) -> Result<mvm_build::runtime_pieces::ReleaseAssembly, mvm_build::runtime_pieces::AssembleError> {
+) -> Result<ReleaseAssembly, mvm_build::runtime_pieces::AssembleError> {
     mvm_build::runtime_pieces::assemble_release_runtime_pieces(cache_root, version, arch, archive)
 }
 
