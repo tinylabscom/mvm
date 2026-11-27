@@ -2098,6 +2098,7 @@ dependencies = [
  "mvm-contract",
  "mvm-crypto",
  "mvm-macho-sign",
+ "mvm-setpriv",
  "plist",
  "rand",
  "rcgen",

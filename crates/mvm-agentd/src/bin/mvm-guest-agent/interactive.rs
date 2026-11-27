@@ -141,7 +141,7 @@ fn do_run_detached_with(
         .stdout(Stdio::from(console_out))
         .stderr(Stdio::from(console_err));
 
-    mvm_agentd::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
+    mvm_agentd::fd_hygiene::configure_close_fds(&mut cmd, 3, &[]);
 
     // SAFETY: runs in the post-fork pre-exec child. `setsid(2)` and the
     // capability strip (prctl/capset only) are async-signal-safe and are the
@@ -183,7 +183,7 @@ fn do_run_detached_with(
         };
         let mut command = std::process::Command::new(&exit_report_bin);
         command.arg(code.to_string());
-        mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
+        mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, &[]);
         // Best-effort, but never silent: an unreported exit leaves the VM
         // running with nothing on the console to say why.
         if let Err(e) = command.status() {

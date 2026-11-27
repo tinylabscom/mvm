@@ -691,7 +691,7 @@ pub fn run_one(path: Option<PathBuf>, label: &str) {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
+    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, &[]);
     match cmd.status() {
         Ok(status) if status.success() => {}
         Ok(status) => eprintln!("mvm-guest-init: {label} exited {status}"),
@@ -740,7 +740,7 @@ pub(crate) fn guest_helper_command(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
+    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, &[]);
     // SAFETY: the hook runs in the forked child before exec. It calls only
     // async-signal-safe syscalls and allocates nothing, which is what
     // `ServiceIdentity::assume` exists to guarantee.
@@ -876,7 +876,7 @@ fn busybox_loopback_up() -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    crate::fd_hygiene::configure_close_fds(&mut ip, 3, None);
+    crate::fd_hygiene::configure_close_fds(&mut ip, 3, &[]);
     let ip_ok = ip.status().map(|status| status.success()).unwrap_or(false);
     if ip_ok {
         return true;
@@ -888,7 +888,7 @@ fn busybox_loopback_up() -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    crate::fd_hygiene::configure_close_fds(&mut ifconfig, 3, None);
+    crate::fd_hygiene::configure_close_fds(&mut ifconfig, 3, &[]);
     ifconfig
         .status()
         .map(|status| status.success())

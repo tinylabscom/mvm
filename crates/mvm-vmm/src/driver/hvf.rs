@@ -430,7 +430,8 @@ fn bounded_supervisor_command(
 ) -> mvm_core::spawn_scope::BoundCommand {
     let mut command = mvm_core::env_hygiene::helper_command(supervisor);
     (policy.configure_environment)(&mut command);
-    StartupDiagnostics::configure(&mut command, diagnostics);
+    let keep = StartupDiagnostics::configure(&mut command, diagnostics);
+    mvm_core::env_hygiene::keep_fds(&mut command, keep.as_slice());
     mvm_core::spawn_scope::bind_spawn(
         command,
         &spec.name,
@@ -518,9 +519,12 @@ fn boot_retaining_child(
     {
         let mut command = mvm_core::env_hygiene::helper_command(&supervisor);
         (policy.configure_environment)(&mut command);
-        StartupDiagnostics::configure(&mut command, diagnostics.as_ref());
-        let inherited = BootInputFiles::inheritance_vector(&cfg)?;
-        crate::host::restore_image::inherit_descriptors(&mut command, inherited);
+        let mut keep = BootInputFiles::inheritance_vector(&cfg)?;
+        keep.extend(StartupDiagnostics::configure(
+            &mut command,
+            diagnostics.as_ref(),
+        ));
+        mvm_core::env_hygiene::keep_fds(&mut command, &keep);
         let bound = mvm_core::spawn_scope::bind_spawn(
             command,
             &spec.name,

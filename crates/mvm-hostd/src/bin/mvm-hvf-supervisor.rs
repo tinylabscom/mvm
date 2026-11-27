@@ -317,30 +317,29 @@ fn record_signed_marker(exe: &std::path::Path) {
     }
 }
 
+/// The command that replaces this process once it is signed: the same
+/// arguments, and every descriptor startup adopts after the exec kept across
+/// it, together with the diagnostics writer, in one keep-set.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn reexec_command(
+    exe: &std::path::Path,
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+    diagnostics: Option<&mvm_vmm::host::hvf_supervisor::StartupReporter>,
+) -> std::process::Command {
+    let mut command = mvm_core::env_hygiene::helper_command(exe);
+    command.args(args).env("MVM_HVF_SIGNED", "1");
+    let mut keep = cfg.startup_descriptors();
+    keep.extend(diagnostics.and_then(|diagnostics| diagnostics.configure_reexec(&mut command)));
+    mvm_core::env_hygiene::keep_fds(&mut command, &keep);
+    command
+}
+
 /// Self-sign ad-hoc with the hypervisor entitlement, then re-exec. We ship the
 /// bin unsigned and HVF rejects it otherwise. `MVM_HVF_SIGNED` breaks the exec
 /// loop; `exec()` preserves the pid + the stdin config pipe. A file lock
 /// serializes concurrent launches (codesign --force rewrites the shared binary
 /// in place). Mirrors the libkrun supervisor's `ensure_self_signed`.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn set_disk_cloexec(
-    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
-    enabled: bool,
-) -> anyhow::Result<()> {
-    for fd in cfg
-        .writable_disk_fds
-        .iter()
-        .flat_map(|disk| [disk.backing, disk.sidecar])
-        .chain(cfg.readonly_data_disk_fds.iter().map(|disk| disk.fd))
-    {
-        // SAFETY: preflight established these exact live descriptors. Only
-        // their close-on-exec flag changes; ownership stays with the caller.
-        let result = unsafe { libc::fcntl(fd, libc::F_SETFD, i32::from(enabled)) };
-        anyhow::ensure!(result >= 0, "updating disk descriptor inheritance");
-    }
-    Ok(())
-}
-
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn ensure_self_signed(
     diagnostics: &mut mvm_vmm::host::hvf_supervisor::StartupReporter,
@@ -411,16 +410,7 @@ fn ensure_self_signed(
     drop(lock);
 
     diagnostics.stage(StartupStage::Reexec);
-    let mut command = mvm_core::env_hygiene::helper_command(&exe);
-    command
-        .args(std::env::args_os().skip(1))
-        .env("MVM_HVF_SIGNED", "1");
-    diagnostics.configure_reexec(&mut command);
-    if let Err(error) = set_disk_cloexec(cfg, false) {
-        eprintln!("mvm-hvf-supervisor: retaining disk descriptors failed: {error}");
-        std::process::exit(1);
-    }
-    let err = command.exec();
+    let err = reexec_command(&exe, std::env::args_os().skip(1), cfg, Some(&*diagnostics)).exec();
     eprintln!("mvm-hvf-supervisor: re-exec after signing failed: {err}");
     std::process::exit(1);
 }
@@ -429,6 +419,48 @@ fn ensure_self_signed(
 mod tests {
     use super::{record_signed_marker, signed_marker_matches};
     use std::io::Write;
+
+    /// A legacy restore re-execs before it adopts its descriptors, so the
+    /// re-exec must carry the restore and kernel descriptors, not only disks.
+    #[test]
+    fn the_signing_reexec_keeps_every_descriptor_startup_adopts() {
+        use std::os::fd::AsRawFd;
+        // Opened by std, so close-on-exec, as a launcher-cleared descriptor
+        // is not: the keep-set must hand these on regardless.
+        let files: Vec<_> = (0..4)
+            .map(|_| std::fs::File::open("/dev/null").unwrap())
+            .collect();
+        let fds: Vec<i32> = files.iter().map(|file| file.as_raw_fd()).collect();
+        let cfg: mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig =
+            serde_json::from_value(serde_json::json!({
+                "console_capture": "encrypted",
+                "vm_name": "reexec-fixture",
+                "kernel": "/k/Image",
+                "kernel_fd": fds[0],
+                "restore_fds": { "ram": fds[1], "frame": fds[2] },
+                "console_log": "/state/console.log",
+                "pid_file": "/state/hvf.pid",
+                "workload_exit": "/state/workload.exit",
+                "timeout_secs": 30,
+            }))
+            .unwrap();
+        let unlisted = fds[3];
+        let probe = |fd: i32| {
+            let args = ["-c", "[ -e /dev/fd/$1 ]", "sh"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .chain([fd.to_string().into()]);
+            super::reexec_command(std::path::Path::new("/bin/sh"), args, &cfg, None)
+                .status()
+                .unwrap()
+                .success()
+        };
+
+        for fd in &fds[..3] {
+            assert!(probe(*fd), "the re-exec lost fd {fd}");
+        }
+        assert!(!probe(unlisted), "the re-exec kept an unlisted descriptor");
+    }
 
     #[test]
     fn legacy_replay_maps_exact_bytes_readonly_without_touching_stdin() {
@@ -721,9 +753,6 @@ fn run() -> anyhow::Result<()> {
             }
             // SAFETY: unchanged legacy launcher diagnostics ownership contract.
             diagnostics = unsafe { StartupReporter::inherited() };
-            // Unrelated signing helpers must not inherit disk custody. The
-            // reexec itself retains it explicitly immediately before exec.
-            set_disk_cloexec(&cfg, true)?;
             ensure_self_signed(&mut diagnostics, &cfg);
             mvm_hostd::supervisor::admission::caller_registration::adopt_startup_files(&cfg)?
         }

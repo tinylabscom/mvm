@@ -10,7 +10,8 @@
 //! that launch Firecracker — are built with [`helper_command`], which silently
 //! removes the same variables from what the helper would otherwise inherit and
 //! logs each removed name at debug level. Nobody asked for an inherited
-//! variable, so nobody is refused over one.
+//! variable, so nobody is refused over one. The same constructor marks every
+//! descriptor from 3 up close-on-exec in the helper, for the same reason.
 //!
 //! No value is ever logged or put in an error: a denied variable is reported
 //! by name and family only, because a password-manager session token's value
@@ -259,11 +260,17 @@ impl EnvFilter {
 }
 
 /// A [`Command`] for a host helper process, with every denied variable this
-/// process would hand down removed from what the helper inherits.
+/// process would hand down removed from what the helper inherits, and every
+/// descriptor numbered 3 or above closed when it execs.
 ///
 /// A variable the call site then sets explicitly with `.env(...)` is that
 /// site's own, named decision; this removes only what would otherwise have
-/// arrived unasked.
+/// arrived unasked. Descriptors work the same way: one this process inherited
+/// or left inheritable (a harness's held `flock`, say) never reaches a helper.
+/// A site that hands a helper descriptors names all of them in one
+/// [`keep_fds`] call. Standard input, output and error are untouched. Through
+/// [`std::os::unix::process::CommandExt::exec`] the marking happens in this
+/// process, so a failed exec leaves its own descriptors close-on-exec.
 #[must_use]
 pub fn helper_command(program: impl AsRef<OsStr>) -> Command {
     helper_command_with(program, &EnvReadmit::none())
@@ -278,7 +285,17 @@ pub fn helper_command_with(program: impl AsRef<OsStr>, readmit: &EnvReadmit) -> 
     spawn_recorder::note(program.as_ref());
     let mut command = Command::new(program);
     scrub_command(&mut command, readmit);
+    mvm_setpriv::fd_hygiene::configure_close_fds(&mut command, 3, &[]);
     command
+}
+
+/// Hand `command`'s child exactly the descriptors in `keep`, numbered as they
+/// are here, on top of its standard streams; every other descriptor closes at
+/// exec. Call it once per command with the complete set: one hook marks the
+/// rest and clears the flag on these, so the result does not depend on hook
+/// order, and a second call replaces the first.
+pub fn keep_fds(command: &mut Command, keep: &[std::ffi::c_int]) {
+    mvm_setpriv::fd_hygiene::configure_close_fds(command, 3, keep);
 }
 
 /// This process's environment without its denied variables, other than those
@@ -635,5 +652,73 @@ mod tests {
         let removed = scrub_command(&mut command, &EnvReadmit::none());
         assert!(removed.contains(&"BASH_ENV".to_string()), "{removed:?}");
         assert!(removals(&command).contains(&"BASH_ENV".to_string()));
+    }
+
+    /// A file whose descriptor this process leaves inheritable, as a shell's
+    /// `exec 9>LIVE.lock` does before it runs `mvmctl`.
+    #[cfg(unix)]
+    fn inheritable(path: &std::path::Path) -> std::fs::File {
+        let file = std::fs::File::create(path).unwrap();
+        rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty()).unwrap();
+        file
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_does_not_inherit_a_descriptor_left_without_close_on_exec() {
+        use std::os::fd::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let leaked = inheritable(&dir.path().join("leaked"));
+        let probe = ["-c", "[ -e /dev/fd/$1 ]", "sh"];
+        let fd = leaked.as_raw_fd().to_string();
+
+        let control = Command::new("/bin/sh")
+            .args(probe)
+            .arg(&fd)
+            .status()
+            .unwrap();
+        assert!(control.success(), "control: a raw child inherits it");
+
+        let helper = helper_command("/bin/sh")
+            .args(probe)
+            .arg(&fd)
+            .status()
+            .unwrap();
+        assert!(!helper.success(), "a helper must not inherit fd {fd}");
+    }
+
+    /// A long-lived helper started while the caller holds an `flock` must not
+    /// keep that lock once the caller lets go: an idle-pool Firecracker and
+    /// its reaper once held a harness's lock descriptor and stalled every
+    /// later `flock` on the same file.
+    #[cfg(unix)]
+    #[test]
+    fn a_long_lived_helper_does_not_keep_the_callers_flock() {
+        use rustix::fs::{FlockOperation, flock};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("LIVE.lock");
+        let held = inheritable(&path);
+        flock(&held, FlockOperation::LockExclusive).unwrap();
+
+        let mut helper = helper_command("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        // Inheritable only while the helper spawns, so a concurrent test's raw
+        // child in this same process cannot pick the lock up afterwards.
+        rustix::io::fcntl_setfd(&held, rustix::io::FdFlags::CLOEXEC).unwrap();
+        drop(held);
+        let next = std::fs::File::open(&path).unwrap();
+        let acquired = flock(&next, FlockOperation::NonBlockingLockExclusive);
+        helper.kill().unwrap();
+        helper.wait().unwrap();
+
+        assert!(
+            acquired.is_ok(),
+            "the helper kept the caller's lock: {acquired:?}"
+        );
     }
 }

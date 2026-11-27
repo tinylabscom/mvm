@@ -3751,6 +3751,7 @@ dependencies = [
  "mvm-crypto",
  "mvm-http",
  "mvm-macho-sign",
+ "mvm-setpriv",
  "p256",
  "p384",
  "plist",

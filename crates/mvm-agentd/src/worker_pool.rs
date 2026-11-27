@@ -648,7 +648,7 @@ fn spawn_worker(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, entrypoint::spawn_fd_to_keep(entrypoint));
+    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, &[]);
     // A script runs through `/proc/self/fd/<n>`: the kernel re-execs its
     // interpreter on that path, so the descriptor has to survive the exec or
     // the interpreter cannot reopen the script. The cold path keeps a

@@ -67,7 +67,6 @@ use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Leading bytes of a chunk-encrypted snapshot artifact.
@@ -285,33 +284,6 @@ impl VerifiedRestoreFile {
     /// How the private copy was produced.
     pub fn copy(&self) -> PrivateCopy {
         self.copy
-    }
-}
-
-/// Let `cmd`'s child inherit `fds` under the same numbers.
-///
-/// Every descriptor this process opens is close-on-exec, which is what keeps a
-/// restore image from leaking into unrelated spawns. The flag is cleared only in
-/// the forked child, immediately before `exec`, so no other process started from
-/// this one — concurrently or later — ever holds these descriptors. The child
-/// sets the flag again when it adopts them ([`adopt_inherited`]); anything it
-/// spawns before that point inherits read-only handles, which can read the
-/// verified bytes but never change them.
-pub fn inherit_descriptors(cmd: &mut Command, fds: Vec<RawFd>) {
-    use std::os::unix::process::CommandExt;
-    // SAFETY: the closure runs in the forked child between `fork` and `exec`,
-    // where only async-signal-safe calls are allowed. It calls `fcntl` alone,
-    // which is async-signal-safe, and reads a `Vec` that was allocated before
-    // the fork and is not mutated or freed inside the closure.
-    unsafe {
-        cmd.pre_exec(move || {
-            for fd in &fds {
-                if libc::fcntl(*fd, libc::F_SETFD, 0) == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        });
     }
 }
 
@@ -899,6 +871,7 @@ fn sha256_of(file: &File, source: &Path) -> Result<String, RestoreImageError> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
 
     use mvm_contract::hash::sha256_hex;
 
@@ -1403,24 +1376,33 @@ mod tests {
         assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
     }
 
+    /// A verified restore image reaches the helper it is kept for, and no
+    /// unrelated spawn and no unlisted descriptor: the flag is cleared only in
+    /// that child.
     #[test]
-    fn inherited_descriptors_reach_the_child_and_no_one_else() {
+    fn a_helper_inherits_its_listed_descriptor_and_nothing_else() {
         let bytes = b"saved guest memory".to_vec();
         let (_root, private, source) = fixture(&bytes);
         let verified =
             VerifiedRestoreFile::prepare(&source, &private, &sha256_hex(&bytes)).unwrap();
-        let fd = verified.file().as_raw_fd();
-        let probe = format!("test -e /dev/fd/{fd}");
+        let kept = verified.file().as_raw_fd();
+        let stray = std::fs::File::open("/dev/null").unwrap();
+        // SAFETY: changes only the descriptor flags of a file this test owns.
+        let cleared = unsafe { libc::fcntl(stray.as_raw_fd(), libc::F_SETFD, 0) };
+        assert_eq!(cleared, 0);
+        let holds = |fd: RawFd| {
+            let mut helper = mvm_core::env_hygiene::helper_command("/bin/sh");
+            helper.args(["-c", "[ -e /dev/fd/$1 ]", "sh", &fd.to_string()]);
+            mvm_core::env_hygiene::keep_fds(&mut helper, &[kept]);
+            helper.status().unwrap().success()
+        };
 
-        let mut with = Command::new("/bin/sh");
-        with.args(["-c", &probe]);
-        inherit_descriptors(&mut with, vec![fd]);
-        assert!(with.status().unwrap().success(), "the child inherits it");
-
-        let without = Command::new("/bin/sh")
-            .args(["-c", &probe])
+        assert!(holds(kept), "the listed descriptor reaches the helper");
+        assert!(!holds(stray.as_raw_fd()), "an unlisted one does not");
+        let unrelated = Command::new("/bin/sh")
+            .args(["-c", "[ -e /dev/fd/$1 ]", "sh", &kept.to_string()])
             .status()
             .unwrap();
-        assert!(!without.success(), "an unrelated spawn does not");
+        assert!(!unrelated.success(), "an unrelated spawn does not");
     }
 }

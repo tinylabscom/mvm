@@ -523,6 +523,32 @@ impl std::fmt::Display for RestoreInputsError {
 impl std::error::Error for RestoreInputsError {}
 
 impl HvfSupervisorConfig {
+    /// Every descriptor the supervisor adopts at startup: kernel, checked boot
+    /// images, restore RAM and frame, read-only DATA disks, and each writable
+    /// disk's backing and sidecar. Preflight validates exactly this set, and a
+    /// self re-exec keeps exactly this set (plus its diagnostics writer).
+    pub fn startup_descriptors(&self) -> Vec<i32> {
+        self.kernel_fd
+            .into_iter()
+            .chain(
+                self.boot_image_fds
+                    .into_iter()
+                    .flat_map(BootImageFds::descriptors),
+            )
+            .chain(
+                self.restore_fds
+                    .into_iter()
+                    .flat_map(|fds| [fds.ram, fds.frame]),
+            )
+            .chain(self.readonly_data_disk_fds.iter().map(|disk| disk.fd))
+            .chain(
+                self.writable_disk_fds
+                    .iter()
+                    .flat_map(|disk| [disk.backing, disk.sidecar]),
+            )
+            .collect()
+    }
+
     /// Validate DATA roles without granting checked-cold or builder authority.
     ///
     /// # Errors
@@ -791,6 +817,29 @@ mod tests {
             cpu_millicores: Some(500),
             quota_record: Some("/state/quota.json".into()),
         }
+    }
+
+    /// The startup set is everything the supervisor adopts once it runs, so a
+    /// self re-exec that keeps only this set loses nothing it later needs.
+    #[test]
+    fn the_startup_descriptors_are_every_descriptor_startup_adopts() {
+        let mut cfg = full_config_fixture();
+        cfg.kernel_fd = Some(10);
+        cfg.boot_image_fds = Some(BootImageFds {
+            rootfs: 11,
+            verity: 12,
+            metadata: 13,
+            root_hash: 14,
+        });
+        cfg.restore_fds = Some(HvfRestoreFds { ram: 15, frame: 16 });
+        cfg.writable_disk_fds = vec![HvfWritableDiskFds {
+            disk: 1,
+            backing: 17,
+            sidecar: 18,
+        }];
+        let mut listed = cfg.startup_descriptors();
+        listed.sort_unstable();
+        assert_eq!(listed, vec![10, 11, 12, 13, 14, 15, 16, 17, 18, 42]);
     }
 
     #[test]

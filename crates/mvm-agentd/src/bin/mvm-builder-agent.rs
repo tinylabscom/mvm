@@ -24,7 +24,7 @@ const LISTEN_BACKLOG: i32 = 16;
 #[cfg(target_os = "linux")]
 fn child_command(program: &str) -> Command {
     let mut command = Command::new(program);
-    mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
+    mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, &[]);
     command
 }
 

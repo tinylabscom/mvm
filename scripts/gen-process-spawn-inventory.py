@@ -343,13 +343,15 @@ def gate_places():
 def guard(rel, kinds, places, fns):
     g = []
     if any(k in ("helper_command", "helper_command_with") for k in kinds):
-        g.append("`helper_command` env scrub")
+        g.append("`helper_command` env scrub and fd hygiene")
     if any(k == "Command::new" or k.startswith(("raw:", "libc::")) for k in kinds):
         pl = {places.get((rel, f)) or next((w for (gf, _), w in places.items() if gf == rel and None in fns), None) for f in fns}
         g.append("RAW_SITES (" + "/".join(sorted(p for p in pl if p)) + ")" if pl - {None} else "UNCLASSIFIED raw spawn")
     src = open(os.path.join(ROOT, rel)).read()
     if "refuse_cli_spawn" in src or "CliSpawn::" in src or "refuse_toolchain_spawn" in src:
         g.append("embedder refusal")
+    if "keep_fds(" in src:
+        g.append("fd keep-list (`keep_fds`)")
     if "network_endpoint" in rel or "gpu_endpoint" in rel:
         g.append("check-single-network-path")
     if crate_of(rel) in ("mvm-client", "mvm-hostlib", "mvm-sdk"):

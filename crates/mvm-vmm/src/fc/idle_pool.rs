@@ -1168,6 +1168,40 @@ mod tests {
             .expect("spawn a stand-in process")
     }
 
+    /// The reaper outlives the launch that starts it, so it must not keep a
+    /// lock the launching process inherited: a reaper holding a harness's
+    /// `LIVE.lock` descriptor once stalled every later `flock` on that file.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_reaper_does_not_keep_a_lock_its_launcher_inherited() {
+        use std::os::fd::AsRawFd;
+        let _env = mvm_core::util::test_env::TestEnv::new();
+        let scratch = tempfile::tempdir().unwrap();
+        let entry = scratch.path().join("entry");
+        std::fs::create_dir(&entry).unwrap();
+        let lock = scratch.path().join("LIVE.lock");
+        let held = std::fs::File::create(&lock).unwrap();
+        // SAFETY: descriptor flags and an advisory lock on a file this test owns.
+        unsafe {
+            assert_eq!(libc::fcntl(held.as_raw_fd(), libc::F_SETFD, 0), 0);
+            assert_eq!(libc::flock(held.as_raw_fd(), libc::LOCK_EX), 0);
+        }
+
+        start_reaper(&entry).unwrap();
+        // Inheritable only while the reaper spawns, so a concurrent test's raw
+        // child in this same process cannot pick the lock up afterwards.
+        // SAFETY: descriptor flags of a file this test owns.
+        let marked = unsafe { libc::fcntl(held.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+        assert_eq!(marked, 0);
+        drop(held);
+        let next = std::fs::File::open(&lock).unwrap();
+        // SAFETY: an advisory lock on a file this test owns.
+        let acquired = unsafe { libc::flock(next.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        stop_reaper(&entry, &entry);
+
+        assert_eq!(acquired, 0, "the reaper kept the lock");
+    }
+
     #[cfg(target_os = "linux")]
     fn alive(child: &mut std::process::Child) -> bool {
         child.try_wait().expect("try_wait").is_none()

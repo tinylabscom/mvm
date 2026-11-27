@@ -464,7 +464,7 @@ fn build_command(
     #[cfg(unix)]
     cmd.process_group(0);
 
-    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
+    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, &[]);
 
     // SAFETY: pre_exec's closure runs post-fork/pre-exec, where only async-
     // signal-safe calls are allowed. It calls only raw syscalls, allocates

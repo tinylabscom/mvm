@@ -368,7 +368,7 @@ pub fn run() -> ! {
         use std::os::unix::process::CommandExt;
         let mut command = Command::new(&invocation.command);
         command.args(&invocation.command_args);
-        fd_hygiene::configure_close_fds(&mut command, 3, None);
+        fd_hygiene::configure_close_fds(&mut command, 3, &[]);
         let error = command.exec();
         eprintln!("mvm-setpriv: exec {:?} failed: {error}", invocation.command);
         std::process::exit(127);
