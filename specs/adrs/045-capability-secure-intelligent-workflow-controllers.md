@@ -6,7 +6,7 @@ Validation: none — this is a proposed design; no code implements it and no tes
 **Status:** Proposed  
 **Date:** 2026-08-13  
 **Related:** ADR-001, ADR-014 (including `mvmd` production authority), ADR-020, ADR-022,
-ADR-031, ADR-035, ADR-040, ADR-041, ADR-042,
+ADR-023, ADR-035, ADR-040, ADR-041, ADR-042,
 ADR-047 (the agent memory plane); Plan 296,
 Plan 298, Plan 308, and Plan 329.  
 **Depends on:** ADR-057 for mailboxes and ADR-046 for the remaining proposed

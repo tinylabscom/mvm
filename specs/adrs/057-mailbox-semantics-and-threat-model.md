@@ -15,7 +15,7 @@ durability, storage, host-blindness, and the `mvmd` boundary. ADR-046 remains a
 proposed design for its non-mailbox lanes and their migration.
 **Reconciles:** ADR-051. The workload actor model remains, but its inbox uses
 the contract and identities defined here.
-**Complements:** ADR-001, ADR-014, ADR-020, ADR-031, ADR-042, ADR-045,
+**Complements:** ADR-001, ADR-014, ADR-020, ADR-023, ADR-042, ADR-045,
 ADR-047, and ADR-056.
 
 Acceptance of this architecture is not an implementation or security-claim

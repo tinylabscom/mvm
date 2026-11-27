@@ -239,6 +239,32 @@ It is signed keylessly under the release pipeline's own CI identity.
 reuse, and treats a manifest past its expiry or on a revocation list as
 untrusted.
 
+### Host platforms and the Windows promotion gate
+
+The supported native hosts are Linux with
+KVM and macOS 26+ on Apple Silicon; `mvmctl` refuses an Intel Mac or an older
+macOS by name before any command runs. Windows is not a supported or witnessed
+execution tier. Its planned path is
+the existing libkrun backend on x86_64 with the Windows Hypervisor Platform,
+not an in-house WHP supervisor or device stack. That work is tracked in
+[#5024](https://github.com/tinylabscom/mvm/issues/5024), which keeps the
+acceptance criteria of the closed
+[#3553](https://github.com/tinylabscom/mvm/issues/3553). Before Windows is
+promoted it needs:
+
+- a qualified Windows host and an archived end-to-end boot witness;
+- private-state ACLs that hold, and the same admission, audit, secret custody
+  and guest/host transport contracts as the other hosts;
+- a named refusal on hosts without usable WHP or on unsupported architectures,
+  with no silent backend fallback;
+- platform documentation and `mvmctl doctor` capability output that agree;
+- a recorded artifact signing and integrity posture.
+
+A compiled package, a mock test or compile-only CI is compile evidence, not a
+lifecycle or security witness. A frontend must not hide a missing platform
+capability by launching `mvmctl`, silently changing backend tier, or
+presenting remote execution as local.
+
 ## Consequences
 
 Dropping PGP and a third-party distribution from the seed narrows the

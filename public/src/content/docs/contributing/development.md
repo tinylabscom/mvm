@@ -523,6 +523,31 @@ just ci
 - CLI binary tests go in root `tests/cli.rs`
 - Use `#[serde(default)]` when adding fields to structs used in test fixtures
 
+### Hermetic lifecycle tests
+
+Every state-changing verb emits exactly one local audit record per attempt,
+including its no-op and failure branches, and `tests/audit_emissions_live.rs`
+witnesses that without KVM, Nix, libkrun, GitHub or `sudo`. Each test runs the
+compiled `mvmctl` as a subprocess with `MVM_HOME` and `HOME` in a per-test
+temporary directory, because the audit emitter resolves its path from the
+environment at call time; a subprocess gets its own environment and keeps
+tests parallel. Each verb family reaches a hermetic stand-in instead of its
+real substrate:
+
+| Verbs | Stand-in |
+|-------|----------|
+| start, stop, TTL | `--hypervisor mock`, the in-memory `MockBackend` in `crates/mvm-runtime/src/mock.rs` |
+| pause, resume | `CannedIO` behind the `SnapshotIO` trait in `crates/mvm-vmm/src/snapshot.rs` |
+| guest filesystem and process RPCs | `MockGuestAgent` in `crates/mvm-runtime/src/mock_guest_agent.rs` |
+| self-update | `MVM_UPDATE_API_URL` pointed at a loopback HTTP fixture |
+| `env uninstall` | a versioned install staged inside the test's sandbox, so the developer's own install is never touched |
+
+The mock backend exists only under the `test-support` feature, so a shipped
+`mvmctl` never carries it. Nothing checks a stand-in against its real
+counterpart beyond review, so keep each one honest when the real path changes.
+This covers the per-attempt local audit stream, not the chain-signed plan
+audit, which has its own tests.
+
 ### Gated E2E
 
 The `MVM_E2E_SMOKE=1` gate covers `crates/mvm-sdk/sdks/python/tests/test_sandbox_exec.py`, which exercises `Sandbox.exec(*argv) -> ExecResult` against a real microVM. Default-skips on `pytest`; opt-in with `MVM_E2E_SMOKE=1 python -m pytest crates/mvm-sdk/sdks/python/tests/test_sandbox_exec.py`.
@@ -718,6 +743,31 @@ just lint         # Both format check + clippy
 - **No `format!()` in `format!()` named args**: extract to a variable first
 - **Cross-crate imports**: always use `mvm_core::`, `mvm_runtime::`, etc.
 
+### Rules are gates, not review conventions
+
+A code-quality rule that lives only in review drifts, so each one is a check
+that fails a PR by name:
+
+- **Workspace clippy lints** in the root `Cargo.toml`
+  (`[workspace.lints.clippy]`): `too_many_arguments`, `await_holding_lock`,
+  `await_holding_refcell_ref` and `undocumented_unsafe_blocks` are `deny`. The
+  only `too_many_arguments` suppression is bindgen output in
+  `crates/deps/libkrun-sys/src/sys.rs`.
+- **`unsafe` is scoped, not banned.** Crates that parse untrusted bytes or
+  carry the contract deny or forbid it at the crate root (`mvm-fs`,
+  `mvm-core`, `mvm-contract`, `mvm-crypto`, among others); FFI and ioctl code
+  uses it in small documented blocks.
+- **Architecture invariants are `xtask` checks**, one module per rule under
+  `xtask/src/check_*.rs`, run through `cargo run -p xtask -- check-all`. A new
+  rule is a new check, not a line in a shared config.
+- **Exactly two root feature surfaces.** Product behaviour folds into `host`
+  (what the host runs) or `user` (what a user runs); `dev` is their union and
+  `default` a lean subset. Every other root feature must be on the internal or
+  build-only allowlist in `xtask/src/check_two_surfaces.rs`, so adding one
+  forces the choice in that PR: fold it into a surface or justify the
+  allowlist entry. The rule governs the root `[features]` table only, not what
+  a library crate gates internally.
+
 ## Architecture Principles
 
 ### Multi-Backend
@@ -818,6 +868,21 @@ with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 | `release.yml` | Tags matching `v*` | Builds 3 platform binaries (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), creates GitHub Release |
 | `publish-crates.yml` | Manual dispatch with a tag (dry run by default); pull requests that change the publish machinery run the dry run | Publishes the public crate (`mvm-contract`) to crates.io; every other crate is `publish = false` |
 | `workers.yml` | Website change merged to main, release, version tag, or manual dispatch | Deploys docs to Cloudflare Workers Static Assets |
+
+Two rules keep that split honest:
+
+- **Every `ci.yml` lane is a dependency of the `Test` aggregate and is
+  checked in its result step.** A lane named by neither spends runner time
+  and gates nothing: its failure cannot block a merge.
+- **No `security.yml` lane gates a merge.** Those lanes run on release tags,
+  nightly and on dispatch, never on a pull request or in the merge queue, so a
+  claim witness can go red while the change that broke it lands green. The
+  enforcement is `security-lane-watch.yml`, which opens or updates one
+  tracking issue, and the release-tag run before anything ships.
+  `cargo-deny` and `cargo-audit` are the exception: `ci.yml` calls
+  `supply-chain.yml` when a pull request changes dependencies. Moving the
+  cheap claim lanes onto pull requests would add runner cost but little
+  wall-clock time; that trade is a maintainer's decision and is not taken.
 
 The `main merge queue` ruleset allows 40 minutes for checks (longer than the
 expected 25-minute worst case). The watchdog never retries a CI run with a

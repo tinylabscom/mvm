@@ -497,9 +497,9 @@ mod tests {
     #[test]
     fn extract_adr_refs_finds_padded_and_unpadded() {
         let body = "See ADR-007 for the pivot; ADR-1 the security \
-                    posture; ADR-012 for CI policy.";
+                    posture; ADR-023 for secrets.";
         let refs = extract_adr_refs(body);
-        assert_eq!(refs, vec![7, 1, 12]);
+        assert_eq!(refs, vec![7, 1, 23]);
     }
 
     #[test]

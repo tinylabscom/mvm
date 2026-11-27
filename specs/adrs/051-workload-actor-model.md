@@ -11,7 +11,7 @@ ADR-046 (the secure message fabric).
 **Mailbox amendment:** ADR-057 preserves the actor model while replacing
 ADR-046's mailbox identity, envelope, delivery, durability, and ownership
 contract.
-**Complements:** ADR-001, ADR-014, ADR-020, ADR-031, ADR-035, ADR-042, ADR-047.
+**Complements:** ADR-001, ADR-014, ADR-020, ADR-023, ADR-035, ADR-042, ADR-047.
 **Tracked by:** [#5544](https://github.com/tinylabscom/mvm/issues/5544)
 (workload actor design) and [#4622](https://github.com/tinylabscom/mvm/issues/4622)
 (mailbox work). The vertical slice below remains unqualified.

@@ -296,6 +296,37 @@ exactly as for any other bound secret.
   exposure this design eliminates. Signing happens host-side, in the
   keyholder.
 
+## Primitive selection — wire, crypto and storage stay on in-tree primitives
+
+The wire format is `serde` with canonical
+JSON (`serde_jcs`) under Ed25519 signatures (`ed25519-dalek`); TLS
+re-origination for substitution uses `rustls` and `rcgen` on `ring`; secret
+buffers are `zeroize`d; storage is the append-only chain-signed JSONL audit log
+(read by the wasm-clean `mvm_contract::verify`), content-addressed cache
+directories and mode-0600 key files under one `~/.mvm` root. Four proposed
+replacements are declined, each with the condition that would reopen it:
+
+- **Cap'n Proto.** It would break the byte-identical signed wire shared with
+  mvmd and the SDK codegen, and add a zero-copy untrusted-input parser to
+  re-fuzz, for small control-plane messages `serde` already handles on
+  `no_std` and `wasm32`. Revisit only for a genuine high-rate data path, and
+  then with a targeted frame codec.
+- **libsignal.** Its ratcheting protocol targets asynchronous multi-party
+  messaging over an untrusted relay; host-to-guest traffic is local vsock with
+  a trusted host and no secret in the guest. Revisit only for true end-to-end
+  messaging across an untrusted relay.
+- **SQLite.** It works against the append-only, tamper-evident audit log, the
+  content-addressed cache and the single-root layout, and adds a host C
+  dependency. Queryable state at fleet scale belongs to mvmd.
+- **IOTA Stronghold.** Its protections target a compromised host and hardware
+  key attestation, which ADR-001 scopes out. At-rest key encryption, if wanted,
+  is a focused change with an in-tree AEAD. Revisit only alongside an ADR-001
+  amendment that brings host compromise into scope.
+
+Any future framework proposal is held to the bar these failed: a real problem
+the in-tree primitive cannot solve, weighed against the CI-enforced invariant
+the swap would disturb.
+
 ## Claim — egress substitution keeps a raw secret off the guest
 
 ---

@@ -166,11 +166,11 @@ scribbled `used.idx` between two drains does not move the next completion)
 plus tests for both rewind transitions and for the redundant-activation
 no-op.
 
-## Supply chain and closure (ADR-001 / ADR-031 compliance)
+## Supply chain and closure (ADR-001 / ADR-023 compliance)
 
 Every workspace dependency clears the supply-chain bar — `cargo-deny`
 (`deny.toml`) + `cargo-audit`, ADR-001 §"Claims ledger (claim → witness)" — and the repo holds the
-limit-dependencies line (ADR-031; ADR-001's "audit in-house rather than
+limit-dependencies line (ADR-023 primitive selection; ADR-001's "audit in-house rather than
 vet a third-party surface" posture). This is the crux of the sign-off, so
 the closure delta was **measured**, not estimated.
 
@@ -240,7 +240,7 @@ at 0.15 only, and the `[bans].skip` entry below is gone.
 This is a small, permissively-licensed, actively-maintained addition on
 the host path only, and it *removes* audited surface (the hand-rolled ring
 walk and header parse) once the migration completes. It clears the
-ADR-031 bar: a real problem the in-tree primitive cannot solve (an
+ADR-023 primitive-selection bar: a real problem the in-tree primitive cannot solve (an
 availability class the hand-rolled code re-introduces per device),
 weighed against the CI-enforced closure/dep invariants, with the exact
 cost measured and the one unavoidable skip named.
@@ -285,7 +285,7 @@ The migration must not regress the HVF path:
   `0.12` for the duplicate-major reason measured above.
 - **Vendor / fork the crates.** Rejected — it forfeits the "audited
   upstream, tracked by advisory-db" property that is the whole point, and
-  adds maintenance load, against the ADR-031 posture.
+  adds maintenance load, against the ADR-023 primitive-selection posture.
 
 ## Consequences
 
