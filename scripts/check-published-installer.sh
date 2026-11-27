@@ -27,7 +27,7 @@ case "$content_type" in
     ;;
 esac
 
-if ! grep -Fq '# mvmctl installer.' "$probe_dir/body"; then
+if ! grep -Fq '# mvmctl installer and uninstaller.' "$probe_dir/body"; then
   echo 'installer marker is missing' >&2
   exit 1
 fi
