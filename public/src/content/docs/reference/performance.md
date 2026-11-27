@@ -72,7 +72,7 @@ reads. Editing it by hand fails the doc-sync test rather than changing a budget.
 ## Planned production composable witness
 
 No production composable launch or latency lane ships yet. Under
-[ADR-037](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/037-mvmd-only-production-launch.md), only an authenticated `mvmd` request may
+[ADR-014](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/014-signed-audited-execution-plans.md), only an authenticated `mvmd` request may
 initiate production; a local `mvmctl` run is development evidence. The
 [composable-pack build contract](https://github.com/tinylabscom/mvm/blob/main/specs/contracts/composable-pack-build.md)
 requires the first production witness to time the host's authenticated request

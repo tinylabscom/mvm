@@ -5,8 +5,8 @@ Validation: none — this is a proposed design; no code implements it and no tes
 
 **Status:** Proposed  
 **Date:** 2026-08-13  
-**Related:** ADR-001, ADR-014, ADR-020, ADR-022, ADR-031, ADR-035,
-ADR-037 (`mvmd` production authority), ADR-040, ADR-041, ADR-042,
+**Related:** ADR-001, ADR-014 (including `mvmd` production authority), ADR-020, ADR-022,
+ADR-031, ADR-035, ADR-040, ADR-041, ADR-042,
 ADR-047 (the agent memory plane); Plan 296,
 Plan 298, Plan 308, and Plan 329.  
 **Depends on:** ADR-057 for mailboxes and ADR-046 for the remaining proposed
@@ -653,7 +653,7 @@ The implementation must preserve all of the following:
 - AI planning introduces prompt-injection, model-provider data, token/cost,
   model-supply-chain, and planner-loop risks, though those risks remain inside
   the workflow envelope.
-- Production controller delegation requires a precise refinement of ADR-037.
+- Production controller delegation requires a precise refinement of ADR-014's `mvmd` launch-authority rule.
 - Encrypted sessions require a follow-up cryptographic decision and migration.
 - `mvmd`, mailbox, semantic projection, and optional AT compatibility span
   multiple repositories and operational roles.
@@ -735,7 +735,7 @@ Before implementation reaches production:
 
 1. Amend ADR-001 with the controller, workflow, mailbox, resource-amplification,
    semantic-planning, and cross-node threat model and preview claims.
-2. Amend or supersede ADR-037 with the precise `mvmd`-rooted delegation rule.
+2. Amend ADR-014's `mvmd` launch-authority rule with the precise `mvmd`-rooted delegation rule.
 3. Write a guest-host encrypted-session ADR reconciling ADR-008 and ADR-020.
 4. Write or finalize the mailbox transactional-storage and archive ADR.
 5. Decide private actor checkpoint semantics and classification/declassification
