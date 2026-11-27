@@ -53,6 +53,7 @@ pub fn claim_selected_cli_warm(
         SelectedClaim::Claimed { owner, claim } => {
             *admission.borrow_mut() = Some(owner);
             let _ = pool.remove(&handle.id);
+            mvm_core::launch_trace::lap("warm_claim.pool_remove");
             CliWarmClaimOutcome::Claimed(claim)
         }
         SelectedClaim::ReservationLost(owner) => {
@@ -102,7 +103,9 @@ fn claim_selected(
         registry_path: &registry_path,
         grant_issuer: Some(&grant_issuer),
     };
+    mvm_core::launch_trace::lap("warm_claim.claim_context");
     let (owner, result) = owner.claim_prepared_warm(backend, &ctx, handle);
+    mvm_core::launch_trace::lap("warm_claim.dispatch_return");
     match result {
         Ok(claim) => SelectedClaim::Claimed { owner, claim },
         Err(error)

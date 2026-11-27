@@ -429,6 +429,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             network_policy: &config.network_policy,
             cmdline,
         };
+        mvm_core::launch_trace::lap("start.runner_preflight");
         self.start_workload_custodied_with_release(&inputs, images, release)
     }
 
@@ -445,15 +446,18 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             !crate::kernel_custody::has_retained_kernel(&lifecycle)?,
             "canonical kernel lifetime for this VM is still unresolved"
         );
+        mvm_core::launch_trace::lap("start.lifecycle_lease");
         let bound_config = match release {
             Some(release) => lifecycle.bind_verified_release(inputs.config, release)?,
             None => lifecycle.bind(inputs.config)?,
         };
+        mvm_core::launch_trace::lap("start.runtime_bind");
         let kernel_binding = crate::kernel_custody::KernelBoundLaunch::bind(
             bound_config,
             self.driver.kind(),
             &lifecycle,
         )?;
+        mvm_core::launch_trace::lap("start.kernel_bind");
         let bound_config = kernel_binding.config();
         let bound_cmdline = if bound_config.runtime_release_proof.is_some()
             || bound_config.unsigned_runtime_development
@@ -476,6 +480,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         };
         let result =
             self.boot_bound_workload_guarded(inputs, Some(&kernel_binding), writable_images);
+        mvm_core::launch_trace::lap("start.runner_boot");
         result.map_err(|error| {
             cold_hvf_channel::retain_boot_error(error, (lifecycle, kernel_binding))
         })

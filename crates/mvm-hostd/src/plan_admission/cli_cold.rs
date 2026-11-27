@@ -265,6 +265,7 @@ pub fn claim_prepared_cli_cold<C>(
         };
     }
     let retained_config = config.clone();
+    mvm_core::launch_trace::lap("warm_claim.admission_durability");
     match claim_cli_transient(
         backend,
         admitted,

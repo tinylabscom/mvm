@@ -754,6 +754,8 @@ fn verify_runtime_for_launch_at(
         .as_deref()
         .context("selected guest runtime has no version")?;
     let selection = runtime_selection(config, minimum_protocol)?;
+    // Ends the span before the check, so the lap below times the check alone.
+    mvm_core::launch_trace::lap("runtime_evidence.provenance_and_selection");
     let verified = match config.runtime_release_proof.as_ref() {
         Some(proof) => VerifiedLaunchRuntime::Release(Box::new(verify_runtime_release_proof(
             proof,

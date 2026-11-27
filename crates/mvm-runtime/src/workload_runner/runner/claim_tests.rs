@@ -561,6 +561,84 @@ fn forked_saved_state_claim_marks_no_consumed_preloaded_parent() {
     drop(env);
 }
 
+/// A traced saved-state claim names every step, the materialize steps
+/// included, and its laps sum to the claim's wall time.
+#[test]
+fn a_traced_saved_state_claim_laps_every_step_in_order() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.set("MVM_HOME", home.path());
+    env.set(mvm_core::launch_trace::PHASE_TIMING_ENV, "1");
+
+    let store_root = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let (checkpoints, snapshots, parent_id, parent_meta) =
+        seed_audited_parent(store_root.path(), src.path(), true);
+    let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
+    let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+    let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+    pool.record(&handle).unwrap();
+    let registry_path = store_root.path().join("vm-names.json");
+    let anchor = ClaimTestAnchor::audited(&parent_meta);
+    let claim = admitted_child_claim(
+        &src.path().join("rootfs.ext4"),
+        signed_child_plan_json(&parent_digest),
+    );
+    let runner = WorkloadRunner::new(
+        MockDriver::default(),
+        KeyingSpawner::default(),
+        RecordingBrokerRegistrar::new(),
+    );
+    let ctx = ClaimContext {
+        pool: &pool,
+        checkpoints: &checkpoints,
+        snapshots: &snapshots,
+        anchor: &anchor,
+        parent_checkpoint: &parent_id,
+        registry_path: &registry_path,
+        grant_issuer: None,
+    };
+
+    let before = mvm_core::launch_trace::recorded_laps().len();
+    let started = Instant::now();
+    mvm_core::launch_trace::lap_reset(None);
+    runner
+        .claim_standby(&ctx, &handle, &claim)
+        .expect("saved-state claim");
+    let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+    let laps = &mvm_core::launch_trace::recorded_laps()[before..];
+    let names: Vec<&str> = laps.iter().map(|lap| lap.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "warm_claim.parent_verified",
+            "warm_claim.runtime_verified",
+            "warm_claim.plan_and_grant_binds",
+            "warm_claim.child_identity_and_lock",
+            "materialize_child.verify_content",
+            "materialize_child.verify_lineage",
+            "materialize_child.snapshot_copy",
+            "materialize_child.chunk_rebuild",
+            "warm_claim.child_materialized",
+            "warm_claim.endpoint_ready",
+            "warm_claim.broker_registered",
+            "warm_claim.child_forked",
+            "warm_claim.identity_verified",
+            "warm_claim.commit",
+        ]
+    );
+    let lapped_ms: f64 = laps.iter().map(|lap| lap.ms).sum();
+    assert!(
+        lapped_ms <= wall_ms && wall_ms - lapped_ms < 5.0_f64.max(wall_ms * 0.05),
+        "laps sum to {lapped_ms:.3} ms of a {wall_ms:.3} ms claim"
+    );
+    drop(env);
+}
+
 /// Not decrypting is not trusting: a sealed object changed after the
 /// standby was prepared still refuses the claim and quarantines the parent.
 #[test]

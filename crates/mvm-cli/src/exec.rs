@@ -462,6 +462,7 @@ fn run_inner(
         runtime.verify_config(&start_config)?;
     }
     check_admitted_projection(audit_owner, &start_config)?;
+    mvm_core::launch_trace::lap("gate.lifecycle_lock_and_projection");
     let mut boot_attempt = BootAttempt {
         backend: &backend,
         start_config: &start_config,
@@ -480,6 +481,7 @@ fn run_inner(
         )?;
         permit.mark_dispatching_for(&plan, &vm_name)?;
     }
+    mvm_core::launch_trace::lap("gate.host_budget_mark");
     let booted = boot_transient_vm(
         vm_name,
         template_acceleration,
@@ -497,6 +499,7 @@ fn run_inner(
             ))),
         };
     }
+    mvm_core::launch_trace::lap("finalize.record_host_charge");
     let vm_name = booted.name;
     let effective_lifecycle = booted.lifecycle;
     if vm_name != requested_vm_name {
@@ -523,6 +526,7 @@ fn run_inner(
         exit_audit,
         &mut sub_marks,
     )?);
+    mvm_core::launch_trace::lap("handoff.capture_custody");
     drop(effective_lifecycle);
     drop(requested_lifecycle);
     let launch_mode = booted.launch_mode;
@@ -534,6 +538,7 @@ fn run_inner(
     }
     let refill = standby_to_leave(req.standby_refill.as_ref(), booted.cold_reason);
     leave_standby_when(refill, launch_mode, LeaveAt::AfterBoot);
+    mvm_core::launch_trace::lap("handoff.standby_refill_schedule");
     let startup_clock = StartupClock {
         launch_mode,
         started: startup_started,
@@ -548,18 +553,14 @@ fn run_inner(
     let backend_trace = timing
         .then(|| mvm_core::launch_trace::read_trace(&mvm_core::config::vm_state_dir(&vm_name)))
         .flatten();
-    // The launch's own laps (admission and overlay attach) sit beside the
-    // backend's phases: both are qualified names inside a runner phase.
-    let backend_phases = backend_trace
+    let mut backend_phases = backend_trace
         .as_ref()
         .map(|trace| trace.phases.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .chain(mvm_core::launch_trace::recorded_laps())
-        .collect::<Vec<_>>();
+        .unwrap_or_default();
     let degraded = backend_trace
         .map(|trace| trace.degraded)
         .unwrap_or_default();
+    mvm_core::launch_trace::lap("handoff.read_backend_trace");
 
     let warm_memory_start = if sample_path.is_some()
         && launch_mode == crate::commands::vm::phase_timing::LaunchMode::Warm
@@ -580,11 +581,14 @@ fn run_inner(
     // foreground. The wasm tier has no network endpoint to ask.
     let _approvals =
         (backend.name() != "wasm").then(|| crate::approval::serve_for(&vm_name, req.pty));
+    mvm_core::launch_trace::lap("handoff.interrupt_and_approvals");
+    let durable = start_config.wait_for_admission_durability();
+    mvm_core::launch_trace::lap("handoff.admission_durability");
 
     // Run the command + always tear down. The wasm backend has no guest
     // agent; the module already ran inside `start`, so we just collect its
     // exit status instead of waiting for a vsock console.
-    let run_outcome = if let Err(error) = start_config.wait_for_admission_durability() {
+    let run_outcome = if let Err(error) = durable {
         Err(error)
     } else if backend.name() == "wasm" {
         match run_wasm_module(&backend, &vm_name) {
@@ -605,6 +609,10 @@ fn run_inner(
     let reported_exit_code = reported_exit_code(&run_outcome);
     let workload_completed = run_outcome.is_ok();
     let t_command_done = timing.then(std::time::Instant::now);
+    // The launch's own laps (admission through readiness) sit beside the
+    // backend's phases: both are qualified names inside a run phase. Read
+    // after readiness so the post-start stages are included.
+    backend_phases.extend(mvm_core::launch_trace::recorded_laps());
     let (mut result, t_vsock_ready) = match run_outcome {
         Ok((either, vsock_ready)) => (Ok(either), vsock_ready),
         Err(e) => (Err(e), None),
@@ -1480,6 +1488,7 @@ fn resolve_launch_with_admit(
             .flatten();
         built_pack::require_handoff(shape.image, built_runtime.is_some())?;
     }
+    mvm_core::launch_trace::lap("admit.prepare_tail");
     marks.admitted = marks.now();
 
     Ok(ResolvedLaunch {
