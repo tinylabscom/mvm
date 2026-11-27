@@ -295,3 +295,5 @@ Two environment variables disable parts of the verification pipeline. Both print
 | `MVM_SKIP_COSIGN_VERIFY=1` | Cosign signature check on manifest + revocation list | Sigstore-side outage where TUF root or Rekor is unavailable |
 
 The two are independent — setting one doesn't disable the other. SHA-256 still runs even with cosign disabled, and vice versa.
+
+`MVM_SKIP_COSIGN_VERIFY` accepts an unverified *download*, never an unverified *install*. The release guest runtime still downloads with the signature unchecked, but `mvmctl bootstrap`, a first launch and an image launch refuse to assemble launch pieces or install OCI guest shims from it, with or without `MVM_SKIP_HASH_VERIFY`. Unset the variable and run `mvmctl bootstrap` again.

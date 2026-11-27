@@ -9,7 +9,9 @@
 //! [`mvm_client::release`]. Bootstrap then assembles the runtime
 //! overlay, the initramfs, both SDK sidecars and the OCI guest runtime from
 //! the archive it acquired
-//! ([`mvm_client::release::assemble_release_pieces`]).
+//! ([`mvm_client::release::assemble_release_pieces`]). An archive downloaded
+//! with `MVM_SKIP_COSIGN_VERIFY` set is never installed: bootstrap, first use
+//! and the image path refuse it, while `env update` still takes its bytes.
 //!
 //! A source build assembles its guest runtime from its tree when
 //! `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build` asks for that. Otherwise it uses
@@ -104,10 +106,21 @@ pub(crate) fn installed_for_running_binary(
     arch: mvm_core::arch::GuestArch,
 ) -> Result<mvm_client::release::GuestRuntime> {
     let release = prepare_for_running_binary()?;
+    install_from(cache_root, crate::update::current_version(), arch, &release)
+}
+
+/// Install `release` into the digest-keyed store. A download whose signature
+/// check was skipped is refused before anything is written.
+fn install_from(
+    cache_root: &Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+    release: &ReleaseGuestRuntime,
+) -> Result<mvm_client::release::GuestRuntime> {
     mvm_client::release::install_guest_runtime(
         cache_root,
-        &release.archive,
-        crate::update::current_version(),
+        release.authenticated_archive()?,
+        version,
         arch,
     )
     .with_context(|| {
@@ -120,9 +133,22 @@ pub(crate) fn installed_for_running_binary(
 
 /// Install only the OCI shims needed by an image launch.
 pub(crate) fn prepare_oci_for_running_binary(cache_root: &Path) -> Result<()> {
-    let version = crate::update::current_version();
-    let arch = mvm_core::arch::GuestArch::host();
-    let runtime = installed_for_running_binary(cache_root, arch)?;
+    let release = prepare_for_running_binary()?;
+    install_oci_from(
+        cache_root,
+        crate::update::current_version(),
+        mvm_core::arch::GuestArch::host(),
+        &release,
+    )
+}
+
+fn install_oci_from(
+    cache_root: &Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+    release: &ReleaseGuestRuntime,
+) -> Result<()> {
+    let runtime = install_from(cache_root, version, arch, release)?;
     mvm_client::release::install_oci_guest_runtime(cache_root, version, arch, &runtime)
         .context("installing OCI guest shims from the verified release runtime")
 }
@@ -130,14 +156,38 @@ pub(crate) fn prepare_oci_for_running_binary(cache_root: &Path) -> Result<()> {
 /// Assemble the version-locked launch artifacts from the authenticated release.
 pub(crate) fn prepare_launch_pieces_for_running_binary(cache_root: &Path) -> Result<()> {
     let release = prepare_for_running_binary()?;
-    mvm_client::release::assemble_release_pieces(
+    assemble_from(
         cache_root,
         crate::update::current_version(),
         mvm_core::arch::GuestArch::host(),
-        &release.archive,
+        &release,
     )
     .context("assembling the release guest runtime for first launch")?;
     Ok(())
+}
+
+/// Assemble every launch piece and the OCI shims from `release`, and record
+/// the adoption. The one path bootstrap, first use and the image path install
+/// a release guest runtime through; a download whose signature check was
+/// skipped is refused before anything is written.
+pub(crate) fn assemble_from(
+    cache_root: &Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+    release: &ReleaseGuestRuntime,
+) -> Result<mvm_build::runtime_pieces::ReleaseAssembly> {
+    mvm_client::release::assemble_release_pieces(
+        cache_root,
+        version,
+        arch,
+        release.authenticated_archive()?,
+    )
+    .with_context(|| {
+        format!(
+            "assembling the launch pieces from the release guest runtime {}",
+            release.archive.display()
+        )
+    })
 }
 
 /// Whether `version`'s guest-runtime pieces were already assembled from its
@@ -214,13 +264,7 @@ fn ensure_prepared_with(
             places.join(", ")
         )
     })?;
-    mvm_client::release::assemble_release_pieces(cache_root, version, arch, &release.archive)
-        .with_context(|| {
-            format!(
-                "assembling the release guest runtime {} for first launch",
-                release.archive.display()
-            )
-        })?;
+    assemble_from(cache_root, version, arch, &release).context("preparing it for first launch")?;
     Ok(())
 }
 
@@ -237,9 +281,114 @@ pub(crate) fn stage_for_update(tag: &str) -> Result<ReleaseGuestRuntime> {
     Ok(runtime)
 }
 
+/// A release guest runtime acquired the way a hatched bootstrap acquires one,
+/// and the check that nothing was installed from it.
+#[cfg(test)]
+pub(crate) mod hatched {
+    use super::*;
+    use mvm_core::util::test_env::TestEnv;
+
+    /// Which hatches are set.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) enum Hatches {
+        /// `MVM_SKIP_COSIGN_VERIFY`: the archive is held to its digest only.
+        Signature,
+        /// `MVM_SKIP_COSIGN_VERIFY` and `MVM_SKIP_HASH_VERIFY`: the release
+        /// publishes a digest the archive does not have.
+        SignatureAndDigest,
+    }
+
+    /// The hatched acquisition and everything it borrows.
+    pub(crate) struct Hatched {
+        pub(crate) release: ReleaseGuestRuntime,
+        _env: TestEnv,
+        _served: tempfile::TempDir,
+    }
+
+    /// Acquire `version`'s guest runtime from a `file://` release with
+    /// `hatches` set, into `cache_root`.
+    pub(crate) fn acquire(version: &str, cache_root: &Path, hatches: Hatches) -> Hatched {
+        let mut env = TestEnv::new();
+        env.set(mvm_client::release::SKIP_COSIGN_VERIFY_ENV, "1");
+        let served = tempfile::TempDir::new().unwrap();
+        let archive = mvm_build::guest_runtime::release_fixture::write_release_archive(
+            served.path(),
+            version,
+        );
+        let name = mvm_client::release::guest_runtime_archive_name(version);
+        let digest = match hatches {
+            Hatches::Signature => {
+                env.remove("MVM_SKIP_HASH_VERIFY");
+                mvm_core::crypto::image_verify::sha256_file(&archive).unwrap()
+            }
+            Hatches::SignatureAndDigest => {
+                env.set("MVM_SKIP_HASH_VERIFY", "1");
+                "0".repeat(64)
+            }
+        };
+        std::fs::write(
+            served.path().join(format!("{name}.sha256")),
+            format!("{digest}  {name}\n"),
+        )
+        .unwrap();
+        let release = acquire_release_guest_runtime(&ReleaseGuestRuntimeRequest {
+            release_url: &format!("file://{}", served.path().display()),
+            version,
+            cache_root,
+            installed_dirs: &[],
+        })
+        .expect("a hatched download proceeds");
+        assert_eq!(
+            release.origin,
+            mvm_client::release::ReleaseGuestRuntimeOrigin::Unverified
+        );
+        Hatched {
+            release,
+            _env: env,
+            _served: served,
+        }
+    }
+
+    /// The typed refusal, wherever in the chain the caller wrapped it.
+    pub(crate) fn is_refusal(error: &anyhow::Error) -> bool {
+        matches!(
+            error.downcast_ref::<mvm_client::release::ReleaseGuestRuntimeError>(),
+            Some(mvm_client::release::ReleaseGuestRuntimeError::Unverified { .. })
+        )
+    }
+
+    /// Nothing an install writes exists under `cache_root`: no object in the
+    /// store, no piece, no OCI shim, no adoption record. The hatched download
+    /// itself writes nothing there either, so the whole root stays empty.
+    pub(crate) fn assert_nothing_installed(
+        cache_root: &Path,
+        version: &str,
+        arch: mvm_core::arch::GuestArch,
+    ) {
+        assert!(!cache_root.join("guest-runtime/v1/objects").exists());
+        for piece in mvm_build::runtime_pieces::RuntimePiece::ALL {
+            assert!(
+                !piece.local_dir(cache_root, version, arch).exists(),
+                "{}",
+                piece.label()
+            );
+        }
+        assert!(!cache_root.join("oci").exists());
+        assert!(
+            !mvm_build::runtime_pieces::release_adoption_record(cache_root, version, arch).exists()
+        );
+        assert!(
+            !cache_root.exists() || std::fs::read_dir(cache_root).unwrap().next().is_none(),
+            "nothing at all is written under {}",
+            cache_root.display()
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hatched::Hatches;
 
     const FIXTURE_VERSION: &str = "9.9.9";
 
@@ -373,6 +522,70 @@ mod tests {
             "{rendered}"
         );
         assert!(first.adopted().is_none());
+    }
+
+    #[test]
+    fn first_use_refuses_a_hatched_download_and_installs_nothing() {
+        for hatches in [Hatches::Signature, Hatches::SignatureAndDigest] {
+            let first = FirstUse::new();
+            let hatched = hatched::acquire(FIXTURE_VERSION, first.cache.path(), hatches);
+            let err = ensure_prepared_with(
+                first.cache.path(),
+                &first.oci(),
+                FIXTURE_VERSION,
+                mvm_core::arch::GuestArch::host(),
+                &[],
+                || Ok(hatched.release.clone()),
+            )
+            .expect_err("a hatched download must not be installed");
+            assert!(hatched::is_refusal(&err), "{hatches:?}: {err:#}");
+            hatched::assert_nothing_installed(
+                first.cache.path(),
+                FIXTURE_VERSION,
+                mvm_core::arch::GuestArch::host(),
+            );
+        }
+    }
+
+    #[test]
+    fn the_image_path_refuses_a_hatched_download_and_installs_nothing() {
+        for hatches in [Hatches::Signature, Hatches::SignatureAndDigest] {
+            let cache = tempfile::TempDir::new().unwrap();
+            let hatched = hatched::acquire(FIXTURE_VERSION, cache.path(), hatches);
+            let arch = mvm_core::arch::GuestArch::host();
+            let oci = install_oci_from(cache.path(), FIXTURE_VERSION, arch, &hatched.release)
+                .expect_err("the OCI shims must not come from a hatched download");
+            assert!(hatched::is_refusal(&oci), "{hatches:?}: {oci:#}");
+            let pieces = assemble_from(cache.path(), FIXTURE_VERSION, arch, &hatched.release)
+                .expect_err("the launch pieces must not come from a hatched download");
+            assert!(hatched::is_refusal(&pieces), "{hatches:?}: {pieces:#}");
+            hatched::assert_nothing_installed(cache.path(), FIXTURE_VERSION, arch);
+        }
+    }
+
+    #[test]
+    fn the_image_path_installs_the_oci_shims_from_a_verified_release() {
+        let first = FirstUse::new();
+        mvm_build::guest_runtime::release_fixture::write_release_archive(
+            first.installed.path(),
+            FIXTURE_VERSION,
+        );
+        let release = acquire_release_guest_runtime(&ReleaseGuestRuntimeRequest {
+            release_url: "file:///no-release-is-reachable",
+            version: FIXTURE_VERSION,
+            cache_root: first.cache.path(),
+            installed_dirs: &[first.installed.path().to_path_buf()],
+        })
+        .unwrap();
+        let arch = mvm_core::arch::GuestArch::host();
+        install_oci_from(first.cache.path(), FIXTURE_VERSION, arch, &release)
+            .expect("an installed release is authenticated");
+        assert!(mvm_client::release::oci_guest_binaries_cached(
+            &first.oci(),
+            FIXTURE_VERSION,
+            arch
+        ));
+        assert!(first.cache.path().join("guest-runtime/v1/objects").is_dir());
     }
 
     #[test]

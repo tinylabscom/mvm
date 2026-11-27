@@ -1255,8 +1255,15 @@ bootstrap path.
   its acquisition authority from that installation. A cached copy is checked
   again with the launch's verifier on every acquisition and refused, not
   replaced, when it fails. A download made with `MVM_SKIP_COSIGN_VERIFY` set is
-  never written to the release cache, although bootstrap still assembles
-  pieces from it.
+  never written to the release cache and is never installed: bootstrap,
+  first-use preparation and the image path refuse it before anything reaches
+  the object store, the launch pieces, the OCI shims or the adoption record
+  (`bootstrap_keeps_a_hatched_download_out_of_the_install`), because installing
+  takes an `AuthenticatedReleaseArchive` that an `Unverified` result cannot
+  produce. The hatch accepts an unverified download, not an unverified install;
+  a caller that only needs the bytes, such as `mvmctl env update`, still gets
+  them. Pieces a hatched bootstrap assembled before this refusal existed stay
+  in the cache until it is cleared.
   An ordinary signed-release launch independently authenticates the selected archive,
   checksum and available signature bundles once for that launch, retaining
   the verified archive bytes until it binds the selected overlay, verity tree

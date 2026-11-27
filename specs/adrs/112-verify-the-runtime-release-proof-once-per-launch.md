@@ -152,6 +152,12 @@ The conditions that make this the same verification, not a weaker one:
    signature work.
 7. **`MVM_SKIP_COSIGN_VERIFY` keeps its present meaning** for each path that
    honours it today, and the Firecracker launch proof remains non-waivable.
+   For the release guest runtime that meaning is an unverified *download*,
+   never an unverified *install* (amended 2026-11-26): the download still
+   proceeds and its bytes are returned, but bootstrap, first-use preparation
+   and the image path refuse to install from it, so a hatched archive never
+   reaches the object store, the launch pieces, the OCI shims or the adoption
+   record.
 
 The release identity (archive digest, selected artifact digests and verified
 signer) is signed as an optional top-level `ExecutionPlan.runtime_identity`

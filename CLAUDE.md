@@ -876,9 +876,16 @@ this row as enforced without it.
     verifier, so the cache holds only the files that verified
     (`the_cached_files_are_the_bytes_that_were_verified`).
     `MVM_SKIP_COSIGN_VERIFY` skips the signature at download time as it does
-    everywhere; such a download is never written to that release cache, though
-    bootstrap still copies it into the shared object store and assembles the
-    launch pieces from it. The Firecracker launch proof is stricter: it re-verifies the
+    everywhere, and means only that: an unverified download, never an
+    unverified install. Such a download is never written to that release
+    cache, and bootstrap, first-use preparation and the image path refuse to
+    install from it (`bootstrap_keeps_a_hatched_download_out_of_the_install`):
+    installing takes an `AuthenticatedReleaseArchive`, which
+    `authenticated_archive` will not make from an `Unverified` result, so
+    nothing reaches the object store, the launch pieces, the OCI shims or the
+    adoption record, and the refusal says to unset the hatch and run
+    `mvmctl bootstrap` again. A caller that only needs the bytes, such as
+    `mvmctl env update`, still gets them. The Firecracker launch proof is stricter: it re-verifies the
     archive's signed bundle at every launch and `MVM_SKIP_COSIGN_VERIFY` does
     not waive it, so a locally built archive can be assembled from but never
     launched under Firecracker.

@@ -612,7 +612,7 @@ Triage in this order:
    Same identity wording mvmctl uses internally.
 4. **Open a security issue** if the signature is genuinely invalid against the official identity. Don't ship a workaround locally.
 
-Emergency rotation when Sigstore TUF/Rekor is unavailable: `MVM_SKIP_COSIGN_VERIFY=1` keeps SHA-256 verification active while bypassing the signature check. Loud warnings; not for routine use.
+Emergency rotation when Sigstore TUF/Rekor is unavailable: `MVM_SKIP_COSIGN_VERIFY=1` keeps SHA-256 verification active while bypassing the signature check. Loud warnings; not for routine use. It does not let `mvmctl bootstrap` install the release guest runtime: a guest runtime downloaded with the signature unchecked is refused before anything is assembled from it, so unset the variable and run `mvmctl bootstrap` again once Sigstore is reachable.
 
 ### "Manifest is for v0.14.1 but mvmctl is v0.14.0"
 

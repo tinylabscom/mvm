@@ -14,8 +14,8 @@ pub use mvm_build::artifact_acquisition::{
     DistributionChannel, RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, compiled_channel,
 };
 pub use mvm_build::guest_bins::release::{
-    ReleaseGuestRuntime, ReleaseGuestRuntimeError, ReleaseGuestRuntimeOrigin,
-    ReleaseGuestRuntimeRequest,
+    AuthenticatedReleaseArchive, ReleaseGuestRuntime, ReleaseGuestRuntimeError,
+    ReleaseGuestRuntimeOrigin, ReleaseGuestRuntimeRequest,
 };
 pub use mvm_build::guest_runtime::GuestRuntime;
 pub use mvm_build::published_image_set::{
@@ -95,7 +95,7 @@ pub fn acquire_release_guest_runtime(
 /// Install a release archive into the digest-keyed guest-runtime store.
 pub fn install_guest_runtime(
     cache_root: &Path,
-    archive: &Path,
+    archive: AuthenticatedReleaseArchive<'_>,
     version: &str,
     arch: GuestArch,
 ) -> Result<GuestRuntime, mvm_build::guest_runtime::GuestRuntimeError> {
@@ -117,7 +117,7 @@ pub fn assemble_release_pieces(
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
-    archive: &Path,
+    archive: AuthenticatedReleaseArchive<'_>,
 ) -> Result<mvm_build::runtime_pieces::ReleaseAssembly, mvm_build::runtime_pieces::AssembleError> {
     mvm_build::runtime_pieces::assemble_release_runtime_pieces(cache_root, version, arch, archive)
 }

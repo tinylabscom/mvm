@@ -166,18 +166,7 @@ fn prewarm_pieces_from_release(
     arch: mvm_core::arch::GuestArch,
     release: &mvm_build::guest_bins::release::ReleaseGuestRuntime,
 ) -> Result<()> {
-    let assembly = mvm_build::runtime_pieces::assemble_release_runtime_pieces(
-        cache_root,
-        version,
-        arch,
-        &release.archive,
-    )
-    .with_context(|| {
-        format!(
-            "assembling the launch pieces from the release guest runtime {}",
-            release.archive.display()
-        )
-    })?;
+    let assembly = crate::release_guest_runtime::assemble_from(cache_root, version, arch, release)?;
     ui::notice(&release_assembly_line(release, &assembly.runtime.digest));
     Ok(())
 }
@@ -491,6 +480,52 @@ mod tests {
         assert_eq!(
             mvm_build::runtime_pieces::adopted_release_archive(&cache, "9.9.9", arch).unwrap(),
             None
+        );
+    }
+
+    /// The signature hatch accepts an unverified download, not an unverified
+    /// install: bootstrap refuses to assemble from it and writes nothing.
+    #[test]
+    fn bootstrap_keeps_a_hatched_download_out_of_the_install() {
+        use crate::release_guest_runtime::hatched::{self, Hatches};
+        for hatches in [Hatches::Signature, Hatches::SignatureAndDigest] {
+            let dir = tempfile::tempdir().unwrap();
+            let cache = dir.path().join("cache");
+            let hatched = hatched::acquire("9.9.9", &cache, hatches);
+            let arch = mvm_core::arch::GuestArch::host();
+            let error = prewarm_pieces_from_release(&cache, "9.9.9", arch, &hatched.release)
+                .expect_err("a hatched download must not be installed");
+            assert!(hatched::is_refusal(&error), "{hatches:?}: {error:#}");
+            hatched::assert_nothing_installed(&cache, "9.9.9", arch);
+        }
+    }
+
+    #[test]
+    fn bootstrap_assembles_and_adopts_a_verified_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("installed");
+        mvm_build::guest_runtime::release_fixture::write_release_archive(&installed, "9.9.9");
+        let cache = dir.path().join("cache");
+        let release = mvm_build::guest_bins::release::acquire_release_guest_runtime(
+            &mvm_build::guest_bins::release::ReleaseGuestRuntimeRequest {
+                release_url: "file:///no-release-is-reachable",
+                version: "9.9.9",
+                cache_root: &cache,
+                installed_dirs: &[installed],
+            },
+        )
+        .unwrap();
+        let arch = mvm_core::arch::GuestArch::host();
+        prewarm_pieces_from_release(&cache, "9.9.9", arch, &release)
+            .expect("an installed release is authenticated");
+        assert!(
+            mvm_build::runtime_pieces::adopted_release_archive(&cache, "9.9.9", arch)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            mvm_build::guest_agent_build::cached_guest_binaries(&cache.join("oci"), "9.9.9", arch)
+                .is_some()
         );
     }
 
