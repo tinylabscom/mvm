@@ -85,7 +85,7 @@ fn verify_capture_with_identity(
     actual: &RuntimeArtifacts,
 ) -> Result<Option<mvm_core::plan::RuntimeIdentity>> {
     if actual.firecracker_drives.is_some() {
-        mvm_backends::fc::runtime_artifacts::validate_artifacts(actual, binding)?;
+        mvm_vmm::fc::runtime_artifacts::validate_artifacts(actual, binding)?;
     }
     let Some(binding) = binding else {
         ensure!(
@@ -345,7 +345,7 @@ pub(crate) fn verify_checkpoint_runtime_at(
     let actual = decode_authenticated_observation(&bytes, &digest)?;
     match mvm_core::checkpoint::vm_full_origin(meta) {
         Some(mvm_core::checkpoint::VmFullOrigin::Firecracker) => {
-            mvm_backends::fc::runtime_artifacts::validate_artifacts(
+            mvm_vmm::fc::runtime_artifacts::validate_artifacts(
                 &actual,
                 meta.runtime_launch_binding.as_ref(),
             )?;

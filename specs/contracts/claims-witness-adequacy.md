@@ -97,7 +97,7 @@ activation path (tier installed per workload process); tier selection in
 `crates/mvm-core/src/crypto/policy/mount.rs` and
 `crates/mvm-cli/src/commands/shared/parse.rs`; share re-verification in
 `crates/mvm-hostd/src/plan_admission/shares.rs`; libkrun refusal in
-`crates/mvm-backends/src/driver/libkrun.rs`.
+`crates/mvm-vmm/src/driver/libkrun.rs`.
 
 | Witness | Where | Class |
 |---|---|---|
@@ -108,7 +108,7 @@ activation path (tier installed per workload process); tier selection in
 | `admitted_seccomp_tier_grants_sockets_only_to_a_launch_that_needs_them`, `a_gpu_grant_admits_the_vsock_tier_and_no_wider` | `crates/mvm-core/src/plan/synthesis.rs` | OUTCOME-UNIT: tier chosen by plan synthesis. Proves the tier is selected, not that a guest enforces it. |
 | `validated_conversion_enforces_mount_allow_list`, `dir_share_two_part_defaults_ro` | `crates/mvm-cli/src/commands/shared/parse.rs` | OUTCOME-UNIT (by location): CLI parse-time allow-list. |
 | `bare_mnt_is_refused_because_it_shadows_the_config_drive` | `crates/mvm-core/src/crypto/policy/mount.rs` | OUTCOME-UNIT. |
-| `libkrun_refuses_any_virtio_fs_share_before_mapping` | `crates/mvm-backends/src/driver/libkrun.rs` | OUTCOME-UNIT (by location): driver config refusal, no VM. |
+| `libkrun_refuses_any_virtio_fs_share_before_mapping` | `crates/mvm-vmm/src/driver/libkrun.rs` | OUTCOME-UNIT (by location): driver config refusal, no VM. |
 | `enforce_admitted_shares_refuses_unadmitted_or_mismatched` | `crates/mvm-hostd/src/plan_admission/shares_tests.rs` | OUTCOME-UNIT over temp directories. |
 
 Limits carried through (ADR-001 row and `CLAUDE.md`): a cold boot whose guest

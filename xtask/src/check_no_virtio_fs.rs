@@ -71,13 +71,13 @@ const PINNED: &[(&str, usize, &str)] = &[
         "the VirtioFsShare type itself; empty for every workload spec",
     ),
     (
-        "crates/mvm-backends/src/driver/qemu.rs",
+        "crates/mvm-vmm/src/driver/qemu.rs",
         1,
         "a test: QEMU must keep *refusing* a share, the same witness \
          Firecracker carries. No wiring left to retire",
     ),
     (
-        "crates/mvm-backends/src/driver/fc.rs",
+        "crates/mvm-vmm/src/driver/fc.rs",
         1,
         "a test: Firecracker must keep *refusing* a share",
     ),

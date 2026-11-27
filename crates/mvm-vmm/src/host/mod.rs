@@ -1,6 +1,6 @@
 //! Host-side helpers that concrete VMM backends and the builder VM share.
 //!
-//! Keeping these helpers in `mvm-vmm` lets `mvm-backends` depend on them
+//! Keeping these helpers in `mvm-vmm` lets the drivers beside them use them
 //! without creating a dependency cycle with `mvm-runtime` or `mvm-build`.
 
 pub mod actor_identity;

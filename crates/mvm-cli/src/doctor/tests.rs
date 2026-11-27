@@ -314,7 +314,7 @@ fn the_snapshot_encryption_key_line_names_its_source() {
 
 #[test]
 fn the_firecracker_line_names_the_binary_and_how_it_was_vouched_for() {
-    use mvm_backends::fc::binary::{FirecrackerOrigin, ResolveError, ResolvedFirecracker};
+    use mvm_vmm::fc::binary::{FirecrackerOrigin, ResolveError, ResolvedFirecracker};
     let resolved = |origin| ResolvedFirecracker {
         path: "/opt/mvm/firecracker/firecracker".into(),
         origin,

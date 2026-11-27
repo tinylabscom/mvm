@@ -14,7 +14,7 @@ fn has_vm_marker(state_dir: &std::path::Path) -> bool {
 }
 
 impl<S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
-    WorkloadRunner<mvm_backends::driver::hvf::HvfDriver, S, B>
+    WorkloadRunner<mvm_vmm::driver::hvf::HvfDriver, S, B>
 {
     /// Preserve native launch failures and this exact runtime lease before any
     /// compatibility conversion to the string-only standby error.

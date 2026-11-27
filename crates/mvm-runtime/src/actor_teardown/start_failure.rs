@@ -151,8 +151,7 @@ impl ActorStartFailure {
             return owner.stop_and_reap().map(drop);
         }
         if let Some(cause) = state.cause.as_mut() {
-            if let Some(failure) =
-                cause.downcast_mut::<mvm_backends::driver::hvf::ColdHvfBootFailure>()
+            if let Some(failure) = cause.downcast_mut::<mvm_vmm::driver::hvf::ColdHvfBootFailure>()
             {
                 failure.retry_stop()?;
             }

@@ -6,7 +6,8 @@ KVM on Linux or Hypervisor.framework on Apple Silicon macOS.
 
 ## Who uses it
 
-`mvm-backends` implements the libkrun VMM driver with this crate. `mvm-build`
+`mvm-vmm` implements the libkrun VMM driver with this crate behind its
+`libkrun` feature. `mvm-build`
 uses it for the optional libkrun builder path, `mvm-hostd` runs the dedicated
 libkrun supervisor, and `mvm-cli` exposes feature-gated live support.
 `mvm-runtime` uses it in tests and integration wiring.

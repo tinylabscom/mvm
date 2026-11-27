@@ -13,8 +13,7 @@ async-trait.workspace = true
 mvm-core = { workspace = true, features = ["client-remote", "host-state", "provenance"] }
 mvm-agentd.workspace = true
 mvm-runtime = { workspace = true, default-features = false }
-mvm-vmm = { workspace = true }
-mvm-backends = { workspace = true }
+mvm-vmm = { workspace = true, features = ["fc", "hvf", "libkrun", "qemu"] }
 mvm-build = { workspace = true, default-features = false, features = ["builder-libkrun"] }
 libkrun-sys.workspace = true
 mvm-fs.workspace = true

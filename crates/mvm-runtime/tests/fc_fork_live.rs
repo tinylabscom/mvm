@@ -422,7 +422,7 @@ fn restore_forked_child_and_read_random(
             child_id,
             &child_dir,
             None,
-            &mvm_backends::fc::ForkRuntimeEvidence {
+            &mvm_vmm::fc::ForkRuntimeEvidence {
                 observation_sha256: &observation_sha256,
                 anchors_sha256: &anchors_sha256,
                 reseeded_identity_sha256: None,

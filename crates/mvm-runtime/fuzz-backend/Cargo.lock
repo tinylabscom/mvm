@@ -2007,25 +2007,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-backends"
-version = "0.28.0-rc.11"
-dependencies = [
- "anyhow",
- "ed25519-dalek",
- "hex",
- "libc",
- "libkrun-sys",
- "mvm-agentd",
- "mvm-contract",
- "mvm-core",
- "mvm-vmm",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
-]
-
-[[package]]
 name = "mvm-build"
 version = "0.28.0-rc.11"
 dependencies = [
@@ -2215,7 +2196,6 @@ dependencies = [
  "hmac",
  "libc",
  "mvm-agentd",
- "mvm-backends",
  "mvm-build",
  "mvm-contract",
  "mvm-core",
@@ -2264,6 +2244,7 @@ dependencies = [
  "flate2",
  "hex",
  "libc",
+ "libkrun-sys",
  "mio",
  "mvm-agentd",
  "mvm-contract",

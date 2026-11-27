@@ -866,7 +866,7 @@ mod tests {
     #[test]
     fn the_stage0_boot_contract_composes_onto_every_shipped_driver() {
         use crate::driver::VmmDriver;
-        use mvm_backends::driver::{fc::FcDriver, hvf::HvfDriver, qemu::QemuDriver};
+        use mvm_vmm::driver::{fc::FcDriver, hvf::HvfDriver, qemu::QemuDriver};
 
         let drivers: Vec<(&str, Box<dyn VmmDriver>)> = vec![
             ("hvf", Box::new(HvfDriver::new())),
@@ -934,7 +934,7 @@ mod tests {
     #[test]
     fn the_builder_boot_contract_composes_onto_every_shipped_driver() {
         use crate::driver::VmmDriver;
-        use mvm_backends::driver::{fc::FcDriver, hvf::HvfDriver, qemu::QemuDriver};
+        use mvm_vmm::driver::{fc::FcDriver, hvf::HvfDriver, qemu::QemuDriver};
 
         let drivers: Vec<(&str, Box<dyn VmmDriver>)> = vec![
             ("hvf", Box::new(HvfDriver::new())),

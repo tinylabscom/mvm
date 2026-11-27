@@ -112,9 +112,9 @@ struct Check {
 
 /// Which Firecracker a launch on this host will exec, and why that one.
 fn firecracker_binary_check() -> Check {
-    use mvm_backends::fc::binary::resolve_for_host;
+    use mvm_vmm::fc::binary::resolve_for_host;
     describe_firecracker(resolve_for_host(), || {
-        let path = std::env::var_os(mvm_backends::fc::binary::OVERRIDE_ENV)?;
+        let path = std::env::var_os(mvm_vmm::fc::binary::OVERRIDE_ENV)?;
         let out = mvm_core::env_hygiene::helper_command(path)
             .arg("--version")
             .output()
@@ -126,13 +126,10 @@ fn firecracker_binary_check() -> Check {
 }
 
 fn describe_firecracker(
-    resolved: Result<
-        mvm_backends::fc::binary::ResolvedFirecracker,
-        mvm_backends::fc::binary::ResolveError,
-    >,
+    resolved: Result<mvm_vmm::fc::binary::ResolvedFirecracker, mvm_vmm::fc::binary::ResolveError>,
     override_version: impl FnOnce() -> Option<String>,
 ) -> Check {
-    use mvm_backends::fc::binary::FirecrackerOrigin;
+    use mvm_vmm::fc::binary::FirecrackerOrigin;
     let (ok, info) = match resolved {
         Ok(found) => match found.origin {
             FirecrackerOrigin::Shipped => (
@@ -175,7 +172,7 @@ fn fc_block_discard_check(version_output: &str) -> Check {
         .next()
         .and_then(|line| line.split_whitespace().last())
         .unwrap_or("");
-    let info = if mvm_backends::fc::FcCapabilities::for_version(installed).block_discard {
+    let info = if mvm_vmm::fc::FcCapabilities::for_version(installed).block_discard {
         "yes — a guest trim returns builder-store disk to the host".to_string()
     } else {
         format!(
@@ -245,8 +242,8 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
         builder::builder_tool_skipped("firecracker", "tools")
     };
     // The pinned release is what a launch runs unless an override names another.
-    let pinned = cfg!(target_os = "linux")
-        && std::env::var_os(mvm_backends::fc::binary::OVERRIDE_ENV).is_none();
+    let pinned =
+        cfg!(target_os = "linux") && std::env::var_os(mvm_vmm::fc::binary::OVERRIDE_ENV).is_none();
     let block_discard = firecracker.ok.then(|| {
         if pinned {
             fc_block_discard_check(&fc_version())

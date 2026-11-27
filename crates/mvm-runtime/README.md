@@ -20,7 +20,7 @@ several lower-level crates use its test support.
    sidecars that will be booted.
 3. Storage and network providers create per-machine resources and return typed
    handles with explicit teardown ownership.
-4. A `WorkloadRunner` drives the selected `VmmDriver` from `mvm-backends`.
+4. A `WorkloadRunner` drives the selected `VmmDriver` from `mvm-vmm`.
 5. Agent sessions, host services, output capture, and lifecycle events are
    connected over bounded channels and vsock.
 6. Runtime state and lineage are persisted only after identity checks, then

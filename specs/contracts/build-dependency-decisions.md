@@ -1388,16 +1388,17 @@ The full workspace test suite, native macOS checks, and live admission checks
 remain unrun. The counts above are dependency-resolution evidence, not a
 measurement of linked binary contents.
 
-## Crate folds into `mvm-core` (#4839, ADR-061)
+## Crate folds (#4839, ADR-061)
 
 Accepted. Folding a crate removes a package and its lockfile entry; it adds
 no third-party dependency, because each folded crate already depended only on
-`mvm-core` and what `mvm-core` carries.
+its new owner and what that owner carries.
 
 | Fold | Workspace members | `Cargo.lock` packages | `mvmctl` closure (macOS default / Linux default / release macOS, Linux x86_64, Linux aarch64) | `mvm-core` `-e no-dev` | Guest closures (`mvm-builder-guest` / `mvm-agentd` / `mvm-host-services`, musl) |
 |---|---|---|---|---|---|
 | `mvm-net` into `mvm_core::net` | 30 → 29 | 714 → 713 | 326 → 325 / 331 → 330 / 353 → 352, 352 → 351, 351 → 350; all-features 560 → 559 | 99 → 99 | 88 / 84 / 85, unchanged |
 | `mvm-bundler` into `mvm_core::plan::bundle::export` | 28 → 27 | 698 → 697 | 325 → 324 / 330 → 329 / 329 → 328, 335 → 334, 334 → 333; all-features measured 550 → 549 (budget 559 → 549) | 99 → 99 | 88 / 84 / 85, unchanged |
+| `mvm-backends` into `mvm-vmm`, behind its `fc`, `hvf`, `libkrun` and `qemu` features | 26 → 25 | 696 → 695 | 323 → 322 / 328 → 327 / 327 → 326, 333 → 332, 332 → 331; all-features 548 → 547 | 123 → 123 | 88 / 84 / 85, unchanged |
 
 Measured with `cargo tree -e normal,build --prefix none --target <target>` as
 `xtask check-closure-budget` does, and `cargo metadata --no-deps` for the

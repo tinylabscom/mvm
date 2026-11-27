@@ -151,7 +151,7 @@ jobs:
       - name: Warm test-support feature tests
         run: |
           cargo test --no-run --features test-support --lib \
-            -p mvm-backends -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm \
+            -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm \
             -p mvm-fs -p mvm-build
           cargo test --no-run -p mvmctl --features test-support \
             --test audit_emissions_live

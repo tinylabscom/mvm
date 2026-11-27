@@ -1218,7 +1218,7 @@ mod tests {
         // together so a single resolution serves all of them.
         for expected in [
             "cargo nextest run --features test-support --lib",
-            "-p mvm-backends -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm",
+            "-p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm",
             "cargo nextest run -p mvmctl --features test-support --test audit_emissions_live",
         ] {
             assert!(
@@ -1236,7 +1236,7 @@ mod tests {
         // The per-package shape is what made this lane the critical path, so
         // its return is an error rather than a silent regression.
         for regressed in [
-            "cargo nextest run -p mvm-backends --features test-support --lib",
+            "cargo nextest run -p mvm-vmm --features test-support --lib",
             "cargo nextest run -p mvm-runtime --features test-support --lib",
         ] {
             assert!(
@@ -1838,7 +1838,7 @@ mod tests {
             2,
             "the lane must check the crate set and the pure-Rust mvm-core features"
         );
-        for krate in ["mvm-contract", "mvm-core", "mvm-vmm", "mvm-backends"] {
+        for krate in ["mvm-contract", "mvm-core", "mvm-vmm"] {
             assert!(
                 lane.contains(&format!("-p {krate}")),
                 "the Windows compile check must cover {krate}"
@@ -2316,14 +2316,12 @@ mod tests {
                 .strip_prefix(&workspace)
                 .expect("workspace-relative path");
             let owned = [
-                "crates/mvm-backends/",
                 "crates/mvm-build/",
                 "crates/mvm-cli/",
                 "crates/mvm-client/",
                 "crates/mvm-core/",
                 "crates/mvm-fs/",
                 "crates/mvm-runtime/",
-                "crates/mvm-backends/",
                 "crates/mvm-vmm/",
                 // Enabled only through mvm-client's and mvm-cli's
                 // dev-dependency, so their test lanes compile and run it.

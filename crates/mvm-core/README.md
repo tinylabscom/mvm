@@ -7,7 +7,7 @@ VMs or present user commands.
 
 ## Who uses it
 
-Nearly every host-side crate depends on `mvm-core`, including `mvm-vmm`, `mvm-backends`, `mvm-runtime`, `mvm-build`, `mvm-agentd`,
+Nearly every host-side crate depends on `mvm-core`, including `mvm-vmm`, `mvm-runtime`, `mvm-build`, `mvm-agentd`,
 `mvm-hostd`, `mvm-client`, `mvm-sdk`, `mvm-cli`, and the
 root `mvmctl` facade. `xtask` also uses selected schemas for repository checks.
 

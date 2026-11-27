@@ -65,9 +65,6 @@ mvm-policy.workspace = true
 # + the VmBackend implementations. mvm-runtime does NOT depend on this crate, so
 # this edge is acyclic.
 mvm-runtime = { workspace = true, default-features = false }
-# Full-VM fork restoration constructs the authenticated Firecracker restorer
-# inside the client facade rather than accepting an arbitrary CLI callback.
-mvm-backends.workspace = true
 # The in-process admitted-boot seam (`run::admit_and_boot_local`). mvm-hostd is
 # already in the mvmctl closure (the CLI links it), so this edge adds no crates
 # to the default build; mvm-hostd has no dependency back on this crate.
@@ -77,8 +74,10 @@ mvm-hostd = { workspace = true }
 # crate's closure through mvm-hostd.
 mvm-agentd.workspace = true
 # The per-boot drive files the start config carries. Already in this crate's
-# closure through mvm-runtime.
-mvm-vmm.workspace = true
+# closure through mvm-runtime. Full-VM fork restoration constructs the
+# authenticated Firecracker restorer inside the client facade rather than
+# accepting an arbitrary CLI callback.
+mvm-vmm = { workspace = true, features = ["fc", "hvf", "libkrun", "qemu"] }
 # Shared run-path orchestration (`run_image::inject_and_materialize`) and its
 # unconditional pure-Rust ext4 writer — the same path the CLI's `run --image`
 # uses. mvm-fs is already in the mvmctl closure via the CLI.

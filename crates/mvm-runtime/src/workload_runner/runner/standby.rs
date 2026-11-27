@@ -57,7 +57,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         })?;
         warm_claim::record_standby_phase(started, "lease", "bound");
         let result = match (&self.driver as &dyn std::any::Any)
-            .downcast_ref::<mvm_backends::driver::hvf::HvfDriver>()
+            .downcast_ref::<mvm_vmm::driver::hvf::HvfDriver>()
         {
             Some(driver) => {
                 self.spawn_bound_standby_captured_using(ctx, spec, &parent_config, |request| {

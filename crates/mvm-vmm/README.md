@@ -2,13 +2,14 @@
 
 `mvm-vmm` contains the backend-agnostic virtual-machine monitor model. It
 defines the hypervisor and driver traits, shared virtio devices, guest-memory
-access, host-process helpers, checkpoint formats, and vsock transport used by
-all concrete VMM implementations.
+access, host-process helpers, checkpoint formats, and vsock transport, and it
+holds the concrete Firecracker, HVF, libkrun and QEMU drivers behind the `fc`,
+`hvf`, `libkrun` and `qemu` features. The default build has none of them.
 
 ## Who uses it
 
-`mvm-backends` implements the driver and hypervisor seams. `mvm-runtime`
-assembles those drivers into workload lifecycles. `mvm-build`, `mvm-hostd`, and
+`mvm-runtime`, `mvm-client` and `mvm-cli` enable all four driver features;
+`mvm-runtime` assembles those drivers into workload lifecycles. `mvm-build`, `mvm-hostd`, and
 `mvm-cli` use its boot, supervisor, checkpoint, and host-resource types.
 
 ## How it works
@@ -42,12 +43,15 @@ Vsock modules provide the common guest transport and the egress bridge.
 | `vsock_transport` | Backend-neutral guest communication |
 | `vsock_egress_bridge` | Guest traffic mediation over vsock |
 | `post_restore` | State repair and validation after restore |
+| `driver::{fc, hvf, libkrun, qemu}`, `fc` | Concrete drivers and Firecracker host mechanics, one feature each |
+| `mock` | Hypervisor-free `VmmDriver` test double |
+| `run_sidecars` | Clearing a run's leftover sidecars before the next boot |
 
 ## Design boundaries
 
 This crate does not select a backend, perform workload admission, or own CLI
-state. Concrete platform calls belong in `mvm-backends`; orchestration and
-persistence belong in `mvm-runtime`.
+state. Concrete platform calls belong in the feature-gated driver modules;
+orchestration and persistence belong in `mvm-runtime`.
 
 ## Developing
 

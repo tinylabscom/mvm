@@ -95,12 +95,12 @@ const NIC_SYMBOLS: &[&str] = &[
 
 const NIC_GUARDED_PATHS: &[&str] = &[
     "crates/mvm-agentd/src",
-    "crates/mvm-backends/src/driver/fc.rs",
-    "crates/mvm-backends/src/driver/hvf.rs",
-    "crates/mvm-backends/src/driver/hvf_restore.rs",
-    "crates/mvm-backends/src/driver/libkrun.rs",
-    "crates/mvm-backends/src/driver/qemu.rs",
-    "crates/mvm-backends/src/driver/qemu_process.rs",
+    "crates/mvm-vmm/src/driver/fc.rs",
+    "crates/mvm-vmm/src/driver/hvf.rs",
+    "crates/mvm-vmm/src/driver/hvf_restore.rs",
+    "crates/mvm-vmm/src/driver/libkrun.rs",
+    "crates/mvm-vmm/src/driver/qemu.rs",
+    "crates/mvm-vmm/src/driver/qemu_process.rs",
     "crates/mvm-runtime/src/backend.rs",
     "crates/mvm-runtime/src/apple_container_backend.rs",
     "crates/mvm-runtime/src/workload_runner",

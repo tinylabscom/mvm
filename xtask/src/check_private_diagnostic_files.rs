@@ -29,8 +29,8 @@ use std::path::Path;
 const WATCHED: &[&str] = &[
     "crates/mvm-vmm/src/vmm",
     "crates/mvm-vmm/src/host",
-    "crates/mvm-backends/src/driver",
-    "crates/mvm-backends/src/fc",
+    "crates/mvm-vmm/src/driver",
+    "crates/mvm-vmm/src/fc",
     "crates/mvm-hostd/src/bin",
     "crates/mvm-runtime/src/workload_runner",
     "crates/mvm-runtime/src/backends",
@@ -51,17 +51,17 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "the per-tenant spawn lock: an empty file held for flock",
     ),
     (
-        "crates/mvm-backends/src/driver/qemu_process.rs",
+        "crates/mvm-vmm/src/driver/qemu_process.rs",
         "lock_path",
         "the CID allocation lock: an empty file held for flock",
     ),
     (
-        "crates/mvm-backends/src/fc/fork_namespace.rs",
+        "crates/mvm-vmm/src/fc/fork_namespace.rs",
         "parent_path",
         "an empty mount-point placeholder a bind mount covers",
     ),
     (
-        "crates/mvm-backends/src/fc/fork_devices.rs",
+        "crates/mvm-vmm/src/fc/fork_devices.rs",
         "open(recorded)",
         "an empty drive placeholder the retarget replaces before the child runs",
     ),

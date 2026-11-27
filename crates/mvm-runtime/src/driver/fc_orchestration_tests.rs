@@ -1,7 +1,7 @@
 //! Firecracker-driver tests that assert runtime orchestration rather than
 //! VMM mechanics.
 //!
-//! `FcDriver` itself lives in `mvm-backends`, but these four reach for
+//! `FcDriver` itself lives in `mvm-vmm`, but these four reach for
 //! `workload_runner`, `test_support`, and the `WasmBackend` capability row —
 //! all orchestration this crate owns. They stayed here rather than following
 //! the driver down, because stubbing what they call would have hollowed out
@@ -9,8 +9,8 @@
 
 #[cfg(test)]
 mod tests {
-    use mvm_backends::driver::FcDriver;
     use mvm_core::vm_backend::VmBackend;
+    use mvm_vmm::driver::FcDriver;
     use mvm_vmm::driver::spec::VmmSpec;
     use mvm_vmm::driver::traits::VmmDriver;
 
@@ -22,9 +22,9 @@ mod tests {
     fn firecracker_and_hvf_advertise_the_live_standby_pool() {
         use crate::driver::hvf::HvfDriver;
         use crate::wasm_backend::WasmBackend;
-        use mvm_backends::driver::LibkrunDriver;
-        use mvm_backends::driver::QemuDriver;
-        use mvm_backends::mock::MockDriver;
+        use mvm_vmm::driver::LibkrunDriver;
+        use mvm_vmm::driver::QemuDriver;
+        use mvm_vmm::mock::MockDriver;
 
         assert!(FcDriver::new().capabilities().standby_pool);
         assert!(!LibkrunDriver::new().capabilities().standby_pool);
@@ -90,7 +90,7 @@ mod tests {
         )
         .unwrap();
 
-        let control = mvm_backends::fc::FcVmFullControl::new(&spec.id);
+        let control = mvm_vmm::fc::FcVmFullControl::new(&spec.id);
         assert_eq!(control.rootfs_path().unwrap(), image);
     }
 
@@ -188,12 +188,12 @@ mod tests {
         // because it is where the cmdline lands, and that the cmdline matches the
         // workload's is asserted where both are assembled, not here.
         let device_set = |boot: &VmmSpec| {
-            mvm_backends::driver::fc::fc_config_api_puts(
+            mvm_vmm::driver::fc::fc_config_api_puts(
                 boot,
                 "/img/vmlinux",
                 "/state/w/runtime/v.sock",
                 "/state/w",
-                mvm_backends::fc::FcCapabilities::default(),
+                mvm_vmm::fc::FcCapabilities::default(),
             )
             .into_iter()
             .filter(|p| p.path != "/boot-source")

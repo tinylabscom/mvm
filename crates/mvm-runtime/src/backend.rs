@@ -21,8 +21,8 @@ use crate::web_linux_backend::WebLinuxBackend;
 use crate::workload_runner::{
     RealBrokerRegistrar, RealNetworkEndpointSpawner, StopTiming, WorkloadRunner,
 };
-use mvm_backends::driver::hvf::HvfDriver;
-use mvm_backends::driver::{LibkrunDriver, QemuDriver};
+use mvm_vmm::driver::hvf::HvfDriver;
+use mvm_vmm::driver::{LibkrunDriver, QemuDriver};
 use mvm_vmm::host::drive_file::DriveFile;
 
 /// Release a failed custodied start only when its native owner proves no live child remains.
@@ -36,7 +36,7 @@ use mvm_vmm::host::drive_file::DriveFile;
 pub fn release_confirmed_start_failure(
     error: anyhow::Error,
 ) -> std::result::Result<anyhow::Error, anyhow::Error> {
-    match error.downcast::<mvm_backends::driver::hvf::ColdHvfBootFailure>() {
+    match error.downcast::<mvm_vmm::driver::hvf::ColdHvfBootFailure>() {
         Ok(failure) => failure.into_released_error().map_err(anyhow::Error::new),
         Err(error) => Ok(error),
     }
@@ -46,7 +46,7 @@ pub fn release_confirmed_start_failure(
 #[cfg(all(feature = "test-support", unix))]
 #[doc(hidden)]
 pub fn uncertain_native_start_failure_for_test() -> anyhow::Error {
-    anyhow::Error::new(mvm_backends::driver::hvf::ColdHvfBootFailure::uncertain_test_fixture())
+    anyhow::Error::new(mvm_vmm::driver::hvf::ColdHvfBootFailure::uncertain_test_fixture())
 }
 
 /// Reap a synthetic native start failure after a custody-classification test.
@@ -54,7 +54,7 @@ pub fn uncertain_native_start_failure_for_test() -> anyhow::Error {
 #[doc(hidden)]
 pub fn reap_uncertain_native_start_failure_for_test(error: anyhow::Error) {
     error
-        .downcast::<mvm_backends::driver::hvf::ColdHvfBootFailure>()
+        .downcast::<mvm_vmm::driver::hvf::ColdHvfBootFailure>()
         .expect("synthetic native start custody remains intact")
         .reap_uncertain_test_fixture();
 }

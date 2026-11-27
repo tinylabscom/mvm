@@ -604,7 +604,7 @@ pub fn verify_and_resume_from_dir<IO: SnapshotIO + ?Sized>(
 // depending on this crate. Re-exported here at its original paths.
 // The Firecracker SnapshotIO moved to the backend that implements it;
 // re-exported here so callers keep resolving it at its original path.
-pub use mvm_backends::fc::io::FirecrackerIO;
+pub use mvm_vmm::fc::io::FirecrackerIO;
 pub use mvm_vmm::snapshot::{
     CannedIO, SnapshotIO, assert_vsock_only_device_model, guarded_fork_load_paused,
     guarded_fork_load_resume, guarded_load_resume,
@@ -880,8 +880,8 @@ fn map_verify_error(err: VerifyError, dir: &Path) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_backends::fc::io::FirecrackerIO;
     use mvm_core::util::test_env::TestEnv;
+    use mvm_vmm::fc::io::FirecrackerIO;
     use mvm_vmm::host::shell::{run_in_vm, shell_quote};
     use std::os::unix::fs::PermissionsExt;
 

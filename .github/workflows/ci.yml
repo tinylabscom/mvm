@@ -521,12 +521,12 @@ jobs:
           features="$features,mvm-cli/manifest-verify,mvm-cli/release-artifact-bootstrap,mvm-cli/test-support"
           features="$features,mvm-hostd/manifest-verify,mvm-hostd/wasm-backend"
           features="$features,mvm-runtime/wasm-backend,mvm-runtime/test-support"
-          features="$features,mvm-backends/test-support,mvm-vmm/test-support,mvm-fs/test-support"
+          features="$features,mvm-vmm/test-support,mvm-fs/test-support"
           features="$features,mvm-agentd/addons"
           echo "features: $features"
           ./scripts/cargo.sh clippy --locked --all-targets \
             -p mvmctl -p mvm-core -p mvm-client -p mvm-sdk -p mvm-build -p mvm-cli \
-            -p mvm-hostd -p mvm-runtime -p mvm-backends -p mvm-vmm -p mvm-fs -p mvm-agentd \
+            -p mvm-hostd -p mvm-runtime -p mvm-vmm -p mvm-fs -p mvm-agentd \
             --features "$features" -- -D warnings
 
       # mvmd links mvm-core without the release verifier, so the refusal path
@@ -834,8 +834,8 @@ jobs:
 
   # mvm does not run on Windows hosts, and nothing here claims it does. What
   # this lane holds is the portable floor a future Windows host would build
-  # on: the foundation crates, and the VMM and backend crates with their
-  # Unix-only modules compiled out, have to keep compiling for a Windows
+  # on: the foundation crates, and the VMM crate with its Unix-only device
+  # model and drivers compiled out, have to keep compiling for a Windows
   # target. A Unix API used without a platform guard fails here instead of
   # being found by whoever next attempts the port. It is a compile check only: no Windows
   # runner, no tests, and the GNU target so no MSVC toolchain is needed. The
@@ -871,7 +871,7 @@ jobs:
       - name: cargo check for x86_64-pc-windows-gnu
         run: |
           cargo check --locked --target x86_64-pc-windows-gnu \
-            -p mvm-contract -p mvm-core -p mvm-vmm -p mvm-backends
+            -p mvm-contract -p mvm-core -p mvm-vmm
           cargo check --locked --target x86_64-pc-windows-gnu \
             -p mvm-core --features provenance,client,hostd-transport
 

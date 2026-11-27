@@ -578,7 +578,7 @@ fn check_same_identity_ownership(rel: &str, source: &str, violations: &mut Vec<S
     if has_identifier(source, "guarded_load_resume")
         && rel != SEALED_RESUME_OWNER
         && rel != "crates/mvm-vmm/src/snapshot.rs"
-        && rel != "crates/mvm-backends/src/fc/snapshot.rs"
+        && rel != "crates/mvm-vmm/src/fc/snapshot.rs"
     {
         violations.push(format!(
             "{rel}: `guarded_load_resume` is outside the sealed owner or named lower implementation"

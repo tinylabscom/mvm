@@ -9,7 +9,6 @@ members = [
     "crates/deps/mvm-macho-sign",
     "crates/mvm-runtime",
     "crates/mvm-vmm",
-    "crates/mvm-backends",
     "crates/mvm-build",
     # Seals built artifacts into a signed `.mvmpkg` under any Ed25519 signer.
     # Depends on mvm-core alone, so the CLI and a library caller share one
@@ -310,7 +309,6 @@ mvm-host-services = { path = "crates/mvm-host-services", version = "0.28.0-rc.11
 mvm-build = { path = "crates/mvm-build", version = "0.28.0-rc.11", default-features = false }
 mvm-runtime = { path = "crates/mvm-runtime", version = "0.28.0-rc.11", default-features = false }
 mvm-vmm = { path = "crates/mvm-vmm", version = "0.28.0-rc.11" }
-mvm-backends = { path = "crates/mvm-backends", version = "0.28.0-rc.11" }
 mvm-fs = { path = "crates/mvm-fs", version = "0.28.0-rc.11" }
 mvm-http = { path = "crates/mvm-http", version = "0.28.0-rc.11" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.28.0-rc.11", default-features = false }
@@ -440,8 +438,7 @@ tar.workspace = true
 # `test-support` for the in-process registry `tests/audit_emissions_live.rs`
 # pushes bundles to.
 mvm-fs = { workspace = true, features = ["test-support"] }
-mvm-backends.workspace = true
-mvm-vmm.workspace = true
+mvm-vmm = { workspace = true, features = ["fc", "hvf", "libkrun", "qemu"] }
 # Plan 60 Phase 4 — `tests/audit_total_coverage.rs` walks the
 # `clap::Command` tree returned by `mvm_cli::commands::cli_command()`
 # to enforce that every subcommand has a declared audit posture.
