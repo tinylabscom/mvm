@@ -354,7 +354,9 @@ fn recover_incomplete_claims_in(root: &Path) {
             // journal (shouldn't happen with new code) or the cleanup
             // already ran. Either way, destroy if stale.
             if older_than(&claimed, ABANDONED_AFTER) {
+                // An interrupted retire, which stops the reaper before the VMM.
                 let origin = infer_origin_dir(root, name_str);
+                stop_reaper(&claimed, &origin);
                 destroy(&claimed, &origin, &claimed);
             }
             continue;
@@ -1438,37 +1440,127 @@ mod tests {
         assert_eq!(left, ["idle-young"]);
     }
 
-    /// Draining stops the reaper of the entry it retires, and never signals a
-    /// process the entry's identity record does not confirm.
+    /// Kills every process still running when dropped, so a failed assert
+    /// leaves nothing behind.
+    #[cfg(target_os = "linux")]
+    struct Reaped(Vec<std::process::Child>);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            for child in &mut self.0 {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    /// A stand-in Firecracker: a shell copied under the name `firecracker`,
+    /// so `/proc/<pid>/comm` reads `firecracker`, whose command line names
+    /// `entry`'s API socket the way a pool process's does.
+    #[cfg(target_os = "linux")]
+    fn fake_firecracker(bin_dir: &Path, entry: &Path) -> std::process::Child {
+        let _env = mvm_core::util::test_env::TestEnv::new();
+        let binary = bin_dir.join("firecracker");
+        if !binary.exists() {
+            std::fs::copy("/bin/sh", &binary).expect("copy a shell");
+        }
+        std::process::Command::new(&binary)
+            .args([
+                "-c",
+                "while :; do sleep 1; done",
+                "firecracker",
+                "--api-sock",
+            ])
+            .arg(entry.join(API_SOCKET))
+            .spawn()
+            .expect("spawn a stand-in Firecracker")
+    }
+
+    /// Draining retires a healthy idle process: its confirmed Firecracker
+    /// and its reaper are both stopped, though the entry is young.
     #[cfg(target_os = "linux")]
     #[test]
-    fn drain_stops_the_reaper_and_never_signals_an_unconfirmed_pid() {
+    fn drain_stops_a_healthy_idle_firecracker_and_its_reaper() {
         let root = tempfile::tempdir().unwrap();
-        let dir = entry(root.path(), "idle-leaked", Some(512));
-        let mut reaper = session_child(&dir);
-        let mut decoy = session_child(root.path());
-        std::fs::write(dir.join(REAPER_PID_FILE), record(&reaper).render()).unwrap();
-        let recycled = EndpointPid {
-            started: record(&decoy).started.map(|started| started + 1),
-            ..record(&decoy)
-        };
-        std::fs::write(dir.join(FC_IDENTITY_FILE), recycled.render()).unwrap();
-        std::fs::write(dir.join(PID_FILE), decoy.id().to_string()).unwrap();
-        age(&dir, ABANDONED_AFTER * 2);
+        let bin = tempfile::tempdir().unwrap();
+        let dir = entry(root.path(), "idle-healthy", Some(512));
+        let mut procs = Reaped(vec![
+            fake_firecracker(bin.path(), &dir),
+            session_child(&dir),
+        ]);
+        std::fs::write(dir.join(FC_IDENTITY_FILE), record(&procs.0[0]).render()).unwrap();
+        std::fs::write(dir.join(PID_FILE), procs.0[0].id().to_string()).unwrap();
+        std::fs::write(dir.join(REAPER_PID_FILE), record(&procs.0[1]).render()).unwrap();
+        assert!(confirmed_firecracker(&dir, &dir.join(API_SOCKET)).is_some());
 
         drain_in(root.path());
 
         assert!(
-            wait_gone(&mut reaper),
-            "the retired entry's reaper is stopped"
+            wait_gone(&mut procs.0[0]),
+            "the idle Firecracker is stopped"
+        );
+        assert!(wait_gone(&mut procs.0[1]), "its reaper is stopped");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    /// The start time in a record is what stands between a drain and a
+    /// recycled pid: a process whose command line names the entry, exactly as
+    /// its reaper's does, is spared when its start time is not the recorded
+    /// one, and stopped when it is.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn drain_never_signals_a_pid_whose_start_time_differs() {
+        let root = tempfile::tempdir().unwrap();
+        let spared_dir = entry(root.path(), "idle-recycled", Some(512));
+        let stopped_dir = entry(root.path(), "idle-recorded", Some(512));
+        let mut procs = Reaped(vec![
+            session_child(&spared_dir),
+            session_child(&stopped_dir),
+        ]);
+        let real = record(&procs.0[0]);
+        let recycled = EndpointPid {
+            started: real.started.map(|started| started + 1),
+            ..real
+        };
+        std::fs::write(spared_dir.join(REAPER_PID_FILE), recycled.render()).unwrap();
+        std::fs::write(
+            stopped_dir.join(REAPER_PID_FILE),
+            record(&procs.0[1]).render(),
+        )
+        .unwrap();
+        age(&spared_dir, ABANDONED_AFTER * 2);
+        age(&stopped_dir, ABANDONED_AFTER * 2);
+
+        drain_in(root.path());
+
+        assert!(
+            wait_gone(&mut procs.0[1]),
+            "the recorded process is stopped"
         );
         assert!(
-            alive(&mut decoy),
-            "a pid with another start time is never signalled"
+            alive(&mut procs.0[0]),
+            "another start time is never signalled"
         );
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
-        let _ = decoy.kill();
-        let _ = decoy.wait();
+    }
+
+    /// Recovering a retire interrupted after its rename stops the reaper the
+    /// retire had not reached yet.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovering_an_interrupted_retire_stops_its_reaper() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("idle-cut");
+        let taken = entry(root.path(), "claimed-idle-cut-aabbccdd", Some(512));
+        let mut procs = Reaped(vec![session_child(&origin)]);
+        std::fs::write(taken.join(REAPER_PID_FILE), record(&procs.0[0]).render()).unwrap();
+        age(&taken, ABANDONED_AFTER * 2);
+
+        recover_in(root.path());
+
+        assert!(wait_gone(&mut procs.0[0]), "the reaper is stopped");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
     /// Pool files are created fresh, owner-only, and never through a symlink.

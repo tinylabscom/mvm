@@ -93,27 +93,29 @@ pub fn watch_idle(idle_timeout: Duration) {
 /// Release everything this host keeps for launches that have not happened
 /// yet: every unclaimed standby and every idle Firecracker process.
 ///
-/// A standby whose VM was started is stopped through the teardown a machine
-/// gets ([`crate::LocalBackend::stop_machine_in_lifecycle`]); one with nothing
-/// running has its state removed the way that teardown ends. A claimed
-/// standby belongs to the launch consuming it and is left alone, as is an
-/// idle process a refill is still starting.
+/// Each standby VM, parent and preloaded child, goes through the teardown a
+/// machine gets ([`crate::LocalBackend::stop_machine_in_lifecycle`]); one with
+/// nothing running is left with no state, the way that teardown ends. What a
+/// launch owns is left alone: a claimed standby, one whose preloaded child a
+/// claim holds, and an idle process a refill is still starting. Records go
+/// before their VMs, so a failed teardown leaves a standby VM with no record
+/// for the next `machine stop --all` to stop.
 ///
 /// # Errors
 ///
-/// If the pool cannot be read, or a standby could not be released; the others
-/// are still released.
+/// If the pool cannot be read, or a standby VM could not be released; the
+/// others are still released.
 pub fn drain(client: &crate::LocalBackend) -> Result<()> {
-    let taken = SupervisorStandbyPool::open()?.take_unclaimed()?;
-    let failed: Vec<String> = taken
-        .into_iter()
-        .flat_map(|h| std::iter::once(h.id).chain(h.preloaded_child_vm_name))
-        .filter_map(|name| {
-            release_standby_vm(client, &name)
-                .err()
-                .map(|error| format!("{name}: {error:#}"))
-        })
-        .collect();
+    let mut failed = Vec::new();
+    for taken in SupervisorStandbyPool::open()?.take_unclaimed()? {
+        let parent = crate::lifecycle::MachineLifecycleLock::acquire(&taken.handle.id);
+        let gates = std::iter::once(parent).chain(taken.child_gate.map(Ok));
+        for gate in gates {
+            if let Err(error) = gate.and_then(|gate| release_standby_vm(client, &gate)) {
+                failed.push(format!("{}: {error:#}", taken.handle.id));
+            }
+        }
+    }
     mvm_vmm::fc::idle_pool::drain();
     anyhow::ensure!(
         failed.is_empty(),
@@ -123,15 +125,32 @@ pub fn drain(client: &crate::LocalBackend) -> Result<()> {
     Ok(())
 }
 
-fn release_standby_vm(client: &crate::LocalBackend, name: &str) -> Result<()> {
-    let lifecycle = crate::lifecycle::MachineLifecycleLock::acquire(name)?;
-    if mvm_runtime::AnyBackend::for_started_vm(name).is_some() {
-        client
-            .stop_machine_in_lifecycle(&crate::dto::MachineId(name.to_string()), &lifecycle, None)
-            .map_err(|error| anyhow::anyhow!(error))
-    } else {
-        lifecycle.reap_unowned_state().map(|_| ())
+/// The VM names unclaimed standbys hold, parents and preloaded children: what
+/// [`drain`] would release. Empty when the pool cannot be read.
+#[must_use]
+pub fn unclaimed_standby_vms() -> Vec<String> {
+    SupervisorStandbyPool::open()
+        .and_then(|pool| pool.list())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|h| matches!(h.state, StandbyState::Idle | StandbyState::Parked))
+        .flat_map(|h| std::iter::once(h.id).chain(h.preloaded_child_vm_name))
+        .collect()
+}
+
+/// Stop the standby VM `lifecycle` names, then remove what it left. A saved-state
+/// standby has no VM to stop; its state goes as a stopped machine's does, and
+/// the stop's error matters only while something still runs out of it.
+fn release_standby_vm(
+    client: &crate::LocalBackend,
+    lifecycle: &crate::lifecycle::MachineLifecycleLock,
+) -> Result<()> {
+    let id = crate::dto::MachineId(lifecycle.name().to_string());
+    let stopped = client.stop_machine_in_lifecycle(&id, lifecycle, None);
+    if lifecycle.reap_unowned_state()? {
+        return Ok(());
     }
+    stopped.map_err(|error| anyhow::anyhow!(error))
 }
 
 /// What the host budget leaves for standbys.
@@ -416,6 +435,52 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    /// A standby whose VM is running is stopped by the drain through the
+    /// machine teardown, not only a saved-state one whose state is removed.
+    #[tokio::test]
+    async fn drain_stops_a_running_standby_vm() {
+        use mvm_core::client::MvmClient as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"hashable-rootfs-bytes\n").unwrap();
+        let client = crate::LocalBackend::with_hypervisor("mock");
+        let launched = client
+            .launch(
+                crate::launch::LaunchRequest::builder(
+                    crate::launch::LifecycleMode::Persistent,
+                    rootfs
+                        .to_string_lossy()
+                        .parse::<mvm_core::rootfs_source::RootfsSource>()
+                        .expect("test image parses"),
+                )
+                .name("standby-live")
+                .build()
+                .expect("request"),
+            )
+            .await
+            .expect("launch");
+        SupervisorStandbyPool::open()
+            .unwrap()
+            .record(&idle_handle(&launched.machine.name, 0))
+            .unwrap();
+
+        drain(&client).expect("drain");
+
+        let running = client
+            .list_machines(mvm_core::client::dto::MachineFilter::all())
+            .await
+            .expect("list")
+            .into_iter()
+            .any(|m| {
+                m.name == "standby-live"
+                    && m.status == mvm_core::client::dto::MachineStatus::Running
+            });
+        assert!(!running, "the running standby VM was not stopped");
+        assert!(!mvm_core::config::vm_state_dir("standby-live").exists());
     }
 
     #[test]

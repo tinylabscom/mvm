@@ -3833,3 +3833,115 @@ fn promoting_a_parent_to_a_workload_is_refused() {
     );
     assert_eq!(before.state, StandbyState::Idle);
 }
+
+/// The reservation context a lock test needs: the reservation runs, and the
+/// claim then fails reading a parent checkpoint that does not exist.
+struct ReservationScaffold {
+    _tmp: tempfile::TempDir,
+    pool: SupervisorStandbyPool,
+    checkpoints: CheckpointStore,
+    snapshots: FsSnapshotStore,
+    parent: CheckpointId,
+    registry_path: PathBuf,
+}
+
+impl ReservationScaffold {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        Self {
+            pool: SupervisorStandbyPool::at(tmp.path().join("pool")),
+            checkpoints: CheckpointStore::at(tmp.path().join("checkpoints")),
+            snapshots: FsSnapshotStore::new(tmp.path().join("snapshots")).unwrap(),
+            parent: CheckpointId::new("absent-parent"),
+            registry_path: tmp.path().join("vm-names.json"),
+            _tmp: tmp,
+        }
+    }
+
+    fn reserve(&self, handle: &StandbyHandle) -> std::result::Result<CheckpointMeta, StandbyError> {
+        let anchor = ClaimTestAnchor::unaudited();
+        let ctx = ClaimContext {
+            pool: &self.pool,
+            checkpoints: &self.checkpoints,
+            snapshots: &self.snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &self.parent,
+            registry_path: &self.registry_path,
+            grant_issuer: None,
+        };
+        reserve_and_verify_parent(&ctx, handle, false)
+    }
+}
+
+/// A drain and a claim race over one standby at each step, serialized by one
+/// lock. Before the reservation: the drain takes the record, and the claim
+/// loses it cleanly without recreating it.
+#[test]
+fn a_standby_the_drain_took_is_lost_to_a_later_reservation() {
+    let scaffold = ReservationScaffold::new();
+    let handle = idle_parent_handle("raced", Path::new("/unused.sock"));
+    scaffold.pool.record(&handle).unwrap();
+
+    let taken = scaffold.pool.take_unclaimed().unwrap();
+
+    assert_eq!(taken.len(), 1);
+    assert!(matches!(
+        scaffold.reserve(&handle),
+        Err(StandbyError::ReservationLost)
+    ));
+    assert!(
+        scaffold.pool.list().unwrap().is_empty(),
+        "the record is not recreated"
+    );
+}
+
+/// After the reservation: the record reads `Claimed` and the drain leaves it.
+#[test]
+fn a_standby_a_claim_reserved_is_left_by_the_drain() {
+    let scaffold = ReservationScaffold::new();
+    let handle = idle_parent_handle("raced", Path::new("/unused.sock"));
+    scaffold.pool.record(&handle).unwrap();
+
+    // The reservation's locked step; the rest of a claim runs unlocked.
+    scaffold.pool.mark_claimed(&handle.id).unwrap();
+
+    assert!(scaffold.pool.take_unclaimed().unwrap().is_empty());
+    let left: Vec<_> = scaffold
+        .pool
+        .list()
+        .unwrap()
+        .into_iter()
+        .map(|h| h.id)
+        .collect();
+    assert_eq!(left, ["raced"]);
+}
+
+/// During either: the production reservation waits on the lock the drain
+/// holds while it selects and removes records, so neither sees the other
+/// half-done.
+#[test]
+fn the_production_reservation_waits_on_the_lock_the_drain_holds() {
+    let scaffold = std::sync::Arc::new(ReservationScaffold::new());
+    let handle = idle_parent_handle("raced", Path::new("/unused.sock"));
+    scaffold.pool.record(&handle).unwrap();
+    let drain_holds = scaffold.pool.claim_lock().unwrap();
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let racer = std::sync::Arc::clone(&scaffold);
+    let reserving = std::thread::spawn(move || {
+        let _ = racer.reserve(&handle);
+        let _ = done_tx.send(());
+    });
+
+    assert!(
+        done_rx
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .is_err(),
+        "the reservation must wait for the drain's lock"
+    );
+    drop(drain_holds);
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the reservation proceeds once the drain lets go");
+    reserving.join().unwrap();
+}

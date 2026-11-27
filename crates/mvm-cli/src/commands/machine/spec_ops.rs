@@ -162,22 +162,28 @@ pub(super) fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
     Ok(())
 }
 
+/// Drain the unclaimed standbys and idle Firecracker processes for `rm --all`.
+/// They hold no definition, so a failure is reported and the removal goes on.
+fn drain_standbys() {
+    if let Err(error) = mvm_client::standby::drain(&mvm_client::LocalBackend::new()) {
+        crate::ui::warn(&format!("could not drain the standby pool: {error:#}"));
+    }
+}
+
 pub(super) fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
     let json = args.json;
     let targets = resolve_remove_targets(args.all, &args.names)?;
-    // Standbys and idle Firecracker processes hold no definition or user
-    // state, so `--all` drains them rather than refusing over them below.
-    if args.all {
-        mvm_client::standby::drain(&mvm_client::LocalBackend::new())?;
-    }
-    // `--all` removes definitions, so a live VM that has none (a standby, an
-    // unnamed run) is not a target; it must not be passed over as absent.
+    // `--all` removes definitions, so a live VM that has none (an unnamed run)
+    // is not a target; it must not be passed over as absent. An unclaimed
+    // standby is neither: `--all` drains it once the removal is confirmed.
     let undefined = if args.all {
+        let standbys = mvm_client::standby::unclaimed_standby_vms();
         let live: Vec<String> = mvm_client::LocalBackend::new()
             .list_stop_targets()
             .into_iter()
             .filter(|machine| machine.status != mvm_core::client::dto::MachineStatus::Stopped)
             .map(|machine| machine.name)
+            .filter(|name| !standbys.contains(name))
             .collect();
         undefined_live_vms(&targets, &live)
     } else {
@@ -189,6 +195,9 @@ pub(super) fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
         anyhow::bail!(msg);
     }
     if targets.is_empty() && undefined.is_empty() {
+        if args.all {
+            drain_standbys();
+        }
         if json {
             println!("[]");
         } else {
@@ -219,6 +228,9 @@ pub(super) fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
             println!("aborted");
             return Ok(());
         }
+    }
+    if args.all {
+        drain_standbys();
     }
     // Only reached with `--force`: there is no definition to remove, so the
     // VMM is stopped and that is all.

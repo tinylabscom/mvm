@@ -67,21 +67,33 @@ impl Home {
         self.root.join("fc-idle")
     }
 
-    fn run(&self, args: &[&str]) {
-        #[allow(deprecated)]
-        let out = Command::cargo_bin("mvmctl")
-            .expect("locate mvmctl")
-            .args(args)
-            .env("HOME", self.root.parent().expect("parent"))
-            .env("MVM_HOME", &self.root)
-            .output()
-            .expect("spawn mvmctl");
+    /// Run `mvmctl` against this home. `MVM_SKIP_RECONCILE=1` is set for the
+    /// verbs that drain: the reconcile pass before a lifecycle command
+    /// recovers crashed idle-pool entries on its own, so without it a drain
+    /// that never ran would still leave the pool empty.
+    fn run(&self, args: &[&str]) -> std::process::Output {
+        let out = self.mvmctl(args).output().expect("spawn mvmctl");
         assert!(
             out.status.success(),
             "mvmctl {args:?} failed:\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+        out
+    }
+
+    fn mvmctl(&self, args: &[&str]) -> Command {
+        #[allow(deprecated)]
+        let mut command = Command::cargo_bin("mvmctl").expect("locate mvmctl");
+        command
+            .args(args)
+            .env("HOME", self.root.parent().expect("parent"))
+            .env("MVM_HOME", &self.root)
+            .stdin(std::process::Stdio::null());
+        if args.first() == Some(&"machine") {
+            command.env("MVM_SKIP_RECONCILE", "1");
+        }
+        command
     }
 
     fn names(dir: &Path) -> Vec<String> {
@@ -128,27 +140,51 @@ impl Home {
 #[test]
 fn stop_all_drains_the_standby_and_idle_pools() {
     let home = Home::seeded();
-    home.run(&["machine", "stop", "--all", "--yes"]);
+    let _ = home.run(&["machine", "stop", "--all", "--yes"]);
     home.assert_drained();
 }
 
 #[test]
 fn rm_all_drains_the_standby_and_idle_pools() {
     let home = Home::seeded();
-    home.run(&["machine", "rm", "--all", "--yes"]);
+    let _ = home.run(&["machine", "rm", "--all", "--yes"]);
     home.assert_drained();
 }
 
 #[test]
 fn reconcile_recovers_what_a_crash_left_in_the_idle_pool() {
     let home = Home::seeded();
-    home.run(&["reconcile"]);
+    let _ = home.run(&["reconcile"]);
     home.assert_recovered();
 }
 
 #[test]
 fn cache_prune_recovers_what_a_crash_left_in_the_idle_pool() {
     let home = Home::seeded();
-    home.run(&["cache", "prune"]);
+    let _ = home.run(&["cache", "prune"]);
     home.assert_recovered();
+}
+
+/// `machine rm --all` drains only once the removal is confirmed. A declined
+/// prompt (here a run with no terminal and no `--yes`) removes nothing, warm
+/// standbys and idle processes included, and a standby is not listed as a VM
+/// with no definition.
+#[test]
+fn rm_all_that_is_not_confirmed_drains_nothing() {
+    let home = Home::seeded();
+    let _ = home.run(&["machine", "create", "kept", "--image", "alpine"]);
+
+    let out = home.run(&["machine", "rm", "--all"]);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("aborted"), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("standby-"),
+        "a standby is not an undefined VM: {stdout}"
+    );
+    assert_eq!(home.standbys(), ["standby-claimed", "standby-idle"]);
+    assert_eq!(
+        Home::names(&home.idle_pool()),
+        ["claimed-idle-crashed-aabbccdd", "idle-abandoned"]
+    );
 }
