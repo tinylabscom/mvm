@@ -1435,10 +1435,8 @@ mod tests {
         let kept = verified.file().as_raw_fd();
         let stray = std::fs::File::open("/dev/null").unwrap();
         // SAFETY: changes only the descriptor flags of a file this test owns.
-        assert_eq!(
-            unsafe { libc::fcntl(stray.as_raw_fd(), libc::F_SETFD, 0) },
-            0
-        );
+        let cleared = unsafe { libc::fcntl(stray.as_raw_fd(), libc::F_SETFD, 0) };
+        assert_eq!(cleared, 0);
         let holds = |fd: RawFd| {
             let mut helper = mvm_core::env_hygiene::helper_command("/bin/sh");
             helper.args(["-c", "[ -e /dev/fd/$1 ]", "sh", &fd.to_string()]);

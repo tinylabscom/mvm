@@ -269,10 +269,8 @@ mod tests {
         use std::os::fd::AsRawFd;
         let file = std::fs::File::open("/dev/null").unwrap();
         // SAFETY: changes only the descriptor flags of a file this test owns.
-        assert_eq!(
-            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, 0) },
-            0
-        );
+        let cleared = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, 0) };
+        assert_eq!(cleared, 0);
         file
     }
 
