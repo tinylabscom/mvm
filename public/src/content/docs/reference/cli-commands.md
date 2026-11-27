@@ -2669,7 +2669,10 @@ When a completed launch writes a sample that violates the selected lane,
 `~/.mvm/state/bench/bench-invalid-sample-*.json`). The JSON is marked
 `status: "invalid_sample"` and is not a publishable report; it does not update
 `bench-latest.json`. If the launch wrote no sample, no invalid-sample JSON is
-created.
+created. A warm-claim lane does not treat a claim over the startup ceiling as
+an invalid sample: it records every sample and writes the report with the
+startup maximum marked FAIL, then exits nonzero, so a slow host still yields
+the distribution and each claim's phase trace.
 | `mvmctl explain <run>`                 | Explain a run and its egress refusals from the chain-signed audit log: each refused destination, its count, and how to allow it where a grant can                           |
 | `mvmctl explain <run> --review [--project PATH]` | Open the same Grant / Skip review used after a foreground run. Only grantable denials from a verified audit chain are offered; selected grants are shown as a draft and require a second confirmation before `mvm.toml` changes. `PATH` is a project directory or its manifest file; a foreground run that cannot review in place prints this command with its plan id |
 | `mvmctl watch <ir.json>`               | Rebuild a workload when its local inputs change                                                                                                                           |

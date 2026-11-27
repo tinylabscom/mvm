@@ -322,6 +322,22 @@ fn launch_for(lane: LaunchLane, launch: &[String]) -> Result<Vec<String>> {
 /// Status is never conveyed by colour alone, phase names are expanded into
 /// ordinary language, and the hard maximum is separate from percentiles so a
 /// reader cannot mistake p99 for "every boot".
+/// One PASS/FAIL row of the hard-requirement table.
+fn render_requirement(
+    out: &mut String,
+    metric: &str,
+    requirement: &crate::bench::cold_launch::HardBootRequirement,
+) {
+    let observed = format_ms(requirement.observed_max_ms);
+    let limit = format!("< {:.1} ms", requirement.limit_ms);
+    let status = if requirement.met { "PASS" } else { "FAIL" };
+    let _ = writeln!(
+        out,
+        "  {:<24} {:>12} {:>14}  {:<6}  {}",
+        metric, observed, limit, status, requirement.remark
+    );
+}
+
 fn render_summary(report: &crate::bench::cold_launch::ColdLaunchReport) -> String {
     let mut out = String::new();
     let budgets = report.lane.budgets();
@@ -340,20 +356,16 @@ fn render_summary(report: &crate::bench::cold_launch::ColdLaunchReport) -> Strin
         "Metric", "Observed", "Requirement", "Status"
     );
     if let Some(requirement) = &report.hard_requirement {
-        let observed = format_ms(requirement.observed_max_ms);
-        let limit = format!("< {:.1} ms", requirement.limit_ms);
-        let status = if requirement.met { "PASS" } else { "FAIL" };
-        let _ = writeln!(
-            out,
-            "  {:<24} {:>12} {:>14}  {:<6}  {}",
-            "Boot dispatch maximum", observed, limit, status, requirement.remark
-        );
+        render_requirement(&mut out, "Boot dispatch maximum", requirement);
     } else {
         let _ = writeln!(
             out,
             "  {:<24} {:>12} {:>14}  {:<6}  This lane has no hard boot ceiling.",
             "Boot dispatch maximum", "n/a", "n/a", "N/A"
         );
+    }
+    if let Some(requirement) = &report.startup_requirement {
+        render_requirement(&mut out, "Startup maximum", requirement);
     }
 
     let _ = writeln!(out, "\nPublished percentile budgets");
@@ -585,6 +597,25 @@ mod tests {
             .expect("hard-requirement row");
         assert!(hard_row.contains("FAIL"), "{hard_row}");
         assert!(hard_row.contains("200.0 ms"), "{hard_row}");
+    }
+
+    #[test]
+    fn human_summary_shows_a_missed_startup_ceiling() {
+        let mut report = summary_report(150.0, true);
+        report.startup_requirement = Some(HardBootRequirement {
+            metric: crate::bench::cold_launch::TimingMetric::StartupMs,
+            comparison: crate::bench::cold_launch::RequirementComparison::LessThan,
+            limit_ms: 300.0,
+            observed_max_ms: Some(717.2),
+            met: false,
+            remark: "startup".to_string(),
+        });
+        let rendered = render_summary(&report);
+        let row = rendered
+            .lines()
+            .find(|line| line.contains("Startup maximum"))
+            .expect("startup row");
+        assert!(row.contains("FAIL") && row.contains("717.2 ms"), "{row}");
     }
 
     /// The default has to be host-independent or the baseline is not one.

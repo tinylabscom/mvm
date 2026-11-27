@@ -790,7 +790,11 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
 /// The requirement every warm lane shares: the launch claimed a standby
 /// (flag and mode are independent signals, so one going missing cannot pass
 /// the other), recorded whole-VMM memory evidence for the first command, and
-/// reached the guest below the ceiling from invocation.
+/// recorded its startup from invocation.
+///
+/// The startup ceiling is judged over the whole report, not per sample, so a
+/// host where every claim misses it still yields the distribution that shows
+/// by how much. The report's startup requirement fails the lane instead.
 fn require_warm_claim(lane: LaunchLane, sample: &LaunchSample) -> Result<(), LaneViolation> {
     if !sample.work.warm_claim || sample.launch_mode != LaunchMode::Warm {
         return Err(LaneViolation::MissingWork {
@@ -801,7 +805,7 @@ fn require_warm_claim(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lan
     if sample.warm_first_command_memory.is_none() {
         return Err(LaneViolation::MissingWarmMemory);
     }
-    require_startup_below_ceiling(lane, sample)
+    require_startup_recorded(lane, sample).map(|_| ())
 }
 
 /// Whether the launch booted a built template slot: a `--flake` or
@@ -822,12 +826,7 @@ fn require_startup_below_ceiling(
     lane: LaunchLane,
     sample: &LaunchSample,
 ) -> Result<(), LaneViolation> {
-    let Some(found_ms) = sample.phases.startup_ms else {
-        return Err(LaneViolation::MissingWork {
-            lane,
-            expected: "startup_ms",
-        });
-    };
+    let found_ms = require_startup_recorded(lane, sample)?;
     if found_ms >= STARTUP_HARD_MAX_MS {
         return Err(LaneViolation::StartupCeilingExceeded {
             lane,
@@ -836,6 +835,15 @@ fn require_startup_below_ceiling(
         });
     }
     Ok(())
+}
+
+/// The sample's startup from invocation, which a prepared or warm lane needs
+/// to judge its ceiling at all.
+fn require_startup_recorded(lane: LaunchLane, sample: &LaunchSample) -> Result<f64, LaneViolation> {
+    sample.phases.startup_ms.ok_or(LaneViolation::MissingWork {
+        lane,
+        expected: "startup_ms",
+    })
 }
 
 /// Every cold lane requires a genuinely new VMM and guest identity. A warm
@@ -1854,7 +1862,7 @@ mod tests {
     }
 
     #[test]
-    fn a_warm_sample_is_held_to_the_ceiling_from_invocation() {
+    fn a_warm_sample_over_the_ceiling_still_belongs_in_its_lane() {
         let mut sample = launch_sample();
         sample.work.warm_claim = true;
         sample.launch_mode = LaunchMode::Warm;
@@ -1863,12 +1871,15 @@ mod tests {
         // that took the ceiling to reach the guest from the caller's command.
         assert!(sample.phases.dispatch_window_ms() < WARM_CLAIM_HARD_MAX_MS);
         sample.phases.startup_ms = Some(STARTUP_HARD_MAX_MS);
+        // The sample belongs in the lane: one slow claim must not erase the
+        // distribution that shows the miss.
+        assert_eq!(validate_lane(LaunchLane::WarmClaim, &sample), Ok(()));
+        sample.phases.startup_ms = None;
         assert_eq!(
             validate_lane(LaunchLane::WarmClaim, &sample),
-            Err(LaneViolation::StartupCeilingExceeded {
+            Err(LaneViolation::MissingWork {
                 lane: LaunchLane::WarmClaim,
-                found_ms: STARTUP_HARD_MAX_MS,
-                limit_ms: STARTUP_HARD_MAX_MS,
+                expected: "startup_ms",
             })
         );
     }
