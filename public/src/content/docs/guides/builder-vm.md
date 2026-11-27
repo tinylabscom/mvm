@@ -80,16 +80,11 @@ mvmctl machine run --flake . --hypervisor hvf
 
 On macOS 26+ the default runtime backend is HVF (Hypervisor.framework, vsock-only). The builder VM remains a build-time implementation detail. It is not the same VM as your workload VM.
 
-That distinction matters for networking. A macOS HVF workload VM is already
-vsock-only, with no guest NIC in the runtime path. The builder VM is different:
-the workload path does not imply anything about builder bootstrap. On current
-macOS HVF hosts, a source-checkout builder-image rebuild now stays on the
-trusted HVF builder transport once a cached or verified base builder image
-exists, rather than silently falling back to the older libkrun gateway path.
-If the base image is missing, the builder path may still need a verified
-bootstrap artifact for fetch-capable rebuilds. So seeing a `network-backend` or
-gateway check in `mvmctl doctor` does not mean workload traffic is going
-through a legacy guest-NIC helper.
+That distinction does not extend to networking: the builder VM is NIC-less on
+every backend too. Its `nix build` substituter traffic and dependency installs
+cross the same vsock relay to a host-side endpoint under a trusted build-egress
+policy, and an install on a builder booted without vsock egress is refused
+rather than dialed direct. There is no userspace network gateway on any path.
 
 For development convenience, `machine run --flake` combines the two phases:
 
@@ -109,6 +104,50 @@ The builder VM and runtime microVM have different jobs:
 | Runtime microVM | Runs your workload from a finished image. | Created by `mvmctl machine run`, `run`, `exec`, or tests. | Uses the built rootfs/kernel artifacts. |
 
 Do not benchmark the builder VM when you want runtime boot time. The builder VM exists so that the host can ask for Linux builds without becoming a Linux build machine itself.
+
+## Choosing the builder backend
+
+The builder VM runs on one of four host VMMs:
+
+| Backend | When it is used |
+| --- | --- |
+| `hvf` | Default on macOS 26+ Apple Silicon. Hypervisor.framework, no Homebrew dependencies. |
+| `firecracker` | Default on Linux with `/dev/kvm`, the same VMM as the Linux workload tier. Bootstraps (Stage 0) and serves one-shot builds and shell jobs; only the persistent builder refuses it by name. Live-proven on x86_64; aarch64 is untested. |
+| `qemu` | Default on every other host; a dev/test substrate, opt-in elsewhere. |
+| `libkrun` | Never auto-detected and never fallen back to; runs only when named. Needs the `slp/krun/libkrun` and `slp/krun/libkrunfw` Homebrew packages on macOS. Also boots and builds on Linux/KVM when named. |
+
+Selection, highest priority first:
+
+1. the global `--builder <libkrun|qemu|hvf|firecracker>` flag;
+2. `MVM_BUILDER_BACKEND` with one of those names (case-insensitive,
+   whitespace-trimmed; an unrecognised value, including a retired backend
+   name, logs a warning and falls through);
+3. auto-detect (`auto_detect_default_for`): macOS 26+ Apple Silicon picks
+   `hvf`, Linux with KVM picks `firecracker`, every other host picks `qemu`.
+
+macOS below 26 never reaches this ladder: `mvmctl` refuses the host before any
+command runs. `mvmctl doctor` reports the resolved choice on its
+`builder backend` line as `<backend> — <source> — <availability>`.
+
+A builder that cannot create its VM surfaces that failure; nothing retries on
+another backend. Every builder entry point goes through one policy seam
+(`builder_attempt_order` and `run_with_builder_fallback`), and
+`builder_attempt_order` returns a single backend in every branch. A genuine
+build error surfaces unchanged.
+
+Stage 0, the bootstrap that builds the builder image from nothing, is
+registered per backend at startup. A backend with no registered Stage 0
+refuses and names itself as a wiring error; it is never lowered onto libkrun.
+Stage 0's bootstrap kernel is fetched and digest-verified even in a source
+checkout, because Stage 0 is what makes local kernel builds possible:
+`mvm_build::stage0_kernel` classifies it as a bootstrap seed, as Stage 0
+already classifies its Nix root tarball. That exception covers that one
+kernel. The workload kernel still builds from a selected `mvm-images`
+checkout, and so does the builder image when `MVM_ALLOW_LOCAL_BUILDER_BUILD=1`
+opts in.
+
+Every backend produces the same `BuilderArtifacts` (kernel and rootfs from the
+same builder image), so switching backends during development is supported.
 
 ## Persistent builder VM
 
@@ -134,6 +173,11 @@ mvmctl machine build --no-persistent-builder
 ```
 
 The intended top-level DX is that developers do not need to invoke the low-level controls for normal use: `mvmctl bootstrap` pre-fetches the builder VM image, and `build` uses a persistent non-interactive builder by default when the platform supports it. If the persistent path is unavailable, the command should say why it fell back rather than silently changing the trust and performance model.
+
+Persistent builder state lives under `~/.mvm/cache/builder-vm/vms/`, one
+directory per builder, named `mvm-persistent-builder-vm-*` for libkrun and
+`mvm-persistent-builder-hvf-*` for HVF. The Stage 0 reaper ignores the prefix,
+so every backend's state takes part in `mvmctl cache prune`.
 
 ## Communication Model
 

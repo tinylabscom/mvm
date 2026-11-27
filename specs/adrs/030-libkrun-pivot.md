@@ -67,9 +67,14 @@ regardless of what the host happens to have installed.
    only when `MVM_ALLOW_LOCAL_BUILDER_BUILD=1` opts in (see Status).
    Without one, the checkout fetches the signed image set `images.lock` pins
    and verifies it against its root. The explicit `MVM_BOOT_IMAGE=fetch`
-   escape hatch may fetch the published boot image even with a checkout
-   selected; that choice is recorded as `source: fetched` in the verified
-   sidecar stamp.
+   escape hatch fetches the published builder image even with a checkout
+   selected. The default workload image refuses it while a checkout is
+   selected, because the selector is explicit in both directions: to compare
+   against a signed release, deselect the checkout. Without a checkout, a
+   fetched default image records `source: fetched` in its verified sidecar
+   stamp, so a stale prebuilt cannot be mistaken for a build of the working
+   tree, and the `boot image` line of `mvmctl doctor` reports which arm ran
+   and why.
 
    The builder image carries no binary from `mvmctl`'s embedded payload that
    a builder boot runs. Those binaries are supplied at every boot from the

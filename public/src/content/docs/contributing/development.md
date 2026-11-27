@@ -123,7 +123,7 @@ socket-custody fix in #4808. This entrypoint alone does not complete #4764.
 - **macOS 26+ Apple Silicon or Linux** — standard source-checkout development
   uses native HVF on macOS and native `/dev/kvm` on Linux. macOS 25 and older
   is not supported.
-- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which a release `cargo build` embeds and a debug `mvmctl` builds on first use. `just setup toolchain` installs the pinned Zig package into `~/.local/share/mvm/toolchains/zig/<version>` rather than system Python, so it works with externally managed Python on Ubuntu and Debian; the build detects the pinned binary there. End-users running a downloaded `mvmctl` don't need them.
+- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which an `embed-host-bins` build embeds and an unembedded `mvmctl` builds on first use. `just setup toolchain` installs the pinned Zig package into `~/.local/share/mvm/toolchains/zig/<version>` rather than system Python, so it works with externally managed Python on Ubuntu and Debian; the build detects the pinned binary there. End-users running a downloaded `mvmctl` don't need them.
 - **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
 
 Direct Nix recipe sources must include `rust-toolchain.toml` and `nix/flake.lock`.
@@ -242,6 +242,20 @@ just build embed --release                                   # the same, plus th
 
 The pinned zig and `cargo-zigbuild` must be installed for the feature
 (`just setup toolchain`); without them the build fails and names the fix.
+The build script and `mvmctl` both find the zig `just setup toolchain`
+installed; set `MVM_EMBED_ZIG=/path/to/zig` to use another binary.
+
+On macOS, `just build embed` replaces any globally configured compiler-cache
+wrapper with `scripts/rustc-macos-loader.sh` for that build. Cargo constructs
+a new dynamic-library search path before invoking rustc, so the wrapper
+restores the pinned Rust sysroot's `lib/` directory through
+`DYLD_FALLBACK_LIBRARY_PATH` at the compiler boundary; ordinary builds keep
+their configured wrapper. Some nightly distributions give `rust-objcopy` an
+incorrect RPATH, and without the repair cargo-zigbuild repeatedly warns that
+`libLLVM.dylib` is missing and embeds larger, unstripped binaries even though
+the library exists. Cargo may replay warning text cached by compilation units
+built before the repair; a new warning carries a new `dyld[PID]` and means the
+current strip step still failed.
 
 For live development, `bin/dev <command>` builds the `dev`-feature CLI and native
 host helpers together before running it, with state isolated to the checkout
@@ -275,6 +289,39 @@ Or run the bootstrap script on a fresh machine:
 ```bash
 ./nix/ops/bootstrap/dev-setup.sh
 ```
+
+### Guest runtime pieces from a source checkout
+
+A source build assembles the runtime overlay, the universal initramfs and
+both SDK sidecars on the host from one guest-runtime archive built from this
+checkout (`mvm_build::runtime_pieces::assemble_runtime_pieces`), with no
+`mvm-images` checkout and no builder VM. `mvmctl bootstrap` prewarms all four
+that way whatever `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE` says; the selector still
+decides how the OCI guest runtime is keyed (by source under `build`, by
+version otherwise) and opts bootstrap into source-built host helpers, which an
+unreleased version needs. `mvmctl dev runtime-overlay build` assembles the
+overlay from the same archive. Each assembled piece records its archive
+digest in a file beside it (`ARCHIVE_ORIGIN_FILE`), and the `guest runtime`
+line of `mvmctl doctor` names, per piece, the archive it came from and whether
+it is this tree's or this release's.
+
+After changing the guest-facing C ABI in `crates/mvm-host-services`, refresh
+the sidecars explicitly:
+
+```sh
+./target/debug/mvmctl dev sdk-sidecar build
+```
+
+It packs both libc variants from this checkout's guest-runtime archive
+(`pack_sdk_sidecars`), building the archive first if it is not cached. Each
+variant is stamped with the cdylib source fingerprint a launch compares
+against this checkout and with the digest of the archive it was packed from.
+The image carries no loader and no `libc.so.6`; the workload process that
+loads the library already has one. Outside a source checkout, `auto` packs
+them from the published guest runtime of this version; there is no
+`--source download`, because the image set carries no sidecar. A launch only
+resolves prepared sidecars, so a stale or missing one is a warning or a
+refusal naming this verb or `mvmctl bootstrap`, never an implicit rebuild.
 
 ## Building and Running
 
