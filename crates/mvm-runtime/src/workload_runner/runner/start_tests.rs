@@ -168,7 +168,7 @@ fn only_the_hvf_supervisor_owns_console_capture() {
 #[test]
 fn boot_and_console_start_run_concurrently() {
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
-    let booted = console_boot::boot_while_starting_console(
+    let booted = console_boot::boot_beside(
         || {
             started_rx
                 .recv_timeout(Duration::from_secs(1))

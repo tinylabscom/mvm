@@ -215,7 +215,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let beside_boot = durability::wait_for_unactivated_boot(inputs.config, unsynced)?;
         // Fails closed: only a sync that ran to completion replaces it.
         let mut synced = Err(anyhow::anyhow!(
-            "the lifecycle lease and runtime generation sync did not run"
+            "the lifecycle lease and runtime generation sync did not finish"
         ));
         if let Some(kernel) = kernel {
             kernel.before_boot(&spec)?;
@@ -226,7 +226,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             &spec,
             writable_images,
         )?;
-        let boot = console_boot::boot_while_starting_console(
+        let boot = console_boot::boot_beside(
             || {
                 #[cfg(unix)]
                 {
@@ -254,8 +254,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 }
             },
             || {
-                streamer.start(&capture);
                 synced = beside_boot.sync();
+                streamer.start(&capture);
             },
             || trace.mark("driver_boot"),
         );

@@ -51,10 +51,14 @@ impl<S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
         );
         self.require_caller_registration_shape(config)?;
         let lifecycle = crate::runtime_evidence::RuntimeLifecycleLease::acquire(&config.name)?;
-        let (config, unsynced) = lifecycle.bind_unsynced(config, release)?;
-        unsynced.sync()?;
-        let launch =
-            crate::kernel_custody::KernelBoundLaunch::bind(config, self.driver.kind(), &lifecycle)?;
+        let (config, mut unsynced) = lifecycle.bind_unsynced(config, release)?;
+        let launch = crate::kernel_custody::KernelBoundLaunch::bind(
+            config,
+            self.driver.kind(),
+            &lifecycle,
+            &mut unsynced,
+        )?;
+        unsynced.sync_before_spawn()?;
         let config = launch.config();
         cold_hvf_channel::require_cold_start_config(config)?;
         ClaimGuards::new(&self.spawner)
@@ -445,12 +449,13 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             "canonical kernel lifetime for this VM is still unresolved"
         );
         mvm_core::launch_trace::lap("start.lifecycle_lease");
-        let (bound_config, unsynced) = lifecycle.bind_unsynced(inputs.config, release)?;
+        let (bound_config, mut unsynced) = lifecycle.bind_unsynced(inputs.config, release)?;
         mvm_core::launch_trace::lap("start.runtime_bind");
         let kernel_binding = crate::kernel_custody::KernelBoundLaunch::bind(
             bound_config,
             self.driver.kind(),
             &lifecycle,
+            &mut unsynced,
         )?;
         mvm_core::launch_trace::lap("start.kernel_bind");
         let bound_config = kernel_binding.config();

@@ -112,7 +112,14 @@ impl BundleRegistry {
         let dir = self.bundle_users_dir(sha);
         self.has_bundle_users(sha)?;
         crate::config::create_private_dir(&dir)?;
-        crate::atomic_io::atomic_write_new(&dir.join(vm), b"retained\n")?;
+        let user = dir.join(vm);
+        crate::atomic_io::atomic_write_new(&user, b"retained\n").with_context(|| {
+            format!(
+                "bundle {sha} is already retained for a VM named {vm}; if no VM of that name \
+                 is running (a power loss can leave this behind), remove {}",
+                user.display()
+            )
+        })?;
         crate::private_fs::sync_managed_directory_chain(&self.root, &dir)?;
         Ok(())
     }

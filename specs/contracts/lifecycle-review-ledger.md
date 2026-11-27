@@ -16,29 +16,36 @@ line ranges are as recorded there and were not re-derived when this file was wri
 
 ## Cold-launch lease and generation durability
 
-Reviewed `RuntimeLifecycleLease::{acquire, bind, bind_unsynced}`, the
-runner's cold start (`start_workload_custodied_with_release`,
-`boot_bound_workload_guarded`, `durability`), and every reader of
+Reviewed `RuntimeLifecycleLease::{acquire, bind, bind_unsynced}`,
+`KernelBoundLaunch::bind`, the runner's cold start
+(`start_workload_custodied_with_release`, `boot_bound_workload_guarded`,
+`durability`), the cold HVF channel, and every reader of
 `runtime-evidence/<vm>`: kernel custody, installed-bundle release, retirement
-on `machine rm`, and the stop path. Reconcile and the host budget read only
-`vms/<name>`. A cold launch whose guest is activated over vsock now syncs the
-lease entry and runtime generation on the console-start scoped thread beside
-the driver boot, joined before activation; a failed or unfinished sync kills
-the guest unactivated and keeps the generation. A guest without an
-activation step syncs before its VMM starts. Standby spawns and the cold HVF
-channel still sync before spawn.
+on `machine rm` and transient completion, the stop path, and the checkpoint
+and fork paths that reach a generation through `vms/<name>/mode.json`'s
+runtime launch binding. Those last need a live, activated VM, so they only
+ever see synced records. Reconcile, doctor and the host budget read only
+`vms/<name>`.
+
+A cold launch whose guest is activated over vsock syncs the lease entry, the
+runtime generation and any pending canonical-kernel record on the
+console-start scoped thread beside the driver boot, before starting the
+console follower, joined before activation. A failed or unfinished sync kills
+the guest unactivated and keeps the generation. A guest without an activation
+step syncs before its VMM starts. Standby spawns and the cold HVF channel
+sync before spawn, and a bind whose sync fails there removes its generation.
+A new lease entry is synced before an installed bundle records the VM as its
+user, so a registry use cannot outlive its release record.
 
 The deferral changes only what survives a power loss or kernel crash between
 spawn and activation, and no VMM survives either. A killed launcher loses
 nothing it wrote; the subprocess witness kills one inside the sync after the
-VMM started and checks reconcile and a same-name relaunch. Limits: an
-installed-bundle use record and a canonical kernel record that lose their
-unsynced `<vm>` entry to a power loss leave their registry retention
-unreleased, which refuses a same-name launch rather than admitting one
-(fail-closed, the class #6005 already widened). A failed sync whose kill also
-fails leaves an unactivated VMM, as a failed admission sync does. Release
-proof files are still synced by mvm-build before spawn. No power-loss test
-was run.
+VMM started and checks reconcile and a same-name relaunch. Limits: a failed
+sync whose kill also fails leaves an unactivated VMM, as a failed admission
+sync does. An installed-bundle use left behind by any other crash is refused
+with an error naming the file to remove once no VM of that name runs. The
+canonical-kernel witness needs the pinned kernel and is ignored by default.
+No power-loss test was run.
 
 ## Direct coordinator process observation
 

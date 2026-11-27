@@ -3417,7 +3417,12 @@ mod tests {
         let sha = &installed.sha256;
 
         registry.retain_for_vm(sha, "first").unwrap();
-        assert!(registry.retain_for_vm(sha, "first").is_err());
+        let stuck = format!("{:#}", registry.retain_for_vm(sha, "first").unwrap_err());
+        let user = tmp.path().join(format!(".{sha}.uses/first"));
+        assert!(
+            stuck.contains(&user.display().to_string()),
+            "a refused retention names the file that recovers it: {stuck}"
+        );
         registry.retain_for_vm(sha, "second").unwrap();
         assert!(!registry.evict_extracted_if_unused(sha).unwrap());
         assert!(registry.remove(sha).is_err());

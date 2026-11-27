@@ -305,3 +305,117 @@ fn crash_child() {
     let _ = runner(&driver).start_workload(&launch(&cfg));
     panic!("the child did not reach a lease or generation sync");
 }
+
+/// A failed lease sync whose kill also fails still never activates the guest
+/// and still reports the sync failure, not the kill.
+#[test]
+fn a_failed_lease_sync_whose_kill_also_fails_still_refuses_activation() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.set("MVM_HOME", home.path());
+    let vm = "lease-sync-fails-unkillable";
+    let cfg = fresh_launch_config(vm, "unkillable-source");
+    let driver = MockDriver::default().with_failing_kill();
+    let lease = evidence_root(home.path()).join(vm);
+    let _hook = durable_steps::hook(move |path| {
+        anyhow::ensure!(
+            !(path.starts_with(&lease) && path.ends_with("launch.json")),
+            "fsync {}: input/output error",
+            path.display()
+        );
+        Ok(())
+    });
+
+    let error = match runner(&driver).start_workload(&launch(&cfg)) {
+        Ok(_) => panic!("a launch whose lease is not durable must not activate"),
+        Err(error) => error,
+    };
+
+    assert!(
+        format!("{error:#}").contains("input/output error"),
+        "{error:#}"
+    );
+    assert!(
+        driver
+            .take_guest_end(&VmId(vm.into()), GUEST_AGENT_PORT)
+            .is_none(),
+        "a guest that could not be killed is still never activated"
+    );
+}
+
+/// A sync that panics never reports success: the guest is killed
+/// unactivated and the launch says the sync did not finish.
+#[test]
+fn a_panicking_lease_sync_tears_the_guest_down_unactivated() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.set("MVM_HOME", home.path());
+    let vm = "lease-sync-panics";
+    let cfg = fresh_launch_config(vm, "panics-source");
+    let driver = MockDriver::default();
+    let lease = evidence_root(home.path()).join(vm);
+    let _hook = durable_steps::hook(move |path| {
+        assert!(
+            !(path.starts_with(&lease) && path.ends_with("launch.json")),
+            "injected panic inside the lease sync"
+        );
+        Ok(())
+    });
+
+    let error = match runner(&driver).start_workload(&launch(&cfg)) {
+        Ok(_) => panic!("a launch whose sync panicked must not activate"),
+        Err(error) => error,
+    };
+
+    assert!(format!("{error:#}").contains("did not finish"), "{error:#}");
+    assert_eq!(driver.killed_vms(), vec![vm.to_string()]);
+    assert!(
+        driver
+            .take_guest_end(&VmId(vm.into()), GUEST_AGENT_PORT)
+            .is_none()
+    );
+}
+
+/// A guest that is not activated over vsock runs its workload as soon as it
+/// boots, so its lease is durable before the VMM starts.
+#[test]
+fn a_guest_without_activation_syncs_its_lease_before_the_vmm_starts() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.set("MVM_HOME", home.path());
+    let vm = "lease-unactivated";
+    let cfg = config(vm);
+    let driver = MockDriver::default();
+    let root = evidence_root(home.path());
+    let synced: Arc<Mutex<Vec<(PathBuf, bool)>>> = Arc::default();
+    let _hook = durable_steps::hook({
+        let (driver, synced, root) = (driver.clone(), Arc::clone(&synced), root.clone());
+        move |path| {
+            if path == root {
+                let booted = !driver.booted_specs().is_empty();
+                synced.lock().unwrap().push((path.to_path_buf(), booted));
+            }
+            Ok(())
+        }
+    });
+
+    runner(&driver)
+        .start_workload(&launch(&cfg))
+        .expect("an unactivated guest boots");
+
+    assert_eq!(driver.booted_specs().len(), 1);
+    assert_eq!(
+        *synced.lock().unwrap(),
+        vec![(root, false)],
+        "the new lease entry is durable before the VMM starts"
+    );
+}

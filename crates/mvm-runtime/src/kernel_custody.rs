@@ -36,10 +36,13 @@ pub(crate) struct KernelBoundLaunch {
 }
 
 impl KernelBoundLaunch {
+    /// A pending record written here joins `unsynced`, so its contents are
+    /// durable before the lease directory that names it.
     pub(crate) fn bind(
         config: VmStartConfig,
         backend: BackendKind,
         lifecycle: &RuntimeLifecycleLease,
+        unsynced: &mut crate::runtime_evidence::UnsyncedBind,
     ) -> Result<Self> {
         let record = lifecycle.canonical_kernel_record();
         ensure!(
@@ -122,6 +125,7 @@ impl KernelBoundLaunch {
                 process: None,
             };
             mvm_core::util::atomic_io::write_private_new(&record, &serde_json::to_vec(&pending)?)?;
+            unsynced.add_file(record.clone());
         }
         Ok(Self {
             config,
@@ -484,8 +488,21 @@ mod tests {
             ..Default::default()
         };
         let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
-        assert!(KernelBoundLaunch::bind(config.clone(), BackendKind::Qemu, &lease).is_err());
-        let firecracker = KernelBoundLaunch::bind(config.clone(), BackendKind::Firecracker, &lease);
+        assert!(
+            KernelBoundLaunch::bind(
+                config.clone(),
+                BackendKind::Qemu,
+                &lease,
+                &mut Default::default()
+            )
+            .is_err()
+        );
+        let firecracker = KernelBoundLaunch::bind(
+            config.clone(),
+            BackendKind::Firecracker,
+            &lease,
+            &mut Default::default(),
+        );
         if cfg!(target_os = "linux") {
             let firecracker = firecracker.unwrap();
             assert!(firecracker.kernel.is_some());
@@ -496,8 +513,13 @@ mod tests {
         }
         let mut wrong = config.clone();
         wrong.kernel_read_sha256 = Some("0".repeat(64));
-        assert!(KernelBoundLaunch::bind(wrong, BackendKind::Hvf, &lease).is_err());
-        let bound = KernelBoundLaunch::bind(config, BackendKind::Hvf, &lease).unwrap();
+        assert!(
+            KernelBoundLaunch::bind(wrong, BackendKind::Hvf, &lease, &mut Default::default())
+                .is_err()
+        );
+        let bound =
+            KernelBoundLaunch::bind(config, BackendKind::Hvf, &lease, &mut Default::default())
+                .unwrap();
         let mut spec = VmmSpec {
             name: bound.config().name.clone(),
             kernel: KernelImage::Path(source.clone()),
@@ -568,11 +590,22 @@ mod tests {
             name: pending.vm,
             ..Default::default()
         };
-        assert!(KernelBoundLaunch::bind(config.clone(), BackendKind::Hvf, &lease).is_err());
+        assert!(
+            KernelBoundLaunch::bind(
+                config.clone(),
+                BackendKind::Hvf,
+                &lease,
+                &mut Default::default()
+            )
+            .is_err()
+        );
         assert_eq!(std::fs::read(&record).unwrap(), bytes);
         std::fs::write(&record, b"uncertain interrupted write").unwrap();
         assert!(has_retained_kernel(&lease).unwrap());
-        assert!(KernelBoundLaunch::bind(config, BackendKind::Hvf, &lease).is_err());
+        assert!(
+            KernelBoundLaunch::bind(config, BackendKind::Hvf, &lease, &mut Default::default())
+                .is_err()
+        );
         assert!(read_record(&record).is_err());
         assert_eq!(
             std::fs::read(&record).unwrap(),
@@ -598,6 +631,7 @@ mod tests {
                 },
                 BackendKind::Hvf,
                 &lease,
+                &mut Default::default(),
             )
             .is_err()
         );
@@ -813,9 +847,14 @@ mod tests {
         for process in [None, Some(fc_process(1))] {
             let (generation, path) = process_record(home.path(), &lease, process);
             assert!(has_retained_kernel(&lease).unwrap());
-            let error = KernelBoundLaunch::bind(config.clone(), BackendKind::Firecracker, &lease)
-                .err()
-                .expect("a retained generation must block reuse of the VM name");
+            let error = KernelBoundLaunch::bind(
+                config.clone(),
+                BackendKind::Firecracker,
+                &lease,
+                &mut Default::default(),
+            )
+            .err()
+            .expect("a retained generation must block reuse of the VM name");
             assert!(format!("{error:#}").contains("still retained"), "{error:#}");
             assert!(generation.exists() && path.exists());
             std::fs::remove_file(&path).unwrap();

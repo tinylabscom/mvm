@@ -242,8 +242,8 @@ pub(crate) mod durable_steps {
         }
     }
 
-    /// Every path synced since the last call, in order.
-    pub(in crate::runtime_evidence) fn take() -> Vec<PathBuf> {
+    /// Every path synced on this thread since the last call, in order.
+    pub(crate) fn take() -> Vec<PathBuf> {
         STEPS.with(RefCell::take)
     }
 

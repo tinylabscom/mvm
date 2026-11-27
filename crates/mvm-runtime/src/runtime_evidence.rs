@@ -20,6 +20,7 @@ use mvm_core::util::atomic_io::write_private_new;
 use mvm_core::vm_backend::VmStartConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod namespace;
 mod retire;
@@ -877,12 +878,36 @@ pub const SHARED_CONTENT_DIR: &str = "shared_content";
 pub(crate) struct UnsyncedBind {
     files: Vec<PathBuf>,
     directories: Vec<PathBuf>,
+    generation: Option<PathBuf>,
 }
 
 impl UnsyncedBind {
+    /// A file written under the lease after the bind, synced before the
+    /// directories that name it.
+    pub(crate) fn add_file(&mut self, file: PathBuf) {
+        self.files.push(file);
+    }
+
     pub(crate) fn sync(self) -> Result<()> {
         self.files.iter().try_for_each(|file| sync_file(file))?;
         self.directories.iter().try_for_each(|dir| sync_dir(dir))
+    }
+
+    /// [`Self::sync`] before anything has started from the bind: a generation
+    /// that cannot be made durable is removed again.
+    pub(crate) fn sync_before_spawn(self) -> Result<()> {
+        let generation = self.generation.clone();
+        self.sync().inspect_err(|_| {
+            if let Some(generation) = generation
+                && let Err(error) = std::fs::remove_dir_all(&generation)
+            {
+                tracing::warn!(
+                    path = %generation.display(),
+                    %error,
+                    "could not remove a runtime generation that was never made durable"
+                );
+            }
+        })
     }
 }
 
@@ -892,8 +917,9 @@ pub(crate) struct RuntimeLifecycleLease {
     directory: PathBuf,
     /// Whether `acquire` created `directory` and left its entry in the
     /// namespace root unsynced. A bind syncs it after the generation it
-    /// publishes, in the same round.
-    entry_unsynced: bool,
+    /// publishes, in the same round, or at once before an installed bundle
+    /// records this VM as its user.
+    entry_unsynced: AtomicBool,
     _lock: std::fs::File,
 }
 
@@ -907,13 +933,15 @@ impl RuntimeLifecycleLease {
     /// no VM name can collide with it, and never deleted: it holds one copy per
     /// distinct runtime.
     fn shared_content(&self) -> Result<PathBuf> {
-        let root = self
-            .directory
-            .parent()
-            .context("runtime lifecycle namespace has no root")?;
-        let shared = root.join(SHARED_CONTENT_DIR);
+        let shared = self.root()?.join(SHARED_CONTENT_DIR);
         private_directory(&shared)?;
         Ok(shared)
+    }
+
+    fn root(&self) -> Result<&Path> {
+        self.directory
+            .parent()
+            .context("runtime lifecycle namespace has no root")
     }
 
     fn bundle_use_record(&self) -> PathBuf {
@@ -943,6 +971,11 @@ impl RuntimeLifecycleLease {
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
             "an unresolved bundle use already owns this VM name"
         );
+        // The registry's use must never outlive, across a power loss, the
+        // record under this VM that releases it.
+        if self.entry_unsynced.swap(false, Ordering::Relaxed) {
+            sync_dir(self.root()?)?;
+        }
         registry.retain_for_vm(sha, &config.name)?;
         write_private_new(&record, sha.as_bytes())?;
         sync_file(&record)?;
@@ -992,7 +1025,7 @@ impl RuntimeLifecycleLease {
         let lock = namespace::lock(&directory)?;
         Ok(Self {
             directory,
-            entry_unsynced,
+            entry_unsynced: entry_unsynced.into(),
             _lock: lock,
         })
     }
@@ -1000,7 +1033,7 @@ impl RuntimeLifecycleLease {
     /// [`Self::bind_unsynced`], durable before it returns.
     pub(crate) fn bind(&self, config: &VmStartConfig) -> Result<VmStartConfig> {
         let (bound, unsynced) = self.bind_unsynced(config, None)?;
-        unsynced.sync()?;
+        unsynced.sync_before_spawn()?;
         Ok(bound)
     }
 
@@ -1048,13 +1081,8 @@ impl RuntimeLifecycleLease {
     ) -> Result<(VmStartConfig, UnsyncedBind)> {
         let mut unsynced = UnsyncedBind::default();
         let bound = self.publish_generation(config, verified, &mut unsynced)?;
-        if self.entry_unsynced {
-            unsynced.directories.push(
-                self.directory
-                    .parent()
-                    .context("runtime lifecycle namespace has no root")?
-                    .to_path_buf(),
-            );
+        if self.entry_unsynced.load(Ordering::Relaxed) {
+            unsynced.directories.push(self.root()?.to_path_buf());
         }
         Ok((bound, unsynced))
     }
@@ -1168,6 +1196,7 @@ impl RuntimeLifecycleLease {
             artifacts.directory_path().to_path_buf(),
             self.directory.clone(),
         ]);
+        unsynced.generation = Some(artifacts.directory_path().to_path_buf());
         tracing::warn!(
             path = %artifacts.directory_path().display(),
             "retaining runtime generation before spawn; deletion requires independently confirmed absence of all VM readers"
@@ -1436,6 +1465,77 @@ mod tests {
         assert!(!claim.exists());
         assert!(!lease.bundle_use_record().exists());
         assert!(rootfs.exists(), "an older install is not eviction-eligible");
+    }
+
+    /// A new lease entry is durable before an installed bundle records this VM
+    /// as its user, so a power loss cannot leave the registry's use behind
+    /// with no record under the VM to release it. The root is synced once.
+    #[test]
+    fn a_new_lease_entry_is_durable_before_an_installed_bundle_is_retained() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let registry = mvm_core::plan::bundle::BundleRegistry::default_path().unwrap();
+        let sha = "b".repeat(64);
+        let rootfs = registry.install_dir(&sha).join("artifacts/rootfs.ext4");
+        mvm_core::config::create_private_dir(rootfs.parent().unwrap()).unwrap();
+        std::fs::write(&rootfs, b"fixture rootfs").unwrap();
+        let config = VmStartConfig {
+            name: "bundle-root-first".into(),
+            rootfs_path: rootfs.display().to_string(),
+            ..Default::default()
+        };
+
+        let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
+        let root = namespace::root(false).unwrap();
+        namespace::durable_steps::take();
+        lease.bind(&config).unwrap();
+
+        let steps = namespace::durable_steps::take();
+        assert_eq!(
+            steps.first(),
+            Some(&root),
+            "the lease entry is synced before the bundle use is recorded: {steps:?}"
+        );
+        assert_eq!(steps.iter().filter(|path| **path == root).count(), 1);
+        assert!(steps.contains(&lease.bundle_use_record()));
+    }
+
+    /// A bind that cannot make its generation durable removes it again, as
+    /// nothing has been started from it yet.
+    #[test]
+    fn a_bind_whose_sync_fails_removes_the_generation_it_published() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"fixture rootfs").unwrap();
+        let (fixture, _) = checked_source_runtime_fixture("unsynced-source", &rootfs).unwrap();
+        let lease = RuntimeLifecycleLease::acquire("unsynced-bind").unwrap();
+        let _hook = namespace::durable_steps::hook(|path| {
+            anyhow::ensure!(!path.ends_with("launch.json"), "fsync: input/output error");
+            Ok(())
+        });
+
+        let error = lease
+            .bind(&VmStartConfig {
+                name: "unsynced-bind".into(),
+                ..fixture
+            })
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("input/output error"));
+        let generations = std::fs::read_dir(&lease.directory)
+            .unwrap()
+            .filter(|entry| entry.as_ref().unwrap().path().is_dir())
+            .count();
+        assert_eq!(generations, 0, "the unsynced generation is removed");
     }
 
     #[test]
