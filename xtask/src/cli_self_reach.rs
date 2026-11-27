@@ -44,6 +44,7 @@ const KNOWN_REACHES: &[&str] = &[
     "crates/mvm-backends/src/driver/qemu_process.rs",
     "crates/mvm-build/src/builder_egress_process.rs",
     "crates/mvm-build/src/builder_vm_bootstrap.rs",
+    "crates/mvm-cli/src/capture/verify.rs",
     "crates/mvm-cli/src/commands/build/kernel.rs",
     "crates/mvm-cli/src/commands/env/builder_vm/vm_helpers.rs",
     "crates/mvm-cli/src/commands/env/uninstall.rs",
