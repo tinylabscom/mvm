@@ -8,7 +8,7 @@ Validation: none
 Accepted, 2026-10-05. Tracking issue:
 [#4100](https://github.com/tinylabscom/mvm/issues/4100).
 
-Amends ADR-030 decision 4 (both the builder image and every user-facing image
+Amends ADR-004 §Image source in a source checkout (both the builder image and every user-facing image
 build from `mvm-images`) and ADR-004's account of how mvm's own Linux binaries
 reach a guest. Supersedes the consumer half of
 specs/plans/2026-09-29-guest-bins-artifact-decoupling.md (retired; recover from tag specs-archive-2026-11-02). Since
@@ -30,7 +30,7 @@ specs/plans/2026-10-05-image-boundary-linux-layer.md (retired; recover from tag 
 
 ## Context
 
-Since the image train moved out of this repository (ADR-030 decision 4,
+Since the image train moved out of this repository (ADR-004 §Image source in a source checkout,
 specs/plans/2026-09-16-image-repository-extraction.md (retired; recover from tag specs-archive-2026-11-02)), `mvm-images` has
 built two different kinds of thing:
 
@@ -470,7 +470,7 @@ builder image sets (#4107), and the workload-author guide is updated with it.
   release asset is still bound to an exact GitHub Actions workflow identity.
   The guest runtime is authenticated the way the CLI archive is, under the
   CLI release workflow, rather than under the image-set workflow.
-- Host Nix is never used (ADR-030 decision 3). The guest runtime was never a
+- Host Nix is never used (ADR-004). The guest runtime was never a
   Nix build on the host and does not become one: it is cargo-zigbuild output
   from the pinned toolchain, the same mechanism ADR-004 uses for the builder
   binaries embedded in `mvmctl`.

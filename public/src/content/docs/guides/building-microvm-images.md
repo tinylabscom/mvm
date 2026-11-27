@@ -10,7 +10,7 @@ builder VM, the default workload image, the kernel, the runtime overlay.
 That workflow uses a sibling [`mvm-images`](https://github.com/tinylabscom/mvm-images)
 checkout and is documented in [Developing Images with a Sibling Checkout](/guides/image-sibling-checkout/).)
 
-Under the hood, mvm wraps [microvm.nix](https://github.com/microvm-nix/microvm.nix) (MIT) — that's the NixOS module that abstracts Firecracker, Cloud Hypervisor, QEMU, crosvm, kvmtool, and stratovirt. The choice is recorded in [ADR-030](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/030-libkrun-pivot.md).
+Under the hood, mvm wraps [microvm.nix](https://github.com/microvm-nix/microvm.nix) (MIT) — that's the NixOS module that abstracts Firecracker, Cloud Hypervisor, QEMU, crosvm, kvmtool, and stratovirt.
 
 ## The two files in your project
 

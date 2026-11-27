@@ -66,7 +66,7 @@ as they are. This ADR is for after the demo.
 2. Authority must come from the signed plan (claim 8), not from a connection
    that happens to be open.
 3. Raw credentials stay on the host (claim 13); no guest NIC, no second
-   network path (ADR-003, ADR-042). The channel is vsock.
+   network path (ADR-003). The channel is vsock.
 4. Message passing is not automatically harmless: a message that selects a
    program, a path or a flag is a shell with extra steps.
 5. Every grant, use, refusal and revocation is audit-visible and chain-signed.

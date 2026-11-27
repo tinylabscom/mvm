@@ -13,7 +13,7 @@ contain one open-source `mvmd` deployment client, but it still does not become a
 tenant scheduler, provider registry, or fleet control plane.  
 **Complements:** ADR-007 (`VmBackend`), ADR-014 (signed/audited execution
 plans; `mvmd` is the only production launch authority), ADR-024 (WASI/browser
-claim boundary), and ADR-042 (one flow-aware workload networking
+claim boundary), and ADR-003 (one flow-aware workload networking
 path).  
 **Implementation plan:** specs/plans/338-weblinux-browser-backend-builder-workbench-and-mvmd-deploy.md (retired; recover from tag specs-archive-2026-11-02)
 
@@ -267,7 +267,7 @@ unclean-shutdown recovery.
 The user must be able to export source and artifacts. OPFS is useful local
 persistence but not the only copy of valuable source code.
 
-### 10. Browser networking follows ADR-042's one policy path
+### 10. Browser networking follows ADR-003's one policy path
 
 `WebLinux` does not reintroduce a raw-packet policy bypass.
 

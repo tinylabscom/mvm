@@ -20,17 +20,17 @@ class TaskContextTests(unittest.TestCase):
             root = Path(directory)
             (root / "specs/adrs").mkdir(parents=True)
             (root / "specs/contracts").mkdir(parents=True)
-            (root / "specs/adrs/042-network.md").write_text("decision")
+            (root / "specs/adrs/003-network.md").write_text("decision")
             (root / "specs/contracts/agent-v1.md").write_text("contract")
 
             found = TASK_CONTEXT.linked_documents(
-                "Use ADR-042 and `specs/contracts/agent-v1.md`; ignore plans/x.md.",
+                "Use ADR-003 and `specs/contracts/agent-v1.md`; ignore plans/x.md.",
                 root,
             )
 
             self.assertEqual(
                 found,
-                ["specs/adrs/042-network.md", "specs/contracts/agent-v1.md"],
+                ["specs/adrs/003-network.md", "specs/contracts/agent-v1.md"],
             )
 
     def test_render_marks_missing_links_instead_of_guessing(self):

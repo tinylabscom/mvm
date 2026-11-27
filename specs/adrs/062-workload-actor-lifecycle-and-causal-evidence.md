@@ -10,7 +10,7 @@ slice (#5672) is on main but in no release tag, and no witness qualifies it.
 **Absorbs:** the workload actor model (decision record 051, 2026-08-25), now
 section 0, and the proposed rebuild outbox (record 060), now section 4.2. Both
 were Proposed and stay Proposed here.
-**Complements:** ADR-001, ADR-014, ADR-025, ADR-035, ADR-045, ADR-057 and
+**Complements:** ADR-001, ADR-014, ADR-004, ADR-035, ADR-045, ADR-057 and
 ADR-110.
 **Related issues:** #5097 (distributed host interface), #5292 (shared mailbox
 daemon and its key-custody decision D1), #5510 (density), #5121 and the
@@ -596,7 +596,7 @@ rules:
 - Per-epoch seals and indexes let `explain` and audit verification cost scale
   with the epoch read, not with the whole chain.
 - The recipe hash is the sharing key for read-only base pages, fork families
-  and standby pools, within a tenant (ADR-025).
+  and standby pools, within a tenant (ADR-004).
 
 ### 10. No actor framework
 
