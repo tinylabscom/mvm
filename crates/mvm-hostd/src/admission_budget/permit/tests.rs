@@ -152,20 +152,32 @@ fn dead_marker() -> Vec<u8> {
 /// A live handoff: the claimed child's `hvf.pid` is a link to the marker of
 /// the standby parent whose VMM it took over. The parent's dir keeps that
 /// marker and no charge evidence; the child carries the record and plan.
-fn handed_off(home: &Path, parent_marker: &[u8]) {
+///
+/// The names are the caller's: warnings are once per process, so a test that
+/// asserts silence must not share a machine name with any other test.
+fn handed_off(home: &Path, parent_marker: &[u8], parent: &str, child: &str) {
     neighbour(
         home,
-        "standby-parent",
+        parent,
         Neighbour {
             record: None,
             marker: Some(parent_marker),
             plan: false,
         },
     );
+    linked_child(
+        home,
+        child,
+        &mvm_core::config::vm_state_dir_at(home, parent).join("hvf.pid"),
+    );
+}
+
+/// A charged child whose `hvf.pid` is a link to `target`.
+fn linked_child(home: &Path, child: &str, target: &Path) {
     let record = serde_json::to_vec(&charge()).unwrap();
     neighbour(
         home,
-        "claimed-child",
+        child,
         Neighbour {
             record: Some(&record),
             marker: None,
@@ -173,8 +185,8 @@ fn handed_off(home: &Path, parent_marker: &[u8]) {
         },
     );
     std::os::unix::fs::symlink(
-        mvm_core::config::vm_state_dir_at(home, "standby-parent").join("hvf.pid"),
-        mvm_core::config::vm_state_dir_at(home, "claimed-child").join("hvf.pid"),
+        target,
+        mvm_core::config::vm_state_dir_at(home, child).join("hvf.pid"),
     )
     .unwrap();
 }
@@ -182,15 +194,54 @@ fn handed_off(home: &Path, parent_marker: &[u8]) {
 #[test]
 fn a_live_handoff_child_is_counted_once_through_its_linked_marker() {
     let home = tempfile::tempdir().unwrap();
-    handed_off(home.path(), &live_marker());
+    handed_off(
+        home.path(),
+        &live_marker(),
+        "standby-parent",
+        "claimed-child",
+    );
     assert!(neighbour_is_counted(home.path()));
 }
 
 #[test]
 fn a_dead_handoff_child_is_not_counted() {
     let home = tempfile::tempdir().unwrap();
-    handed_off(home.path(), &dead_marker());
+    handed_off(
+        home.path(),
+        &dead_marker(),
+        "standby-parent",
+        "claimed-child",
+    );
     assert!(!neighbour_is_counted(home.path()));
+}
+
+/// Admission runs under the ledger lock, so evaluating it must never block.
+fn neighbour_is_counted_promptly(home: &Path) -> bool {
+    let home = home.to_owned();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(neighbour_is_counted(&home)));
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("a linked marker must never block admission")
+}
+
+#[test]
+fn a_marker_linked_to_a_fifo_neither_blocks_admission_nor_frees_its_capacity() {
+    let home = tempfile::tempdir().unwrap();
+    let fifo = home.path().join("fifo");
+    let c_path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path and a plain mode.
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    linked_child(home.path(), "linked-to-a-fifo", &fifo);
+    assert!(neighbour_is_counted_promptly(home.path()));
+}
+
+#[test]
+fn a_marker_linked_to_an_oversize_file_keeps_its_machine_counted() {
+    let home = tempfile::tempdir().unwrap();
+    let huge = home.path().join("huge");
+    std::fs::write(&huge, vec![b' '; 1 << 20]).unwrap();
+    linked_child(home.path(), "linked-to-a-huge-file", &huge);
+    assert!(neighbour_is_counted_promptly(home.path()));
 }
 
 #[test]
@@ -864,7 +915,12 @@ fn a_group_writable_config_is_refused_with_its_path_and_the_fix() {
 #[test]
 fn a_standby_and_a_handoff_child_are_normal_states_and_log_no_warning() {
     let home = tempfile::tempdir().unwrap();
-    handed_off(home.path(), &live_marker());
+    handed_off(
+        home.path(),
+        &live_marker(),
+        "quiet-standby-parent",
+        "quiet-claimed-child",
+    );
     let (_, logged) = crate::test_fixtures::capturing_warnings(|| {
         neighbour_is_counted(home.path());
         super::super::committed_at(home.path())

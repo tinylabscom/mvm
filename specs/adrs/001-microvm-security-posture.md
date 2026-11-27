@@ -399,12 +399,16 @@ not paraphrase this row without them.
    `fn:an_unreadable_charge_record_with_no_plan_hides_only_that_machine`). The
    two sums differ in their liveness test:
    - The ledger counts a machine while any pid marker leaves it possibly
-     running, so a marker that cannot be read keeps it counted until its
-     directory is removed.
+     running. A marker that cannot be read keeps it counted until its
+     directory is removed, unless one of its markers is a link.
    - The advisory live-machine sum (default sizing, standby room) counts only a
      marker that names a live process.
-   - Both judge a live-handoff child by the parent marker its own marker
-     links to.
+   - Both judge a dir holding a link (a live-handoff child's marker, linked to
+     its standby parent's) by whether some marker names a live process. So a
+     dangling link, or a malformed marker beside a link, counts nothing. In
+     the ledger, a link whose target is not a small regular file still keeps
+     the machine counted. Every marker read is non-blocking and bounded, so no
+     marker can stall an admission.
 
    A charge too large to add saturates. It reads as the whole host, which the
    headroom check then refuses. An idle standby carries no record or plan, so

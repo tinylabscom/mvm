@@ -742,33 +742,48 @@ const MAX_MACHINE_EVIDENCE_BYTES: usize = 1024 * 1024;
 /// No marker is no machine. A live-handoff child's marker is a link to the
 /// marker of the standby parent whose VMM it took over, which the owner-only
 /// reader refuses to follow; the shared liveness probe judges the process that
-/// marker names. Any other marker that cannot be read proves nothing either
-/// way, so that machine stays counted: over-counting one machine costs
-/// headroom, refusing on it would cost every boot.
+/// marker names, and a dangling link names none. Any marker that cannot be
+/// read safely (a link to anything but a small regular file, or a malformed
+/// marker in a dir with no link) proves nothing either way, so that machine
+/// stays counted: over-counting one machine costs headroom, refusing on it
+/// would cost every boot.
 fn may_be_live(directory: &Path, name: &str) -> bool {
-    use mvm_vmm::host::process_liveness::{PID_FILE_NAMES, state_dir_has_live_process};
+    use mvm_vmm::host::process_liveness::{
+        PID_FILE_NAMES, read_pid_marker, state_dir_has_live_process,
+    };
     let markers: Vec<_> = PID_FILE_NAMES
         .iter()
-        .filter_map(|file| directory.join(file).symlink_metadata().ok())
+        .map(|file| directory.join(file))
+        .filter_map(|path| path.symlink_metadata().ok().map(|meta| (path, meta)))
         .collect();
     if markers.is_empty() {
         return false;
     }
-    if markers.iter().any(|meta| meta.file_type().is_symlink()) {
+    let unreadable = |error: &dyn std::fmt::Display| {
+        super::warn_once(
+            name,
+            format!(
+                "unreadable machine PID evidence; counting this machine as possibly live: {error:#}"
+            ),
+        );
+        true
+    };
+    let links: Vec<_> = markers
+        .iter()
+        .filter(|(_, meta)| meta.file_type().is_symlink())
+        .collect();
+    if !links.is_empty() {
+        if let Some(error) = links
+            .iter()
+            .find_map(|(path, _)| read_pid_marker(path).err())
+        {
+            return unreadable(&error);
+        }
         return state_dir_has_live_process(directory);
     }
     match platform::machine_is_confirmed_dead(directory) {
         Ok(dead) => !dead,
-        Err(error) => {
-            super::warn_once(
-                name,
-                format!(
-                    "unreadable machine PID evidence; counting this machine as possibly live: \
-                     {error:#}"
-                ),
-            );
-            true
-        }
+        Err(error) => unreadable(&error),
     }
 }
 
