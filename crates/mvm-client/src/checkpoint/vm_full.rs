@@ -119,6 +119,7 @@ pub fn prepare_vm_full_fork(
     let inherited_runtime =
         inherited_runtime_config(expected_parent.runtime_launch_binding.as_ref(), &rootfs);
     let user_cfg = mvm_core::user_config::load(None);
+    let mem_mib = restored_memory_mib(store, &expected_parent)?;
     let ledger = crate::admission::InMemoryNonceLedger::new();
     let admission = crate::admission::admit_plan_for_boot_with_verified_retained(
         crate::admission::AdmitPlanForBootParams {
@@ -138,7 +139,7 @@ pub fn prepare_vm_full_fork(
             boot_artifact_identity: None,
             runtime_config: inherited_runtime.as_ref(),
             cpus: user_cfg.default_cpus,
-            mem_mib: user_cfg.default_memory_mib as u64,
+            mem_mib,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: crate::admission::secrets::release_for_bindings(
                 request.declared_secrets,
@@ -243,6 +244,21 @@ impl PreparedVmFullFork {
             },
         }
     }
+}
+
+/// The guest memory the restore will map, so the child is admitted and charged
+/// at its configured maximum: the saved RAM's authenticated length. A
+/// Firecracker load sizes the guest from it, and the HVF restore refuses RAM
+/// whose length differs from the memory its captured config names.
+fn restored_memory_mib(store: &CheckpointStore, parent: &CheckpointMeta) -> Result<u64> {
+    let bytes = mvm_runtime::checkpoint::materialized_blob_len(
+        store,
+        parent,
+        mvm_core::checkpoint::MEMORY_BLOB,
+    )
+    .context("reading the saved machine's memory size, which a vm_full fork is admitted at")?;
+    anyhow::ensure!(bytes > 0, "the saved machine's memory image is empty");
+    Ok(bytes.div_ceil(1024 * 1024))
 }
 
 fn backend_for_origin(origin: Option<VmFullOrigin>) -> Result<BackendKind> {
@@ -388,6 +404,9 @@ fn verify_child_plan(
 mod tests {
     use super::*;
 
+    /// The parent's saved RAM, deliberately unlike the host's default memory.
+    const PARENT_MEMORY_MIB: u64 = 72;
+
     struct CapturedParent(PathBuf);
 
     impl mvm_vmm::checkpoint::VmFullControl for CapturedParent {
@@ -404,7 +423,7 @@ mod tests {
         }
 
         fn save_memory(&self, memory: &std::path::Path) -> Result<()> {
-            std::fs::write(memory, b"memory")?;
+            std::fs::write(memory, vec![0_u8; PARENT_MEMORY_MIB as usize * 1024 * 1024])?;
             std::fs::write(
                 memory.with_file_name(mvm_core::checkpoint::HVF_FRAME_BLOB),
                 b"frame",
@@ -519,6 +538,20 @@ mod tests {
                 mvm_core::checkpoint::ROOTFS_BLOB,
             )
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_fork_is_admitted_at_the_memory_its_restore_maps_not_the_host_default() {
+        let (_env, _home, root, store, meta) = fixture();
+        let prepared = prepare_vm_full_fork(&store, request(&meta, root.path())).unwrap();
+        assert_ne!(
+            u64::from(mvm_core::user_config::load(None).default_memory_mib),
+            PARENT_MEMORY_MIB
+        );
+        assert_eq!(
+            prepared.admitted_plan().resources.mem_mib,
+            PARENT_MEMORY_MIB
         );
     }
 
@@ -656,24 +689,55 @@ mod tests {
         .unwrap();
     }
 
-    /// Publish a backend PID marker for `vm` naming `pid`, as a restore does.
-    fn write_pid_marker(home: &std::path::Path, vm: &str, pid: u32) {
+    /// Publish a backend PID marker for `vm`, as a restoring supervisor does.
+    fn write_pid_marker(home: &std::path::Path, vm: &str, marker: &str) {
         let directory = mvm_core::config::vm_state_dir_at(home, vm);
         std::fs::create_dir_all(&directory).unwrap();
-        mvm_core::atomic_io::write_private(
-            &directory.join("hvf.pid"),
-            mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(pid)
-                .render()
-                .as_bytes(),
-        )
-        .unwrap();
+        mvm_core::atomic_io::write_private(&directory.join("hvf.pid"), marker.as_bytes()).unwrap();
     }
 
-    fn exited_pid() -> u32 {
-        let mut child = std::process::Command::new("true").spawn().unwrap();
-        let pid = child.id();
+    /// A marker naming this live test process, with its start time.
+    fn live_marker() -> String {
+        mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(std::process::id()).render()
+    }
+
+    /// A `pid start` marker, as real supervisors write, of a process that has
+    /// since been killed and reaped.
+    fn dead_marker() -> String {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let marker = mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(child.id());
+        assert!(
+            marker.started.is_some(),
+            "the marker must carry a start time"
+        );
+        child.kill().unwrap();
         child.wait().unwrap();
-        pid
+        marker.render()
+    }
+
+    fn running_as_root() -> bool {
+        use std::os::unix::fs::MetadataExt as _;
+        tempfile::tempfile().unwrap().metadata().unwrap().uid() == 0
+    }
+
+    /// Assert the host has exactly `free_mib` of budget headroom left.
+    fn assert_headroom(free_mib: u64) {
+        assert!(host_admits(free_mib), "{free_mib} MiB should still fit");
+        let error = mvm_hostd::admission_budget::HostBudgetPermit::reserve(
+            "budget-probe",
+            mvm_contract::grants::budget::MachineCharge {
+                memory_mib: free_mib + 1,
+                cpu_millicores: 0,
+            },
+        )
+        .expect_err("one MiB more than the headroom must be refused");
+        assert!(
+            format!("{error:#}").contains("exceed this host's budget"),
+            "refused for the budget, not a lockout: {error:#}"
+        );
     }
 
     /// Whether the host can still admit a machine of `memory_mib` right now.
@@ -736,18 +800,15 @@ mod tests {
         configure_host_budget(home.path(), BUDGET_MIB);
         let (bound, store, anchor, memory_mib) = bound_fork(&store, &meta, root.path());
         let restorer = |child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
-            write_pid_marker(home.path(), child.vm_name, std::process::id());
+            write_pid_marker(home.path(), child.vm_name, &live_marker());
             Ok(())
         };
         let dispatched = bound.dispatch_test_hvf(&store, &restorer, &anchor, &|_| Ok(()));
         dispatched.result.expect("a fork that fits is admitted");
         drop(dispatched.admitted);
 
-        assert!(
-            !host_admits(BUDGET_MIB - memory_mib + 1),
-            "the running fork's configured memory must be charged to the host"
-        );
-        assert!(host_admits(BUDGET_MIB - memory_mib));
+        assert_eq!(memory_mib, PARENT_MEMORY_MIB);
+        assert_headroom(BUDGET_MIB - memory_mib);
     }
 
     #[test]
@@ -767,7 +828,7 @@ mod tests {
             },
         )
         .unwrap();
-        write_pid_marker(home.path(), "neighbour", std::process::id());
+        write_pid_marker(home.path(), "neighbour", &live_marker());
         let restored = Cell::new(false);
         let restorer = |_child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
             restored.set(true);
@@ -817,6 +878,13 @@ mod tests {
     }
 
     fn fork_failing_with(failure: LaunchFailure) {
+        use std::cell::RefCell;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if matches!(failure, LaunchFailure::ChargeRecordUnwritable) && running_as_root() {
+            // A read-only directory does not stop root from writing the record.
+            return;
+        }
         let (_env, home, root, store, meta) = fixture();
         configure_host_budget(home.path(), BUDGET_MIB);
         let (bound, store, anchor, _) = bound_fork(&store, &meta, root.path());
@@ -824,11 +892,11 @@ mod tests {
             match failure {
                 LaunchFailure::RestoreWithoutProcess => anyhow::bail!("restore refused"),
                 LaunchFailure::RestoreReapedItsProcess => {
-                    write_pid_marker(home.path(), child.vm_name, exited_pid());
+                    write_pid_marker(home.path(), child.vm_name, &dead_marker());
                     anyhow::bail!("restore failed after spawning")
                 }
                 LaunchFailure::ContainedAfterRestore => {
-                    write_pid_marker(home.path(), child.vm_name, exited_pid());
+                    write_pid_marker(home.path(), child.vm_name, &dead_marker());
                     mvm_hostd::policy_generation::workload_store::OwnedWorkloadStore::open(
                         home.path(),
                     )?
@@ -839,8 +907,7 @@ mod tests {
                     )?;
                 }
                 LaunchFailure::ChargeRecordUnwritable => {
-                    use std::os::unix::fs::PermissionsExt as _;
-                    write_pid_marker(home.path(), child.vm_name, exited_pid());
+                    write_pid_marker(home.path(), child.vm_name, &dead_marker());
                     std::fs::set_permissions(
                         mvm_core::config::vm_state_dir_at(home.path(), child.vm_name),
                         std::fs::Permissions::from_mode(0o500),
@@ -849,7 +916,11 @@ mod tests {
             }
             Ok(())
         };
-        let dispatched = bound.dispatch_test_hvf(&store, &restorer, &anchor, &|_| Ok(()));
+        let stops = RefCell::new(Vec::new());
+        let dispatched = bound.dispatch_test_hvf(&store, &restorer, &anchor, &|name| {
+            stops.borrow_mut().push(name.to_string());
+            Ok(())
+        });
         let error = dispatched.result.expect_err("the launch fails");
         assert!(
             error
@@ -857,8 +928,15 @@ mod tests {
                 .is_none(),
             "{failure:?}: {error:#}"
         );
+        let expected_stops: &[&str] = match failure {
+            // The restorer owns what it spawned; dispatch has no child to stop.
+            LaunchFailure::RestoreWithoutProcess | LaunchFailure::RestoreReapedItsProcess => &[],
+            LaunchFailure::ContainedAfterRestore | LaunchFailure::ChargeRecordUnwritable => {
+                &["child-vm"]
+            }
+        };
+        assert_eq!(stops.into_inner(), expected_stops, "{failure:?}: {error:#}");
         if let LaunchFailure::ChargeRecordUnwritable = failure {
-            use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(
                 mvm_core::config::vm_state_dir_at(home.path(), "child-vm"),
                 std::fs::Permissions::from_mode(0o700),
@@ -902,16 +980,14 @@ mod tests {
         configure_host_budget(home.path(), BUDGET_MIB);
         let (bound, store, anchor, memory_mib) = bound_fork(&store, &meta, root.path());
         let restorer = |child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
-            write_pid_marker(home.path(), child.vm_name, std::process::id());
+            write_pid_marker(home.path(), child.vm_name, &live_marker());
             anyhow::bail!("restore failed and could not reap its process")
         };
         let dispatched = bound.dispatch_test_hvf(&store, &restorer, &anchor, &|_| Ok(()));
         assert!(dispatched.result.is_err());
         drop(dispatched.admitted);
-        assert!(
-            !host_admits(BUDGET_MIB - memory_mib + 1),
-            "a VMM that may still run keeps its capacity reserved"
-        );
+        // A VMM that may still run keeps exactly its own capacity reserved.
+        assert_headroom(BUDGET_MIB - memory_mib);
     }
 
     #[test]
@@ -925,7 +1001,7 @@ mod tests {
             .mem_mib;
         configure_host_budget(home.path(), FORKS * memory_mib);
         let restorer = |child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
-            write_pid_marker(home.path(), child.vm_name, std::process::id());
+            write_pid_marker(home.path(), child.vm_name, &live_marker());
             Ok(())
         };
         for fork in 0..FORKS {
@@ -951,21 +1027,24 @@ mod tests {
     }
 
     #[test]
-    fn without_a_host_budget_a_vm_full_fork_writes_no_accounting() {
+    fn without_a_host_budget_a_vm_full_fork_records_its_charge_like_a_cold_launch() {
         let (_env, home, root, store, meta) = fixture();
-        let (bound, store, anchor, _) = bound_fork(&store, &meta, root.path());
+        let (bound, store, anchor, memory_mib) = bound_fork(&store, &meta, root.path());
         let restorer = |child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
-            write_pid_marker(home.path(), child.vm_name, std::process::id());
+            write_pid_marker(home.path(), child.vm_name, &live_marker());
             Ok(())
         };
         let dispatched = bound.dispatch_test_hvf(&store, &restorer, &anchor, &|_| Ok(()));
         dispatched.result.expect("an unbudgeted fork");
-        assert!(
-            !mvm_core::config::vm_state_dir_at(home.path(), "child-vm")
-                .join("admitted-charge.json")
-                .exists()
+        assert_eq!(
+            mvm_hostd::admission_budget::committed_at(home.path()).memory_mib,
+            memory_mib,
+            "the fork child is visible to committed(), as a cold launch is"
         );
-        assert!(!home.path().join("admission-budget").exists());
+        assert!(
+            !home.path().join("admission-budget").exists(),
+            "no reservation ledger without a budget"
+        );
     }
 
     #[test]

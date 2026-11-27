@@ -163,9 +163,6 @@ fn record_child_charge(
     child_name: &str,
     stop_child: &dyn Fn(&str) -> Result<()>,
 ) -> Result<()> {
-    if !admitted.host_budget.is_tracked() {
-        return Ok(());
-    }
     let Err(error) = admitted.host_budget.record_started(child_name) else {
         return Ok(());
     };

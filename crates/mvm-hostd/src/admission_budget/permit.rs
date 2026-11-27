@@ -446,11 +446,11 @@ impl HostBudgetPermit {
         })
     }
 
-    /// Settle an ordinary hold whose launch failed, by the evidence the budget
-    /// counts machines with: a launch that never dispatched holds nothing; a
-    /// machine whose process is live and provably ours stays charged until it
-    /// dies; one with no PID marker, or whose every marker is confirmed dead,
-    /// is released. An unprovable marker keeps the dispatch charged.
+    /// Settle an ordinary hold whose launch failed, by the ledger's own
+    /// liveness rule: a launch that never dispatched holds nothing, a machine
+    /// that cannot be running ([`may_be_live`]) is released, and one that may
+    /// be keeps its charge, upgraded to `Running` when its process is provably
+    /// ours so the usual reconciliation retires it once that process dies.
     pub fn settle_failed_launch(&self, vm_name: &str) -> Result<()> {
         if matches!(self.mode, PermitMode::UnboundedOrdinary { .. }) {
             return Ok(());
@@ -478,24 +478,14 @@ impl HostBudgetPermit {
                 record.vm_name == vm_name,
                 "host reservation names another machine"
             );
-            if let Some(process) = platform::machine_identity(&directory)? {
-                record.phase = Phase::Running { process };
-                return Ok(());
-            }
-            let has_marker = mvm_vmm::host::process_liveness::PID_FILE_NAMES
-                .iter()
-                .any(|file| directory.join(file).symlink_metadata().is_ok());
-            if !has_marker || platform::machine_is_confirmed_dead(&directory)? {
+            if !may_be_live(&directory, vm_name) {
                 remove_legacy_charge(&self.home, record)?;
                 record.phase = Phase::OrdinaryStopped;
+            } else if let Ok(Some(process)) = platform::machine_identity(&directory) {
+                record.phase = Phase::Running { process };
             }
             Ok(())
         })
-    }
-
-    /// Whether this permit is a durable hold against a configured host budget.
-    pub(crate) fn is_tracked(&self) -> bool {
-        matches!(self.mode, PermitMode::Tracked)
     }
 
     /// Record original runtime refusal before any helper/native dispatch.
@@ -601,8 +591,10 @@ impl HostBudgetPermit {
     /// Record terminal reconciliation by the trusted original lifecycle owner.
     ///
     /// The caller must have confirmed death and host-resource cleanup and
-    /// durably committed this terminal result. Missing PID files, failed starts,
-    /// and best-effort audit writes are not that evidence.
+    /// durably committed this terminal result. For a coordinated hold, missing
+    /// PID files, failed starts and best-effort audit writes are not that
+    /// evidence; an ordinary failed launch is settled instead by
+    /// [`Self::settle_failed_launch`].
     pub fn reconcile_terminal(&self, result_digest: &str) -> Result<()> {
         ensure!(
             matches!(self.mode, PermitMode::Tracked),

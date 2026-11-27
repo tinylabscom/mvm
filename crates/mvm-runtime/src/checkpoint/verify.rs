@@ -50,6 +50,25 @@ pub fn materialized_blob_sha256(
     chunks::materialized_sha256(&store.content_dir(&meta.id), blob)
 }
 
+/// Length of the contiguous bytes a blob materializes to, from the same
+/// authenticated index as [`materialized_blob_sha256`].
+pub fn materialized_blob_len(
+    store: &CheckpointStore,
+    meta: &CheckpointMeta,
+    name: &str,
+) -> Result<u64> {
+    let blob = meta
+        .content
+        .iter()
+        .find(|blob| blob.name == name)
+        .with_context(|| format!("checkpoint '{}' has no {name} blob", meta.id))?;
+    if let Some(keys) = store.keys_for(meta)? {
+        return sealed::materialized_len(&keys, &store.content_dir(&meta.id), blob);
+    }
+    chunks::ensure_chunked_layout(&store.content_dir(&meta.id), meta)?;
+    chunks::materialized_len(&store.content_dir(&meta.id), blob)
+}
+
 /// Rebuild every chunked blob in `destination_dir` from the authenticated
 /// checkpoint index. Existing materialized copies are replaced so a snapshot
 /// copy cannot bypass chunk verification.

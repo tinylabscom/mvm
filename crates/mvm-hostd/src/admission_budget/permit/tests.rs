@@ -983,7 +983,17 @@ fn a_failed_launch_whose_process_lives_stays_charged() {
     .unwrap();
     permit.settle_failed_launch("first").unwrap();
     drop(permit);
-    assert!(HostBudgetPermit::reserve_at(home.path(), &budget(), "second", charge()).is_err());
+    assert_refused_for_the_budget(home.path());
+}
+
+/// The hold is still counted: a second full-size machine is refused because it
+/// exceeds the budget, not because some machine locked the host out.
+fn assert_refused_for_the_budget(home: &Path) {
+    let error = HostBudgetPermit::reserve_at(home, &budget(), "second", charge()).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("exceed this host's budget"),
+        "{error:#}"
+    );
 }
 
 #[test]
@@ -1000,7 +1010,7 @@ fn a_failed_launch_with_an_unprovable_marker_stays_charged() {
     .unwrap();
     permit.settle_failed_launch("first").unwrap();
     drop(permit);
-    assert!(HostBudgetPermit::reserve_at(home.path(), &budget(), "second", charge()).is_err());
+    assert_refused_for_the_budget(home.path());
 }
 
 #[test]
@@ -1010,5 +1020,13 @@ fn a_coordinated_hold_is_never_settled_as_an_ordinary_failure() {
     permit.bind_coordinator(&"a".repeat(64)).unwrap();
     assert!(permit.settle_failed_launch("first").is_err());
     drop(permit);
-    assert!(HostBudgetPermit::reserve_at(home.path(), &budget(), "second", charge()).is_err());
+    assert_refused_for_the_budget(home.path());
+}
+
+#[test]
+fn a_launcher_that_dies_after_the_spend_leaves_its_hold_charged() {
+    let home = tempfile::tempdir().unwrap();
+    // The launcher is killed between the spend and the settle: nothing settles.
+    std::mem::forget(dispatched(home.path(), "first"));
+    assert_refused_for_the_budget(home.path());
 }

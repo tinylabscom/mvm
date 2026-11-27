@@ -62,7 +62,8 @@ pub use retention::{
 pub(crate) use sealed::chunk_opens;
 pub use verify::{
     CheckpointChainAnchor, checkpoint_ancestry, checkpoint_children, materialize_checkpoint_blobs,
-    materialize_chunked_blobs, materialized_blob_sha256, verify_content, verify_lineage,
+    materialize_chunked_blobs, materialized_blob_len, materialized_blob_sha256, verify_content,
+    verify_lineage,
 };
 use verify::{
     ensure_same_tenant, materialize_checkpoint_manifest, verify_checkpoint_against_chain,
@@ -3074,6 +3075,30 @@ mod tests {
         )
         .expect("an explicitly coexistence-safe backend may fork a live parent");
         assert!(coexistence_safe.seen.borrow().is_some());
+    }
+
+    #[test]
+    fn a_blob_length_is_read_from_its_authenticated_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "blob-length");
+        let scratch = tempfile::tempdir().unwrap();
+        let memory = materialized_source(
+            &store,
+            &parent,
+            mvm_core::checkpoint::MEMORY_BLOB,
+            scratch.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            materialized_blob_len(&store, &parent, mvm_core::checkpoint::MEMORY_BLOB).unwrap(),
+            std::fs::metadata(memory).unwrap().len()
+        );
+        let missing = materialized_blob_len(&store, &parent, "absent.bin").unwrap_err();
+        assert!(
+            format!("{missing:#}").contains("has no absent.bin blob"),
+            "{missing:#}"
+        );
     }
 
     #[test]

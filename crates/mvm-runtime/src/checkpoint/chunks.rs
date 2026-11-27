@@ -739,6 +739,10 @@ pub(super) fn materialized_sha256(content_dir: &Path, blob: &ContentBlob) -> Res
         .context("chunk index does not record the materialized blob digest")
 }
 
+pub(super) fn materialized_len(content_dir: &Path, blob: &ContentBlob) -> Result<u64> {
+    Ok(load_index(content_dir, blob)?.length_bytes)
+}
+
 pub(super) fn load_index(content_dir: &Path, blob: &ContentBlob) -> Result<ChunkIndex> {
     validate_blob_name(&blob.name)?;
     let path = index_path(content_dir, &blob.name);
