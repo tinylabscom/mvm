@@ -859,7 +859,7 @@ fn qemu_nic_violations(rel: &str, raw: &str) -> Vec<String> {
             )
         })
         .collect();
-    let launches = code.matches("helper_command(\"timeout\")").count();
+    let launches = code.matches("helper_command(&qemu_bin)").count();
     let disabled = Regex::new(r#"cmd\.args\(\[\s*"-nic",\s*"none",\s*"-m""#)
         .expect("static QEMU NIC-disable regex")
         .find_iter(&code)
@@ -1411,14 +1411,14 @@ fn probe() {
 
     #[test]
     fn a_qemu_nic_argument_is_named_and_a_comment_or_test_is_not() {
-        let clean = "// no virtio-net here\nfn launch() { let mut cmd = helper_command(\"timeout\"); cmd.args([\"-nic\", \"none\", \"-m\"]); cmd.arg(\"-device\").arg(\"vhost-vsock-pci\"); }\n\
+        let clean = "// no virtio-net here\nfn launch() { let mut cmd = helper_command(&qemu_bin); cmd.args([\"-nic\", \"none\", \"-m\"]); cmd.arg(\"-device\").arg(\"vhost-vsock-pci\"); }\n\
                      #[cfg(test)]\nmod tests { fn t() { assert!(!a.contains(\"-netdev\")); } }\n";
         assert!(qemu_nic_violations(QEMU_BUILDER_RS, clean).is_empty());
-        let implicit_nic = "fn launch() { let mut cmd = helper_command(\"timeout\"); cmd.arg(\"-device\").arg(\"vhost-vsock-pci\"); }";
+        let implicit_nic = "fn launch() { let mut cmd = helper_command(&qemu_bin); cmd.arg(\"-device\").arg(\"vhost-vsock-pci\"); }";
         assert!(!qemu_nic_violations(QEMU_BUILDER_RS, implicit_nic).is_empty());
         let nic = "fn launch() { cmd.args([\"-netdev\", \"user,id=n0\"]); }";
         assert!(!qemu_nic_violations(QEMU_BUILDER_RS, nic).is_empty());
-        let unsafe_nic = "fn launch() { let mut cmd = helper_command(\"timeout\"); cmd.args([\"-nic\", \"user\", \"-m\"]); }";
+        let unsafe_nic = "fn launch() { let mut cmd = helper_command(&qemu_bin); cmd.args([\"-nic\", \"user\", \"-m\"]); }";
         assert!(!qemu_nic_violations(QEMU_BUILDER_RS, unsafe_nic).is_empty());
     }
 
