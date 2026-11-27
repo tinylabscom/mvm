@@ -161,6 +161,67 @@ root, so no in-tree directory fits a research document. This ADR carries the
 decision and the evidence summary. It does not carry the work items, and it
 does not carry a status ledger.
 
+### 5. `mvm` stays a single-host tool; `mvmd` owns the fleet.
+
+`mvmctl` carries no tenant, placement, or provider-registry command, and no
+named accelerator or remote-execution provider concept. Which hypervisor runs
+a workload is the `VmBackend` trait plus `--hypervisor` / `MVM_HYPERVISOR` and
+auto-detection; there is no second "provider" layer with its own identity,
+capability list and health model. Accelerators and GPUs are not modelled as
+providers either: host-side accelerator access, if it is ever exposed, is
+designed against `VmBackend` and `MvmClient` as they exist then.
+
+The one exception is `mvmctl deploy` (with `deployments`), an `mvmd` client. It
+builds, seals and records the artifact locally first, then submits it to an
+authenticated `mvmd` endpoint. It chooses no production host or hypervisor;
+`mvmd` owns placement, backend selection and launch authority (ADR-014). This
+is a narrow client operation, not a provider abstraction.
+
+### 6. One client contract for embedders and remote callers.
+
+The machine lifecycle contract is `MvmClient`, defined once in `mvm-core`
+behind its `client` feature and re-exported by `mvm-client`. `connect(Target)`
+returns a `Box<dyn MvmClient>`: `Target::Local` builds the in-process
+`LocalBackend`, and `Target::Gateway` builds the REST `GatewayBackend`, which
+needs the `remote` feature. A new transport is one more `MvmClient` impl, not
+a new abstraction layer.
+
+The language SDKs reach it through `libmvm_hostlib` (`crates/mvm-hostlib`),
+loaded in-process, and never run `mvmctl`; `xtask check-no-cli-shellout` fails
+the build if SDK source reaches for a process API. Rust callers depend on
+`mvm-sdk` for build-time authoring and on `mvm-client` for execution; the
+client has no normal dependency on the SDK. The CLI itself does not route
+through `MvmClient`: it drives `AnyBackend` directly, and only its MCP adapter
+sits on the trait.
+
+### 7. `machine` is the workload noun, and `run` is its one-shot.
+
+Every workload lifecycle verb hangs off `mvmctl machine`. There is no
+top-level `vm`, `up`, `down`, `ls`, `console` or `invoke`. The one exception is
+`mvmctl run`, which flattens `machine run`'s own argument struct
+(`MachineRunArgs`) and adds only the SDK transport flags: one implementation
+under two names, not two behaviours.
+
+- `machine ps` (alias `ls`) is the only listing. It joins the persisted
+  machine specs with the live VMs and labels each row persistent or
+  transient, so one command answers "what do I have?".
+- The image source is a mutually exclusive flag (`--image`, `--manifest` and
+  the rest) on one command, not a command tree per source.
+- Persistence is chosen by flags (`-d`, `--ttl`, `--port`, `--healthcheck`,
+  `--up-json`), never by `--tty` or `--name`. An interactive `-it` run is
+  foreground-only.
+- Every visible top-level verb has a row in
+  `public/src/content/docs/reference/cli-commands.md`, and every row names a
+  visible verb; `xtask check-cli-help-matches-docs` holds both directions, so
+  hiding a verb to skip documenting it also removes it from `--help`.
+  Developer tooling is hidden, and internal subprocess transports carry a
+  `__` prefix so they cannot be typed by accident.
+- A renamed or removed verb leaves no hidden alias behind. Before 1.0 there is
+  no user owed the old name.
+
+Every `machine` verb still goes through the same signed-plan admission and
+audit chain; the surface is naming over unchanged enforcement.
+
 ## Consequences
 
 **We accept a narrower product surface for longer.** A competitor can ship a

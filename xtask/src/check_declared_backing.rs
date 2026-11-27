@@ -109,7 +109,6 @@ const PENDING: &[&str] = &[
     "specs/adrs/003-hypervisor-egress-policy.md",
     "specs/adrs/004-sealed-signed-builder-image.md",
     "specs/adrs/005-function-call-entrypoints.md",
-    "specs/adrs/006-mvm-provider-cli-contract.md",
     "specs/adrs/007-vmbackend-single-trait.md",
     "specs/adrs/008-iroh-aware-encryption-layering.md",
     "specs/adrs/014-signed-audited-execution-plans.md",
@@ -118,7 +117,6 @@ const PENDING: &[&str] = &[
     "specs/adrs/022-target-architecture.md",
     "specs/adrs/023-secrets-subsystem-egress-substitution.md",
     "specs/adrs/024-wasm-sandbox-backend.md",
-    "specs/adrs/027-cli-surface-consolidation.md",
     "specs/adrs/035-workload-stream-plane.md",
 ];
 
