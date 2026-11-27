@@ -20,13 +20,13 @@
 
 use std::path::{Path, PathBuf};
 
-use mvm_backends::driver::{fc::FcDriver, hvf::HvfDriver};
 use mvm_build::builder_backend_select::{
     BuilderBackendChoice, register_driver_builders, register_stage0_builders,
 };
 use mvm_build::builder_vm::{
     BuilderVm, BuilderVmError, BuilderVmImage, builder_vm_cache_dir, host_arch_tag,
 };
+use mvm_vmm::driver::{fc::FcDriver, hvf::HvfDriver};
 
 use super::{DriverBuilderVm, Stage0Vm};
 use crate::driver::VmmDriver;

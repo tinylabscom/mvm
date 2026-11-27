@@ -408,7 +408,7 @@ fn an_hvf_runner_reaches_the_launch_checks_instead_of_a_blanket_refusal() {
     let mut env = TestEnv::new();
     env.set("MVM_HOME", home.path());
     let runner = WorkloadRunner::new(
-        mvm_backends::driver::hvf::HvfDriver::new(),
+        mvm_vmm::driver::hvf::HvfDriver::new(),
         RecordingSpawner::new("/run/ep.sock"),
         RecordingBrokerRegistrar::new(),
     );

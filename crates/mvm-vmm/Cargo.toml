@@ -14,13 +14,15 @@ substrate_server_category = "per-VM provider plumbing (host agent, console, hand
 [dependencies]
 # The HVF handoff request's wire shape.
 serde = { workspace = true }
+# Run-sidecar clearing reads the exit and usage capture paths on every host.
+mvm-core = { workspace = true, features = ["host-state"] }
+anyhow.workspace = true
 
 # The device model, vsock transport, driver seam and host helpers drive a VMM
 # through Unix sockets, file descriptors and guest memory mappings, so they and
 # the crates only they need build on Unix hosts alone. On any other host the
 # crate keeps its portable modules, and nothing here reaches `ring`.
 [target.'cfg(unix)'.dependencies]
-anyhow.workspace = true
 # JSON serialization for host-service configs.
 serde_json = { workspace = true }
 # Egress policy types used by the vsock egress bridge.
@@ -52,6 +54,10 @@ rand.workspace = true
 # Unix sockets / file descriptors.
 libc.workspace = true
 socket2.workspace = true
+tempfile.workspace = true
+# The libkrun driver's supervisor config and availability probe. Its FFI
+# linkage stays behind libkrun-sys's own feature.
+libkrun-sys = { workspace = true, optional = true }
 ed25519-dalek.workspace = true
 hex.workspace = true
 base64.workspace = true
@@ -62,7 +68,6 @@ mvm-macho-sign = { path = "../deps/mvm-macho-sign" }
 security-framework = "3.7"
 core-foundation = "0.10"
 plist = "1"
-tempfile.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -77,3 +82,11 @@ default = []
 # turn that crate's feature on itself. Leaving it off only worked while every
 # consumer happened to enable mvm-core/test-support for its own reasons.
 test-support = ["mvm-core/test-support"]
+# One feature per concrete driver family. The default build carries none, so
+# a crate that needs only the seam or the host helpers does not compile the
+# drivers or link libkrun-sys. The Firecracker driver reuses libkrun's stop
+# deadline and QEMU's KVM probe, so `fc` brings both families with it.
+fc = ["libkrun", "qemu"]
+hvf = []
+libkrun = ["dep:libkrun-sys"]
+qemu = []

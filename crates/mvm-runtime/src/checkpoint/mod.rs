@@ -240,7 +240,7 @@ pub struct RestoredChild<'a> {
 
 /// Stages a forked child's snapshot into position and starts the VM. Taken as a
 /// seam so [`fork_vm_full`] is testable without a live hypervisor, and so the
-/// VMM-specific restorers can live in `mvm-backends` without this crate naming
+/// VMM-specific restorers can live in `mvm-vmm` without this crate naming
 /// them: `FcForkRestorer` loads Firecracker's snapshot triple, `HvfForkRestorer`
 /// maps private RAM and restores the frame. Any `Fn(&RestoredChild)` closure is
 /// a restorer that verifies nothing itself.
@@ -261,7 +261,7 @@ impl<F: Fn(&RestoredChild<'_>) -> Result<()>> ForkRestorer for F {
     }
 }
 
-impl ForkRestorer for mvm_backends::fc::FcForkRestorer {
+impl ForkRestorer for mvm_vmm::fc::FcForkRestorer {
     fn restore(&self, child: &RestoredChild<'_>) -> Result<()> {
         let required_blob_sha = |name: &str| {
             child
@@ -277,7 +277,7 @@ impl ForkRestorer for mvm_backends::fc::FcForkRestorer {
             child.vm_name,
             child.state_dir,
             child.cpu_grant,
-            &mvm_backends::fc::ForkRuntimeEvidence {
+            &mvm_vmm::fc::ForkRuntimeEvidence {
                 observation_sha256: required_blob_sha("runtime-artifacts.json")?,
                 anchors_sha256: required_blob_sha("device-anchors.json")?,
                 reseeded_identity_sha256: child.reseeded_identity_sha256,

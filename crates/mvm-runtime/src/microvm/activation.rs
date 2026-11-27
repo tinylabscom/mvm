@@ -165,7 +165,7 @@ where
 /// Use the same payload and ACK contract on an independently verified,
 /// retained native channel. The caller keeps custody on every error.
 pub(crate) fn activate_cold_hvf(
-    owner: &mut mvm_backends::driver::hvf::ColdHvfOwner,
+    owner: &mut mvm_vmm::driver::hvf::ColdHvfOwner,
     config: &VmStartConfig,
 ) -> Result<()> {
     let env = build_activation_environment(config)?;

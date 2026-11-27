@@ -898,17 +898,17 @@ fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
 
 fn assert_live_firecracker_has_no_nic(name: &str) -> Result<()> {
     let state_dir = mvm_core::config::vm_state_dir(name);
-    let socket = mvm_backends::fc::fc_api_socket_path(&state_dir.to_string_lossy());
-    let body = mvm_backends::fc::fc_api::call(Path::new(&socket), "GET", "/vm/config", None)
+    let socket = mvm_vmm::fc::fc_api_socket_path(&state_dir.to_string_lossy());
+    let body = mvm_vmm::fc::fc_api::call(Path::new(&socket), "GET", "/vm/config", None)
         .with_context(|| format!("reading live Firecracker device model for {name}"))?;
     assert_no_nic_in_firecracker_config(&body)
         .with_context(|| format!("checking live Firecracker device model for {name}"))
 }
 
 fn assert_no_nic_in_firecracker_config(body: &str) -> Result<()> {
-    let model: mvm_backends::fc::RestoredDeviceModel =
+    let model: mvm_vmm::fc::RestoredDeviceModel =
         serde_json::from_str(body).context("parsing GET /vm/config response")?;
-    mvm_backends::fc::assert_vsock_only_device_model(model.network_interfaces.len())
+    mvm_vmm::fc::assert_vsock_only_device_model(model.network_interfaces.len())
 }
 
 fn wait_until_ready(spec: &BenchSpec, name: &str) -> Result<()> {

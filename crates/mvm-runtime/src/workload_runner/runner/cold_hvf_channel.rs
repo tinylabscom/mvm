@@ -3,7 +3,7 @@
 
 use super::*;
 use mvm_agentd::vsock::{ExecEvent, GuestRequest, GuestResponse};
-use mvm_backends::driver::hvf::{ColdHvfBootFailure, ColdHvfOwner, HvfDriver};
+use mvm_vmm::driver::hvf::{ColdHvfBootFailure, ColdHvfOwner, HvfDriver};
 
 /// Legacy anyhow callers still carry the actual typed native failure. Add
 /// their supporting guards before any outer caller can drop or format it.

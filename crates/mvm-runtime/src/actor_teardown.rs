@@ -398,7 +398,7 @@ impl AnyBackend {
         let helpers = Arc::new(Mutex::new(Vec::new()));
         let failed_vm = Arc::new(Mutex::new(None));
         let mut runner = WorkloadRunner::new(
-            mvm_backends::driver::hvf::HvfDriver::new(),
+            mvm_vmm::driver::hvf::HvfDriver::new(),
             ActorSpawner(Arc::clone(&helpers)),
             ActorBroker(Arc::clone(&helpers)),
         )

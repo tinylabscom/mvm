@@ -34,7 +34,7 @@ impl ShellJobBuilder {
                 let image = mvm_client::resolve_driver_builder_image()
                     .map_err(|error| anyhow::anyhow!("resolving HVF builder image: {error}"))?;
                 mvm_client::DriverBuilderVm::new(
-                    mvm_backends::driver::hvf::HvfDriver::new(),
+                    mvm_vmm::driver::hvf::HvfDriver::new(),
                     image.kernel,
                     image.rootfs,
                 )
@@ -47,7 +47,7 @@ impl ShellJobBuilder {
                     anyhow::anyhow!("resolving Firecracker builder image: {error}")
                 })?;
                 mvm_client::DriverBuilderVm::new(
-                    mvm_backends::driver::fc::FcDriver::new(),
+                    mvm_vmm::driver::fc::FcDriver::new(),
                     image.kernel,
                     image.rootfs,
                 )

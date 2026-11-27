@@ -584,23 +584,23 @@ const HELPER_SPAWNS: &[(&str, &str)] = &[
         "impl LinuxEnv for NativeEnv",
     ),
     (
-        "crates/mvm-backends/src/driver/libkrun.rs",
+        "crates/mvm-vmm/src/driver/libkrun.rs",
         "fn bounded_supervisor_command(",
     ),
     (
-        "crates/mvm-backends/src/driver/hvf.rs",
+        "crates/mvm-vmm/src/driver/hvf.rs",
         "fn bounded_supervisor_command(",
     ),
     (
-        "crates/mvm-backends/src/driver/hvf_restore.rs",
+        "crates/mvm-vmm/src/driver/hvf_restore.rs",
         "fn bounded_restore_command(",
     ),
     (
-        "crates/mvm-backends/src/driver/qemu.rs",
+        "crates/mvm-vmm/src/driver/qemu.rs",
         "fn bounded_qemu_command(",
     ),
     (
-        "crates/mvm-backends/src/driver/qemu_process.rs",
+        "crates/mvm-vmm/src/driver/qemu_process.rs",
         "fn spawn_vsock_bridges(",
     ),
     (

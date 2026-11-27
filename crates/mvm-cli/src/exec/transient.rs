@@ -90,7 +90,7 @@ impl RuntimeRunCustody {
         name: &str,
     ) -> Result<mvm_vmm::host::process_identity::ProcessIdentity> {
         use mvm_vmm::driver::traits::VmmDriver as _;
-        mvm_backends::driver::FcDriver::new()
+        mvm_vmm::driver::FcDriver::new()
             .attach(&VmId(name.to_owned()))?
             .process_identity()?
             .context("original runtime process identity is unavailable")

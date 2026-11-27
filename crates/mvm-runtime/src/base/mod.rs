@@ -15,7 +15,7 @@
 //! ## What moved down into `mvm-vmm::host`
 //!
 //! `ui`, `runtime_meta`, `observability_target`, `shell`, and `linux_env`
-//! now live in `mvm-vmm::host` so `mvm-backends` can use them without a
+//! now live in `mvm-vmm::host` so the drivers can use them without a
 //! back-edge into `mvm-runtime`. They are re-exported below at their old
 //! `crate::base::*` paths so in-crate callers and the mvmd contract
 //! surface keep resolving.

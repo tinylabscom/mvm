@@ -28,7 +28,7 @@ const OWNED_MODULES: &[(&str, &str)] = &[
     ("kernel_artifact", "crates/mvm-build/src/kernel_artifact.rs"),
     ("page_merge", "crates/mvm-conformance/src/page_merge.rs"),
     ("rate_limit", "crates/mvm-hostd/src/rate_limit.rs"),
-    ("run_sidecars", "crates/mvm-backends/src/run_sidecars.rs"),
+    ("run_sidecars", "crates/mvm-vmm/src/run_sidecars.rs"),
     ("socks5_udp", "crates/mvm-agentd/src/socks5_udp.rs"),
 ];
 

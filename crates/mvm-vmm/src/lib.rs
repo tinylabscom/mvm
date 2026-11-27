@@ -6,10 +6,11 @@
 //! [`hv::HypervisorVm`] / [`hv::HypervisorVcpu`] traits, then drive the
 //! shared device model through [`run::run`].
 //!
-//! The driver seam ([`driver::VmmDriver`](driver::VmmDriver), [`VmmSpec`])
-//! and the backend-agnostic vsock transport also live here so that
-//! `mvm-backends` can implement backends without depending on the workload
-//! orchestration in `mvm-runtime`.
+//! The driver seam ([`driver::VmmDriver`](driver::VmmDriver), [`VmmSpec`]),
+//! the backend-agnostic vsock transport and the concrete drivers live here,
+//! below the workload orchestration in `mvm-runtime`. Each driver family is
+//! selected by its own feature (`fc`, `hvf`, `libkrun`, `qemu`); the default
+//! build has none of them.
 
 //!
 //! Everything that touches a Unix socket, a file descriptor or guest memory is
@@ -22,14 +23,20 @@ pub mod agent_debug;
 pub mod checkpoint;
 #[cfg(unix)]
 pub mod driver;
+#[cfg(all(unix, feature = "fc"))]
+pub mod fc;
 #[cfg(unix)]
 pub mod host;
 pub mod hvf_handoff;
+#[cfg(unix)]
+pub mod mock;
 #[cfg(unix)]
 pub mod post_restore;
 pub mod qemu_arch;
 #[cfg(unix)]
 pub mod quota;
+/// Clearing one run's leftover sidecars before the next boot.
+pub mod run_sidecars;
 #[cfg(unix)]
 pub mod runtime_artifacts;
 #[cfg(unix)]

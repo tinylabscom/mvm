@@ -194,11 +194,11 @@ jobs:
         # different fingerprints and rebuilt most of the same graph seven
         # times over — 28 of this job's 35 minutes, and the critical path for
         # every code validation. These packages form one feature subtree
-        # (mvm-cli -> mvm-runtime -> mvm-backends, mvm-vmm -> mvm-core,
+        # (mvm-cli -> mvm-runtime -> mvm-vmm -> mvm-core,
         # mvm-fs), so a single resolution covers all of them and compiles once.
         run: |
           cargo nextest run --features test-support --lib \
-            -p mvm-backends -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm \
+            -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm \
             -p mvm-fs -p mvm-build
           cargo nextest run -p mvmctl --features test-support --test audit_emissions_live
 
@@ -706,18 +706,19 @@ jobs:
           if sys.platform != "linux":
               raise RuntimeError("producer descriptor regressions must execute on Linux")
           tests = [
-              ("mvm-backends", "driver::fc::tests::descriptor_boot_source_reads_held_bytes_after_slot_replacement"),
-              ("mvm-runtime", "kernel_custody::tests::producer_kernel_descriptor_survives_replacement_after_final_check"),
-              ("mvm-cli", "commands::pack::build::tests::health_backend_requires_an_actual_same_host_descriptor_route"),
+              # The Firecracker driver is behind mvm-vmm's `fc` feature.
+              ("mvm-vmm", ["--features", "fc"], "driver::fc::tests::descriptor_boot_source_reads_held_bytes_after_slot_replacement"),
+              ("mvm-runtime", [], "kernel_custody::tests::producer_kernel_descriptor_survives_replacement_after_final_check"),
+              ("mvm-cli", [], "commands::pack::build::tests::health_backend_requires_an_actual_same_host_descriptor_route"),
           ]
           logs = pathlib.Path(tempfile.mkdtemp(prefix="mvm-producer-linux-", dir=os.environ["RUNNER_TEMP"]))
           print(f"Exact Linux producer regression logs: {logs}", flush=True)
-          for package, name in tests:
+          for package, features, name in tests:
               log = logs / f"{package}.log"
               subprocess.run([
                   sys.executable, "scripts/run-bounded-command.py",
                   "--timeout", "595", "--grace", "5", "--log", str(log), "--",
-                  "cargo", "test", "--locked", "-p", package, "--lib", name,
+                  "cargo", "test", "--locked", "-p", package, *features, "--lib", name,
                   "--", "--exact", "--color", "never",
               ], check=True)
               require_one_pass(log.read_text(), name)

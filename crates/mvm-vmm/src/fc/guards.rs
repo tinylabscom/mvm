@@ -1,0 +1,254 @@
+//! RAII resource guards — prevent leaks when VM launch fails partway through.
+
+use tracing::warn;
+
+use crate::host::config::VmSlot;
+use crate::host::shell::run_in_vm;
+
+/// RAII guard for a Firecracker process started on the Linux host.
+///
+/// On drop, kills the Firecracker process using the PID file and cleans up
+/// the API socket. Call `defuse()` after a successful launch to prevent
+/// cleanup (ownership transfers to the normal stop path).
+pub struct FirecrackerGuard {
+    /// Absolute path to the VM directory on the Linux host (contains fc.pid; the
+    /// API socket is wherever [`super::fc_api_socket_path`] puts it).
+    abs_dir: Option<String>,
+}
+
+impl FirecrackerGuard {
+    /// No process cleanup is armed yet.
+    pub(crate) fn pending() -> Self {
+        Self { abs_dir: None }
+    }
+
+    /// Retire prior markers at commit-to-effects, before cleanup can read them.
+    pub(crate) fn arm(&mut self, abs_dir: &str) -> std::io::Result<()> {
+        if self.abs_dir.is_some() {
+            return Ok(());
+        }
+        for name in ["fc.pid", ".fc-pid"] {
+            match std::fs::remove_file(std::path::Path::new(abs_dir).join(name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        self.abs_dir = Some(abs_dir.to_string());
+        Ok(())
+    }
+
+    /// Create a new guard for a Firecracker process in the given directory.
+    pub fn new(abs_dir: &str) -> Self {
+        Self {
+            abs_dir: Some(abs_dir.to_string()),
+        }
+    }
+
+    /// Defuse the guard — prevents cleanup on drop.
+    /// Call this after the VM has been fully started and run-info written.
+    pub fn defuse(&mut self) {
+        self.abs_dir = None;
+    }
+}
+
+/// The cleanup script for an orphaned Firecracker in `dir`; every path is
+/// quoted, since `dir` derives from the VM name.
+fn orphan_cleanup_script(dir: &str) -> String {
+    use crate::host::shell::shell_quote as q;
+    let pid = q(&format!("{dir}/fc.pid"));
+    let old_pid = q(&format!("{dir}/.fc-pid"));
+    let socket = q(&super::fc_api_socket_path(dir));
+    format!(
+        r#"
+                if [ -f {pid} ]; then
+                    kill "$(cat {pid})" 2>/dev/null || true
+                    rm -f {pid}
+                elif [ -f {old_pid} ]; then
+                    kill "$(cat {old_pid})" 2>/dev/null || true
+                    rm -f {old_pid}
+                fi
+                rm -f {socket}
+                "#
+    )
+}
+
+impl Drop for FirecrackerGuard {
+    fn drop(&mut self) {
+        if let Some(ref dir) = self.abs_dir {
+            warn!(dir = %dir, "FirecrackerGuard: killing orphaned Firecracker process");
+            if let Err(e) = run_in_vm(&orphan_cleanup_script(dir)) {
+                warn!("FirecrackerGuard: cleanup failed: {e}");
+            }
+        }
+    }
+}
+
+/// Removes a slot reservation if launch fails before real run-info is written.
+pub struct SlotReservationGuard {
+    slot: Option<VmSlot>,
+}
+
+impl SlotReservationGuard {
+    pub fn new(slot: &VmSlot) -> Self {
+        Self {
+            slot: Some(slot.clone()),
+        }
+    }
+
+    pub fn defuse(&mut self) {
+        self.slot = None;
+    }
+}
+
+impl Drop for SlotReservationGuard {
+    fn drop(&mut self) {
+        if let Some(ref slot) = self.slot
+            && let Err(e) = super::observe::release_slot_reservation(slot)
+        {
+            warn!(
+                vm = %slot.name,
+                slot = slot.index,
+                "SlotReservationGuard: cleanup failed: {e}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::shell::mock as shell_mock;
+
+    #[test]
+    fn failed_marker_retirement_does_not_arm_cleanup_or_retry() {
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(state.path().join("fc.pid"), b"11111").unwrap();
+        std::fs::create_dir(state.path().join(".fc-pid")).unwrap();
+        let _handler = shell_mock::install_handler(|_| {
+            panic!("failed retirement must not arm cleanup");
+        });
+        let mut guard = FirecrackerGuard::pending();
+        assert!(guard.arm(state.path().to_str().unwrap()).is_err());
+        assert!(
+            !state.path().join("fc.pid").exists(),
+            "first retirement already occurred"
+        );
+        assert!(state.path().join(".fc-pid").is_dir());
+        drop(guard);
+    }
+
+    #[test]
+    fn already_armed_guard_keeps_the_new_attempt_marker() {
+        let state = tempfile::tempdir().unwrap();
+        let mut guard = FirecrackerGuard::pending();
+        guard.arm(state.path().to_str().unwrap()).unwrap();
+        std::fs::write(state.path().join("fc.pid"), b"33333").unwrap();
+        guard.arm(state.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read(state.path().join("fc.pid")).unwrap(),
+            b"33333"
+        );
+        guard.defuse();
+    }
+
+    #[test]
+    fn firecracker_guard_defuse_prevents_cleanup() {
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = call_count.clone();
+        let _handler = shell_mock::install_handler(move |_script: &str| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            shell_mock::MockResponse {
+                exit_code: 0,
+                stdout: String::new(),
+            }
+        });
+
+        {
+            let mut guard = FirecrackerGuard::new("/tmp/test-vm");
+            guard.defuse();
+            // guard drops here — should NOT call shell
+        }
+
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "defused FirecrackerGuard must not run cleanup"
+        );
+    }
+
+    #[test]
+    fn firecracker_guard_runs_cleanup_on_drop() {
+        let scripts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let scripts_clone = scripts.clone();
+        let _handler = shell_mock::install_handler(move |script: &str| {
+            scripts_clone
+                .lock()
+                .expect("mutex must not be poisoned")
+                .push(script.to_string());
+            shell_mock::MockResponse {
+                exit_code: 0,
+                stdout: String::new(),
+            }
+        });
+
+        {
+            let _guard = FirecrackerGuard::new("/tmp/test-vm");
+            // guard drops here without defuse — should run cleanup
+        }
+
+        let captured = scripts.lock().expect("mutex must not be poisoned");
+        assert_eq!(captured.len(), 1, "FirecrackerGuard must call cleanup once");
+        assert!(
+            captured[0].contains("fc.pid") || captured[0].contains(".fc-pid"),
+            "cleanup must reference PID file"
+        );
+        assert!(
+            captured[0].contains("/tmp/test-vm"),
+            "cleanup must reference the VM directory"
+        );
+    }
+
+    #[test]
+    fn firecracker_guard_tolerates_cleanup_failure() {
+        let _handler = shell_mock::install_handler(|_script: &str| shell_mock::MockResponse {
+            exit_code: 1,
+            stdout: String::new(),
+        });
+
+        // Should not panic even though cleanup shell command fails
+        {
+            let _guard = FirecrackerGuard::new("/tmp/nonexistent-vm");
+        }
+    }
+}
+
+#[cfg(test)]
+mod script_tests {
+    use super::orphan_cleanup_script;
+    use crate::host::shell::shell_quote;
+
+    #[test]
+    fn the_orphan_cleanup_script_keeps_a_hostile_directory_one_inert_word() {
+        for v in [
+            "/v/PWN a b",
+            "/v/PWN'; touch /tmp/PWN; '",
+            "/v/PWN$(touch /tmp/PWN)",
+            "/v/PWN`touch /tmp/PWN`",
+            "/v/PWN\ntouch /tmp/PWN",
+            "/v/PWN;rm -rf /",
+        ] {
+            let script = orphan_cleanup_script(v);
+            let mut rest = script.clone();
+            for part in [
+                shell_quote(&format!("{v}/fc.pid")),
+                shell_quote(&format!("{v}/.fc-pid")),
+                shell_quote(&crate::fc::fc_api_socket_path(v)),
+            ] {
+                assert!(rest.contains(&part), "{part} missing from {script}");
+                rest = rest.replace(&part, "Q");
+            }
+            assert!(!rest.contains("PWN"), "leaks: {rest}");
+        }
+    }
+}

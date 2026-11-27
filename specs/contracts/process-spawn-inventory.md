@@ -67,14 +67,6 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-agentd | `src/lifecycle_hooks.rs` | 2 | guest workload | before_/after_ lifecycle hook scripts | guest | CHS | - | RAW_SITES (guest) | guest-side |
 | mvm-agentd | `src/process_rpc.rs` | 1 | guest workload | process-control RPC start of a requested program | guest | CHS | - | RAW_SITES (guest) | guest-side |
 | mvm-agentd | `src/worker_pool.rs` | 1 | guest workload | warm worker-pool process | guest | CHS | - | RAW_SITES (guest) | guest-side |
-| mvm-backends | `src/driver/hvf.rs` | 2 | hypervisor supervisor | spawn mvm-hvf-supervisor for an HVF VM (cold and restore) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
-| mvm-backends | `src/driver/hvf/cold_channel.rs` | 1 | test harness | test-support only: synthetic unconfirmed-launch custody fixture spawning an idle sh child (absent from a build without the test-support feature) | dev harness, not shipped | CH | - | `helper_command` env scrub | test-only |
-| mvm-backends | `src/driver/hvf_restore.rs` | 1 | hypervisor supervisor | spawn mvm-hvf-supervisor for a snapshot restore | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
-| mvm-backends | `src/driver/libkrun.rs` | 1 | hypervisor supervisor | spawn mvm-libkrun-supervisor | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
-| mvm-backends | `src/driver/qemu.rs` | 1 | hypervisor | launch QEMU | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
-| mvm-backends | `src/driver/qemu_process.rs` | 1 | mvmctl self re-exec | start `mvmctl __qemu-vsock-bridge` | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal | embedder-refused |
-| mvm-backends | `src/fc/fetch.rs` | 2 | network fetch | curl of the pinned Firecracker release, then tar of the digest-checked archive | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub | fixed-argv-utility |
-| mvm-backends | `src/fc/idle_pool.rs` | 1 | process control | setsid-detached idle standby holder | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-build | `src/builder_egress_process.rs` | 1 | mvmctl self re-exec | start `mvmctl __builder-egress-supervisor` | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal | embedder-refused |
 | mvm-build | `src/builder_vm_bootstrap.rs` | 1 | mvmctl self re-exec | run the bootstrap helper to prepare the builder image | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal | embedder-refused |
 | mvm-build | `src/builder_vm_image.rs` | 1 | storage tool | host mkfs of the builder store image | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | fixed-argv-utility |
@@ -142,6 +134,14 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-runtime | `src/storage/volume/encrypted_linux.rs` | 7 | storage tool | cryptsetup, mount, umount, mkfs.ext4 for an encrypted volume | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | bounded-fixed-argv-utility |
 | mvm-runtime | `src/workload_runner/runner/standby_live_hvf.rs` | 1 | test harness | opt-in native HVF standby witness runs the authenticated conformance reaper test binary | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | test-only |
 | mvm-setpriv | `src/lib.rs` | 1 | guest helper | privilege-drop-and-exec of the target command | guest | CHS | - | RAW_SITES (guest) | guest-side |
+| mvm-vmm | `src/driver/hvf.rs` | 2 | hypervisor supervisor | spawn mvm-hvf-supervisor for an HVF VM (cold and restore) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
+| mvm-vmm | `src/driver/hvf/cold_channel.rs` | 1 | test harness | test-support only: synthetic unconfirmed-launch custody fixture spawning an idle sh child (absent from a build without the test-support feature) | dev harness, not shipped | CH | - | `helper_command` env scrub | test-only |
+| mvm-vmm | `src/driver/hvf_restore.rs` | 1 | hypervisor supervisor | spawn mvm-hvf-supervisor for a snapshot restore | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
+| mvm-vmm | `src/driver/libkrun.rs` | 1 | hypervisor supervisor | spawn mvm-libkrun-supervisor | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
+| mvm-vmm | `src/driver/qemu.rs` | 1 | hypervisor | launch QEMU | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
+| mvm-vmm | `src/driver/qemu_process.rs` | 1 | mvmctl self re-exec | start `mvmctl __qemu-vsock-bridge` | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub; embedder refusal | embedder-refused |
+| mvm-vmm | `src/fc/fetch.rs` | 2 | network fetch | curl of the pinned Firecracker release, then tar of the digest-checked archive | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub | fixed-argv-utility |
+| mvm-vmm | `src/fc/idle_pool.rs` | 1 | process control | setsid-detached idle standby holder | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub | required-host-primitive |
 | mvm-vmm | `src/host/aux_bin.rs` | 2 | helper bin | `--contract-version` probe of a helper; cargo build of helpers from source | library: caller's process (CLI, daemon, embedder) | CH | CH | `helper_command` env scrub; embedder refusal | embedder-refused |
 | mvm-vmm | `src/host/broker_services_spawn.rs` | 1 | helper bin | spawn the per-VM host-services broker | library: caller's process (CLI, daemon, embedder) | CH | CH | `helper_command` env scrub | required-host-primitive |
 | mvm-vmm | `src/host/gpu_endpoint_spawn.rs` | 1 | helper bin | spawn the per-VM GPU endpoint | library: caller's process (CLI, daemon, embedder) | CH | CH | `helper_command` env scrub; check-single-network-path | required-host-primitive |
@@ -156,7 +156,6 @@ Totals: 191 production sites in 100 files.
 | Crate | Sites |
 |---|--:|
 | mvm-agentd | 27 |
-| mvm-backends | 10 |
 | mvm-build | 27 |
 | mvm-builder-guest | 32 |
 | mvm-cli | 32 |
@@ -167,7 +166,7 @@ Totals: 191 production sites in 100 files.
 | mvm-hostd | 11 |
 | mvm-runtime | 12 |
 | mvm-setpriv | 1 |
-| mvm-vmm | 16 |
+| mvm-vmm | 26 |
 
 | Disposition | Sites | Files |
 |---|--:|--:|
@@ -186,7 +185,6 @@ Reviewed library-reachable sites (disposition, then why):
 
 | File | Disposition | Reason |
 |---|---|---|
-| `mvm-backends/src/fc/fetch.rs` | fixed-argv-utility | `curl` accepts only the lock-derived HTTPS URL and writes to a private temporary file; `tar` extracts only the lock-named member after verifying the archive digest. Both use separate argv under `helper_command`, and the binary's size and digest are checked before installation. Neither spawn has a wall-clock bound. |
 | `mvm-build/src/builder_vm_image.rs` | fixed-argv-utility | `prepopulate_with_mkfs`: program is the e2fsprogs `mkfs.ext4` path from `find_host_mkfs_ext4` (fixed candidate list), argv is a fixed flag list plus typed paths and a block count, no shell, status checked and mapped to `BuilderVmError`. Formats the builder's own store image from a digest-verified seed; no caller-supplied text reaches argv. Stdio is inherited and there is no wall-clock bound (not changed: the output is the operator's progress display, not captured). |
 | `mvm-build/src/builder_vm_runtime.rs` | bounded-fixed-argv-utility | `debugfs_cat`: read-only `debugfs -R` on the builder store image. The request comes from `debugfs_cat_request` (refuses a relative path or whitespace and control characters). It runs under `mvm_core::bounded_run::run_bounded` with a 60 s timeout (typed error) and a 1 MiB stdout cap, and its error text is `excerpt`-capped; tests drive a fake tool for the hang, the 10 MB output and the normal and not-found paths. |
 | `mvm-build/src/embed_toolchain.rs` | embedder-refused-by-caller | The module is shared with `build.rs` and the CLI payload build, which are not library paths. The only non-CLI caller is `rustc_has_target`, reached from `guest_agent_build::ensure_rust_targets` after `zigbuild_tools`, whose first statement is `refuse_toolchain_spawn` (`CliSpawn::GuestRuntimeToolchain`); a library embedder is refused before any `rustup`, `cargo`, `rustc`, `zig` or `python3` probe runs. The module cannot call that function itself because `build.rs` includes it without `mvm-vmm`. |
@@ -201,6 +199,7 @@ Reviewed library-reachable sites (disposition, then why):
 | `mvm-runtime/src/storage/backend.rs` | bounded-fixed-argv-utility | `dmsetup_linux::probe`: `dmsetup --version` availability probe, fixed argv, under `run_bounded` (30 s timeout, 4 KiB capture); a hang or non-zero exit maps to `StorageError::BackendUnavailable`. |
 | `mvm-runtime/src/storage/volume/encrypted_linux.rs` | bounded-fixed-argv-utility | `attach`/`detach`/`format_image`/`close_mapper` through one `check_bounded` helper: fixed programs (`cryptsetup`, `mount`, `umount`, `mkfs.ext4`), argv is fixed subcommands plus typed volume paths and a mapper name derived from a validated `VolumeName` (lowercase alphanumerics, `-`, `_`); the data key goes only through a 0600 tempfile. Each step runs under `run_bounded` (10 min timeout, stdin null, 64 KiB capture) and a failure quotes at most 1000 characters of stderr. Linux only. |
 | `mvm-runtime/src/workload_runner/runner/standby_live_hvf.rs` | test-only | `standby.rs` includes this module only under `cfg(all(test, target_os = "macos", target_arch = "aarch64"))`; `run_reaper` spawns the explicitly supplied conformance test binary only from the ignored, opt-in `native_standby_inventory` witness. No production library path loads this module. |
+| `mvm-vmm/src/fc/fetch.rs` | fixed-argv-utility | `curl` accepts only the lock-derived HTTPS URL and writes to a private temporary file; `tar` extracts only the lock-named member after verifying the archive digest. Both use separate argv under `helper_command`, and the binary's size and digest are checked before installation. Neither spawn has a wall-clock bound. |
 
 Still open-review, and the concrete missing piece:
 

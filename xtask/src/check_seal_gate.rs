@@ -109,7 +109,7 @@ const PRIMITIVES: &[Primitive] = &[
     },
     Primitive {
         pattern: "GuestRequest::SleepPrep",
-        allowed: &[AGENTD, "crates/mvm-backends/src/driver/fc/stop.rs"],
+        allowed: &[AGENTD, "crates/mvm-vmm/src/driver/fc/stop.rs"],
     },
     // The one channel that can hand a running guest a new grant: a resume
     // (which carries none), a fork child and a warm claim, each admitted.
@@ -119,7 +119,7 @@ const PRIMITIVES: &[Primitive] = &[
             LOCAL,
             SNAPSHOT,
             "crates/mvm-vmm/src/post_restore.rs",
-            "crates/mvm-backends/src/fc/snapshot.rs",
+            "crates/mvm-vmm/src/fc/snapshot.rs",
             "crates/mvm-cli/src/commands/vm/checkpoint/fork_vm_full.rs",
         ],
     },
@@ -134,7 +134,7 @@ const MUST_NOT_GATE: &[&str] = &[
     "crates/mvm-client/src/containment.rs",
     "crates/mvm-hostd/src/supervisor/lifecycle/wall_clock.rs",
     "crates/mvm-hostd/src/supervisor/lifecycle/session_expiry.rs",
-    "crates/mvm-backends/src/driver/fc/stop.rs",
+    "crates/mvm-vmm/src/driver/fc/stop.rs",
 ];
 
 const GATE_CALL: &str = "seal_gate::authorize";

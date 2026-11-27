@@ -203,8 +203,7 @@ fn refill_planless(
                 result.spawned += 1;
             }
             Err(error) => {
-                let error = match error.downcast::<mvm_backends::driver::hvf::ColdHvfBootFailure>()
-                {
+                let error = match error.downcast::<mvm_vmm::driver::hvf::ColdHvfBootFailure>() {
                     Ok(native) => match native.into_released_error() {
                         Ok(error) => error,
                         Err(native) => {
@@ -375,7 +374,7 @@ pub fn is_warm_parent_ownership_uncertain(error: &anyhow::Error) -> bool {
             .downcast_ref::<WarmParentCleanupUncertain>()
             .is_some()
             || source
-                .downcast_ref::<mvm_backends::driver::hvf::ColdHvfBootFailure>()
+                .downcast_ref::<mvm_vmm::driver::hvf::ColdHvfBootFailure>()
                 .is_some()
     })
 }
@@ -395,7 +394,7 @@ pub fn warm_parent_cleanup_uncertain_for_test(path: &Path) -> Result<anyhow::Err
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub fn warm_parent_native_custody_for_test() -> anyhow::Error {
-    anyhow::Error::new(mvm_backends::driver::hvf::ColdHvfBootFailure::test_fixture())
+    anyhow::Error::new(mvm_vmm::driver::hvf::ColdHvfBootFailure::test_fixture())
 }
 
 fn discard_parent(

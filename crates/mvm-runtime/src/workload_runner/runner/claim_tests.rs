@@ -1251,8 +1251,8 @@ fn claim_with_volumes(
     volumes: Vec<mvm_core::vm_backend::VmVolume>,
 ) -> (
     std::result::Result<VmId, StandbyError>,
-    Vec<mvm_backends::mock::MockChildFork>,
-    Vec<mvm_backends::mock::DeliveredChildIdentity>,
+    Vec<mvm_vmm::mock::MockChildFork>,
+    Vec<mvm_vmm::mock::DeliveredChildIdentity>,
 ) {
     let home = tempfile::tempdir().unwrap();
     let mut env = TestEnv::new();

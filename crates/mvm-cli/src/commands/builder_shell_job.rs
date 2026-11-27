@@ -72,7 +72,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
         BuilderBackendChoice::Hvf => {
             let image = mvm_client::resolve_driver_builder_image().map_err(builder_vm_err)?;
             mvm_client::DriverBuilderVm::new(
-                mvm_backends::driver::hvf::HvfDriver::new(),
+                mvm_vmm::driver::hvf::HvfDriver::new(),
                 image.kernel,
                 image.rootfs,
             )
@@ -82,7 +82,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
         BuilderBackendChoice::Firecracker => {
             let image = mvm_client::resolve_driver_builder_image().map_err(builder_vm_err)?;
             mvm_client::DriverBuilderVm::new(
-                mvm_backends::driver::fc::FcDriver::new(),
+                mvm_vmm::driver::fc::FcDriver::new(),
                 image.kernel,
                 image.rootfs,
             )

@@ -1,0 +1,1898 @@
+//! Firecracker daemon lifecycle + the raw HTTP-over-UDS API client:
+//! socket/uds path helpers, process spawn, and the PUT/PATCH call plumbing.
+
+use anyhow::{Context, Result};
+use tracing::instrument;
+
+use crate::host::shell::{run_in_vm_visible, shell_quote};
+use crate::host::ui;
+
+use super::{firecracker_vsock_uds_path, resolve_running_vm_dir};
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(serde::Deserialize)]
+struct WriterConfig {
+    drives: Vec<WriterDrive>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(serde::Deserialize)]
+struct WriterDrive {
+    drive_id: String,
+    path_on_host: std::path::PathBuf,
+    is_read_only: bool,
+}
+
+/// Authenticate the configured writable drives against the original objects
+/// still held by this launch, not against pathnames that could be replaced.
+#[cfg(target_os = "linux")]
+pub(crate) fn verify_writable_writer(
+    abs_dir: &str,
+    abs_socket: &str,
+    handoff: &crate::driver::prepared_disks::LaunchWritableHandoff,
+) -> Result<()> {
+    let config: WriterConfig = serde_json::from_str(&super::call(
+        std::path::Path::new(abs_socket),
+        "GET",
+        "/vm/config",
+        None,
+    )?)
+    .context("parsing actual Firecracker writable drive configuration")?;
+    validate_writer_config(&config, handoff.projected())?;
+    let pid = read_firecracker_pid(abs_dir)?;
+    handoff
+        .verify_writer_descriptors(pid)
+        .with_context(|| format!("verifying original writable custody in Firecracker pid {pid}"))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn verify_writable_writer(
+    _abs_dir: &str,
+    _abs_socket: &str,
+    _handoff: &crate::driver::prepared_disks::LaunchWritableHandoff,
+) -> Result<()> {
+    anyhow::bail!("Firecracker descriptor custody requires the native Linux writer")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn validate_writer_config(
+    config: &WriterConfig,
+    spec: &crate::driver::spec::VmmSpec,
+) -> Result<()> {
+    use std::collections::BTreeSet;
+    anyhow::ensure!(
+        config.drives.len() == spec.blocks.len(),
+        "actual writer drive count differs from the prepared recipe"
+    );
+    let mut seen = BTreeSet::new();
+    for drive in &config.drives {
+        let block = spec
+            .blocks
+            .iter()
+            .find(|block| format!("blk{}", block.slot) == drive.drive_id)
+            .with_context(|| format!("actual writer has unknown drive {}", drive.drive_id))?;
+        anyhow::ensure!(
+            seen.insert(block.slot),
+            "actual writer repeats drive slot {}",
+            block.slot
+        );
+        anyhow::ensure!(
+            drive.is_read_only == block.read_only,
+            "actual drive {} changed its read-only role",
+            drive.drive_id
+        );
+        anyhow::ensure!(
+            drive.path_on_host == block.source,
+            "actual drive {} differs from its prepared source",
+            drive.drive_id
+        );
+    }
+    for block in &spec.blocks {
+        anyhow::ensure!(
+            seen.contains(&block.slot),
+            "actual writer is missing configured drive slot {}",
+            block.slot
+        );
+    }
+    Ok(())
+}
+
+/// Resolve the path to the per-VM serial console log file.
+///
+/// The host-side netinit-audit emitter
+/// (`netinit_audit::emit_for_vm`) reads this file after the
+/// agent is ready and parses the netinit Report from the
+/// captured `__MVM_NETINIT_REPORT__` line. The path follows the
+/// existing convention (`<vm_dir>/console.log`); a backend
+/// that doesn't split console + hypervisor logs returns a
+/// path that may not exist, which the caller treats as
+/// "no netinit report available" rather than an error.
+pub fn vm_console_log_path(vm_name: &str) -> Result<std::path::PathBuf> {
+    let abs_dir = resolve_running_vm_dir(vm_name)?;
+    Ok(std::path::PathBuf::from(format!("{abs_dir}/console.log")))
+}
+
+/// Start a Firecracker daemon in a per-VM directory with its own socket.
+#[instrument(skip_all)]
+pub fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
+    require_unprivileged_firecracker(effective_user_id())?;
+    ensure_api_socket_fits(abs_socket)?;
+    secure_socket_dir(abs_dir)?;
+    start_vm_firecracker_inner(abs_dir, abs_socket, "", None, None)
+}
+
+/// Start a Firecracker daemon inside a scope carrying its guest's memory and
+/// task ceilings and the CPU share this launch was admitted under.
+///
+/// Separate from [`start_vm_firecracker`] rather than a wider signature on it:
+/// the unbounded entry point exists for harnesses that boot no admitted guest
+/// at all, and keeping the bounds off its signature is what stops one of them
+/// from inventing a bound no run was admitted under. A snapshot load reaches the
+/// same scope through [`start_vm_firecracker_scoped`].
+#[instrument(skip_all)]
+pub fn start_vm_firecracker_bounded(
+    abs_dir: &str,
+    abs_socket: &str,
+    machine_id: &str,
+    bounds: &mvm_core::spawn_scope::SpawnBounds,
+    guard: &mut super::FirecrackerGuard,
+    handoff: Option<&crate::driver::prepared_disks::LaunchWritableHandoff>,
+) -> Result<()> {
+    validate_required_scope(machine_id, bounds)?;
+    ensure_api_socket_fits(abs_socket)?;
+    secure_socket_dir(abs_dir)?;
+    let prefix = spawn_scope_prefix(machine_id, std::path::Path::new(abs_dir), bounds)?;
+    start_vm_firecracker_inner(abs_dir, abs_socket, &prefix, Some(guard), handoff)
+}
+
+/// Start Firecracker for a snapshot load, inside a scope prefix the caller has
+/// already built.
+///
+/// The restore paths take the prefix rather than the bounds because the value
+/// that ends up on the launch line has to be the one a test can read back: an
+/// unwrapped Firecracker loads the snapshot and runs the restored guest exactly
+/// as well, and is simply unbounded.
+/// Start a replacement writer with original locked descriptions.
+pub(crate) fn start_vm_firecracker_scoped_with_handoff(
+    abs_dir: &str,
+    abs_socket: &str,
+    scope: &str,
+    handoff: Option<&crate::driver::prepared_disks::LaunchWritableHandoff>,
+) -> Result<()> {
+    require_unprivileged_firecracker(effective_user_id())?;
+    anyhow::ensure!(
+        !scope.trim().is_empty(),
+        "required Firecracker scope is missing"
+    );
+    ensure_api_socket_fits(abs_socket)?;
+    secure_socket_dir(abs_dir)?;
+    start_vm_firecracker_inner(abs_dir, abs_socket, scope, None, handoff)
+}
+
+/// The required legacy `systemd-run` scope prefix, or a pre-launch refusal.
+///
+/// Firecracker is the one per-VM process this repo starts through a shell
+/// rather than a `Command` — it runs as the invoking user and detaches itself
+/// with `nohup setsid` — so it needs the prefix as text. The tokens come from the
+/// same builder the `Command` path uses, so the two cannot drift into bounding
+/// different things.
+pub(crate) fn spawn_scope_prefix(
+    machine_id: &str,
+    state_dir: &std::path::Path,
+    bounds: &mvm_core::spawn_scope::SpawnBounds,
+) -> Result<String> {
+    validate_required_scope(machine_id, bounds)?;
+    let tokens = mvm_core::spawn_scope::scope_prefix_for_spawn(machine_id, state_dir, bounds)
+        .context("required Firecracker scope could not be prepared")?;
+    let quoted: Vec<String> = tokens.iter().map(|t| shell_quote(t)).collect();
+    Ok(format!("{} ", quoted.join(" ")))
+}
+
+pub(crate) fn validate_required_scope(
+    machine_id: &str,
+    bounds: &mvm_core::spawn_scope::SpawnBounds,
+) -> Result<()> {
+    require_unprivileged_firecracker(effective_user_id())?;
+    bounds.validate_required_inputs()?;
+    mvm_core::spawn_scope::validate_scope_id(machine_id)?;
+    if let Some(gap) = mvm_core::spawn_scope::mechanism_gap() {
+        anyhow::bail!("required Firecracker scope unavailable: {}", gap.describe());
+    }
+    if bounds.allowed_cpus().is_some()
+        && let Some(gap) = mvm_core::spawn_scope::cpuset_gap()
+    {
+        anyhow::bail!(
+            "this launch is placed on host cores and its scope cannot carry them: {}",
+            gap.describe()
+        );
+    }
+    Ok(())
+}
+
+/// The file the launch script records a scoped launcher's pid in, so the
+/// launch can fail if the service manager never creates the scope.
+const SCOPE_LAUNCHER_PID_FILE: &str = "scope-launcher.pid";
+
+/// Make the VM's socket directory ours before Firecracker binds in it.
+///
+/// A deep state directory moves the sockets to a short `/tmp` name another
+/// local user can compute. The launch script `rm`s a socket there and later
+/// `chown`s the one Firecracker binds, so a directory someone else created
+/// would let them redirect that `chown`; refuse a directory the invoking user
+/// does not own.
+fn secure_socket_dir(abs_dir: &str) -> Result<()> {
+    mvm_core::config::secure_fallback_socket_dir_at(std::path::Path::new(abs_dir))
+        .context("securing the Firecracker socket directory")
+}
+
+fn start_vm_firecracker_inner(
+    abs_dir: &str,
+    abs_socket: &str,
+    scope: &str,
+    guard: Option<&mut super::FirecrackerGuard>,
+    handoff: Option<&crate::driver::prepared_disks::LaunchWritableHandoff>,
+) -> Result<()> {
+    // Before anything is retired or run: a host with no acceptable Firecracker
+    // fails here, having changed nothing.
+    let firecracker = launch_binary()?;
+    ui::info("Starting Firecracker...");
+    if let Some(guard) = guard {
+        guard
+            .arm(abs_dir)
+            .context("retiring prior Firecracker markers before launch")?;
+    }
+    // A process started here serves the socket its own command line names, so
+    // any record that this dir's VMM came from the idle pool is now stale.
+    super::idle_pool::forget_claim_origin(std::path::Path::new(abs_dir));
+    if let Some(handoff) = handoff {
+        run_with_writable_handoff(
+            firecracker_launch_script(abs_dir, abs_socket, scope, &firecracker),
+            handoff,
+        )?;
+    } else {
+        run_in_vm_visible(&firecracker_launch_script(
+            abs_dir,
+            abs_socket,
+            scope,
+            &firecracker,
+        ))?;
+    }
+    await_started_firecracker(abs_dir, abs_socket, scope)?;
+    // Every launch, not only a cold boot: the snapshot-restore path starts its
+    // own fresh VMM through this same function and then speaks to the socket
+    // in-process, and a root-created socket it had not been handed refused the
+    // non-root claimer with EACCES.
+    adopt_api_socket(abs_socket)
+        .context("adopting the Firecracker API socket for the invoking user")?;
+    ui::info("Firecracker started.");
+    Ok(())
+}
+
+/// Rewrite the launch script so the privileged launcher re-opens the writer's
+/// original objects through this process's descriptor table.
+///
+/// The launcher is a separate shell that does not inherit this process's
+/// descriptors, and mvmctl must never ask a host for sudoers changes to make
+/// it. It instead opens `/proc/<pid>/fd/<n>`, which resolves to the very
+/// object this process holds (not a pathname that could be swapped), and
+/// keeps it open across the `exec` into Firecracker. Only integers are
+/// interpolated. The first of each backing/sidecar pair is opened read-write.
+fn reopen_handoff_script(script: &str, pid: u32, first: u32, last: u32) -> Result<String> {
+    let heredoc = "<<'MVM_LAUNCH_SCRIPT_EOF'\n";
+    let runner = "setsid nohup sh ";
+    anyhow::ensure!(
+        script.contains(heredoc) && script.contains(runner),
+        "handoff launch shape changed"
+    );
+    let reopen: String = (first..=last)
+        .map(|fd| {
+            let mode = if (fd - first).is_multiple_of(2) {
+                "<>"
+            } else {
+                "<"
+            };
+            format!("exec {fd}{mode}/proc/{pid}/fd/{fd} || exit 1\n")
+        })
+        .collect();
+    // dash cannot redirect descriptors above 9, so the launcher is bash.
+    Ok(script
+        .replacen(heredoc, &format!("{heredoc}{reopen}"), 1)
+        .replacen(runner, "setsid nohup bash ", 1))
+}
+
+/// Start Firecracker holding the writer's original objects.
+fn run_with_writable_handoff(
+    script: String,
+    handoff: &crate::driver::prepared_disks::LaunchWritableHandoff,
+) -> Result<()> {
+    run_in_vm_visible(&reopen_handoff_script(
+        &script,
+        std::process::id(),
+        handoff.first(),
+        handoff.last(),
+    )?)
+    .context("Firecracker descriptor handoff failed")
+}
+
+/// Start an idle Firecracker for the pool: the same launch line as a VM's,
+/// inside the scope `scope` names, without the progress lines a launch prints.
+pub(crate) fn start_idle_firecracker(abs_dir: &str, abs_socket: &str, scope: &str) -> Result<()> {
+    anyhow::ensure!(
+        !scope.trim().is_empty(),
+        "required Firecracker scope is missing"
+    );
+    let firecracker = launch_binary()?;
+    ensure_api_socket_fits(abs_socket)?;
+    secure_socket_dir(abs_dir)?;
+    let identity = std::path::Path::new(abs_dir).join(super::idle_pool::FC_IDENTITY_FILE);
+    let output = crate::host::shell::run_in_vm(&idle_firecracker_launch_script(
+        abs_dir,
+        abs_socket,
+        scope,
+        &identity.to_string_lossy(),
+        &firecracker,
+    ))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "idle Firecracker launch script failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    await_started_firecracker(abs_dir, abs_socket, scope)
+}
+
+/// Wait for a just-launched Firecracker: its scope, when it has one, then its
+/// API socket.
+fn await_started_firecracker(abs_dir: &str, abs_socket: &str, scope: &str) -> Result<()> {
+    if !scope.is_empty() {
+        let dir = std::path::Path::new(abs_dir);
+        let machine = dir
+            .file_name()
+            .map_or_else(|| abs_dir.to_string(), |n| n.to_string_lossy().into_owned());
+        mvm_core::spawn_scope::await_detached_launcher(
+            &dir.join(SCOPE_LAUNCHER_PID_FILE),
+            &machine,
+        )?;
+    }
+
+    // A fixed-tick shell wait would put a 100 ms floor under every launch; the
+    // socket normally appears in single-digit milliseconds. Waiting here
+    // lets it use the shared backoff; the shell only detaches and execs
+    // Firecracker as the invoking, non-root user.
+    wait_for_api_socket(std::path::Path::new(abs_socket), API_SOCKET_TIMEOUT).map_err(|e| {
+        with_firecracker_stderr(
+            e,
+            &std::path::Path::new(abs_dir).join(FIRECRACKER_STDERR_LOG),
+        )
+    })
+}
+
+/// Where the launch script sends Firecracker's stderr, relative to the VM dir.
+///
+/// It and `console.log` carry guest and VMM diagnostics, so the script
+/// replaces both with fresh 0600 files before Firecracker's redirections open
+/// them: a link left at either path is removed rather than written through, and
+/// neither file is ever created under the caller's umask. The umask is set in a
+/// subshell so Firecracker's own sockets keep the modes it chooses.
+const FIRECRACKER_STDERR_LOG: &str = "firecracker.log";
+
+/// How much of that log a startup failure quotes. Firecracker reports a
+/// refused start in its last few lines; the whole file is left on disk.
+const STDERR_TAIL_LINES: usize = 20;
+
+/// Refuse an API socket path the kernel would refuse, before starting a
+/// process that can only exit.
+///
+/// Firecracker reports this itself — "path must be shorter than SUN_LEN" — but
+/// only in its own log, after which the host sees nothing but a socket that
+/// never appears.
+fn ensure_api_socket_fits(abs_socket: &str) -> Result<()> {
+    if !mvm_core::config::fits_unix_socket_path(std::path::Path::new(abs_socket)) {
+        anyhow::bail!(
+            "Firecracker API socket path {abs_socket} is {} bytes, longer than a Unix socket \
+             can be ({} bytes); Firecracker would exit without creating it",
+            abs_socket.len(),
+            mvm_core::config::UNIX_SOCKET_PATH_MAX_BYTES
+        );
+    }
+    Ok(())
+}
+
+/// Attach what Firecracker wrote to stderr to a startup failure.
+///
+/// A Firecracker that refuses to start exits within milliseconds and says why
+/// only in this log. Quoting it here is what turns "the socket did not appear"
+/// into the actual reason, on hosts where nobody can read the file afterwards.
+fn with_firecracker_stderr(err: anyhow::Error, log: &std::path::Path) -> anyhow::Error {
+    match std::fs::read_to_string(log) {
+        Ok(text) if !text.trim().is_empty() => {
+            let lines: Vec<&str> = text.lines().collect();
+            let tail = lines[lines.len().saturating_sub(STDERR_TAIL_LINES)..].join("\n");
+            let err = err.context(format!("Firecracker stderr ({}):\n{tail}", log.display()));
+            if kvm_access_refused(&text) {
+                err.context(KVM_ACCESS_HINT)
+            } else {
+                err
+            }
+        }
+        _ => err.context(format!(
+            "Firecracker wrote nothing to {} before the deadline",
+            log.display()
+        )),
+    }
+}
+
+/// Firecracker runs as the invoking user and mvmctl never elevates, so the
+/// user needs `/dev/kvm` access of their own.
+const KVM_ACCESS_HINT: &str = "Firecracker could not open /dev/kvm. mvmctl runs it as your own \
+     user and never elevates, so your user must be allowed to open the device: have an \
+     administrator add it to the `kvm` group (`usermod -aG kvm <user>`), log in again, and check \
+     that /dev/kvm exists";
+
+fn kvm_access_refused(stderr: &str) -> bool {
+    stderr.contains("/dev/kvm") && stderr.to_ascii_lowercase().contains("permission denied")
+}
+
+pub(crate) fn effective_user_id() -> u32 {
+    // SAFETY: `geteuid` takes no arguments, dereferences no pointers, and
+    // always returns the effective uid of the calling process.
+    unsafe { libc::geteuid() }
+}
+
+fn require_unprivileged_firecracker(euid: u32) -> Result<()> {
+    anyhow::ensure!(
+        euid != 0,
+        "refusing to launch Firecracker as root; run MVM as a non-root user with /dev/kvm access"
+    );
+    Ok(())
+}
+
+/// The Firecracker a launch execs, resolved and verified against the release's
+/// pin, as a path that is safe to write into the launch script.
+///
+/// The script is a heredoc, so a path with a control character (a
+/// newline would end a heredoc line) is refused rather than quoted. Resolving
+/// here, before any marker is retired or any script runs, means a host with no
+/// acceptable Firecracker fails before it has changed anything.
+fn launch_binary() -> Result<String> {
+    require_unprivileged_firecracker(effective_user_id())?;
+    let resolved =
+        super::fetch::resolve_or_fetch().context("locating the Firecracker to launch")?;
+    script_safe_path(&resolved.path)
+}
+
+fn script_safe_path(path: &std::path::Path) -> Result<String> {
+    let text = path
+        .to_str()
+        .with_context(|| format!("the Firecracker path {path:?} is not valid UTF-8"))?;
+    anyhow::ensure!(
+        !text.chars().any(char::is_control),
+        "the Firecracker path {path:?} contains a control character"
+    );
+    Ok(text.to_string())
+}
+
+fn firecracker_launch_script(
+    abs_dir: &str,
+    abs_socket: &str,
+    scope: &str,
+    firecracker: &str,
+) -> String {
+    let identity = format!("{abs_dir}/{}", super::idle_pool::FC_IDENTITY_FILE);
+    launch_script(
+        abs_dir,
+        abs_socket,
+        scope,
+        effective_user_id(),
+        Some(&identity),
+        firecracker,
+    )
+}
+
+/// The launch script for an idle pool process: the same line, with the
+/// launched process also recording its own pid and start time in
+/// `identity_file` before it becomes Firecracker. The record comes from the
+/// process itself, so it exists as soon as Firecracker does, whether or not
+/// the `mvmctl` that started it is still running.
+pub(crate) fn idle_firecracker_launch_script(
+    abs_dir: &str,
+    abs_socket: &str,
+    scope: &str,
+    identity_file: &str,
+    firecracker: &str,
+) -> String {
+    launch_script(
+        abs_dir,
+        abs_socket,
+        scope,
+        effective_user_id(),
+        Some(identity_file),
+        firecracker,
+    )
+}
+
+/// The launch script, built rather than run.
+///
+/// Pure so a test can read back whether the CPU scope actually reached the
+/// launch line. An unwrapped Firecracker boots identically and is simply not
+/// bounded, which is precisely the failure that needs a test rather than an
+/// inspection.
+///
+/// Firecracker runs as the invoking user and the script never elevates: nothing
+/// in a launch needs more than `/dev/kvm`, which the user must be able to open
+/// themselves (the `kvm` group). There is no network device to configure and
+/// the vsock sockets are the user's own.
+///
+/// `firecracker` is the absolute path the line execs, never a bare name: what
+/// boots the guest is the binary the release shipped and the resolver checked,
+/// not whatever `PATH` names.
+///
+/// The pid marker is written by the launched process itself (`echo $$`) and not
+/// by the caller (`echo $!`), because `$!` names a wrapper rather than
+/// Firecracker whenever one forks instead of exec'ing. Liveness is probed by
+/// comparing `/proc/<pid>/comm` against `firecracker`, so a pid that named a
+/// wrapper read every boot as "the VMM exited" on the first poll. Writing `$$`
+/// from inside is correct whichever wrapper forks, since the `exec` makes that
+/// same pid Firecracker.
+fn launch_script(
+    abs_dir: &str,
+    abs_socket: &str,
+    scope: &str,
+    euid: u32,
+    identity_file: Option<&str>,
+    firecracker: &str,
+) -> String {
+    let q_firecracker = shell_quote(firecracker);
+    let vsock = firecracker_vsock_uds_path(abs_dir);
+    let vsock_cleanup = format!(
+        "rm -f {} {}",
+        shell_quote(&vsock),
+        shell_quote(&format!("{abs_dir}/v.sock"))
+    );
+    let q_dir = shell_quote(abs_dir);
+    let q_socket = shell_quote(abs_socket);
+    // The API socket's directory is the VM dir unless the socket was moved to
+    // the short fallback namespace, which nothing else creates.
+    let q_socket_dir = shell_quote(
+        &std::path::Path::new(abs_socket)
+            .parent()
+            .map_or_else(|| abs_dir.to_string(), |p| p.display().to_string()),
+    );
+    let q_pid = shell_quote(&format!("{abs_dir}/fc.pid"));
+    // `$!` is the scope launcher itself, recorded so the caller can tell a
+    // scope that was created from a service manager that never answered. It is
+    // never used as Firecracker's pid; that marker is written from inside.
+    let record_launcher = if scope.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "echo $! > {}",
+            shell_quote(&format!("{abs_dir}/{SCOPE_LAUNCHER_PID_FILE}"))
+        )
+    };
+    let marker_mode = if euid == 0 { "600" } else { "644" };
+    // Publish identity markers with a same-directory rename so readers cannot
+    // observe a truncated or empty pid while the detached process starts.
+    let write_marker = r#"write_marker() {
+            marker_path=$1
+            marker_value=$2
+            marker_mode=$3
+            marker_tmp=$(mktemp "${marker_path}.tmp.XXXXXXXXXX") || return 1
+            if ! printf "%s\n" "$marker_value" > "$marker_tmp"; then
+                rm -f "$marker_tmp"
+                return 1
+            fi
+            if ! chmod "$marker_mode" "$marker_tmp"; then
+                rm -f "$marker_tmp"
+                return 1
+            fi
+            if ! mv -f "$marker_tmp" "$marker_path"; then
+                rm -f "$marker_tmp"
+                return 1
+            fi
+        }"#;
+    // The body lives in a script file and the `systemd-run` line carries only
+    // its path: some systemd releases rewrite `$` inside the command line, and
+    // the file keeps every `$` out of it.
+    let script_path = format!("{abs_dir}/launch.sh");
+    let q_script = shell_quote(&script_path);
+    let (body, args) = match identity_file {
+        None => (
+            format!(
+                "{write_marker}\nwrite_marker \"$1\" \"$$\" \"{marker_mode}\" && exec {q_firecracker} --api-sock \"$2\"\n"
+            ),
+            format!("{q_pid} {q_socket}"),
+        ),
+        Some(identity) => {
+            // A root caller can read owner-only files; any other caller's
+            // records stay readable to it inside the pool's owner-only
+            // directory.
+            let umask = if euid == 0 { "umask 077\n" } else { "" };
+            (
+                format!(
+                    "{umask}{write_marker}\ns=$(sed \"s/^.*) //\" /proc/$$/stat | cut -d\" \" -f20)\n\
+                     case \"$s\" in ''|*[!0-9]*) exit 1;; esac\n\
+                     write_marker \"$3\" \"$$ $s\" \"{marker_mode}\" && \\\n\
+                     write_marker \"$1\" \"$$\" \"{marker_mode}\" && \\\n\
+                     exec {q_firecracker} --api-sock \"$2\"\n"
+                ),
+                format!(
+                    "{q_pid} {q_socket} {q_identity}",
+                    q_identity = shell_quote(identity)
+                ),
+            )
+        }
+    };
+    let payload = format!("{q_script} {args}");
+    format!(
+        r#"
+        mkdir -p {q_dir} {q_socket_dir}
+        rm -f {q_socket}
+        {vsock_cleanup}
+        (umask 077 && rm -f {q_dir}/console.log {q_dir}/firecracker.log && touch {q_dir}/console.log {q_dir}/firecracker.log)
+        (umask 077 && cat > {q_script} <<'MVM_LAUNCH_SCRIPT_EOF'
+{body}MVM_LAUNCH_SCRIPT_EOF
+        )
+        {scope}setsid nohup sh {payload} \
+            </dev/null >{q_dir}/console.log 2>{q_dir}/firecracker.log &
+        {record_launcher}
+        "#,
+        q_dir = q_dir,
+        payload = payload,
+        body = body,
+        q_script = q_script,
+        q_socket_dir = q_socket_dir,
+        vsock_cleanup = vsock_cleanup,
+        scope = scope,
+        record_launcher = record_launcher,
+    )
+}
+
+/// How long to wait for Firecracker to create its API socket. The shell loop
+/// this replaced allowed 30 x 100 ms, so keeping 3 s means a host slow enough
+/// to need the old ceiling still boots.
+const API_SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Wait for Firecracker to create its API socket, backing off rather than
+/// ticking.
+///
+/// Takes the path and the timeout so the expiry branch is testable without
+/// spawning a VMM. A wait that never fires is the failure mode worth pinning,
+/// and it is unreachable through the launch path.
+fn wait_for_api_socket(socket: &std::path::Path, timeout: std::time::Duration) -> Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut attempt = 0u32;
+    loop {
+        if is_unix_socket(socket) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "Firecracker API socket {} did not appear within {timeout:?}",
+                socket.display()
+            );
+        }
+        std::thread::sleep(mvm_core::poll_backoff::fine_poll_delay(attempt));
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+/// Whether `path` is a unix socket — what `[ -S ]` tested. A regular file left
+/// at the path is not the API socket appearing.
+fn is_unix_socket(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::FileTypeExt as _;
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket())
+}
+
+/// Send an API PUT to a specific Firecracker socket.
+///
+/// The body no longer traverses a shell at all: it is framed by
+/// `Content-Length` on a socket this process owns, so the quoting fragility
+/// the old `curl --data` shape had to defend against does not arise.
+#[instrument(skip_all, fields(path))]
+pub fn api_put_socket(socket: &str, path: &str, data: &str) -> Result<()> {
+    fc_api_call("PUT", socket, path, Some(data))
+}
+
+/// Open a keep-alive session to the Firecracker API socket, reusing one
+/// connection across multiple calls. The boot config sequence sends ~11 PUTs;
+/// pipelining them through one connection saves 10 connect round trips.
+pub fn api_session(socket: &str) -> Result<crate::fc::fc_api::FcSession> {
+    crate::fc::fc_api::FcSession::connect(std::path::Path::new(socket))
+}
+
+/// Send an API PUT through an open session, with the same path validation as
+/// [`api_put_socket`].
+#[instrument(skip_all, fields(path))]
+pub fn api_put_session(
+    session: &mut crate::fc::fc_api::FcSession,
+    path: &str,
+    data: &str,
+) -> Result<()> {
+    if !path.starts_with('/') || path.contains(['\r', '\n']) {
+        anyhow::bail!("refusing malformed Firecracker API path {path:?}");
+    }
+    session.call("PUT", path, Some(data)).map(|_body| ())
+}
+
+/// Restrict the Firecracker-created vsock multiplexer socket to its owner.
+///
+/// Firecracker runs as the invoking user, so it creates this socket as that
+/// user and only the mode needs narrowing: the control plane stays off-limits to
+/// every other user on the host instead of inheriting the process umask.
+pub fn secure_vsock_socket_for_caller(vsock: &str) -> Result<()> {
+    restrict_socket_to_owner(vsock)
+}
+
+/// Mode 0600 on a Firecracker-created control socket.
+fn restrict_socket_to_owner(socket: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("restrict Firecracker socket {socket}"))
+}
+
+/// Shared body for FC's PUT/PATCH calls.
+///
+/// Delegates to [`crate::fc::fc_api::call`], the native HTTP-over-UDS client
+/// this crate already carries for the warm-restore path. That client exists
+/// precisely because each call used to be a `curl` subprocess, and it already
+/// encodes the one thing that is easy to get wrong here: Firecracker answers
+/// `Connection: keep-alive` and holds the socket open regardless of what the
+/// request asked for, so the body must be framed by `Content-Length` and never
+/// by EOF. The boot path was the last caller still shelling out.
+///
+/// Reaching the socket without `sudo` is what [`adopt_api_socket`] arranges.
+fn fc_api_call(method: &str, socket: &str, path: &str, data: Option<&str>) -> Result<()> {
+    // The request target is built by this crate, never by a caller, but it is
+    // interpolated into a request line: reject anything that could terminate
+    // it. A drive id that ever became externally influenced must not be able
+    // to smuggle a second request.
+    if !path.starts_with('/') || path.contains(['\r', '\n']) {
+        anyhow::bail!("refusing malformed Firecracker API path {path:?}");
+    }
+    crate::fc::fc_api::call(std::path::Path::new(socket), method, path, data).map(|_body| ())
+}
+
+/// Restrict a restored Firecracker's vsock socket to its owner.
+///
+/// A snapshot load creates the restored device model, and the VMM binds the
+/// vsock socket the snapshot (or a fork's override) names right then. A restore
+/// gives it the same mode a cold boot gives its vsock socket after `PUT /vsock`.
+/// A load that restored no vsock device bound nothing, and there is nothing to
+/// restrict.
+pub fn secure_restored_vsock_socket(vsock: &std::path::Path) -> Result<()> {
+    if !is_unix_socket(vsock) {
+        return Ok(());
+    }
+    secure_vsock_socket_for_caller(&vsock.to_string_lossy())
+}
+
+/// Restrict the Firecracker-created API socket to its owner.
+///
+/// Firecracker runs as the invoking user, so the socket is already theirs and
+/// the rest of the boot speaks to it in-process. Mode 0600 keeps it off-limits
+/// to every other user on the host. [`start_vm_firecracker_inner`] does this for
+/// every VMM it starts, so the cold boot and the snapshot restore cannot drift
+/// apart on it.
+pub fn adopt_api_socket(socket: &str) -> Result<()> {
+    restrict_socket_to_owner(socket)
+}
+
+/// Read the pid recorded by [`start_vm_firecracker`].
+pub fn read_firecracker_pid(abs_dir: &str) -> Result<u32> {
+    let path = std::path::Path::new(abs_dir).join("fc.pid");
+    let output =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    output.trim().parse::<u32>().with_context(|| {
+        format!(
+            "parse Firecracker pid from {} (marker contents: {:?})",
+            path.display(),
+            output.trim()
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn handoff_reopens_by_proc_fd() {
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 1000);
+        let out = reopen_handoff_script(&script, 42, 1000, 1003).expect("rewrite");
+        assert!(
+            out.contains("exec 1000<>/proc/42/fd/1000 || exit 1"),
+            "{out}"
+        );
+        assert!(
+            out.contains("exec 1001</proc/42/fd/1001 || exit 1"),
+            "{out}"
+        );
+        assert!(
+            out.contains("exec 1003</proc/42/fd/1003 || exit 1"),
+            "{out}"
+        );
+        assert!(out.contains("setsid nohup bash "), "{out}");
+        assert!(!out.contains("sudo"), "{out}");
+        assert!(
+            !out.contains("sudo -C") && !out.contains("closefrom"),
+            "{out}"
+        );
+        assert!(reopen_handoff_script("true", 1, 3, 4).is_err());
+    }
+
+    #[test]
+    fn the_e2e_workflow_installs_no_sudoers_closefrom_dropin() {
+        let wf = include_str!("../../../../.github/workflows/e2e-docs.yml");
+        assert!(
+            !wf.contains("closefrom"),
+            "sudoers closefrom drop-in is back"
+        );
+    }
+
+    use super::*;
+
+    /// A fixed stand-in for the resolved path: the launch line must exec exactly
+    /// the path it is given and nothing found through `PATH`.
+    pub(super) const TEST_FIRECRACKER: &str = "/usr/lib/mvmctl/firecracker/firecracker";
+
+    pub(super) fn firecracker_launch_script_as(
+        abs_dir: &str,
+        abs_socket: &str,
+        scope: &str,
+        euid: u32,
+    ) -> String {
+        launch_script(abs_dir, abs_socket, scope, euid, None, TEST_FIRECRACKER)
+    }
+
+    #[test]
+    fn live_writer_config_must_match_every_original_writable_source() {
+        use crate::driver::spec::{BlockDev, KernelImage, VmmSpec};
+        let spec = VmmSpec {
+            name: "writer".into(),
+            kernel: KernelImage::Bundled,
+            initramfs: None,
+            cmdline: String::new(),
+            vcpus: 1,
+            memory_mib: 512,
+            mem_initial_mib: None,
+            cpu_grant: None,
+            allowed_cpus: None,
+            blocks: vec![BlockDev {
+                source: "/original/volume".into(),
+                read_only: false,
+                ephemeral: false,
+                slot: 3,
+            }],
+            shares: Vec::new(),
+            vsock: Default::default(),
+            console: crate::driver::spec::ConsoleCapture {
+                log_path: "/unused".into(),
+            },
+            trusted_builder: false,
+            builder_egress_endpoint: None,
+            plan_binding: None,
+        };
+        let matching: WriterConfig = serde_json::from_str(
+            r#"{"drives":[{"drive_id":"blk3","path_on_host":"/original/volume","is_read_only":false}]}"#,
+        )
+        .unwrap();
+        validate_writer_config(&matching, &spec).unwrap();
+        let mut read_only_spec = spec.clone();
+        read_only_spec.blocks[0].read_only = true;
+        assert!(validate_writer_config(&matching, &read_only_spec).is_err());
+        for body in [
+            r#"{"drives":[]}"#,
+            r#"{"drives":[{"drive_id":"blk3","path_on_host":"/replacement","is_read_only":false}]}"#,
+            r#"{"drives":[{"drive_id":"blk4","path_on_host":"/original/volume","is_read_only":false}]}"#,
+        ] {
+            let changed: WriterConfig = serde_json::from_str(body).unwrap();
+            assert!(validate_writer_config(&changed, &spec).is_err(), "{body}");
+        }
+    }
+
+    /// Both launch kinds publish original identity without changing the PID wire.
+    #[test]
+    fn both_launch_lines_record_original_identity_and_keep_the_bare_pid_wire() {
+        let idle = launch_script(
+            "/p/idle-1",
+            "/p/idle-1/fc.socket",
+            "",
+            0,
+            Some("/p/idle-1/fc.identity"),
+            TEST_FIRECRACKER,
+        );
+        assert!(idle.contains(r#"write_marker "$3" "$$ $s""#), "{idle}");
+        assert!(idle.contains("/proc/$$/stat"), "{idle}");
+        assert!(idle.contains("'/p/idle-1/fc.identity'"), "{idle}");
+        assert!(
+            idle.contains("umask 077"),
+            "root keeps its records owner-only"
+        );
+        // Every launch line creates its log files owner-only; only root's
+        // payload also narrows the identity record it writes under sudo.
+        let as_user = launch_script(
+            "/p/i",
+            "/p/i/fc.socket",
+            "",
+            1000,
+            Some("/p/i/id"),
+            TEST_FIRECRACKER,
+        );
+        assert!(idle.contains("umask 077\nwrite_marker() {"), "{idle}");
+        assert!(
+            !as_user.contains("umask 077\nwrite_marker() {"),
+            "{as_user}"
+        );
+        assert!(as_user.contains("(umask 077 && rm -f"), "{as_user}");
+        let vm = firecracker_launch_script("/tmp/vm", "/tmp/vm/fc.socket", "", TEST_FIRECRACKER);
+        assert!(vm.contains("/proc/$$/stat"), "{vm}");
+        assert!(vm.contains("'/tmp/vm/fc.identity'"), "{vm}");
+        assert!(vm.contains(r#"write_marker "$3" "$$ $s""#), "{vm}");
+        assert!(vm.contains(r#"write_marker "$1" "$$""#), "{vm}");
+        assert!(
+            vm.contains(r#"case "$s" in ''|*[!0-9]*) exit 1;; esac"#),
+            "{vm}"
+        );
+    }
+
+    /// A boot that reaches the deadline with no socket must fail with a
+    /// message naming the path, not hang. The shell loop this replaced had the
+    /// same ceiling; the wait is unreachable from a unit test through the
+    /// launch path, which is why the timeout is a parameter.
+    #[test]
+    fn waiting_for_an_api_socket_that_never_appears_fails_with_the_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("fc.socket");
+        let err = wait_for_api_socket(&missing, std::time::Duration::from_millis(30))
+            .expect_err("a socket that never appears must not succeed");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("fc.socket"),
+            "unexpected error: {rendered}"
+        );
+    }
+
+    /// The failure the hosted runners hit: Firecracker refused the socket
+    /// path and exited, and the host reported only that the socket never
+    /// appeared. The reason has to be in the error itself.
+    #[test]
+    fn a_socket_that_never_appears_quotes_what_firecracker_said() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join(FIRECRACKER_STDERR_LOG);
+        std::fs::write(
+            &log,
+            "Error: RunWithApi(FailedToBindAndRunHttpServer(IOError(Error { kind: \
+             InvalidInput, message: \"path must be shorter than SUN_LEN\" })))\n",
+        )
+        .expect("write log");
+        let err = wait_for_api_socket(
+            &dir.path().join("fc.socket"),
+            std::time::Duration::from_millis(5),
+        )
+        .map_err(|e| with_firecracker_stderr(e, &log))
+        .expect_err("no socket");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("SUN_LEN"), "{rendered}");
+        assert!(rendered.contains("did not appear"), "{rendered}");
+        assert!(rendered.contains(&log.display().to_string()), "{rendered}");
+    }
+
+    #[test]
+    fn a_silent_firecracker_is_reported_as_silent_with_the_log_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join(FIRECRACKER_STDERR_LOG);
+        let rendered = format!(
+            "{:#}",
+            with_firecracker_stderr(anyhow::anyhow!("socket did not appear"), &log)
+        );
+        assert!(rendered.contains("wrote nothing"), "{rendered}");
+        assert!(rendered.contains(&log.display().to_string()), "{rendered}");
+    }
+
+    #[test]
+    fn a_refused_dev_kvm_names_the_kvm_group_and_says_mvmctl_never_elevates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join(FIRECRACKER_STDERR_LOG);
+        std::fs::write(
+            &log,
+            "Error: Cannot open /dev/kvm: Permission denied (os error 13)\n",
+        )
+        .expect("write log");
+        let rendered = format!("{:#}", with_firecracker_stderr(anyhow::anyhow!("x"), &log));
+        assert!(rendered.contains("`kvm` group"), "{rendered}");
+        assert!(rendered.contains("never elevates"), "{rendered}");
+
+        std::fs::write(&log, "Error: unrelated failure\n").expect("write log");
+        let rendered = format!("{:#}", with_firecracker_stderr(anyhow::anyhow!("x"), &log));
+        assert!(!rendered.contains("kvm"), "{rendered}");
+    }
+
+    #[test]
+    fn only_the_tail_of_a_long_stderr_log_is_quoted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join(FIRECRACKER_STDERR_LOG);
+        let body: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&log, body).expect("write log");
+        let rendered = format!("{:#}", with_firecracker_stderr(anyhow::anyhow!("x"), &log));
+        assert!(rendered.contains("line 99"), "{rendered}");
+        assert!(!rendered.contains("line 79\n"), "{rendered}");
+    }
+
+    #[test]
+    fn an_api_socket_path_the_kernel_would_refuse_is_refused_before_launch() {
+        let long = format!("/{}/fc.socket", "d".repeat(120));
+        let err = ensure_api_socket_fits(&long).expect_err("too long to bind");
+        assert!(
+            err.to_string().contains("longer than a Unix socket"),
+            "{err}"
+        );
+        ensure_api_socket_fits("/srv/vms/w/fc.socket").expect("a short path fits");
+    }
+
+    /// Runs the real script with a stand-in for Firecracker. The launch's
+    /// redirections run in the background, so the assertions read what the
+    /// foreground creation guaranteed before any of them could open a file.
+    #[test]
+    fn the_launch_script_creates_private_logs_and_never_writes_through_a_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let vm = root.path().join("vm");
+        std::fs::create_dir(&vm).unwrap();
+        let victim = root.path().join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        let victim_mode = std::fs::metadata(&victim).unwrap().permissions().mode();
+        std::os::unix::fs::symlink(&victim, vm.join("console.log")).unwrap();
+        std::fs::write(
+            vm.join(FIRECRACKER_STDERR_LOG),
+            b"SYNTHETIC_MARKER from a prior run",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            vm.join(FIRECRACKER_STDERR_LOG),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+
+        let stubs = root.path().join("bin");
+        std::fs::create_dir(&stubs).unwrap();
+        std::fs::write(stubs.join("firecracker"), b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(
+            stubs.join("firecracker"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        // The launch line execs the absolute path it is given, so the stub is
+        // named by path and `PATH` carries nothing it needs.
+        let script = launch_script(
+            vm.to_str().unwrap(),
+            vm.join("fc.socket").to_str().unwrap(),
+            "",
+            0,
+            None,
+            stubs.join("firecracker").to_str().unwrap(),
+        );
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("PATH", "/usr/bin:/bin")
+            .status()
+            .expect("run launch script");
+        assert!(status.success());
+
+        for name in ["console.log", FIRECRACKER_STDERR_LOG] {
+            let meta = std::fs::symlink_metadata(vm.join(name)).unwrap();
+            assert!(meta.file_type().is_file(), "{name} is a fresh regular file");
+            assert_eq!(meta.permissions().mode() & 0o777, 0o600, "{name}");
+            let body = std::fs::read(vm.join(name)).unwrap();
+            assert!(
+                !body.windows(16).any(|w| w == b"SYNTHETIC_MARKER"),
+                "{name} kept a prior run's payload"
+            );
+        }
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode(),
+            victim_mode
+        );
+    }
+
+    #[test]
+    fn the_launch_script_creates_a_relocated_socket_directory() {
+        let script = firecracker_launch_script_as(
+            "/deep/home/vms/w",
+            "/tmp/mvm-sock/0123456789abcdef/fc.socket",
+            "",
+            0,
+        );
+        assert!(
+            script.contains("mkdir -p '/deep/home/vms/w' '/tmp/mvm-sock/0123456789abcdef'"),
+            "{script}"
+        );
+    }
+
+    /// `[ -S ]`, which is what the shell tested: a regular file sitting at the
+    /// socket path is not Firecracker having come up.
+    #[test]
+    fn a_regular_file_at_the_socket_path_is_not_the_socket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let decoy = dir.path().join("fc.socket");
+        std::fs::write(&decoy, b"not a socket").expect("write decoy");
+        assert!(!is_unix_socket(&decoy));
+
+        let listener_path = dir.path().join("real.socket");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&listener_path).expect("bind unix socket");
+        assert!(is_unix_socket(&listener_path));
+        // And the wait returns immediately for one that is already there.
+        wait_for_api_socket(&listener_path, std::time::Duration::from_millis(5))
+            .expect("an existing socket is observed on the first probe");
+    }
+
+    /// The request target is interpolated into a request line. Nothing builds
+    /// one from user input today, but a path carrying CRLF would append a
+    /// second request to the same connection, so it is refused before connect
+    /// rather than trusted because of where it came from.
+    #[test]
+    fn an_api_path_that_could_split_the_request_is_refused() {
+        for bad in [
+            "/drives/a\r\nPUT /actions HTTP/1.1",
+            "/drives/a\nPUT /actions HTTP/1.1",
+            "drives/no-leading-slash",
+        ] {
+            let err = fc_api_call("PUT", "/nonexistent.socket", bad, Some("{}"))
+                .expect_err("malformed path must be refused");
+            assert!(
+                err.to_string().contains("malformed"),
+                "expected a refusal for {bad:?}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn vsock_socket_access_is_private_to_the_invoking_user() {
+        use crate::host::shell::mock as shell_mock;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("v.sock");
+        std::fs::write(&socket, b"").unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        let scripts = Arc::new(Mutex::new(Vec::new()));
+        let captured = scripts.clone();
+        let _guard = shell_mock::install_handler(move |script| {
+            captured.lock().unwrap().push(script.to_string());
+            shell_mock::MockResponse::empty()
+        });
+
+        secure_vsock_socket_for_caller(&socket.to_string_lossy()).expect("secure socket");
+
+        assert!(
+            scripts.lock().unwrap().is_empty(),
+            "narrowing a socket this user owns needs no shell, and no elevation"
+        );
+        let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    /// A restore whose snapshot carried no vsock device bound no socket, so
+    /// there is nothing to hand to the invoking user and no shell to run.
+    #[test]
+    fn a_restore_that_bound_no_vsock_socket_hands_nothing_over() {
+        use crate::host::shell::mock as shell_mock;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scripts = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&scripts);
+        let _guard = shell_mock::install_handler(move |script| {
+            captured
+                .lock()
+                .expect("scripts lock")
+                .push(script.to_string());
+            shell_mock::MockResponse::empty()
+        });
+
+        secure_restored_vsock_socket(&dir.path().join("runtime/v.sock"))
+            .expect("a missing vsock socket is not an error");
+        assert!(scripts.lock().expect("scripts lock").is_empty());
+    }
+
+    /// A restore that did bind the vsock socket hands it over exactly as a cold
+    /// boot does: a bare 0600, whoever the caller is.
+    #[test]
+    fn a_restored_vsock_socket_is_handed_to_the_invoking_user() {
+        use crate::host::shell::mock as shell_mock;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("v.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        let scripts = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&scripts);
+        let _guard = shell_mock::install_handler(move |script| {
+            captured
+                .lock()
+                .expect("scripts lock")
+                .push(script.to_string());
+            shell_mock::MockResponse::empty()
+        });
+
+        secure_restored_vsock_socket(&socket).expect("hand over the bound socket");
+
+        let scripts = scripts.lock().expect("scripts lock");
+        assert!(scripts.is_empty(), "no shell is spawned: {scripts:?}");
+        let mode = std::fs::metadata(&socket)
+            .expect("socket metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn root_secures_a_socket_without_spawning_a_shell() {
+        use crate::host::shell::mock as shell_mock;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("fc.socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666))
+            .expect("make initial mode broad");
+
+        let scripts = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&scripts);
+        let _guard = shell_mock::install_handler(move |script| {
+            captured
+                .lock()
+                .expect("scripts lock")
+                .push(script.to_string());
+            shell_mock::MockResponse::empty()
+        });
+
+        restrict_socket_to_owner(&socket.to_string_lossy()).expect("secure socket");
+
+        assert!(scripts.lock().expect("scripts lock").is_empty());
+        let mode = std::fs::metadata(&socket)
+            .expect("socket metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    /// Firecracker is the one per-VM process started through a shell, so its
+    /// bound has to reach the launch *line* rather than a `Command`.
+    #[test]
+    fn a_granted_share_prefixes_the_firecracker_launch_line() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
+
+        let prefix = spawn_scope_prefix(
+            "vm-bounded",
+            scratch.path(),
+            &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(512).with_cpu_grant(Some(
+                mvm_contract::grants::CpuGrant::Share { millicores: 1500 },
+            )),
+        )
+        .expect("required scope");
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", &prefix, 1000);
+
+        assert!(script.contains("CPUQuota=150%"), "{script}");
+        assert!(script.contains("'MemoryMax=768M'"), "{script}");
+        assert!(script.contains("'MemorySwapMax=0'"), "{script}");
+        assert!(script.contains("'TasksMax=1024'"), "{script}");
+        // The unit carries a per-boot suffix, so match the stem rather than a
+        // name that can no longer be reconstructed from the machine id.
+        assert!(script.contains("vm-bounded-"), "{script}");
+        assert!(script.contains(".scope"), "{script}");
+        // Ahead of the launch, not merely somewhere in the script: Firecracker
+        // has to be born inside the scope.
+        let scope_at = script.find("systemd-run").expect("prefix present");
+        let launch_at = script.find("setsid nohup sh ").expect("launch present");
+        assert!(scope_at < launch_at, "{script}");
+        // And the launcher is recorded after it is backgrounded, so a manager
+        // that never creates the scope fails the launch.
+        let recorded_at = script
+            .find("echo $! > '/tmp/vm/scope-launcher.pid'")
+            .expect("launcher pid recorded");
+        assert!(launch_at < recorded_at, "{script}");
+    }
+
+    /// Memory and task ceilings are not grants, so a launch admitted with no
+    /// CPU share still carries them.
+    #[test]
+    fn an_ungranted_launch_line_still_carries_the_ceilings() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
+        let prefix = spawn_scope_prefix(
+            "vm-ceilinged",
+            scratch.path(),
+            &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(2048),
+        )
+        .expect("required scope");
+        assert!(prefix.contains("'MemoryMax=2304M'"), "{prefix}");
+        assert!(prefix.contains("'TasksMax=1024'"), "{prefix}");
+        assert!(!prefix.contains("CPUQuota"), "{prefix}");
+    }
+
+    #[test]
+    fn an_unscoped_launch_line_carries_no_scope() {
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 1000);
+        assert!(!script.contains("systemd-run"), "{script}");
+        assert!(!script.contains("scope-launcher.pid"), "{script}");
+        assert!(script.contains("setsid nohup sh "), "{script}");
+        assert!(
+            script.contains(&format!("exec '{TEST_FIRECRACKER}'")),
+            "the shell must exec Firecracker, never leave one behind: {script}"
+        );
+    }
+
+    /// What boots the guest is the binary the release shipped and the resolver
+    /// checked. A bare `exec firecracker` would hand that choice to `PATH`, as
+    /// root.
+    #[test]
+    fn the_launch_line_execs_the_path_it_is_given_and_never_a_bare_name() {
+        let vm = launch_script(
+            "/tmp/vm",
+            "/tmp/vm/fc.socket",
+            "",
+            1000,
+            None,
+            "/opt/fc/firecracker",
+        );
+        let idle = launch_script(
+            "/tmp/vm",
+            "/tmp/vm/fc.socket",
+            "",
+            1000,
+            Some("/tmp/vm/identity"),
+            "/opt/fc/firecracker",
+        );
+        for script in [vm, idle] {
+            assert!(
+                script.contains("exec '/opt/fc/firecracker' --api-sock"),
+                "{script}"
+            );
+            assert!(!script.contains("exec firecracker"), "{script}");
+        }
+    }
+
+    #[test]
+    fn a_path_with_shell_metacharacters_stays_one_word() {
+        let hostile = "/tmp/a b/$HOME/`id`/it's/firecracker";
+        let script = launch_script("/tmp/vm", "/tmp/vm/fc.socket", "", 1000, None, hostile);
+        assert!(
+            script.contains(&format!("exec {} --api-sock", shell_quote(hostile))),
+            "{script}"
+        );
+        assert!(!script.contains("exec /tmp/a b"), "{script}");
+    }
+
+    /// The script is a heredoc, so a path that could end one of its
+    /// lines is refused outright instead of quoted.
+    #[test]
+    fn a_path_that_could_break_the_script_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let ok = std::path::Path::new("/opt/fc/firecracker");
+        assert_eq!(script_safe_path(ok).unwrap(), "/opt/fc/firecracker");
+        for bad in [
+            "/opt/fc\nMVM_LAUNCH_SCRIPT_EOF\nid\n/firecracker",
+            "/opt/fc\r/firecracker",
+            "/opt/fc\0/firecracker",
+        ] {
+            assert!(
+                script_safe_path(std::path::Path::new(bad)).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        let not_utf8 = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/opt/\xff/firecracker"));
+        assert!(script_safe_path(not_utf8).is_err());
+    }
+
+    /// Captures every script the launch path would run and answers as a failed
+    /// launch, so a test sees what ran without waiting on a socket.
+    fn capture_scripts() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        crate::host::shell::mock::MockGuard,
+    ) {
+        let ran = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture = std::sync::Arc::clone(&ran);
+        let guard = crate::host::shell::mock::install_handler(move |script| {
+            capture.lock().unwrap().push(script.to_string());
+            crate::host::shell::mock::MockResponse {
+                exit_code: 1,
+                stdout: String::new(),
+            }
+        });
+        (ran, guard)
+    }
+
+    /// A launch on a host with no acceptable Firecracker fails before it has
+    /// changed anything: no marker retired, no script run.
+    #[test]
+    fn a_launch_with_no_acceptable_firecracker_runs_no_script() {
+        // A cached file that is not the pinned release is present and wrong: it
+        // is refused, and never replaced by a fetch the test could not make.
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        env.set(super::super::binary::OVERRIDE_ENV, "");
+        let cached = super::super::fetch::cache_dir();
+        std::fs::create_dir_all(&cached).unwrap();
+        let wrong = cached.join("firecracker");
+        std::fs::write(&wrong, b"not the pinned release").unwrap();
+        std::fs::set_permissions(&wrong, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let (ran, _handler) = capture_scripts();
+        let dir = tempfile::tempdir().unwrap();
+        let abs_dir = dir.path().to_str().unwrap();
+        let socket = format!("{abs_dir}/fc.socket");
+
+        let started = start_vm_firecracker_inner(abs_dir, &socket, "", None, None);
+        let error = format!("{:#}", started.unwrap_err());
+        assert!(error.contains("pins"), "{error}");
+        let idle = start_idle_firecracker(abs_dir, &socket, "mvm-scope");
+        assert!(idle.is_err());
+        assert!(
+            ran.lock().unwrap().is_empty(),
+            "no launch script may run without a resolved Firecracker"
+        );
+    }
+
+    #[test]
+    fn a_launch_execs_the_firecracker_it_resolved() {
+        let named = std::env::current_exe().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set(super::super::binary::OVERRIDE_ENV, &named);
+        let (ran, _handler) = capture_scripts();
+        let dir = tempfile::tempdir().unwrap();
+        let abs_dir = dir.path().to_str().unwrap();
+
+        // The mock answers as a failed launch; what matters is what it was asked to run.
+        let _ =
+            start_vm_firecracker_inner(abs_dir, &format!("{abs_dir}/fc.socket"), "", None, None);
+        let scripts = ran.lock().unwrap();
+        assert_eq!(scripts.len(), 1, "{scripts:?}");
+        assert!(
+            scripts[0].contains(&format!(
+                "exec {} --api-sock",
+                shell_quote(named.to_str().unwrap())
+            )),
+            "{}",
+            scripts[0]
+        );
+        assert!(!scripts[0].contains("exec firecracker"));
+    }
+
+    #[test]
+    fn the_launch_line_uses_virtio_mmio_instead_of_forcing_pci() {
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 1000);
+
+        assert!(
+            script.contains(&format!("exec '{TEST_FIRECRACKER}' --api-sock")),
+            "{script}"
+        );
+        assert!(
+            !script.contains("--enable-pci"),
+            "virtio-mmio is portable across GICv2 and GICv3 hosts: {script}"
+        );
+    }
+
+    /// The regression this exists for: `$!` names Firecracker only when every
+    /// wrapper in the launch chain execs. A forking wrapper (`sudo` with
+    /// `use_pty`, which Ubuntu 24.04 ships, once was one) makes `$!` the
+    /// wrapper's pid, and the `/proc/<pid>/comm == firecracker` liveness probe
+    /// then reads every boot as an immediate VMM exit.
+    #[test]
+    fn the_pid_marker_is_written_by_the_launched_process_not_the_caller() {
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 1000);
+
+        assert!(
+            !script.contains("echo $!"),
+            "$! does not survive a forking wrapper: {script}"
+        );
+        assert!(
+            script.contains(r#"write_marker "$1" "$$" "644""#),
+            "the pid must come from the process that becomes Firecracker: {script}"
+        );
+
+        // Written before the exec, so the marker is in place by the time the
+        // API socket exists and the caller starts probing liveness.
+        let write_at = script
+            .find(r#"write_marker "$1" "$$" "644""#)
+            .expect("pid write present");
+        let exec_at = script
+            .find(&format!("exec '{TEST_FIRECRACKER}'"))
+            .expect("exec present");
+        assert!(write_at < exec_at, "{script}");
+
+        // And it names the path the rest of the tree reads.
+        assert!(script.contains("/tmp/vm/fc.pid"), "{script}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detached_launch_atomically_publishes_a_parseable_pid_before_exec() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Other tests temporarily replace the process-wide PATH, which this spawn and the
+        // PATH read below resolve through.
+        let _env = mvm_core::util::test_env::TestEnv::new();
+        let root = tempfile::tempdir().expect("temporary launch root");
+        let bin = root.path().join("bin");
+        let vm_dir = root.path().join("vm");
+        std::fs::create_dir_all(&bin).expect("fake command directory");
+        std::fs::create_dir_all(&vm_dir).expect("VM directory");
+
+        let make_executable = |path: &std::path::Path, contents: &str| {
+            std::fs::write(path, contents).expect("write fake command");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+                .expect("make fake command executable");
+        };
+        make_executable(
+            &bin.join("sudo"),
+            "#!/bin/sh\n: > \"$MVM_TEST_SUDO_INVOKED\"\nexec \"$@\"\n",
+        );
+        make_executable(&bin.join("setsid"), "#!/bin/sh\nexec \"$@\"\n");
+        make_executable(&bin.join("nohup"), "#!/bin/sh\nexec \"$@\"\n");
+
+        let invoked = root.path().join("firecracker-invoked");
+        let sudo_invoked = root.path().join("sudo-invoked");
+        make_executable(
+            &bin.join("firecracker"),
+            "#!/bin/sh\n: > \"$MVM_TEST_FIRECRACKER_INVOKED\"\n",
+        );
+
+        // The launch line execs the absolute path it is given, not a name on PATH.
+        let firecracker = bin.join("firecracker");
+        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+            &std::env::var_os("PATH").expect("PATH is set"),
+        )))
+        .expect("construct test PATH");
+        let dir = vm_dir.to_string_lossy();
+        let socket = vm_dir.join("fc.socket");
+        let script = launch_script(
+            &dir,
+            &socket.to_string_lossy(),
+            "",
+            1000,
+            None,
+            firecracker.to_str().unwrap(),
+        );
+        let output = std::process::Command::new("bash")
+            .args(["-c", &script])
+            .env("PATH", path)
+            .env("MVM_TEST_FIRECRACKER_INVOKED", &invoked)
+            .env("MVM_TEST_SUDO_INVOKED", &sudo_invoked)
+            .output()
+            .expect("run detached launch script");
+        assert!(
+            output.status.success(),
+            "launch script failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !invoked.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fake Firecracker was not invoked"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let pid = read_firecracker_pid(&dir).expect("launch must publish a parseable pid");
+        let marker = std::fs::read_to_string(vm_dir.join("fc.pid")).expect("read pid marker");
+        assert_eq!(marker, format!("{pid}\n"));
+        let marker_mode = std::fs::metadata(vm_dir.join("fc.pid"))
+            .expect("stat pid marker")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(marker_mode, 0o644, "the marker stays readable");
+        assert!(!sudo_invoked.exists(), "a launch must never invoke sudo");
+    }
+
+    #[test]
+    fn malformed_pid_error_includes_marker_contents() {
+        let dir = tempfile::tempdir().expect("temporary VM directory");
+        std::fs::write(dir.path().join("fc.pid"), "$\n").expect("write malformed marker");
+
+        let error = read_firecracker_pid(&dir.path().to_string_lossy())
+            .expect_err("a nonnumeric pid marker must be rejected")
+            .to_string();
+        assert!(
+            error.contains("marker contents: \"$\""),
+            "malformed marker should be visible in the error: {error}"
+        );
+    }
+
+    #[test]
+    fn invalid_required_bounds_never_reach_the_launcher() {
+        use mvm_contract::grants::CpuGrant;
+        use mvm_core::spawn_scope::SpawnBounds;
+
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
+        let _guard =
+            crate::host::shell::mock::install_handler(|_| panic!("invalid bounds must not launch"));
+        for bounds in [
+            SpawnBounds::for_guest_memory(0),
+            SpawnBounds::for_guest_memory(512)
+                .with_cpu_grant(Some(CpuGrant::Share { millicores: 0 })),
+            SpawnBounds::for_guest_memory(512)
+                .with_cpu_grant(Some(CpuGrant::Share { millicores: 9 })),
+        ] {
+            assert!(
+                start_vm_firecracker_bounded(
+                    scratch.path().to_str().unwrap(),
+                    scratch.path().join("fc.socket").to_str().unwrap(),
+                    "invalid-bounds",
+                    &bounds,
+                    &mut super::super::FirecrackerGuard::pending(),
+                    None,
+                )
+                .is_err()
+            );
+        }
+        for scope in ["", " \t"] {
+            assert!(
+                start_vm_firecracker_scoped_with_handoff("/unused", "/unused/socket", scope, None)
+                    .is_err()
+            );
+            assert!(start_idle_firecracker("/unused", "/unused/socket", scope).is_err());
+        }
+        assert!(
+            spawn_scope_prefix(
+                "../invalid",
+                scratch.path(),
+                &SpawnBounds::for_guest_memory(512),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn required_bounds_refuse_before_the_shell_launcher_is_called() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let empty = scratch.path().join("empty-path");
+        std::fs::create_dir(&empty).expect("empty PATH");
+        env.set("PATH", &empty);
+        env.remove("XDG_RUNTIME_DIR");
+        env.remove("DBUS_SESSION_BUS_ADDRESS");
+        let _guard = crate::host::shell::mock::install_handler(|_| {
+            panic!("missing required bounds must refuse before invoking the launcher")
+        });
+        let socket = scratch.path().join("fc.socket");
+        let error = start_vm_firecracker_bounded(
+            scratch.path().to_str().expect("directory"),
+            socket.to_str().expect("socket"),
+            "required-bounds",
+            &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(512),
+            &mut super::super::FirecrackerGuard::pending(),
+            None,
+        )
+        .expect_err("missing scope must refuse");
+        assert!(format!("{error:#}").contains("scope"), "{error:#}");
+    }
+
+    #[test]
+    fn a_host_without_the_mechanism_refuses_the_required_scope() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let empty = scratch.path().join("empty-path");
+        std::fs::create_dir_all(&empty).expect("empty PATH");
+        env.set("PATH", &empty);
+        env.remove("XDG_RUNTIME_DIR");
+        env.remove("DBUS_SESSION_BUS_ADDRESS");
+        assert!(
+            spawn_scope_prefix(
+                "vm-x",
+                scratch.path(),
+                &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(512)
+            )
+            .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod no_elevation_tests {
+    use super::tests::{TEST_FIRECRACKER, firecracker_launch_script_as};
+    use super::*;
+
+    #[test]
+    fn firecracker_launch_refuses_root_and_accepts_non_root() {
+        let err = require_unprivileged_firecracker(0).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("refusing to launch Firecracker as root"),
+            "{message}"
+        );
+        assert!(message.contains("/dev/kvm"), "{message}");
+        assert!(require_unprivileged_firecracker(1000).is_ok());
+    }
+
+    /// The launch script never elevates; root callers are refused before
+    /// reaching it. Non-root callers open `/dev/kvm` themselves.
+    #[test]
+    fn a_launch_never_elevates_for_any_caller() {
+        for euid in [0, 1000] {
+            for scope in ["", "systemd-run --scope "] {
+                let vm = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", scope, euid);
+                let idle = launch_script(
+                    "/tmp/vm",
+                    "/tmp/vm/fc.socket",
+                    scope,
+                    euid,
+                    Some("/tmp/vm/id"),
+                    TEST_FIRECRACKER,
+                );
+                for script in [vm, idle] {
+                    assert!(
+                        !script.contains("sudo"),
+                        "euid {euid}, scope {scope:?}: a launch must not shell out to sudo: {script}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The Firecracker lifecycle — launch, control socket, signals, cleanup —
+    /// carries no elevation in its production source, so a later edit cannot
+    /// bring it back without failing here.
+    #[test]
+    fn the_firecracker_lifecycle_source_never_names_sudo() {
+        let sources = [
+            ("fc/daemon.rs", include_str!("daemon.rs")),
+            ("fc/control.rs", include_str!("control.rs")),
+            ("fc/guards.rs", include_str!("guards.rs")),
+            ("fc/idle_pool.rs", include_str!("idle_pool.rs")),
+            ("driver/fc.rs", include_str!("../driver/fc.rs")),
+        ];
+        for (name, source) in sources {
+            let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+            for (n, line) in production.lines().enumerate() {
+                let code = line.trim_start();
+                assert!(
+                    code.starts_with("//") || !code.contains("sudo"),
+                    "{name}:{}: elevation in the Firecracker lifecycle: {line}",
+                    n + 1
+                );
+            }
+        }
+    }
+
+    /// The pid is written from inside the launched process and made correct by
+    /// the `exec`, so it names Firecracker whichever wrapper forks.
+    #[test]
+    fn both_shapes_write_the_pid_from_inside_and_exec_firecracker() {
+        for euid in [0, 1000] {
+            let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", euid);
+            assert!(
+                script.contains(r#"write_marker "$1" "$$""#),
+                "euid {euid} must write the pid from inside: {script}"
+            );
+            assert!(
+                script.contains(&format!("exec '{TEST_FIRECRACKER}'")),
+                "euid {euid} must exec so the pid names Firecracker: {script}"
+            );
+            assert!(script.contains("setsid nohup sh "), "euid {euid}: {script}");
+        }
+    }
+
+    /// The spawn scope must precede the launch in both shapes.
+    #[test]
+    fn the_spawn_scope_precedes_the_launch_with_and_without_sudo() {
+        for euid in [0, 1000] {
+            let script = firecracker_launch_script_as(
+                "/tmp/vm",
+                "/tmp/vm/fc.socket",
+                "systemd-run --scope ",
+                euid,
+            );
+            let scope_at = script.find("systemd-run").expect("scope present");
+            let launch_at = script.find("setsid nohup sh ").expect("launch present");
+            assert!(scope_at < launch_at, "euid {euid}: {script}");
+        }
+    }
+
+    /// Nothing on the scope's command line may contain `$`: some systemd
+    /// releases rewrite `$$` there, so the body is kept in a script file.
+    #[test]
+    fn the_scoped_command_line_carries_no_dollar() {
+        let script = launch_script(
+            "/tmp/vm",
+            "/tmp/vm/fc.socket",
+            "systemd-run --scope ",
+            1000,
+            Some("/tmp/vm/id"),
+            TEST_FIRECRACKER,
+        );
+        let line = script
+            .lines()
+            .find(|l| l.contains("systemd-run"))
+            .expect("scoped launch line");
+        assert!(!line.contains('$'), "{line}");
+    }
+
+    /// A stand-in `systemd-run` that collapses `$$` to `$` in its arguments
+    /// (systemd 259 behaviour) must still leave a numeric pid marker.
+    #[cfg(unix)]
+    #[test]
+    fn a_systemd_that_rewrites_dollars_still_yields_a_numeric_pid() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Other scope tests temporarily replace PATH.
+        let _env = mvm_core::util::test_env::TestEnv::new();
+        let root = tempfile::tempdir().expect("root");
+        let bin = root.path().join("bin");
+        let vm_dir = root.path().join("vm");
+        std::fs::create_dir_all(&bin).expect("bin");
+        std::fs::create_dir_all(&vm_dir).expect("vm");
+        let make = |name: &str, body: &str| {
+            let path = bin.join(name);
+            std::fs::write(&path, body).expect("write stub");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod stub");
+        };
+        make(
+            "systemd-run",
+            "#!/bin/sh\nshift\nfor a; do set -- \"$@\" \"$(printf '%s' \"$a\" | sed 's/\\$\\$/$/g')\"; shift; done\nexec \"$@\"\n",
+        );
+        make("setsid", "#!/bin/sh\nexec \"$@\"\n");
+        make("nohup", "#!/bin/sh\nexec \"$@\"\n");
+        let invoked = root.path().join("invoked");
+        make(
+            "firecracker",
+            "#!/bin/sh\n: > \"$MVM_TEST_FIRECRACKER_INVOKED\"\n",
+        );
+        // The launch line execs the absolute path it is given, not a name on PATH.
+        let firecracker = bin.join("firecracker");
+        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+            &std::env::var_os("PATH").expect("PATH is set"),
+        )))
+        .expect("PATH");
+        let dir = vm_dir.to_string_lossy();
+        let socket = vm_dir.join("fc.socket");
+        let script = launch_script(
+            &dir,
+            &socket.to_string_lossy(),
+            "systemd-run --scope ",
+            0,
+            None,
+            firecracker.to_str().unwrap(),
+        );
+        let out = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .env("PATH", path)
+            .env("MVM_TEST_FIRECRACKER_INVOKED", &invoked)
+            .output()
+            .expect("run launch");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !invoked.exists() {
+            assert!(std::time::Instant::now() < deadline, "firecracker not run");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        read_firecracker_pid(&dir).expect("numeric pid marker");
+    }
+}

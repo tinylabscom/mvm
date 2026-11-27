@@ -31,7 +31,7 @@ fn an_unprobeable_machine_is_listed_failed_beside_the_machines_that_probe() {
     std::fs::write(idle.join("console.log"), "").unwrap();
 
     let runner = WorkloadRunner::new(
-        mvm_backends::driver::hvf::HvfDriver::new(),
+        mvm_vmm::driver::hvf::HvfDriver::new(),
         RecordingSpawner::new("/run/ep.sock"),
         RecordingBrokerRegistrar::new(),
     );

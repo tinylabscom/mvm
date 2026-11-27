@@ -312,7 +312,8 @@ in the workspace.
 | --- | --- |
 | `crates/mvm-contract`, `crates/mvm-core` | `"crates/contract"`, `"crates/core"` |
 | `crates/mvm-crypto` | `"crates/crypto"`; retain the independently optimized package boundary |
-| `crates/mvm-vmm`, `crates/mvm-backends` | `"crates/vmm"`; backends folds into it |
+| `crates/mvm-vmm` | `"crates/vmm"` |
+| `mvm-backends` (folded into `mvm_vmm`, behind its `fc`, `hvf`, `libkrun` and `qemu` features) | Fold into VMM as specified above |
 | `crates/mvm-agentd`, `crates/mvm-setpriv`, `crates/mvm-builder-guest`, `crates/mvm-host-services` | `"crates/guest/mvm-agentd"`, `"crates/guest/mvm-setpriv"`, `"crates/guest/mvm-builder-guest"`, `"crates/guest/mvm-host-services"` |
 | `crates/mvm-hostd` | `"crates/host/mvm-hostd"` for supervisor; extracted roles at `"crates/host/mvm-host-audit"`, `"crates/host/mvm-host-egress"`, `"crates/host/mvm-host-admission"`, `"crates/host/mvm-host-broker"` |
 | `crates/mvm-sdk`, `crates/mvm-hostlib`, `crates/mvm-compiler` | `"crates/sdk/mvm-sdk"`, `"crates/sdk/mvm-hostlib"`, `"crates/sdk/mvm-compiler"` |

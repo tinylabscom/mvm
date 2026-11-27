@@ -8,7 +8,7 @@ helpers for networking, mounts, egress, consoles, and host services.
 ## Who uses it
 
 `mvm-build` compiles and injects the guest binaries into images. `mvm-runtime`,
-`mvm-vmm`, and `mvm-backends` share its session and wire behavior on the host
+and `mvm-vmm` share its session and wire behavior on the host
 side. `mvm-hostd` speaks the corresponding broker, audit, and supervisor
 protocols. `mvm-sdk` and `mvm-host-services` use its in-guest adapters. The root
 `mvmctl` crate re-exports selected protocol surfaces.

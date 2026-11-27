@@ -6,16 +6,16 @@
 //! a same-identity resume — reduce to one operation on HVF: start a supervisor
 //! that maps the saved RAM privately and restores the captured vCPU and device
 //! frame. The mechanics live one layer down in
-//! [`mvm_backends::driver::hvf_restore`]; this module is the thin adapter that
+//! [`mvm_vmm::driver::hvf_restore`]; this module is the thin adapter that
 //! keeps the checkpoint layer free of supervisor-config knowledge.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use mvm_backends::driver::hvf_restore::{VERIFIED_ON_LOAD, restore_hvf_vm};
 use mvm_core::checkpoint::ContentBlob;
+use mvm_vmm::driver::hvf_restore::{VERIFIED_ON_LOAD, restore_hvf_vm};
 
-pub use mvm_backends::driver::hvf_restore::{
+pub use mvm_vmm::driver::hvf_restore::{
     HvfRestoreMode, HvfRestoreRequest, RestoredHvfVm, hvf_child_restore_config,
 };
 

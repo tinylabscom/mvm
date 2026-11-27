@@ -41,7 +41,7 @@ const NOT_LINKABLE: &[&str] = &["mvm-cli"];
 /// Production reaches are shrink-only: replace them with typed client calls.
 /// The dev-only conformance harness intentionally exercises the real CLI.
 const KNOWN_REACHES: &[&str] = &[
-    "crates/mvm-backends/src/driver/qemu_process.rs",
+    "crates/mvm-vmm/src/driver/qemu_process.rs",
     "crates/mvm-build/src/builder_egress_process.rs",
     "crates/mvm-build/src/builder_vm_bootstrap.rs",
     "crates/mvm-cli/src/capture/verify.rs",

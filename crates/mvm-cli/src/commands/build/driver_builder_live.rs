@@ -34,7 +34,7 @@ mod tests {
         };
 
         let result = mvm_runtime::builder_runner::DriverBuilderVm::new(
-            mvm_backends::driver::hvf::HvfDriver::new(),
+            mvm_vmm::driver::hvf::HvfDriver::new(),
             image.kernel,
             image.rootfs,
         )
@@ -74,7 +74,7 @@ mod tests {
         };
 
         let result = mvm_runtime::builder_runner::DriverBuilderVm::new(
-            mvm_backends::driver::fc::FcDriver::new(),
+            mvm_vmm::driver::fc::FcDriver::new(),
             image.kernel,
             image.rootfs,
         )

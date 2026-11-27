@@ -45,9 +45,9 @@ use std::path::Path;
 
 /// Trees that declare or assert a backend vCPU ceiling.
 const SCANNED_DIRS: &[&str] = &[
-    "crates/mvm-backends/src",
     "crates/mvm-client/src",
     "crates/mvm-runtime/src",
+    "crates/mvm-vmm/src",
 ];
 
 /// The struct field whose value this gate governs.

@@ -226,8 +226,8 @@ fn validate_inputs(
 mod tests {
     use super::*;
 
-    use mvm_backends::driver::{fc::FcDriver, hvf::HvfDriver, qemu::QemuDriver};
-    use mvm_backends::mock::MockDriver;
+    use mvm_vmm::driver::{fc::FcDriver, hvf::HvfDriver, qemu::QemuDriver};
+    use mvm_vmm::mock::MockDriver;
 
     #[test]
     fn the_stage0_bootstrapper_declares_bootstrap_and_refuses_builds() {

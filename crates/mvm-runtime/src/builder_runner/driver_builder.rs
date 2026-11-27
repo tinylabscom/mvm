@@ -387,8 +387,8 @@ impl<D: VmmDriver + Clone + 'static> BuilderVm for DriverBuilderVm<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_backends::driver::hvf::HvfDriver;
     use mvm_build::builder_vm::BuilderShellJob;
+    use mvm_vmm::driver::hvf::HvfDriver;
 
     #[test]
     fn an_install_job_is_refused_by_name_and_matches_the_declared_capability() {

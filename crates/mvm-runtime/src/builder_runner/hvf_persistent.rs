@@ -47,7 +47,7 @@ use super::driver_builder::require_runtime_overlay_ext4;
 use super::spec::{PersistentBuilderSpecInputs, persistent_builder_spec};
 use crate::driver::RunningVm;
 use crate::driver::VmmDriver;
-use mvm_backends::driver::hvf::HvfDriver;
+use mvm_vmm::driver::hvf::HvfDriver;
 
 /// Poll interval while waiting for the guest to publish its dispatch listener.
 const READY_POLL: Duration = Duration::from_millis(50);

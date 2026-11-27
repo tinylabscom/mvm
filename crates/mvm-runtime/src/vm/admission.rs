@@ -115,7 +115,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_stop_path_reads_the_marker_a_pause_writes() {
-        assert_eq!(PAUSED_MARKER, mvm_backends::driver::fc::SEALED_PAUSE_MARKER);
+        assert_eq!(PAUSED_MARKER, mvm_vmm::driver::fc::SEALED_PAUSE_MARKER);
     }
 
     #[test]
