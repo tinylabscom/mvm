@@ -145,8 +145,8 @@ has been deleted stops its process at that point regardless.
 standby: each idle process and its reaper are stopped through the identity checks a claim
 uses, and each standby VM goes through the same teardown as a machine. Two things are left
 to their owners: a standby another launch has claimed, and an idle process a refill is
-still starting. `mvmctl reconcile` (which also runs before lifecycle commands) and
-`mvmctl cache prune` take only what a crashed process left: an entry whose process never
+still starting. The registry reconcile pass that runs before lifecycle commands, and
+`mvmctl cache prune`, take only what a crashed process left: an entry whose process never
 came up and a claim whose launcher died mid-adoption. The tenant host agent and its
 signer are shared, not per-launch, and exit on their own 300 s after their last
 registration.
