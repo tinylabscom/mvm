@@ -17,7 +17,7 @@ and the raw VMM-console payload path. Until then ADR-035's stream plane is the
 shipped and required design for those paths. ADR-035 also remains historical rationale for
 redaction, bounded telemetry retention, explicit gaps, hash chaining, sealed
 roots, fan-out, and operator debugging.  
-**Complements:** ADR-001, ADR-014, ADR-019, ADR-020, ADR-031,
+**Complements:** ADR-001, ADR-014, ADR-019, ADR-020, ADR-023,
 ADR-040, ADR-041, and ADR-042.  
 **Consumed by:** ADR-045 and its plan, which depend on this fabric and define
 no message types of their own.  

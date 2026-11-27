@@ -17,7 +17,7 @@ name: Security
 # per-merge cost, so the duplicate post-merge run was pure waste.
 
 on:
-  # Per ADR-012: heavy security gates run at release time + nightly
+  # Heavy security gates run at release time + nightly
   # cron only. Day-to-day per-push CI feedback comes from ci.yml; the
   # nightly cron picks up new RUSTSEC advisories that landed in the
   # advisory-db without anyone touching the repo.

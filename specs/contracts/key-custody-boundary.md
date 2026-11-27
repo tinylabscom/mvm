@@ -13,7 +13,7 @@ The current governing model is [ADR-001](../adrs/001-microvm-security-posture.md
 the host is trusted with execution and private data. Its hardware-backed
 signer amendment does not make guest execution confidential from that host.
 [ADR-008](../adrs/008-iroh-aware-encryption-layering.md) assigns encryption and
-authentication to distinct boundaries; [ADR-031](../adrs/031-serialization-crypto-storage-selection.md)
+authentication to distinct boundaries; [ADR-023](../adrs/023-secrets-subsystem-egress-substitution.md#primitive-selection--wire-crypto-and-storage-stay-on-in-tree-primitives)
 retains focused in-tree primitives rather than replacing the crypto/storage
 stack. This proposal preserves those decisions for trusted-host operation.
 

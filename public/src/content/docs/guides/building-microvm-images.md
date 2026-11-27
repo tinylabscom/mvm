@@ -246,7 +246,7 @@ mvm runs Nix builds inside the project builder VM and copies the finished kernel
 
 - **Linux**: the builder VM provides the Linux build boundary and cache policy. Firecracker is the default runtime backend when `/dev/kvm` is available.
 - **macOS**: the host `mvmctl machine build` command orchestrates a Linux builder VM. On supported Apple Silicon hosts running macOS 26+, both the builder and resulting runtime use native HVF (Hypervisor.framework, vsock-only) without libkrun. macOS 25 and older is not supported.
-- **Windows**: Tauri-only (the `mvm-studio` desktop app packages a WSL2-backed builder + runtime). See [ADR-009](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/009-cross-platform-strategy.md).
+- **Windows**: not a supported host. The planned path is the libkrun backend on the Windows Hypervisor Platform; its promotion gate is in [ADR-004](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/004-sealed-signed-builder-image.md#host-platforms-and-the-windows-promotion-gate).
 
 ## Rootless workloads
 
