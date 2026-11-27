@@ -11,20 +11,35 @@
 //! `mvm-backends` can implement backends without depending on the workload
 //! orchestration in `mvm-runtime`.
 
+//!
+//! Everything that touches a Unix socket, a file descriptor or guest memory is
+//! built on Unix hosts only; elsewhere the crate is its portable modules.
+
 #![deny(unreachable_pub)]
+#[cfg(unix)]
 pub mod agent_debug;
+#[cfg(unix)]
 pub mod checkpoint;
+#[cfg(unix)]
 pub mod driver;
+#[cfg(unix)]
 pub mod host;
 pub mod hvf_handoff;
+#[cfg(unix)]
 pub mod post_restore;
 pub mod qemu_arch;
+#[cfg(unix)]
 pub mod quota;
+#[cfg(unix)]
 pub mod runtime_artifacts;
+#[cfg(unix)]
 pub mod snapshot;
+#[cfg(unix)]
 pub mod vmm;
+#[cfg(unix)]
 pub mod vsock_egress_bridge;
+#[cfg(unix)]
 pub mod vsock_transport;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(all(unix, any(test, feature = "test-support")))]
 pub mod test_support;

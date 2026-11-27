@@ -12,7 +12,17 @@ authors.workspace = true
 substrate_server_category = "per-VM provider plumbing (host agent, console, handoff, and backend-local vsock listeners)"
 
 [dependencies]
+# The HVF handoff request's wire shape.
+serde = { workspace = true }
+
+# The device model, vsock transport, driver seam and host helpers drive a VMM
+# through Unix sockets, file descriptors and guest memory mappings, so they and
+# the crates only they need build on Unix hosts alone. On any other host the
+# crate keeps its portable modules, and nothing here reaches `ring`.
+[target.'cfg(unix)'.dependencies]
 anyhow.workspace = true
+# JSON serialization for host-service configs.
+serde_json = { workspace = true }
 # Egress policy types used by the vsock egress bridge.
 mvm-core = { workspace = true, features = ["egress-ca", "host-state"] }
 # Reuse the forward client's proxy parsing and credential-safe diagnostics.
@@ -25,23 +35,18 @@ mvm-contract = { workspace = true }
 mvm-fs = { workspace = true }
 # Structured logging used by host helpers.
 tracing = { workspace = true }
-# JSON serialization for host-service configs.
-serde_json = { workspace = true }
-serde = { workspace = true }
 # The per-VM egress CA key is held and serialized here; `Zeroizing` keeps the
 # in-memory copies from outliving their use. Already in this crate's closure
 # through mvm-core, so it adds nothing to the shipped dependency set.
 zeroize = { workspace = true }
 # Host event loop for the vsock host-side I/O thread.
 mio = { workspace = true, features = ["os-poll", "os-ext"] }
-
 # virtio split-virtqueue primitive used by virtio-mmio devices.
 virtio-queue = "0.18"
 # virtio-vsock packet layout for the vsock device.
 virtio-vsock = "0.12"
 # rust-vmm guest-memory primitive for safe guest DMA access.
 vm-memory = { version = "0.18", default-features = false, features = ["backend-mmap"] }
-
 # Entropy source for virtio-rng.
 rand.workspace = true
 # Unix sockets / file descriptors.

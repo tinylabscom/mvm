@@ -1838,7 +1838,7 @@ mod tests {
             2,
             "the lane must check the crate set and the pure-Rust mvm-core features"
         );
-        for krate in ["mvm-contract", "mvm-core", "mvm-backends"] {
+        for krate in ["mvm-contract", "mvm-core", "mvm-vmm", "mvm-backends"] {
             assert!(
                 lane.contains(&format!("-p {krate}")),
                 "the Windows compile check must cover {krate}"

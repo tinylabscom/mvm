@@ -834,10 +834,10 @@ jobs:
 
   # mvm does not run on Windows hosts, and nothing here claims it does. What
   # this lane holds is the portable floor a future Windows host would build
-  # on: the foundation crates, and the backend crate with its Unix-only
-  # drivers compiled out, have to keep compiling for a Windows target. A Unix
-  # API used without a platform guard fails here instead of being found by
-  # whoever next attempts the port. It is a compile check only: no Windows
+  # on: the foundation crates, and the VMM and backend crates with their
+  # Unix-only modules compiled out, have to keep compiling for a Windows
+  # target. A Unix API used without a platform guard fails here instead of
+  # being found by whoever next attempts the port. It is a compile check only: no Windows
   # runner, no tests, and the GNU target so no MSVC toolchain is needed. The
   # crate list is exactly the set that builds without a C cross-compiler;
   # anything reaching `ring` or `aws-lc-sys` needs mingw and is out of scope.
@@ -871,7 +871,7 @@ jobs:
       - name: cargo check for x86_64-pc-windows-gnu
         run: |
           cargo check --locked --target x86_64-pc-windows-gnu \
-            -p mvm-contract -p mvm-core -p mvm-backends
+            -p mvm-contract -p mvm-core -p mvm-vmm -p mvm-backends
           cargo check --locked --target x86_64-pc-windows-gnu \
             -p mvm-core --features provenance,client,hostd-transport
 
