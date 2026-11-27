@@ -10,8 +10,10 @@
 //! overlay, the initramfs, both SDK sidecars and the OCI guest runtime from
 //! the archive it acquired
 //! ([`mvm_client::release::assemble_release_pieces`]). An archive downloaded
-//! with `MVM_SKIP_COSIGN_VERIFY` set is never installed: bootstrap, first use
-//! and the image path refuse it, while `env update` still takes its bytes.
+//! with `MVM_SKIP_COSIGN_VERIFY` set is never installed: bootstrap, first use,
+//! the image path, `dev runtime-overlay build` and `dev sdk-sidecar build`
+//! refuse it right after acquisition. `env update` acquires it without
+//! installing anything from it, and its follow-up bootstrap refuses.
 //!
 //! A source build assembles its guest runtime from its tree when
 //! `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build` asks for that. Otherwise it uses
@@ -67,17 +69,35 @@ fn ready_line(runtime: &ReleaseGuestRuntime) -> String {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    format!("Guest runtime {name} ready ({}).", runtime.origin)
+    match runtime.origin {
+        mvm_client::release::ReleaseGuestRuntimeOrigin::Installed
+        | mvm_client::release::ReleaseGuestRuntimeOrigin::Cached
+        | mvm_client::release::ReleaseGuestRuntimeOrigin::Downloaded => {
+            format!("Guest runtime {name} ready ({}).", runtime.origin)
+        }
+        mvm_client::release::ReleaseGuestRuntimeOrigin::Unverified => format!(
+            "Guest runtime {name} downloaded with its signature unchecked; it is not installed."
+        ),
+    }
 }
 
 /// Make sure the published guest runtime matching the running binary's
-/// version is present: installed beside the binary, cached, or fetched and
-/// verified from that version's release.
+/// version is present and installable: installed beside the binary, cached,
+/// or fetched and verified from that version's release. Every caller goes on
+/// to install it, so a download whose signature check was skipped is refused
+/// here, before the caller does any other work.
 pub(crate) fn prepare_for_running_binary() -> Result<ReleaseGuestRuntime> {
     let exe = std::env::current_exe().context("locating the running mvmctl")?;
     let version = crate::update::current_version();
     let runtime = acquire(version, &cache_root(), &installed_guest_runtime_dirs(&exe))
         .with_context(|| unpublished_source_build_hint(compiled_channel(), version))?;
+    admit_for_install(runtime)
+}
+
+/// Pass `runtime` on for installing, or refuse it when its signature check
+/// was skipped. Says it is ready only once it is admitted.
+pub(crate) fn admit_for_install(runtime: ReleaseGuestRuntime) -> Result<ReleaseGuestRuntime> {
+    runtime.authenticated_archive()?;
     report(&runtime);
     Ok(runtime)
 }
@@ -270,8 +290,10 @@ fn ensure_prepared_with(
 
 /// Fetch and verify the guest runtime the release `tag` ships, for
 /// `mvmctl env update` to call before it replaces the binary. A failure here
-/// leaves the installed CLI as it was, so an update never produces a CLI
-/// whose own guest runtime could not be verified.
+/// leaves the installed CLI as it was. With `MVM_SKIP_COSIGN_VERIFY` set the
+/// download is not verified and nothing fails here: the update goes ahead,
+/// the new binary's bootstrap then refuses to install that runtime, and the
+/// update ends with a warning to run `mvmctl bootstrap` again.
 pub(crate) fn stage_for_update(tag: &str) -> Result<ReleaseGuestRuntime> {
     let version = tag.strip_prefix('v').unwrap_or(tag);
     let runtime = acquire(version, &cache_root(), &[]).with_context(|| {
@@ -652,6 +674,18 @@ mod tests {
             ready_line(&runtime),
             "Guest runtime mvm-guest-bins-v9.9.9.tar.gz ready (installed beside mvmctl)."
         );
+    }
+
+    #[test]
+    fn an_unverified_download_is_never_called_ready() {
+        let cache = tempfile::TempDir::new().unwrap();
+        let hatched = hatched::acquire(FIXTURE_VERSION, cache.path(), Hatches::Signature);
+        let line = ready_line(&hatched.release);
+        assert!(!line.contains("ready"), "{line}");
+        assert!(line.contains("not installed"), "{line}");
+        let err = admit_for_install(hatched.release.clone())
+            .expect_err("an unverified download is not admitted for install");
+        assert!(hatched::is_refusal(&err), "{err:#}");
     }
 
     #[test]

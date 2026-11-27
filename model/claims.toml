@@ -526,6 +526,8 @@ witnesses = [
     "fn:a_release_runtime_that_misses_its_digest_is_refused_before_its_signature",
     "fn:a_release_whose_evidence_does_not_verify_publishes_nothing",
     "fn:the_cached_files_are_the_bytes_that_were_verified",
+    "fn:bootstrap_keeps_a_hatched_download_out_of_the_install",
+    "fn:bootstrap_refuses_a_hatched_download_before_any_other_step",
     "fn:authenticated_bundle_returns_its_actual_signer_and_refuses_wrong_identity",
     "fn:release_proof_without_a_launch_owned_set_cannot_be_admitted",
     "fn:release_runtime_admission_refuses_missing_or_unwritable_audit_even_in_dev",

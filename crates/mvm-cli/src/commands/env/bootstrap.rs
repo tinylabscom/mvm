@@ -36,21 +36,19 @@ pub(in crate::commands) fn bootstrap_environment(production: bool) -> Result<()>
     // pause.
     crate::commands::shared::ensure_snapshot_key()?;
     let mode = mvm_client::launch::runtime_overlay::runtime_overlay_acquire_mode();
-    // A release binary's guest runtime is the one its release ships, acquired
-    // once up front. A source build has its tree; the image set has none.
-    let release =
-        if publishes_its_guest_runtime(mvm_build::artifact_acquisition::compiled_channel(), mode) {
-            Some(
-                crate::release_guest_runtime::prepare_for_running_binary()
-                    .context("preparing the release guest runtime")?,
-            )
-        } else {
-            None
-        };
+    let publishes =
+        publishes_its_guest_runtime(mvm_build::artifact_acquisition::compiled_channel(), mode);
     let local_build_requested = mode
         == mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode::BuildFromSourceCheckout
         || mvm_build::image_source::configured_images_dir().is_some();
     let kernel = acquire_bootstrap_artifacts_with(
+        // A release binary's guest runtime is the one its release ships. A
+        // source build has its tree; the image set has none.
+        || {
+            publishes
+                .then(crate::release_guest_runtime::prepare_for_running_binary)
+                .transpose()
+        },
         || {
             if local_build_requested {
                 super::builder_vm::bootstrap_builder_vm_image()
@@ -59,7 +57,7 @@ pub(in crate::commands) fn bootstrap_environment(production: bool) -> Result<()>
             }
         },
         prewarm_host_aux_helpers,
-        || prepare_launch_runtime_artifacts(release.as_ref()),
+        prepare_launch_runtime_artifacts,
         prepare_pair_launch_artifacts,
         super::builder_vm::prepare_workload_kernel,
     )?;
@@ -69,7 +67,11 @@ pub(in crate::commands) fn bootstrap_environment(production: bool) -> Result<()>
     Ok(())
 }
 
-fn acquire_bootstrap_artifacts_with<B, A, R, P, K>(
+/// Run bootstrap's steps in launch-path order. The release guest runtime is
+/// acquired first, so one that may not be installed refuses before any other
+/// step spends time.
+fn acquire_bootstrap_artifacts_with<G, B, A, R, P, K>(
+    release: G,
     builder: B,
     host_helpers: A,
     runtime: R,
@@ -77,12 +79,15 @@ fn acquire_bootstrap_artifacts_with<B, A, R, P, K>(
     workload_kernel: K,
 ) -> Result<String>
 where
+    G: FnOnce() -> Result<Option<mvm_build::guest_bins::release::ReleaseGuestRuntime>>,
     B: FnOnce() -> Result<()>,
     A: FnOnce() -> Result<()>,
     K: FnOnce() -> Result<String>,
-    R: FnOnce() -> Result<()>,
+    R: FnOnce(Option<&mvm_build::guest_bins::release::ReleaseGuestRuntime>) -> Result<()>,
     P: FnOnce() -> Result<()>,
 {
+    let release = release().context("preparing the release guest runtime")?;
+
     ui::info("Preparing builder VM...");
     builder().context("preparing builder VM")?;
     ui::success("Builder VM ready.");
@@ -92,7 +97,7 @@ where
     ui::success("Host helper binaries ready.");
 
     ui::info("Preparing shared guest runtime...");
-    runtime().context("preparing shared guest runtime")?;
+    runtime(release.as_ref()).context("preparing shared guest runtime")?;
     ui::success("Shared guest runtime ready.");
 
     // Announced inside the step: only a selected image checkout gives it work.
@@ -547,6 +552,10 @@ mod tests {
         let calls = RefCell::new(Vec::new());
         let kernel = acquire_bootstrap_artifacts_with(
             || {
+                calls.borrow_mut().push("release");
+                Ok(None)
+            },
+            || {
                 calls.borrow_mut().push("builder");
                 Ok(())
             },
@@ -554,7 +563,7 @@ mod tests {
                 calls.borrow_mut().push("helpers");
                 Ok(())
             },
-            || {
+            |_| {
                 calls.borrow_mut().push("runtime");
                 Ok(())
             },
@@ -571,18 +580,64 @@ mod tests {
 
         assert_eq!(
             calls.into_inner(),
-            ["builder", "helpers", "runtime", "pair", "workload"]
+            [
+                "release", "builder", "helpers", "runtime", "pair", "workload"
+            ]
         );
         assert_eq!(kernel, "/cache/workload/vmlinux");
+    }
+
+    /// A hatched download refuses as bootstrap's first step: the builder VM,
+    /// the host helpers and every later step never run, and nothing is
+    /// installed.
+    #[test]
+    fn bootstrap_refuses_a_hatched_download_before_any_other_step() {
+        use crate::release_guest_runtime::hatched::{self, Hatches};
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let hatched = hatched::acquire("9.9.9", &cache, Hatches::Signature);
+        let calls = RefCell::new(Vec::new());
+        let error = acquire_bootstrap_artifacts_with(
+            || {
+                calls.borrow_mut().push("release");
+                crate::release_guest_runtime::admit_for_install(hatched.release.clone()).map(Some)
+            },
+            || {
+                calls.borrow_mut().push("builder");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("helpers");
+                Ok(())
+            },
+            |_| {
+                calls.borrow_mut().push("runtime");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("pair");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("workload");
+                Ok("/cache/workload/vmlinux".to_string())
+            },
+        )
+        .expect_err("a hatched download must refuse bootstrap");
+
+        assert!(hatched::is_refusal(&error), "{error:#}");
+        assert_eq!(calls.into_inner(), ["release"]);
+        hatched::assert_nothing_installed(&cache, "9.9.9", mvm_core::arch::GuestArch::host());
     }
 
     #[test]
     fn bootstrap_never_reports_ready_after_builder_failure() {
         let runtime_called = std::cell::Cell::new(false);
         let result = acquire_bootstrap_artifacts_with(
+            || Ok(None),
             || anyhow::bail!("builder failed"),
             || Ok(()),
-            || {
+            |_| {
                 runtime_called.set(true);
                 Ok(())
             },
@@ -597,9 +652,10 @@ mod tests {
     #[test]
     fn bootstrap_fails_when_workload_kernel_is_not_ready() {
         let result = acquire_bootstrap_artifacts_with(
+            || Ok(None),
             || Ok(()),
             || Ok(()),
-            || Ok(()),
+            |_| Ok(()),
             || Ok(()),
             || anyhow::bail!("kernel acquisition failed"),
         );
@@ -612,9 +668,10 @@ mod tests {
     fn bootstrap_fails_when_shared_runtime_is_not_ready() {
         let workload_called = std::cell::Cell::new(false);
         let result = acquire_bootstrap_artifacts_with(
+            || Ok(None),
             || Ok(()),
             || Ok(()),
-            || anyhow::bail!("overlay unavailable"),
+            |_| anyhow::bail!("overlay unavailable"),
             || Ok(()),
             || {
                 workload_called.set(true);
@@ -635,12 +692,13 @@ mod tests {
         let runtime_called = std::cell::Cell::new(false);
         let helpers_called = std::cell::Cell::new(false);
         let error = acquire_bootstrap_artifacts_with(
+            || Ok(None),
             || Ok(()),
             || {
                 helpers_called.set(true);
                 anyhow::bail!("helper unavailable")
             },
-            || {
+            |_| {
                 runtime_called.set(true);
                 Ok(())
             },

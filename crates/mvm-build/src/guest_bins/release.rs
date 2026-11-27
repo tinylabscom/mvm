@@ -24,14 +24,14 @@
 //! signature unchecked (and its digest too when `MVM_SKIP_HASH_VERIFY` is also
 //! set). Such a download is returned from a private temporary directory and is
 //! never written to [`release_guest_runtime_cache_dir`], so that directory
-//! holds only evidence that verified. The hatch accepts an unverified
-//! download, not an unverified install: nothing is installed from such a
-//! result. Installing takes an [`AuthenticatedReleaseArchive`], and
+//! holds only evidence that verified. For the guest runtime the hatch accepts
+//! an unverified download, not an unverified install: nothing is installed
+//! from such a result. Installing takes an [`AuthenticatedReleaseArchive`], and
 //! [`ReleaseGuestRuntime::authenticated_archive`] refuses to make one from an
 //! [`ReleaseGuestRuntimeOrigin::Unverified`] result, so the object store, the
-//! launch pieces, the OCI shims and the adoption record stay as they were. A
-//! caller that only needs the bytes, such as `mvmctl env update`, still gets
-//! them.
+//! launch pieces, the OCI shims and the adoption record stay as they were.
+//! Acquisition itself still succeeds and returns the archive, for a caller
+//! that does not install it.
 //!
 //! Whichever place answers, the archive must verify against its own manifest
 //! and that manifest must name this version and carry both architectures. A
@@ -497,8 +497,7 @@ mod tests {
         );
         assert!(!first.archive.starts_with(cache.path()));
 
-        // A caller that only needs the bytes has them; installing them is
-        // refused.
+        // Acquisition returns the archive; installing it is refused.
         assert!(matches!(
             first.authenticated_archive(),
             Err(ReleaseGuestRuntimeError::Unverified { name }) if name == guest_bins_archive_name(VERSION)

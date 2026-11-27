@@ -240,7 +240,8 @@ file's bundle when it is present. A directory that no longer verifies is
 refused, not replaced: remove it and run the command again. Portable
 packaging reads and writes the same directory. With `MVM_SKIP_COSIGN_VERIFY`
 set, a download still proceeds but is never written here, and nothing is
-installed from it: `mvmctl bootstrap`, a first launch and an image launch
-refuse it, so it never reaches `guest-runtime/v1/objects`, the launch pieces,
+installed from it: `mvmctl bootstrap`, a first launch, an image launch,
+`mvmctl dev runtime-overlay build` and `mvmctl dev sdk-sidecar build` refuse
+it, so it never reaches `guest-runtime/v1/objects`, the launch pieces,
 the OCI guest shims or the adoption record. Unset the variable and run
 `mvmctl bootstrap` again.
