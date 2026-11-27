@@ -33,15 +33,6 @@ gap = "Redacted panic capture reaches stderr only; no durable host-side diagnost
 required_witness = "Panic diagnostics reach host-local collection with the emitting role's identity."
 
 [[subscriber_init]]
-file = "crates/mvm-client/src/bin/mvm-hvf-run-owner.rs"
-anchor = "std::panic::set_hook"
-scope = "global"
-role = "host"
-owner = "Refusal-only protected HVF owner prerequisite"
-gap = "The fixed redacted panic marker reaches stderr only; no protected provider collector is connected."
-required_witness = "The commissioned provider captures the fixed owner panic marker under the exact process identity without exposing panic payloads."
-
-[[subscriber_init]]
 file = "crates/mvm-hostd/src/bin/mvm-broker.rs"
 anchor = "tracing_subscriber::fmt()"
 scope = "global"

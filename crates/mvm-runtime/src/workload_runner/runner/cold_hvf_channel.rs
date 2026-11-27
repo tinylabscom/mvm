@@ -47,10 +47,6 @@ enum Phase {
     Uncertain,
 }
 
-fn can_borrow_original_owner(phase: Phase) -> bool {
-    phase == Phase::Activated
-}
-
 fn retained_canonical_plan_digest(plan_json: Option<&str>) -> Result<Option<[u8; 32]>> {
     use sha2::{Digest as _, Sha256};
 
@@ -143,24 +139,6 @@ pub struct NativeCompletionEvidence {
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
 }
 
-/// Borrowed association between the original native owner and the exact plan
-/// bytes retained by its launch configuration.
-pub struct OriginalHvfOwnerBinding<'a> {
-    owner: &'a ColdHvfOwner,
-    canonical_plan_digest: [u8; 32],
-}
-
-impl OriginalHvfOwnerBinding<'_> {
-    pub fn owner(&self) -> &ColdHvfOwner {
-        self.owner
-    }
-
-    #[must_use]
-    pub fn canonical_plan_digest(&self) -> [u8; 32] {
-        self.canonical_plan_digest
-    }
-}
-
 impl NativeCompletion {
     pub fn terminal(&self) -> &mvm_agentd::vsock::EntrypointEvent {
         &self.terminal
@@ -172,29 +150,6 @@ impl NativeCompletion {
 }
 
 impl ColdHvfChannel {
-    /// Borrow the actual original HVF owner after authenticated activation.
-    ///
-    /// The callback cannot retain or reconstruct native custody. This seam is
-    /// only for binding durable bookkeeping to the owner already held here.
-    pub fn with_original_hvf_owner<T>(
-        &mut self,
-        operation: impl FnOnce(OriginalHvfOwnerBinding<'_>) -> Result<T>,
-    ) -> Result<T> {
-        let custody = self.custody()?;
-        anyhow::ensure!(
-            can_borrow_original_owner(custody.phase),
-            "original HVF owner requires authenticated activation before dispatch"
-        );
-        let canonical_plan_digest = retained_canonical_plan_digest(
-            custody.preparation.launch.config().plan_json.as_deref(),
-        )?
-        .context("original HVF owner has no retained canonical plan")?;
-        operation(OriginalHvfOwnerBinding {
-            owner: custody.native.as_ref().context("native owner missing")?,
-            canonical_plan_digest,
-        })
-    }
-
     /// Transfer this controller's actor bootstrap only after authenticated activation.
     ///
     /// The caller must retain the resulting holder with this native owner and
@@ -859,31 +814,6 @@ mod tests {
         let mut empty = ColdHvfChannel { custody: None };
         assert!(empty.complete().is_err());
         assert!(empty.finalize_readonly_entrypoint().is_err());
-    }
-
-    #[test]
-    fn original_owner_borrow_refuses_without_retained_activated_custody() {
-        let mut empty = ColdHvfChannel { custody: None };
-        let called = std::cell::Cell::new(false);
-        assert!(
-            empty
-                .with_original_hvf_owner(|_| {
-                    called.set(true);
-                    Ok(())
-                })
-                .is_err()
-        );
-        assert!(!called.get());
-        assert!(can_borrow_original_owner(Phase::Activated));
-        for phase in [
-            Phase::Prepared,
-            Phase::Dispatched(DispatchLane::Exec),
-            Phase::Dispatched(DispatchLane::Entrypoint),
-            Phase::Finalized(CompletionBarrier::FilesystemsSynced),
-            Phase::Uncertain,
-        ] {
-            assert!(!can_borrow_original_owner(phase));
-        }
     }
 
     #[test]

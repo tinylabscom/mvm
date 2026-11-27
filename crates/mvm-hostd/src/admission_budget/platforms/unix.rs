@@ -33,11 +33,6 @@ pub(crate) fn acquire_lock(path: &Path) -> Result<atomic_io::FileLock> {
     atomic_io::FileLock::acquire_opened(file)
 }
 
-pub(crate) fn acquire_existing_lock(path: &Path) -> Result<atomic_io::FileLock> {
-    let file = open_owned(path, 0o077)?.context("host reservation lock is missing")?;
-    atomic_io::FileLock::acquire_opened(file)
-}
-
 pub(crate) fn read_private(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
     read_owned(path, limit, 0o077)
 }

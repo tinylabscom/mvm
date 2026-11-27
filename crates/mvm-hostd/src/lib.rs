@@ -54,10 +54,6 @@ pub mod extension_admission;
 pub mod extension_controller;
 /// How a thread following a file blocks until it may have changed.
 pub mod file_wait;
-pub mod hvf_owner_audit_signer;
-#[cfg(any(target_os = "macos", test))]
-pub mod hvf_owner_deployment;
-pub mod hvf_owner_native_control_signer;
 /// Shared length-prefixed framing for same-UID host control channels.
 pub use mvm_core::framing;
 /// Host->guest healthcheck probe: run a workload's healthcheck command via
@@ -69,8 +65,6 @@ pub mod host_agent_idle;
 /// no per-VM supervisor.
 pub mod host_agent_sessions;
 pub mod host_signer;
-pub mod hvf_owner_grants;
-pub mod hvf_owner_signer;
 pub mod jailer;
 /// Secret keyholder — the `SecretRef` → credential boundary: the
 /// [`keyholder::SecretResolver`] trait + the single-host

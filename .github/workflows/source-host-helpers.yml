@@ -91,8 +91,6 @@ jobs:
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
               --bin mvm-network-endpoint \
               --bin mvm-hvf-supervisor
-            cargo build --release --target "${BUILD_TARGET}" -p mvm-client \
-              --bin mvm-hvf-run-owner
           else
             cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-hostd \
               --bin mvm-network-endpoint
@@ -111,28 +109,16 @@ jobs:
           cp "helper-source/target/${BUILD_TARGET}/release/mvm-network-endpoint" "dist/${name}/"
           if [[ "${BUILD_TARGET}" == *apple-darwin ]]; then
             cp "helper-source/target/${BUILD_TARGET}/release/mvm-hvf-supervisor" "dist/${name}/"
-            cp "helper-source/target/${BUILD_TARGET}/release/mvm-hvf-run-owner" "dist/${name}/"
             python3 helper-source/scripts/release/sign_macos.py \
               --producer-adhoc \
               --payload "dist/${name}" \
               --report "dist/${name}-producer-signing.json"
-            VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("helper-source/Cargo.toml","rb"))["workspace"]["package"]["version"])')"
-            python3 helper-source/scripts/release/owner_component_manifest.py \
-              --binary "dist/${name}/mvm-hvf-run-owner" \
-              --output "dist/${name}/owner-component.json" \
-              --version "${VERSION}" \
-              --target "${BUILD_TARGET}" \
-              --source-commit "${SOURCE_SHA}"
           fi
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           if [[ "${BUILD_TARGET}" == *apple-darwin ]]; then
             python3 helper-source/scripts/release/verify_macos_package.py \
               --archive "dist/${name}.tar.gz" \
               --envelope "${name}" \
-              --require-owner-inventory \
-              --owner-version "${VERSION}" \
-              --owner-target "${BUILD_TARGET}" \
-              --owner-source-commit "${SOURCE_SHA}" \
               --producer-report "dist/${name}-producer-signing.json" \
               --report "dist/${name}-final-package.json"
           fi

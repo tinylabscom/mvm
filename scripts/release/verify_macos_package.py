@@ -14,7 +14,6 @@ import tarfile
 import zipfile
 
 import sign_macos
-import owner_component_manifest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "nix/packaging/release"))
 from archive_envelope import extract_package
@@ -77,25 +76,8 @@ def verify_relocatable(path):
         raise ValueError(f"non-relocatable path in packaged Mach-O: {path}")
 
 
-def verify_owner_hardening(path):
-    details = sign_macos.run_diagnostic("codesign", "-d", "--verbose=4", path)
-    if "(runtime)" not in details:
-        raise ValueError("owner executable lacks hardened runtime")
-    libraries = sign_macos.run("otool", "-L", path).splitlines()[1:]
-    dependencies = [line.strip().split(" ", 1)[0] for line in libraries if line.strip()]
-    if not dependencies or any(
-            not dependency.startswith(("/usr/lib/", "/System/Library/"))
-            for dependency in dependencies):
-        raise ValueError("owner executable links a non-system library")
-    load_commands = sign_macos.run("otool", "-l", path)
-    if "LC_RPATH" in load_commands:
-        raise ValueError("owner executable carries an rpath")
-
-
 def verify(archive, producer, notary, report, envelope=None,
-           require_cli_inventory=False, require_owner_inventory=False,
-           owner_version=None, owner_target=None, owner_source_commit=None,
-           sdk_layout=False):
+           require_cli_inventory=False, sdk_layout=False):
     if report.resolve() in {p.resolve() for p in (archive, producer, notary) if p is not None}:
         raise ValueError("inspection report must not overwrite its inputs")
     report.unlink(missing_ok=True)
@@ -133,33 +115,12 @@ def verify(archive, producer, notary, report, envelope=None,
                 raise ValueError("TAR requires an explicit envelope")
             extract_package(archive, root, envelope)
             payload = root / envelope
-        if require_cli_inventory or require_owner_inventory:
-            owner_component = payload / "mvm-hvf-run-owner"
-            if not owner_component.is_file():
-                raise ValueError("missing owner executable")
-            owner_manifest_path = payload / "owner-component.json"
-            if not owner_manifest_path.is_file():
-                raise ValueError("missing owner component manifest")
-            if None in (owner_version, owner_target, owner_source_commit):
-                raise ValueError("owner package identity expectation is incomplete")
-            owner_manifest = owner_component_manifest.validate(
-                json.loads(owner_manifest_path.read_text()),
-                owner_component,
-                owner_target,
-                owner_version,
-                owner_source_commit,
-            )
-        else:
-            owner_manifest = None
-            owner_component = None
         code = sign_macos.targets(payload)
         if require_cli_inventory:
             missing = sign_macos.REQUIRED_CLI_BINARIES - {
                 path.name for path, kind in code if kind == 2}
             if missing:
                 raise ValueError("missing required CLI inventory")
-        if owner_component is not None:
-            verify_owner_hardening(owner_component)
         remaining = set(expected)
         actual = []
         for path, kind in code:
@@ -196,7 +157,6 @@ def verify(archive, producer, notary, report, envelope=None,
         "status": "FinalPackageVerified", "authority": "package-inspection-only",
         "package": str(archive), "package_sha256": package_hash,
         "report_source": str(source), "report_source_sha256": sha256(source),
-        "owner_component": owner_manifest,
         "files": actual,
     }, indent=2) + "\n")
 
@@ -208,17 +168,11 @@ def main():
     parser.add_argument("--notary-report", type=Path)
     parser.add_argument("--envelope")
     parser.add_argument("--require-cli-inventory", action="store_true")
-    parser.add_argument("--require-owner-inventory", action="store_true")
-    parser.add_argument("--owner-version")
-    parser.add_argument("--owner-target")
-    parser.add_argument("--owner-source-commit")
     parser.add_argument("--sdk-layout", action="store_true")
     args = parser.parse_args()
     try:
         verify(args.archive, args.producer_report, args.notary_report, args.report,
-               args.envelope, args.require_cli_inventory, args.require_owner_inventory,
-               args.owner_version, args.owner_target, args.owner_source_commit,
-               args.sdk_layout)
+               args.envelope, args.require_cli_inventory, args.sdk_layout)
     except (ValueError, RuntimeError, OSError, KeyError, TypeError,
             zipfile.BadZipFile, tarfile.TarError) as error:
         parser.exit(1, f"final macOS package inspection failed: {error}\n")

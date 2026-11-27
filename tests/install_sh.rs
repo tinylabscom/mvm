@@ -213,8 +213,6 @@ struct Release {
     /// Raw bytes for a named hostbin, overriding the auto-generated shell
     /// script stub — so a test can ship a real, already-signed Mach-O.
     hostbin_bytes: Vec<(String, Vec<u8>)>,
-    /// Synthetic trap proving the owner is preserved even if a profile appears.
-    owner_entitlement_profile: bool,
     /// Whether the archive carries the libkrun runtime payload older releases shipped.
     libkrun_tier: bool,
     /// Write the libkrun payload with different bytes than the honest build —
@@ -254,7 +252,6 @@ impl Release {
             entitlements: EntitlementsLayout::Assets,
             publish_bundle: true,
             hostbin_bytes: Vec::new(),
-            owner_entitlement_profile: false,
             libkrun_tier: false,
             tamper_libkrun_payload: false,
             components_tsv: None,
@@ -350,12 +347,6 @@ impl Release {
     #[cfg(target_os = "macos")]
     fn with_hostbin_bytes(mut self, name: &str, bytes: Vec<u8>) -> Self {
         self.hostbin_bytes.push((name.to_owned(), bytes));
-        self
-    }
-
-    #[cfg(target_os = "macos")]
-    fn with_owner_entitlement_profile(mut self) -> Self {
-        self.owner_entitlement_profile = true;
         self
     }
 
@@ -503,13 +494,6 @@ impl Release {
                     0o644,
                 );
             }
-        }
-        if self.owner_entitlement_profile {
-            append(
-                format!("{dir}/assets/mvm-hvf-run-owner.entitlements"),
-                SUPERVISOR_ENTITLEMENTS,
-                0o644,
-            );
         }
         append(format!("{dir}/README.md"), b"# mvmctl\n", 0o644);
         for hostbin in &self.hostbins {
@@ -2582,35 +2566,6 @@ fn install_sh_codesigns_each_binary_with_its_role_profile() {
     assert!(
         !host.bin().join("mvm-libkrun-supervisor").exists(),
         "an install never stages the libkrun supervisor"
-    );
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn install_sh_never_resigns_the_hvf_owner_even_if_a_profile_appears() {
-    let owner = b"final signed owner bytes".to_vec();
-    let release = Release::new("v9.9.9")
-        .with_hostbins(vec!["mvm-hvf-run-owner".into()])
-        .with_hostbin_bytes("mvm-hvf-run-owner", owner.clone())
-        .with_owner_entitlement_profile();
-    let (base, _stop) = serve_releases(&[&release]);
-    let host = Host::new();
-    let (path, log) = fake_codesign(&host);
-    let output = host
-        .installer(&base, "v9.9.9")
-        .env_remove("MVM_SKIP_CODESIGN")
-        .env("PATH", path)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(
-        std::fs::read(host.bin().join("mvm-hvf-run-owner")).unwrap(),
-        owner
-    );
-    let log = std::fs::read_to_string(log).unwrap();
-    assert!(
-        !log.contains("mvm-hvf-run-owner"),
-        "owner reached the installer signing command: {log}"
     );
 }
 

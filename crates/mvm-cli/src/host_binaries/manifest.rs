@@ -133,12 +133,4 @@ pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
         features: "",
         scope: PerVmScope::MacOsAarch64,
     },
-    // Protected cold-HVF lifecycle boundary. Its v1 process remains
-    // refusal-only; listing it packages no positive VM factory.
-    PerVmBinary {
-        package: "mvm-client",
-        name: "mvm-hvf-run-owner",
-        features: "",
-        scope: PerVmScope::MacOsAarch64,
-    },
 ];

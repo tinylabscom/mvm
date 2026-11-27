@@ -68,12 +68,6 @@ pub mod helper_contract;
 /// Transport-independent host interface: contract, fail-closed preflight, local adapter.
 pub mod host_interface;
 pub mod host_storage_encryption;
-/// Create-only commissioning intent for the protected cold-HVF owner roles.
-#[cfg(any(target_os = "macos", all(unix, feature = "test-support")))]
-pub mod hvf_owner_commissioning_intent;
-/// Strict protected commissioning record for the cold-HVF owner roles.
-#[cfg(any(target_os = "macos", all(unix, feature = "test-support")))]
-pub mod hvf_owner_deployment_receipt;
 pub mod icmp_wire;
 /// Content-addressed image version-lineage nodes (the image analog of
 /// [`checkpoint`]). Provenance metadata, never authorization.
