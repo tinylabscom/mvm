@@ -154,7 +154,8 @@ launch.
   compromised host key defeats both. This mirrors the standing threat
   model's "malicious host is out of scope" carve-out, not a gap specific
   to this design.
-- The `*Ref` policy fields identify the bundle validated at admission.
+- The `*Ref` policy fields are signed labels; admission validates no policy
+  bundle.
   System-level network and credential controls govern the guest's traffic
   regardless of which application produced it. Issue #5115 retired the
   separate named guest-tool policy and decision gate; old plans or bundles

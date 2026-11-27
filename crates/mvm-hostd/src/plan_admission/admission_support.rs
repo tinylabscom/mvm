@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use mvm_build::guest_libc::GuestLibc;
 use mvm_contract::builder::BuilderError;
 use mvm_core::plan::{ExecutionPlan, SynthesisInput, Variant};
-use mvm_core::policy::PolicyBundle;
 use mvm_core::vm_backend::VmStartConfig;
 
 /// Refuse a boot whose kernel is not the one the plan pinned.
@@ -278,7 +277,6 @@ pub struct AdmitAndStartParams<'a> {
     /// mechanism for refuses the boot ([`Variant::Prod`]) or warns and proceeds
     /// ([`Variant::Dev`]).
     pub variant: Variant,
-    pub policy_bundle: Option<&'a PolicyBundle>,
     /// Optional chain-signed emitter: `plan.admitted` fires after admission
     /// succeeds, then `plan.launched` on a successful backend start or
     /// `plan.failed` on a start failure — the same event ordering the CLI's
@@ -321,7 +319,6 @@ pub struct AdmitAndStartParamsBuilder<'a> {
     bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
     extension_ctx: Option<&'a ExtensionAdmissionContext<'a>>,
     variant: Option<Variant>,
-    policy_bundle: Option<&'a PolicyBundle>,
     emitter: Option<&'a crate::audit::emitter::AuditEmitter>,
     audit_durability: Option<crate::audit::durability::AuditDurability>,
     assurance: Option<&'a crate::assurance_session::CampaignRequest>,
@@ -340,7 +337,6 @@ impl<'a> AdmitAndStartParamsBuilder<'a> {
             bundle_ctx: None,
             extension_ctx: None,
             variant: None,
-            policy_bundle: None,
             emitter: None,
             audit_durability: None,
             assurance: None,
@@ -412,13 +408,6 @@ impl<'a> AdmitAndStartParamsBuilder<'a> {
         self
     }
 
-    /// Set `policy_bundle`. Takes a value or an `Option`; unset means `None`.
-    #[must_use]
-    pub fn policy_bundle(mut self, policy_bundle: impl Into<Option<&'a PolicyBundle>>) -> Self {
-        self.policy_bundle = policy_bundle.into();
-        self
-    }
-
     /// Set `emitter`. Takes a value or an `Option`; unset means `None`.
     #[must_use]
     pub fn emitter(
@@ -469,7 +458,6 @@ impl<'a> AdmitAndStartParamsBuilder<'a> {
             variant: self
                 .variant
                 .ok_or(BuilderError::missing("AdmitAndStartParams", "variant"))?,
-            policy_bundle: self.policy_bundle,
             emitter: self.emitter,
             audit_durability: self.audit_durability.ok_or(BuilderError::missing(
                 "AdmitAndStartParams",

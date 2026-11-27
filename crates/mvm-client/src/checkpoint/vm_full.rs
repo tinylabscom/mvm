@@ -213,7 +213,6 @@ impl PreparedVmFullFork {
         let crate::admission::AdmissionContext {
             admitted,
             emitter,
-            policy_bundle,
             host_signer_public_path,
         } = admission;
         let origin = source.origin();
@@ -240,7 +239,6 @@ impl PreparedVmFullFork {
             admission: crate::admission::AdmissionContext {
                 admitted: dispatched.admitted,
                 emitter,
-                policy_bundle,
                 host_signer_public_path,
             },
         }

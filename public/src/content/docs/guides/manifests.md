@@ -292,7 +292,7 @@ To keep the schema small and the boundaries crisp, the following are explicitly 
 - **Build-time deps on other flakes** → flake `inputs` + `flake.lock`.
 - **Runtime deps on other VMs (lifecycle ordering, health gates)** → `mvmd` (separate repo).
 - **Per-tenant network bridges, tap names, IP allocation** → `mvmd`.
-- **Per-tenant network policy bundles** → `mvmctl machine run` flags or `~/.mvm/config.toml` defaults; eventually `mvmd` tenant config. The manifest only carries simple machine defaults (`net`, `allow_hosts`).
+- **Network policy** → `mvmctl machine run` flags or `~/.mvm/config.toml` defaults. The manifest only carries simple machine defaults (`net`, `allow_hosts`).
 - **Secrets / env vars at boot** → `mvmctl machine run`-time injection or `mvmd` instance config.
 
 ## See also

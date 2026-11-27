@@ -1,7 +1,6 @@
 //! Host checks and prepared attachments performed after plan admission.
 
 use anyhow::Result;
-use mvm_core::policy::PolicyBundle;
 use mvm_core::vm_backend::{BackendKind, VmStartConfig};
 
 use super::{
@@ -17,19 +16,12 @@ pub(super) fn run_post_admission_gates(
     mut config: VmStartConfig,
     admitted: &AdmittedPlan,
     backend: BackendKind,
-    policy_bundle: Option<&PolicyBundle>,
 ) -> std::result::Result<
     (VmStartConfig, Option<PreparedBuiltPackRuntime>),
     (&'static str, anyhow::Error),
 > {
-    run_post_admission_gates_for_source(
-        &mut config,
-        admitted,
-        backend,
-        policy_bundle,
-        ImageSource::Ordinary,
-    )
-    .map(|runtime| (config, runtime))
+    run_post_admission_gates_for_source(&mut config, admitted, backend, ImageSource::Ordinary)
+        .map(|runtime| (config, runtime))
 }
 
 pub(super) enum ImageSource {
@@ -43,10 +35,9 @@ pub(super) fn run_post_admission_gates_for_source(
     config: &mut VmStartConfig,
     admitted: &AdmittedPlan,
     backend: BackendKind,
-    policy_bundle: Option<&PolicyBundle>,
     source: ImageSource,
 ) -> std::result::Result<Option<PreparedBuiltPackRuntime>, (&'static str, anyhow::Error)> {
-    if let Err(error) = populate_audit_substrate(config, admitted, policy_bundle) {
+    if let Err(error) = populate_audit_substrate(config, admitted) {
         return Err(("audit-substrate", error));
     }
     if let Err(error) = enforce_admitted_shares(&config.volumes, admitted.plan()) {

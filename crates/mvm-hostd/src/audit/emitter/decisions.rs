@@ -201,7 +201,6 @@ impl AuditEmitter {
         // chain without a circular dependency on the full record label.
         let context_entry = for_plan(
             plan,
-            None,
             "decision_record",
             [
                 ("decision_id".to_string(), record.decision_id.0.clone()),
@@ -219,7 +218,6 @@ impl AuditEmitter {
         let record_json = serde_json::to_string(&record).context("serializing decision record")?;
         let entry = for_plan(
             plan,
-            None,
             "decision_record",
             [
                 ("decision_id".to_string(), record.decision_id.0.clone()),

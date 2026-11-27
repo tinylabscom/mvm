@@ -525,7 +525,6 @@ fn on_boot_path<T>(
             bundle_ctx: None,
             extension_ctx: None,
             variant: Variant::Dev,
-            policy_bundle: None,
             emitter: Some(&emitter),
             audit_durability: crate::audit::durability::AuditDurability::BestEffort,
             assurance: None,

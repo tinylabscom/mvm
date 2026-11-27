@@ -44,13 +44,10 @@ tracing.workspace = true
 # itself. Compile cost is marginal; serde is already in nearly
 # every other workspace crate's dep graph.
 serde = { workspace = true }
-# `SupervisorConfig` carries the per-VM ExecutionPlan + PolicyBundle as
-# `Option<serde_json::Value>` so the bin (`mvm-libkrun-supervisor`) can
-# feed them into the bridge factory without typed coupling to the
-# `mvm_core::plan` / `mvm_core::policy` structs at this layer; the
-# bridge stays a serde boundary. The bin crate, being a leaf, deserializes the Values into
-# typed `ExecutionPlan` / `PolicyBundle` since it can depend on
-# both. Always-on (not feature-gated) because `SupervisorConfig` is
+# `SupervisorConfig` carries the per-VM ExecutionPlan and NetworkPolicy as
+# `Option<serde_json::Value>` so this layer has no typed coupling to the
+# `mvm_core` structs. The bin crate (`mvm-libkrun-supervisor`), being a
+# leaf, deserializes the Values into the typed structs. Always-on (not feature-gated) because `SupervisorConfig` is
 # always-on per the comment above.
 serde_json.workspace = true
 # We intentionally do NOT pull `mvm-agentd` from regular deps: that

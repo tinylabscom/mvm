@@ -33,7 +33,6 @@ pub fn prepare_cli_cold(
             };
             let PendingCliAdmission {
                 authority,
-                policy_bundle,
                 audit,
                 source_rootfs: _,
                 verified_runtime: _,
@@ -43,7 +42,6 @@ pub fn prepare_cli_cold(
             Ok(mvm_hostd::plan_admission::LaunchAdmission {
                 admitted: authority,
                 emitter: audit.emitter,
-                policy_bundle,
                 continuation: super::CliColdContinuation {
                     host_budget,
                     mailbox_posture,
@@ -112,7 +110,6 @@ impl FsQuickBootAdmission {
         };
         let PendingCliAdmission {
             authority,
-            policy_bundle,
             audit,
             source_rootfs: _,
             verified_runtime,
@@ -127,7 +124,6 @@ impl FsQuickBootAdmission {
                     backend,
                     admitted: authority,
                     config,
-                    policy_bundle: policy_bundle.as_ref(),
                     emitter: Some(&audit.emitter),
                     assurance: None,
                 },
@@ -224,7 +220,6 @@ impl CliAdmission {
         };
         Self::Pending(Box::new(PendingCliAdmission {
             authority: context.admitted,
-            policy_bundle: context.policy_bundle,
             audit,
             source_rootfs,
             verified_runtime,
@@ -285,15 +280,6 @@ impl CliAdmission {
             config.plan_json.as_deref() == Some(expected.as_str()),
             "legacy launch plan projection differs from admitted authority"
         );
-        let policy = pending
-            .policy_bundle
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        anyhow::ensure!(
-            config.bundle_json == policy,
-            "legacy launch policy projection differs from admitted authority"
-        );
         Ok(())
     }
 
@@ -351,7 +337,6 @@ impl CliAdmission {
         };
         let PendingCliAdmission {
             authority,
-            policy_bundle,
             audit,
             source_rootfs: _,
             verified_runtime,
@@ -361,7 +346,6 @@ impl CliAdmission {
                 backend,
                 admitted: authority,
                 config,
-                policy_bundle: policy_bundle.as_ref(),
                 emitter: Some(&audit.emitter),
                 assurance: None,
             },

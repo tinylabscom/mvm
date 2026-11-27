@@ -105,7 +105,6 @@ fn wrong_nonce_attach_is_refused_without_boot() {
         gateway_audit_socket: dir.path().join("audit/g.sock"),
         gateway_events_socket: None,
         plan: serde_json::json!({ "ignored": "never-reached" }),
-        bundle: None,
         network_policy: None,
     };
     libkrun_sys::framing::write_json_frame_sync(&mut stream, &attach).unwrap();

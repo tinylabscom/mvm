@@ -4,16 +4,13 @@
 use super::AdmittedPlan;
 use super::verb_grant_sidecar::mint_verb_grant_sidecar;
 use anyhow::{Context, Result};
-use mvm_core::policy::PolicyBundle;
 
-/// Soft caps on the JSON envelope sizes flowing through
-/// `VmStartConfig` → `SupervisorConfig` over the supervisor's
-/// stdin pipe. Adversarial envelopes are a DoS vector (memory pressure
-/// on the supervisor + pipe-buffer pressure on the producer). 1 MiB /
-/// 4 MiB are generous for legitimate plans / bundles and tight enough
-/// to refuse pathological inputs.
+/// Soft cap on the plan envelope flowing through `VmStartConfig` →
+/// `SupervisorConfig` over the supervisor's stdin pipe. Adversarial
+/// envelopes are a DoS vector (memory pressure on the supervisor +
+/// pipe-buffer pressure on the producer). 1 MiB is generous for legitimate
+/// plans and tight enough to refuse pathological inputs.
 const PLAN_JSON_MAX_BYTES: usize = 1024 * 1024;
-const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// Refuse an envelope over its byte cap.
 ///
@@ -35,21 +32,21 @@ pub(super) fn enforce_size_cap(what: &str, len: usize, cap: usize) -> Result<()>
     Ok(())
 }
 
-/// Populate the `VmStartConfig` audit substrate (`tenant_id`, `plan_json`,
-/// `bundle_json`, and `audit_context`) from the admitted plan.
+/// Populate the `VmStartConfig` audit substrate (`tenant_id`, `plan_json`
+/// and `audit_context`) from the admitted plan.
 /// Call after the `VmStartConfig` is built and before
 /// `backend.start()`; the libkrun/HVF backends read these to wire
 /// `SupervisorConfig.{tenant_id, audit_dir, gateway_audit_socket,
 /// gateway_events_socket, signing_key_path}` and activate the
 /// bridge-factory path.
 ///
-/// The signed plan and policy bundle remain JSON envelopes; the endpoint's
+/// The signed plan remains a JSON envelope; the endpoint's
 /// typed audit context carries the admitted plan identity. The
 /// supervisor re-verifies the `SignedExecutionPlan` envelope before
 /// trusting any decoded field — see
 /// `mvm_hostd::supervisor::supervisor::SupervisorAdmission::admit`.
 ///
-/// **Do not log the resulting `plan_json` / `bundle_json` values.**
+/// **Do not log the resulting `plan_json` value.**
 /// The signed envelope may contain secret bindings, environment
 /// variables, or policy refs that resolve to credentials. Treat as
 /// opaque transport bytes.
@@ -84,7 +81,6 @@ pub fn thread_cpu_grant(cfg: &mut mvm_core::vm_backend::VmStartConfig, admitted:
 pub fn populate_audit_substrate(
     cfg: &mut mvm_core::vm_backend::VmStartConfig,
     admitted: &AdmittedPlan,
-    policy_bundle: Option<&PolicyBundle>,
 ) -> Result<()> {
     thread_tenant_id(cfg, admitted);
     thread_cpu_grant(cfg, admitted);
@@ -95,32 +91,14 @@ pub fn populate_audit_substrate(
     enforce_size_cap("plan_json", plan_json.len(), PLAN_JSON_MAX_BYTES)?;
     cfg.plan_json = Some(plan_json);
     cfg.audit_context = Some(admitted.workload_audit_context());
-
-    // `bundle_json` carries the resolved tenant **PolicyBundle** (network /
-    // egress / tool policy) that the supervisor's L4 gate + observers consume.
-    // It is NOT the ExecutionPlan's `.mvmpkg` artifact pin
-    // (`admitted.plan().bundle`, a `PlanArtifact` — content-addressed
-    // kernel/rootfs, verified separately at admit time via `verify_plan_bundle`).
-    // Feeding the pin here was a conflation the supervisor's PolicyBundle decode
-    // would reject. `None` until a policy-bundle source is wired.
-    cfg.bundle_json = match policy_bundle {
-        Some(bundle) => {
-            let bj = serde_json::to_string(bundle)
-                .context("serializing PolicyBundle for VmStartConfig.bundle_json")?;
-            enforce_size_cap("bundle_json", bj.len(), BUNDLE_JSON_MAX_BYTES)?;
-            Some(bj)
-        }
-        None => None,
-    };
     Ok(())
 }
 
 /// Atomically write `body` to `path` at mode 0600 on Unix hosts.
 ///
-/// The Firecracker bridge sidecar reads `plan.json` + `bundle.json` from
-/// the per-VM state dir at spawn time. Those files carry the signed
-/// `ExecutionPlan` envelope and the (optional) bundle pin, which may
-/// resolve through `secrets` / policy refs to credentials. They sit at
+/// Per-VM helpers read `plan.json` from the per-VM state dir
+/// at spawn time. It carries the signed `ExecutionPlan` envelope, which may
+/// name secret bindings. It sits at
 /// the same trust tier as the host signer key
 /// (mode 0600); `std::fs::write` would default to 0644 minus umask which
 /// on most contributor hosts is 0644 or 0664 — world-readable. Use
@@ -163,9 +141,8 @@ pub fn persists_plan_before_start(backend: &str) -> bool {
     )
 }
 
-/// Stash the signed plan envelope + (optional) bundle pin in the
-/// per-VM state dir so the Firecracker bridge sidecar can read them
-/// at spawn time.
+/// Stash the signed plan envelope in the per-VM state dir so the per-VM
+/// helpers can read it at spawn time.
 ///
 /// Runs at the admitted dispatch boundary (or at the legacy CLI producer
 /// boundary for unmigrated launches), after audit-substrate population and
@@ -195,8 +172,5 @@ pub fn stash_plan_and_mint_verb_grant(
     // A new plan under this name is a new run, and a human credential entered
     // during the previous one is not in this guest.
     mvm_runtime::vm::human_credential::clear_for_new_run(&state_dir)?;
-    if let Some(bundle_json) = cfg.bundle_json.as_deref() {
-        write_secret_file(&state_dir.join("bundle.json"), bundle_json.as_bytes())?;
-    }
     mint_verb_grant_sidecar(plan_json, &cfg.name, &state_dir)
 }

@@ -525,11 +525,7 @@ impl MaterializedFsQuickFork {
         )?;
         let (mut config, verified_runtime, admission) = prepared.into_parts();
         populate_fork_rootfs_verity(&mut config, &rootfs)?;
-        crate::admission::populate_audit_substrate(
-            &mut config,
-            &admission.admitted,
-            admission.policy_bundle.as_ref(),
-        )?;
+        crate::admission::populate_audit_substrate(&mut config, &admission.admitted)?;
         crate::admission::FsQuickBootAdmission::new(admission, self, verified_runtime)?
             .start(&backend, config)
     }

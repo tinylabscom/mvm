@@ -188,7 +188,6 @@ pub(super) fn admit_and_start(
             backend,
             admitted,
             config: params.config,
-            policy_bundle: params.policy_bundle,
             emitter: params.emitter,
             assurance: params.assurance,
         },

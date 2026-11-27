@@ -22,13 +22,13 @@ pub use mvm_contract::policy::{
 };
 
 pub use action_budget::ActionBudget;
-pub use bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION};
+pub use bundle::PolicyId;
 pub use policies::{
     ArtifactPolicy, AuditPolicy, BundleNetworkPolicy, DEFAULT_BODY_CAP_BYTES, EgressPolicy,
     FlowByteLogDirections, FlowByteLogSpec, FsGrantSpec, KeyPolicy, L4RuleSpec, PiiPolicy,
     WasiCapPolicy,
 };
-pub use projection::{CanonicalEgress, CanonicalRule, ProjectionError, Proto, canonicalize_l4};
+pub use projection::{CanonicalEgress, CanonicalRule, ProjectionError, Proto};
 pub use protected_paths::{
     ProtectedPath, ProtectedPathSet, ProtectedPathsMode, ProtectedPathsPolicy,
 };

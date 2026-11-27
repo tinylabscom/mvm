@@ -2557,7 +2557,6 @@ mod tests {
                 gateway_events_socket: None,
                 plan_json: String::new(),
                 audit_context: None,
-                bundle_json: None,
                 network_policy: mvm_core::policy::network_policy::NetworkPolicy::deny_all(),
             }
         }

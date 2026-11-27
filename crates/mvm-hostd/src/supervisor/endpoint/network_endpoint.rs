@@ -51,6 +51,17 @@ pub fn build_egress_gate(
     policy: &mvm_core::policy::network_policy::NetworkPolicy,
 ) -> mvm_runtime::vmm::egress_gate::EgressGate {
     let pins = mvm_core::policy::dns_pin::resolve_network_policy_pins(policy);
+    let unpinned = mvm_core::policy::dns_pin::unpinned_hosts(policy, &pins);
+    if !unpinned.is_empty() {
+        // Admission refuses only hosts the gate could never pin by their shape;
+        // whether a well-formed name resolves is known only here.
+        tracing::warn!(
+            hosts = ?unpinned,
+            "egress allow-list hosts did not resolve at endpoint start, so the whole \
+             allow-list falls back to deny-all and every destination is refused; \
+             admission checks a host's shape, not that it resolves"
+        );
+    }
     let now = chrono::Utc::now().to_rfc3339();
     // Peer routes ride the policy, so they arrive here already admitted and
     // need no separate thread. Attaching them at the same place the egress

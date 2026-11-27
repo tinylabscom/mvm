@@ -281,12 +281,8 @@ pub(super) fn record_opening(
     seed: &TranscriptManifest,
 ) -> Result<()> {
     use mvm_core::transcript::evidence;
-    let mut entry = crate::supervisor::audit::signer::for_plan(
-        plan,
-        None,
-        evidence::TRANSCRIPT_OPENED_EVENT,
-        [],
-    );
+    let mut entry =
+        crate::supervisor::audit::signer::for_plan(plan, evidence::TRANSCRIPT_OPENED_EVENT, []);
     entry.labels = evidence::opening_labels(seed)?;
     // Inside a batch the emit below would return before its record is synced,
     // and nothing after it syncs the segment.
@@ -1028,7 +1024,7 @@ mod tests {
         env.isolate_mvm_home(home.path());
         env.set(config::AUDIT_SEGMENT_BYTES_ENV, "1");
         let (plan, emitter, seed) = unopened_capture("opening-after-rotation");
-        let earlier = crate::supervisor::audit::signer::for_plan(&plan, None, "plan.failed", []);
+        let earlier = crate::supervisor::audit::signer::for_plan(&plan, "plan.failed", []);
         emitter
             .emit_entry_for_evidence(&earlier, EvidenceReceipt::Omitted)
             .unwrap();

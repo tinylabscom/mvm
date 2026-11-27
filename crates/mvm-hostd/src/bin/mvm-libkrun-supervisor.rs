@@ -557,7 +557,6 @@ mod tests {
             gateway_events_socket: None,
             signing_key_path: None,
             plan: None,
-            bundle: None,
             network_policy: None,
             bridge_restart_policy: BridgeRestartPolicy::HardFail,
             egress_relay_socket: None,

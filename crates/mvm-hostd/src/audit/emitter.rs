@@ -305,72 +305,6 @@ impl AuditEmitter {
         })
     }
 
-    /// Construct an emitter from a parsed policy bundle's `[audit]`
-    /// section. The default local chain is always kept; `file://`
-    /// destinations add exact-file replicas. Network/unix
-    /// replication is intentionally fail-closed until those
-    /// transports are implemented.
-    pub fn with_policy(
-        signing_key: SigningKey,
-        audit_dir: &Path,
-        policy: &mvm_core::policy::AuditPolicy,
-    ) -> Result<Self> {
-        if !policy.chain_signing {
-            anyhow::bail!(
-                "policy audit.chain_signing=false is not supported for policy-bound admission"
-            );
-        }
-
-        let mut emitter = Self::with_dir(signing_key.clone(), audit_dir)?;
-        emitter.add_policy_destinations(signing_key, policy)?;
-        Ok(emitter)
-    }
-
-    /// Policy-aware constructor that reuses the primary local-chain signer.
-    /// Additional `file://` policy destinations retain independent signers.
-    pub fn with_policy_and_primary_signer(
-        signing_key: SigningKey,
-        audit_dir: &Path,
-        policy: &mvm_core::policy::AuditPolicy,
-        primary_signer: Arc<FileAuditSigner>,
-    ) -> Result<Self> {
-        if !policy.chain_signing {
-            anyhow::bail!(
-                "policy audit.chain_signing=false is not supported for policy-bound admission"
-            );
-        }
-        let mut emitter =
-            Self::with_primary_signer(signing_key.clone(), audit_dir, primary_signer)?;
-        emitter.add_policy_destinations(signing_key, policy)?;
-        Ok(emitter)
-    }
-
-    fn add_policy_destinations(
-        &mut self,
-        signing_key: SigningKey,
-        policy: &mvm_core::policy::AuditPolicy,
-    ) -> Result<()> {
-        for destination in &policy.stream_destinations {
-            let Some(raw_path) = destination.strip_prefix("file://") else {
-                anyhow::bail!(
-                    "audit stream destination {destination:?} is not wired yet; \
-                     only file:// destinations are supported"
-                );
-            };
-            if raw_path.is_empty() {
-                anyhow::bail!("audit file:// destination must include an absolute path");
-            }
-            let path = PathBuf::from(raw_path);
-            if !path.is_absolute() {
-                anyhow::bail!("audit file:// destination must include an absolute path");
-            }
-            let signer = FileAuditSigner::open_file(signing_key.clone(), &path)
-                .with_context(|| format!("opening audit stream {}", path.display()))?;
-            self.signers.push(Arc::new(signer));
-        }
-        Ok(())
-    }
-
     /// Enable runtime emission of signed [`ExecutionReceipt`]s alongside
     /// audit events. Receipts are stored under
     /// `<audit_dir>/receipts/<tenant>/` and chained via `prev_receipt_id`.
@@ -803,7 +737,6 @@ impl AuditEmitter {
     ) -> Result<()> {
         let entry = transcript_sealed(
             plan,
-            None,
             capture_id,
             vm_name,
             sealed_root_hex,
@@ -964,7 +897,7 @@ impl AuditEmitter {
     where
         E: IntoIterator<Item = (String, String)>,
     {
-        let entry = for_plan(plan, None, event, extras);
+        let entry = for_plan(plan, event, extras);
         self.emit_entry(&entry)
     }
 
@@ -2547,123 +2480,6 @@ mod tests {
             let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o700, "audit dir must be tightened to 0700");
         }
-    }
-
-    #[test]
-    fn policy_file_destination_gets_a_replicated_chain() {
-        let dir = crate::audit::test_fixtures::AuditDir::new();
-        let replica = dir.path().join("replica.jsonl");
-        let key = {
-            let mut __ed_seed = [0u8; 32];
-            rand::rng().fill_bytes(&mut __ed_seed);
-            SigningKey::from_bytes(&__ed_seed)
-        };
-        let vk = key.verifying_key();
-        let policy = mvm_core::policy::AuditPolicy {
-            chain_signing: true,
-            stream_destinations: vec![format!("file://{}", replica.display())],
-        };
-        let emitter = AuditEmitter::with_policy(key, dir.path(), &policy).unwrap();
-        let plan = fixture_plan("local", "plan-P");
-
-        emitter.emit_admitted(&plan, "host:test").unwrap();
-
-        let default_path = dir.path().join("local.jsonl");
-        assert!(default_path.exists(), "default local chain remains active");
-        assert!(replica.exists(), "policy file stream must be written");
-        assert_eq!(verify_audit_chain(&default_path, &vk).unwrap(), 1);
-        assert_eq!(verify_audit_chain(&replica, &vk).unwrap(), 1);
-    }
-
-    /// The same guard, on the other constructor.
-    ///
-    /// `with_policy` and `with_policy_and_primary_signer` each refuse
-    /// `chain_signing=false`, and only the first was covered — so deleting the
-    /// `!` from the second inverted its guard and every test still passed. A
-    /// duplicated guard needs a test per copy; one test does not cover both
-    /// merely because the lines are identical.
-    ///
-    /// What that inversion would mean: an emitter accepting a policy that
-    /// disables chain signing, for the admission path whose whole guarantee is
-    /// a chain-signed audit log.
-    #[test]
-    fn the_primary_signer_constructor_also_requires_chain_signing() {
-        let dir = crate::audit::test_fixtures::AuditDir::new();
-        let key = {
-            let mut seed = [0u8; 32];
-            rand::rng().fill_bytes(&mut seed);
-            SigningKey::from_bytes(&seed)
-        };
-        let primary = std::sync::Arc::new(
-            FileAuditSigner::open(key.clone(), dir.path()).expect("open the primary signer"),
-        );
-        let policy = mvm_core::policy::AuditPolicy {
-            chain_signing: false,
-            stream_destinations: Vec::new(),
-        };
-        let err =
-            match AuditEmitter::with_policy_and_primary_signer(key, dir.path(), &policy, primary) {
-                Ok(_) => panic!("chain_signing=false must be rejected here too"),
-                Err(err) => err,
-            };
-        assert!(format!("{err:#}").contains("chain_signing"));
-    }
-
-    #[test]
-    fn policy_requires_chain_signing() {
-        let dir = crate::audit::test_fixtures::AuditDir::new();
-        let key = {
-            let mut __ed_seed = [0u8; 32];
-            rand::rng().fill_bytes(&mut __ed_seed);
-            SigningKey::from_bytes(&__ed_seed)
-        };
-        let policy = mvm_core::policy::AuditPolicy {
-            chain_signing: false,
-            stream_destinations: Vec::new(),
-        };
-        let err = match AuditEmitter::with_policy(key, dir.path(), &policy) {
-            Ok(_) => panic!("chain_signing=false must be rejected"),
-            Err(err) => err,
-        };
-        assert!(format!("{err:#}").contains("chain_signing"));
-    }
-
-    #[test]
-    fn policy_refuses_unwired_replication_schemes() {
-        let dir = crate::audit::test_fixtures::AuditDir::new();
-        let key = {
-            let mut __ed_seed = [0u8; 32];
-            rand::rng().fill_bytes(&mut __ed_seed);
-            SigningKey::from_bytes(&__ed_seed)
-        };
-        let policy = mvm_core::policy::AuditPolicy {
-            chain_signing: true,
-            stream_destinations: vec!["https://audit.example.com/ingest".to_string()],
-        };
-        let err = match AuditEmitter::with_policy(key, dir.path(), &policy) {
-            Ok(_) => panic!("unwired replication schemes must be rejected"),
-            Err(err) => err,
-        };
-        assert!(format!("{err:#}").contains("not wired yet"));
-    }
-
-    #[test]
-    fn policy_refuses_relative_file_destinations() {
-        let dir = crate::audit::test_fixtures::AuditDir::new();
-        let key = {
-            let mut __ed_seed = [0u8; 32];
-            rand::rng().fill_bytes(&mut __ed_seed);
-            SigningKey::from_bytes(&__ed_seed)
-        };
-        let policy = mvm_core::policy::AuditPolicy {
-            chain_signing: true,
-            stream_destinations: vec!["file://relative/audit.jsonl".to_string()],
-        };
-        let err = match AuditEmitter::with_policy(key, dir.path(), &policy) {
-            Ok(_) => panic!("relative audit file destinations must be rejected"),
-            Err(err) => err,
-        };
-        assert!(format!("{err:#}").contains("absolute path"));
     }
 
     #[test]

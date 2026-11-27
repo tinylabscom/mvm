@@ -92,16 +92,12 @@ pub struct SupervisorConfig {
     #[serde(default)]
     pub signing_key_path: Option<std::path::PathBuf>,
 
-    // --- plan + bundle for bridge construction -----
+    // --- plan + network policy -----
     //
-    // The bridge ([`mvm_hostd::supervisor::gateway_bridge::BridgeConfig`])
-    // needs `Arc<ExecutionPlan>` + `Option<Arc<PolicyBundle>>` to
-    // construct chained `AuditEntry`s. Carrying them as
-    // `Option<serde_json::Value>` (instead of the typed structs)
-    // avoids a typed coupling to the `mvm_core::plan` /
-    // `mvm_core::policy` structs at this layer; the bridge stays a
-    // serde boundary. The leaf bin crate `mvm-libkrun-supervisor` can freely
-    // depend on both and deserializes the Values on the bridge side.
+    // Carried as `Option<serde_json::Value>` (instead of the typed structs)
+    // to avoid a typed coupling to the `mvm_core::plan` /
+    // `mvm_core::network_policy` structs at this layer. The leaf bin crate
+    // `mvm-libkrun-supervisor` deserializes the Values.
     /// JSON-encoded admitted plan. Normally a
     /// [`mvm_core::plan::SignedExecutionPlan`] — the admission path
     /// (`vm/exec.rs`, `session.rs`, `invoke.rs`) serializes
@@ -116,18 +112,9 @@ pub struct SupervisorConfig {
     /// `validate_audit_substrate` will refuse).
     #[serde(default)]
     pub plan: Option<serde_json::Value>,
-    /// JSON-encoded [`mvm_core::policy::PolicyBundle`] for this admission.
-    /// Optional even when `plan` is set — workloads can run with
-    /// no bundle (matches the existing `Option<Arc<PolicyBundle>>`
-    /// in `BridgeConfig`).
-    #[serde(default)]
-    pub bundle: Option<serde_json::Value>,
-    /// JSON-encoded [`mvm_core::network_policy::NetworkPolicy`] — the bare
-    /// egress policy for the no-bundle path. The supervisor decodes it onto
-    /// `BridgeConfig.network_policy` so a transient/dev run enforces the same
-    /// policy Firecracker derives from `VmStartConfig.network_policy`. `None`
-    /// ⇒ no bare-policy override (admitted workloads with a `bundle` resolve
-    /// egress from that instead).
+    /// JSON-encoded [`mvm_core::network_policy::NetworkPolicy`] — the
+    /// launch's egress policy, the same one Firecracker derives from
+    /// `VmStartConfig.network_policy`. `None` ⇒ no policy override.
     #[serde(default)]
     pub network_policy: Option<serde_json::Value>,
 
@@ -313,14 +300,11 @@ pub struct SupervisorAttachConfig {
     /// JSON-encoded `SignedExecutionPlan` envelope — same carrier shape as
     /// `SupervisorConfig.plan`. Required (the warm path always carries a plan).
     pub plan: serde_json::Value,
-    /// JSON-encoded `PolicyBundle`, optional even when `plan` is set.
-    #[serde(default)]
-    pub bundle: Option<serde_json::Value>,
     /// JSON-encoded bare `NetworkPolicy` (same carrier shape as the cold-boot
     /// `SupervisorConfig.network_policy`). Threaded from the launcher's resolved
     /// policy so a warm-claimed standby enforces the SAME egress posture a cold
-    /// boot would — the no-bundle deny-by-default path must not silently widen to
-    /// an allow-all (permissive) gate on a pool hit. `None` only for pre-policy
+    /// boot would — deny-by-default must not silently widen to an allow-all
+    /// (permissive) gate on a pool hit. `None` only for pre-policy
     /// callers; the merge fails closed to deny-all in that case.
     #[serde(default)]
     pub network_policy: Option<serde_json::Value>,
@@ -380,12 +364,10 @@ impl SupervisorConfig {
             gateway_events_socket: attach.gateway_events_socket,
             signing_key_path: Some(base.signing_key_path),
             plan: Some(attach.plan),
-            bundle: attach.bundle,
             // Carry the launcher's resolved egress policy onto the merged config so
             // a warm-claimed standby enforces the SAME deny-by-default posture a
-            // cold boot would. Without this, a bundle-less admitted plan that
-            // cold-boots deny-all would silently run an allow-all gate on a pool
-            // hit (run_bridge_inner's no-bundle arm). The attach frame is Ed25519
+            // cold boot would. Without this, an admitted plan that cold-boots
+            // deny-all would silently run an allow-all gate on a pool hit. The attach frame is Ed25519
             // re-verified in `verify_and_merge_attach`, and (like the cold-boot
             // `network_policy` field) the policy is host-provided over the 0700
             // control UDS — a malicious host is out of the threat model.
@@ -429,7 +411,6 @@ mod base_attach_tests {
             gateway_audit_socket: "/audit/gateway-standby-0.sock".into(),
             gateway_events_socket: None,
             plan: serde_json::json!({"envelope": "stub"}),
-            bundle: None,
             network_policy: None,
         }
     }
@@ -450,8 +431,8 @@ mod base_attach_tests {
     #[test]
     fn merge_threads_network_policy_onto_the_merged_config() {
         // Deny-by-default must survive the warm-claim merge: a policy on the
-        // attach frame lands verbatim on the merged config (the no-bundle arm
-        // of run_bridge_inner lowers it), not silently dropped to an allow-all gate.
+        // attach frame lands verbatim on the merged config, not silently
+        // dropped to an allow-all gate.
         let deny =
             serde_json::to_value(mvm_core::network_policy::NetworkPolicy::deny_all()).unwrap();
         let mut a = attach(&"aa".repeat(32));
@@ -647,7 +628,6 @@ mod tests {
             )),
             signing_key_path: Some(keys.join("host-signer.ed25519")),
             plan: None,
-            bundle: None,
             network_policy: None,
             bridge_restart_policy: BridgeRestartPolicy::HardFail,
             egress_relay_socket: None,
@@ -771,7 +751,6 @@ mod tests {
             gateway_events_socket: None,
             signing_key_path: None,
             plan: None,
-            bundle: None,
             network_policy: None,
             bridge_restart_policy: BridgeRestartPolicy::HardFail,
             egress_relay_socket: None,
@@ -785,21 +764,18 @@ mod tests {
         assert!(parsed.gateway_audit_socket.is_none());
         assert!(parsed.signing_key_path.is_none());
         assert!(parsed.plan.is_none());
-        assert!(parsed.bundle.is_none());
         assert!(parsed.egress_relay_socket.is_none());
         // But validate_audit_substrate must refuse it.
         assert!(parsed.validate_audit_substrate().is_err());
     }
 
-    // `plan` + `bundle` fields on SupervisorConfig.
-    // Tests pin: (1) back-compat from JSON omitting both fields, (2)
-    // serde roundtrip with both fields populated, (3) the validate_*
-    // gate doesn't require them (validation covers paths only — the
-    // bridge factory consumes plan/bundle as soft data).
+    // `plan` field on SupervisorConfig.
+    // Tests pin: (1) back-compat from JSON omitting it, (2) serde
+    // roundtrip with it populated.
 
     #[test]
-    fn supervisor_config_parses_pre_w6a5_json_missing_plan_and_bundle() {
-        // An older caller would have omitted both new fields.
+    fn supervisor_config_parses_pre_w6a5_json_missing_plan() {
+        // An older caller would have omitted the field.
         let json = r#"{
             "krun": {
                 "name": "vm",
@@ -819,7 +795,6 @@ mod tests {
         let parsed: SupervisorConfig =
             serde_json::from_str(json).expect("pre-W6.A.5 JSON must still parse");
         assert!(parsed.plan.is_none());
-        assert!(parsed.bundle.is_none());
         assert!(parsed.egress_relay_socket.is_none());
     }
 
@@ -839,40 +814,28 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_config_roundtrips_with_plan_and_bundle_populated() {
+    fn supervisor_config_roundtrips_with_plan_populated() {
         let mut cfg = well_formed_supervisor_config();
-        // Stand-in JSON shapes — the bin crate is what decodes these
-        // into typed `ExecutionPlan` / `PolicyBundle`, so the
-        // mvm-libkrun layer only verifies the Values roundtrip.
+        // Stand-in JSON shape — the bin crate decodes it into a typed
+        // `ExecutionPlan`, so this layer only verifies the Value roundtrips.
         cfg.plan = Some(serde_json::json!({
             "tenant_id": "tenant-x",
             "kind": "workload",
             "version": 1
         }));
-        cfg.bundle = Some(serde_json::json!({
-            "name": "default",
-            "version": 1,
-            "rules": []
-        }));
         let json = serde_json::to_string(&cfg).expect("serialize");
         let parsed: SupervisorConfig = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(parsed.plan, cfg.plan);
-        assert_eq!(parsed.bundle, cfg.bundle);
     }
 
+    /// A config written by a build that still carried the removed `bundle`
+    /// field parses: `SupervisorConfig` ignores the stale key.
     #[test]
-    fn supervisor_config_plan_without_bundle_is_legal() {
-        let mut cfg = well_formed_supervisor_config();
-        cfg.plan = Some(serde_json::json!({ "kind": "workload" }));
-        cfg.bundle = None;
-        // No validation involvement — bridge factory tolerates the
-        // bundle being absent (matches `Option<Arc<PolicyBundle>>`
-        // in BridgeConfig). Confirm serde roundtrip preserves the
-        // shape without errors.
-        let json = serde_json::to_string(&cfg).expect("serialize");
-        let parsed: SupervisorConfig = serde_json::from_str(&json).expect("roundtrip");
-        assert!(parsed.plan.is_some());
-        assert!(parsed.bundle.is_none());
+    fn supervisor_config_ignores_a_stale_bundle_key() {
+        let mut json = serde_json::to_value(well_formed_supervisor_config()).expect("serialize");
+        json["bundle"] = serde_json::Value::Null;
+        let parsed: SupervisorConfig = serde_json::from_value(json).expect("stale key ignored");
+        assert!(parsed.plan.is_none());
     }
 
     // -----------------------------------------------------------------

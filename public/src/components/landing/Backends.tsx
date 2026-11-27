@@ -31,7 +31,7 @@ export function Backends() {
           the backend is an implementation detail.
         </h2>
         <p className="max-w-3xl text-base leading-relaxed text-body">
-          The same signed image, decorated execution plan, policy bundle, and
+          The same signed image, decorated execution plan, network policy, and
           audit chain runs across every backend MVM supports.
         </p>
       </Reveal>

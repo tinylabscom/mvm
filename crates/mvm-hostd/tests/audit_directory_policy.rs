@@ -27,7 +27,7 @@ fn emit(signer: &FileAuditSigner) {
     tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap()
-        .block_on(signer.sign_and_emit(&for_plan(&plan, None, "plan.admitted", [])))
+        .block_on(signer.sign_and_emit(&for_plan(&plan, "plan.admitted", [])))
         .unwrap();
 }
 

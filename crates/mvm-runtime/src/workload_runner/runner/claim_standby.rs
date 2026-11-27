@@ -629,6 +629,5 @@ fn child_start_config(claim: &StandbyClaim, child: &VmId, rootfs_dir: &Path) -> 
     cfg.tenant_id = Some(claim.tenant_id.clone());
     cfg.network_policy = claim.network_policy.clone();
     cfg.plan_json = Some(claim.plan_json.clone());
-    cfg.bundle_json = claim.bundle_json.clone();
     cfg
 }

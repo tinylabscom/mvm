@@ -16,7 +16,6 @@ use anyhow::{Context, Result, bail};
 
 use mvm_core::deploy_record::{BootArtifactIdentity, read_deploy_record, verify_boot_artifact};
 use mvm_core::plan::{StreamRetention, SynthesisInput, Variant};
-use mvm_core::policy::PolicyBundle;
 pub use mvm_hostd::plan_admission::{
     AdmittedPlan, BundleAdmissionContext, BundleImageAdmissionContext, InMemoryNonceLedger,
     RunPosture, SystemClock, admit_for_run, populate_audit_substrate,
@@ -28,11 +27,10 @@ use mvm_hostd::audit::emitter::AuditEmitter;
 use mvm_hostd::audit::host_keypair::load_or_init_at;
 
 use self::audit::{
-    PolicyResolutionKind, build_default_audit_emitter, build_policy_audit_emitter,
-    emit_bundle_environment_refused, emit_bundle_posture_refused, emit_policy_audit_invalid,
-    emit_policy_resolve_failure, emit_policy_resolved,
+    PolicyResolutionKind, build_default_audit_emitter, emit_bundle_environment_refused,
+    emit_bundle_posture_refused, emit_policy_resolved,
 };
-use self::policy::generated_policy_bundle_for_network_policy;
+use self::policy::{egress_destinations, generated_policy_ref};
 
 pub mod agent_verbs;
 mod audit;
@@ -195,11 +193,9 @@ pub struct AdmitPlanForBootParams<'a> {
     /// Default (all-off) preserves the curated-only baseline.
     pub redaction: mvm_core::policy::RedactionPolicy,
     /// The resolved runtime egress policy (`--allow-host`,
-    /// template default, or deny-all default). Non-deny
-    /// policies are lowered into a generated PolicyBundle and referenced by the
-    /// signed plan so the bridge never relies on an unsigned bare carrier to
-
-    /// authorize outbound traffic.
+    /// template default, or deny-all default). Its content digest is bound
+    /// into the signed plan as a policy asset identity, and the per-VM egress
+    /// gate enforces exactly this policy.
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
     /// Raw `--agent-verb` strings from the CLI. Empty ⇒ use the computed
     /// default. Validated inside `admit_plan_for_boot` via
@@ -317,9 +313,6 @@ pub fn entrypoint_is_shell_shaped(argv: &[String], shebang: Option<&[u8]>) -> bo
 pub struct AdmissionContext {
     pub admitted: AdmittedPlan,
     pub emitter: AuditEmitter,
-    /// The resolved tenant `PolicyBundle` (Slice 3 (b)) the bridge enforces
-    /// per-tenant L4 egress against; `None` for a local-default plan.
-    pub policy_bundle: Option<PolicyBundle>,
     pub host_signer_public_path: std::path::PathBuf,
 }
 
@@ -356,7 +349,6 @@ impl CliAdmission {
 /// Private fields keep the pending authority one-shot.
 pub struct PendingCliAdmission {
     authority: AdmittedPlan,
-    policy_bundle: Option<PolicyBundle>,
     audit: AuditContinuation,
     source_rootfs: Option<std::path::PathBuf>,
     verified_runtime: Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
@@ -810,11 +802,8 @@ fn admit_with_runtime_evidence(
     }
 
     mvm_core::launch_trace::lap("admit_plan.kernel_sha256_and_loadable");
-    let generated_network_policy_bundle =
-        generated_policy_bundle_for_network_policy(p.tenant, p.vm_name, &p.network_policy)?;
-    let generated_policy_ref = generated_network_policy_bundle
-        .as_ref()
-        .map(|(policy_ref, _)| policy_ref.as_str());
+    let generated_policy_ref = generated_policy_ref(p.tenant, p.vm_name, &p.network_policy)?;
+    let generated_policy_ref = generated_policy_ref.as_deref();
 
     // Content-derived asset identities. Directory shares that don't carry a
     // digest yet are hashed here, at admission, so the signed plan records
@@ -1161,45 +1150,14 @@ fn admit_with_runtime_evidence(
         "admit: load host signer"
     );
 
-    // The generated bundle's `[audit]` section configures the success-path
-    // emitter. If its L4 rows do not validate, fall back to the default local
-    // chain for the failure record so the rejection is still visible. The
-    // plan's refs name only this generated bundle or `local-default`, so there
-    // is nothing else to resolve.
-    let policy_bundle = generated_network_policy_bundle.map(|(_, bundle)| bundle);
-    if let Some(bundle) = &policy_bundle
-        && let Err(err) = mvm_core::policy::canonicalize_l4(&bundle.network.l4)
-            .context("validating generated signed network policy")
-    {
-        let fallback = build_default_audit_emitter(signer.signing, p.audit_dir)
-            .context("opening fallback audit chain emitter")?;
-        emit_policy_resolve_failure(admitted.plan(), &fallback, &err);
-        return Err(err);
-    }
-    let resolution = if policy_bundle.is_some() {
-        PolicyResolutionKind::GeneratedBundleValidated
+    let resolution = if generated_policy_ref.is_some() {
+        PolicyResolutionKind::NetworkPolicy
     } else {
         PolicyResolutionKind::LocalDefault
     };
-
-    let emitter = match build_policy_audit_emitter(
-        signer.signing.clone(),
-        p.audit_dir,
-        policy_bundle.as_ref().map(|bundle| &bundle.audit),
-    ) {
-        Ok(emitter) => emitter.with_receipts(),
-        Err(err) => {
-            let err = err.context("opening audit chain emitter");
-            match build_default_audit_emitter(signer.signing, p.audit_dir) {
-                Ok(fallback) => emit_policy_audit_invalid(admitted.plan(), &fallback, &err),
-                Err(fallback_err) => tracing::warn!(
-                    error = %fallback_err,
-                    "audit emit_failed for policy-audit-invalid skipped; fallback emitter failed"
-                ),
-            }
-            return Err(err);
-        }
-    };
+    let emitter = build_default_audit_emitter(signer.signing, p.audit_dir)
+        .context("opening audit chain emitter")?
+        .with_receipts();
 
     if let Some(report) = &instruction_report {
         instructions::record_and_enforce(&emitter, admitted.plan(), report)?;
@@ -1218,10 +1176,7 @@ fn admit_with_runtime_evidence(
     );
     // The admitted L7 egress boundary recorded in the chain-signed log so a
     // receipt can name the destinations without re-resolving policy refs.
-    let egress_destinations = policy_bundle
-        .as_ref()
-        .map(|b| b.egress.allow_list.clone())
-        .unwrap_or_default();
+    let egress_destinations = egress_destinations(&p.network_policy);
 
     // One batch, one fsync. Every admission-path entry has to be durable
     // before the same thing — this plan's workload running — and nothing
@@ -1285,7 +1240,6 @@ fn admit_with_runtime_evidence(
     let context = AdmissionContext {
         admitted,
         emitter,
-        policy_bundle,
         host_signer_public_path: signer.public_path,
     };
 
@@ -1819,7 +1773,6 @@ pub(crate) mod admit_plan_tests {
             audit_context: admitted.admitted.workload_audit_context(),
             mailbox_posture: admitted.admitted.mailbox_posture(),
             caller_registration: None,
-            bundle_json: None,
             config_files: Vec::new(),
             read_only_materialized_images: vec!["admitted-image.ext4".into()],
             built_pack_check: admitted.admitted.built_pack_boot_check().unwrap(),
@@ -2208,17 +2161,10 @@ pub(crate) mod admit_plan_tests {
         let original_id = context.admitted.plan_id().clone();
         let original_nonce = context.admitted.plan().nonce.clone();
         let signed = serde_json::to_string(context.admitted.signed()).expect("signed envelope");
-        let bundle = context
-            .policy_bundle
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .expect("admitted policy serializes");
         let owner = CliAdmission::new(context);
         let config = mvm_core::vm_backend::VmStartConfig {
             name: "vm-cli-owner".into(),
             plan_json: Some(signed),
-            bundle_json: bundle,
             ..Default::default()
         };
         owner
@@ -2236,19 +2182,6 @@ pub(crate) mod admit_plan_tests {
         assert!(
             identity_error.to_string().contains("identity differs"),
             "{identity_error:#}"
-        );
-        let changed_policy = mvm_core::vm_backend::VmStartConfig {
-            bundle_json: Some("{}".into()),
-            ..config.clone()
-        };
-        let policy_error = owner
-            .check_legacy_projection(&changed_policy)
-            .expect_err("caller policy JSON cannot replace admitted policy");
-        assert!(
-            policy_error
-                .to_string()
-                .contains("policy projection differs"),
-            "{policy_error:#}"
         );
         let changed = mvm_core::vm_backend::VmStartConfig {
             plan_json: Some("{}".into()),
@@ -2278,18 +2211,11 @@ pub(crate) mod admit_plan_tests {
         let context = admitted_into(keys_dir.path(), audit_dir.path(), "vm-source-owner");
         let original_nonce = context.admitted.plan().nonce.clone();
         let signed = serde_json::to_string(context.admitted.signed()).expect("signed plan");
-        let bundle = context
-            .policy_bundle
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .expect("policy");
         let owner = CliAdmission::new_for_rootfs(context, std::path::Path::new("/admitted/rootfs"));
         let config = mvm_core::vm_backend::VmStartConfig {
             name: "vm-source-owner".into(),
             rootfs_path: "/substituted/rootfs".into(),
             plan_json: Some(signed),
-            bundle_json: bundle,
             ..Default::default()
         };
         let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
@@ -2432,11 +2358,6 @@ pub(crate) mod admit_plan_tests {
                     )?;
                 config.admission_durability = Some(durability);
                 config.plan_json = Some(serde_json::to_string(context.admitted.signed())?);
-                config.bundle_json = context
-                    .policy_bundle
-                    .as_ref()
-                    .map(serde_json::to_string)
-                    .transpose()?;
                 *workload.borrow_mut() = Some(context.admitted.plan().workload.0.clone());
                 Ok(crate::admission::CliColdAdmissionInput::new(
                     CliAdmission::new_for_rootfs(context, &rootfs),
@@ -2674,7 +2595,7 @@ pub(crate) mod admit_plan_tests {
     }
 
     #[test]
-    fn admission_weaves_allow_list_into_signed_generated_policy_bundle() {
+    fn admission_binds_an_allow_list_into_the_signed_plan() {
         let _home = isolated_home();
         use mvm_core::network_policy::{HostPort, NetworkPolicy};
 
@@ -2717,28 +2638,159 @@ pub(crate) mod admit_plan_tests {
             ctx.admitted.plan().network_policy.0,
             ctx.admitted.plan().egress_policy.0
         );
-        let bundle = ctx.policy_bundle.expect("generated policy bundle");
-        assert_eq!(bundle.network.l4.len(), 1);
-        assert_eq!(bundle.network.l4[0].proto, "tcp");
-        assert_eq!(bundle.network.l4[0].dst_cidr, "93.184.216.34/32");
-        assert_eq!(bundle.network.l4[0].port_lo, 443);
-        assert_eq!(bundle.network.l4[0].port_hi, 443);
+        let policy_asset = ctx
+            .admitted
+            .plan()
+            .asset_identities
+            .iter()
+            .find(|asset| asset.kind == mvm_core::plan::AssetKind::Policy)
+            .expect("the signed plan binds the network policy as an asset");
+        assert_eq!(policy_asset.name, ctx.admitted.plan().network_policy.0);
         assert_eq!(
-            bundle.egress.allow_list,
-            vec![("93.184.216.34".to_string(), 443)]
+            policy_asset.digest,
+            mvm_core::policy::network_policy::content_sha256(&NetworkPolicy::allow_list(vec![
+                HostPort::new("93.184.216.34", 443)
+            ]))
         );
 
         let content =
             std::fs::read_to_string(audit_dir.path().join("local.jsonl")).expect("audit file");
         assert!(
-            content.contains("\"resolution\":\"generated-bundle-validated\""),
-            "generated bundle must audit as validated policy resolution: {content}"
+            content.contains("\"resolution\":\"network-policy\""),
+            "an egress grant must audit as a network-policy resolution: {content}"
         );
         assert!(!content.contains("slots_mode"), "{content}");
     }
 
+    /// The admitted egress destinations reach the chain from the launch's own
+    /// network policy: one sorted, de-duplicated `(host, port)` per allowed
+    /// destination, on a plan whose refs are the generated label. Deny-all
+    /// and unrestricted launches record no destination list.
     #[test]
-    fn admission_weaves_unrestricted_policy_into_signed_generated_policy_bundle() {
+    fn admission_records_allow_list_destinations_from_the_network_policy() {
+        let _home = isolated_home();
+        use mvm_core::network_policy::{HostPort, NetworkPolicy};
+
+        let admit = |vm_name: &'static str, network_policy: NetworkPolicy| {
+            let keys_dir = tempfile::tempdir().unwrap();
+            let audit_dir = tempfile::tempdir().unwrap();
+            let rootfs_dir = tempfile::tempdir().unwrap();
+            let rootfs = write_rootfs(rootfs_dir.path(), vm_name.as_bytes());
+            let ledger = InMemoryNonceLedger::new();
+            let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+                bundle_sizing: Default::default(),
+                mailbox: None,
+                vm_name,
+                cpus: 1,
+                mem_mib: 128,
+                keys_dir: Some(keys_dir.path()),
+                audit_dir: Some(audit_dir.path()),
+                network_policy,
+                ..pinning_params(&rootfs, &ledger)
+            })
+            .expect("admission");
+            let content = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
+                .expect("the default chain holds every admission record");
+            (ctx.admitted.plan().clone(), content)
+        };
+
+        let (plan, content) = admit(
+            "vm-destinations",
+            NetworkPolicy::allow_list(vec![
+                HostPort::new("203.0.113.7", 8443),
+                HostPort::new("93.184.216.34", 443),
+                HostPort::new("203.0.113.7", 8443),
+            ]),
+        );
+        let generated_ref = format!("{}:vm-destinations", plan.tenant.0);
+        assert_eq!(plan.network_policy.0, generated_ref);
+        assert_eq!(plan.egress_policy.0, generated_ref);
+        assert_eq!(plan.fs_policy.0, generated_ref);
+        let entry = content
+            .lines()
+            .find(|line| line.contains("\"plan.egress_destinations\""))
+            .unwrap_or_else(|| panic!("no plan.egress_destinations entry: {content}"));
+        for label in [
+            "\"destination_count\":\"2\"",
+            "\"destination_0_host\":\"203.0.113.7\"",
+            "\"destination_0_port\":\"8443\"",
+            "\"destination_1_host\":\"93.184.216.34\"",
+            "\"destination_1_port\":\"443\"",
+        ] {
+            assert!(entry.contains(label), "missing {label}: {entry}");
+        }
+
+        let (plan, content) = admit("vm-deny-all", NetworkPolicy::deny_all());
+        assert_eq!(plan.network_policy.0, mvm_core::plan::DEFAULT_POLICY_REF);
+        assert!(content.contains("plan.admitted"), "{content}");
+        assert!(!content.contains("plan.egress_destinations"), "{content}");
+
+        let (plan, content) = admit("vm-open", NetworkPolicy::unrestricted());
+        assert_eq!(plan.network_policy.0, format!("{}:vm-open", plan.tenant.0));
+        assert!(!content.contains("plan.egress_destinations"), "{content}");
+
+        // A preset's hosts are recorded as the preset expands them.
+        let preset = mvm_core::network_policy::NetworkPreset::Agent;
+        let (_, content) = admit("vm-preset", NetworkPolicy::preset(preset));
+        let entry = content
+            .lines()
+            .find(|line| line.contains("\"plan.egress_destinations\""))
+            .unwrap_or_else(|| panic!("no plan.egress_destinations entry: {content}"));
+        let expected = self::policy::egress_destinations(&NetworkPolicy::preset(preset));
+        assert!(!expected.is_empty());
+        assert!(
+            entry.contains(&format!("\"destination_count\":\"{}\"", expected.len())),
+            "{entry}"
+        );
+        for (host, _) in &expected {
+            assert!(
+                entry.contains(&format!("\"{host}\"")),
+                "missing {host}: {entry}"
+            );
+        }
+    }
+
+    /// A destination the egress gate could never pin is refused before the
+    /// plan is signed, naming the entry, whatever source supplied it — not
+    /// signed, audited as admitted, and then silently denied at the endpoint.
+    #[test]
+    fn admission_refuses_a_destination_the_gate_cannot_pin() {
+        let _home = isolated_home();
+        use mvm_core::network_policy::{HostPort, NetworkPolicy};
+
+        for host in ["*.example.com", "10.0.0.0/8", "[::1]", "bad..name"] {
+            let keys_dir = tempfile::tempdir().unwrap();
+            let audit_dir = tempfile::tempdir().unwrap();
+            let rootfs_dir = tempfile::tempdir().unwrap();
+            let rootfs = write_rootfs(rootfs_dir.path(), b"unpinnable");
+            let ledger = InMemoryNonceLedger::new();
+            let err = admit_plan_for_boot(AdmitPlanForBootParams {
+                bundle_sizing: Default::default(),
+                mailbox: None,
+                vm_name: "vm-unpinnable",
+                cpus: 1,
+                mem_mib: 128,
+                keys_dir: Some(keys_dir.path()),
+                audit_dir: Some(audit_dir.path()),
+                network_policy: NetworkPolicy::allow_list(vec![
+                    HostPort::new("api.github.com", 443),
+                    HostPort::new(host, 443),
+                ]),
+                ..pinning_params(&rootfs, &ledger)
+            })
+            .err()
+            .unwrap_or_else(|| panic!("{host} must be refused"));
+            let msg = format!("{err:#}");
+            assert!(msg.contains(host), "{host}: {msg}");
+            assert!(
+                !audit_dir.path().join("local.jsonl").exists(),
+                "{host}: nothing is admitted or audited as admitted"
+            );
+        }
+    }
+
+    #[test]
+    fn admission_binds_unrestricted_egress_into_the_signed_plan() {
         let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
@@ -2768,9 +2820,19 @@ pub(crate) mod admit_plan_tests {
             ctx.admitted.plan().network_policy.0,
             mvm_core::plan::DEFAULT_POLICY_REF
         );
-        let bundle = ctx.policy_bundle.expect("generated policy bundle");
-        assert_eq!(bundle.egress.mode.as_deref(), Some("open"));
-        assert!(bundle.network.l4.is_empty());
+        let policy_asset = ctx
+            .admitted
+            .plan()
+            .asset_identities
+            .iter()
+            .find(|asset| asset.kind == mvm_core::plan::AssetKind::Policy)
+            .expect("the signed plan binds the network policy as an asset");
+        assert_eq!(
+            policy_asset.digest,
+            mvm_core::policy::network_policy::content_sha256(
+                &mvm_core::network_policy::NetworkPolicy::unrestricted()
+            )
+        );
     }
 
     #[test]

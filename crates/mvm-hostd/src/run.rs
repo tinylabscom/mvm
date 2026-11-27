@@ -511,7 +511,6 @@ impl VerifiedLocal<'_> {
                 bundle_ctx: None,
                 extension_ctx: None,
                 variant: mvm_core::plan::Variant::Dev,
-                policy_bundle: None,
                 emitter: ctx.emitter,
                 // The local boot path launches unsealed (`sealed: false` above)
                 // and issues no attenuated verb grant, so it is not the tier whose
@@ -611,7 +610,6 @@ impl PreparedLocal<'_, '_> {
                 backend: self.admission.backend,
                 admitted: self.admission.admitted,
                 config: self.config,
-                policy_bundle: None,
                 emitter: self.admission.context.emitter,
                 assurance: self.admission.context.assurance,
             },

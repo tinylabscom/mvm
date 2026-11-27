@@ -25,7 +25,6 @@ use super::{AdmitAndStartParams, AdmittedPlan, RunPosture, final_gates, registry
 use anyhow::{Context, Result};
 use mvm_contract::protocol::resource_controls::EnforcedGrants;
 use mvm_core::plan::synthesize_plan;
-use mvm_core::policy::PolicyBundle;
 use mvm_core::vm_backend::{StandbyClaim, StandbyError, StandbyHandle, VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
 use mvm_runtime::vm::instance_snapshot::MachineLifecycleLock;
@@ -44,7 +43,6 @@ pub fn start_owned_entrypoint(
     backend: &AnyBackend,
     admitted: &mut AdmittedPlan,
     config: &mut VmStartConfig,
-    policy_bundle: Option<&PolicyBundle>,
     verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
     built_runtime: &mut Option<super::PreparedBuiltPackRuntime>,
     runtime: &mut Option<mvm_runtime::workload_runner::runner::OwnedRuntimeLaunch>,
@@ -82,7 +80,6 @@ pub fn start_owned_entrypoint(
         config,
         admitted,
         backend.kind(),
-        policy_bundle,
         final_gates::ImageSource::OwnedNative,
     )
     .map_err(|(stage, err)| err.context(format!("admission gate refused ({stage})")))?;
@@ -228,8 +225,6 @@ pub struct LaunchAdmission<C> {
     pub admitted: AdmittedPlan,
     /// The signer that records later readiness acceptance or refusal.
     pub emitter: crate::audit::emitter::AuditEmitter,
-    /// The resolved policy bundle enforced by final launch gates.
-    pub policy_bundle: Option<PolicyBundle>,
     /// Opaque client state returned without granting launch authority.
     pub continuation: C,
 }
@@ -365,7 +360,6 @@ pub fn boot_vm<C>(
     let LaunchAdmission {
         admitted,
         emitter,
-        policy_bundle,
         continuation,
     } = admission;
     let audit_plan = admitted.plan().clone();
@@ -374,7 +368,6 @@ pub fn boot_vm<C>(
             backend,
             admitted,
             config,
-            policy_bundle: policy_bundle.as_ref(),
             emitter: Some(&emitter),
             assurance: None,
         },
@@ -402,7 +395,6 @@ pub fn boot_vm<C>(
         admission: LaunchAdmission {
             admitted: started.admitted,
             emitter,
-            policy_bundle,
             continuation,
         },
         config: started.config,
@@ -442,7 +434,6 @@ pub struct StartAdmittedParams<'a> {
     /// ran — it cannot be built any other way.
     pub admitted: AdmittedPlan,
     pub config: VmStartConfig,
-    pub policy_bundle: Option<&'a PolicyBundle>,
     /// Optional chain-signed emitter: ordinary starts emit `plan.launched`
     /// after backend start; CLI transient starts defer it until completed exit.
     /// Ordinary boot refusals emit `plan.failed` here; CLI transient refusals
@@ -604,7 +595,6 @@ pub fn claim_cli_transient(
     backend: &AnyBackend,
     admitted: AdmittedPlan,
     config: VmStartConfig,
-    policy_bundle: Option<&mvm_core::policy::PolicyBundle>,
     verified_runtime: Option<&mvm_runtime::runtime_evidence::VerifiedRuntimeSet>,
     ctx: &mvm_runtime::workload_runner::ClaimContext<'_>,
     handle: &StandbyHandle,
@@ -633,13 +623,10 @@ pub fn claim_cli_transient(
     } else {
         verify_selected_runtime(&config)?;
     }
-    let (mut prepared, built_runtime) = final_gates::run_post_admission_gates(
-        config.clone(),
-        &admitted,
-        backend.kind(),
-        policy_bundle,
-    )
-    .map_err(|(stage, error)| error.context(format!("warm admission gate refused ({stage})")))?;
+    let (mut prepared, built_runtime) =
+        final_gates::run_post_admission_gates(config.clone(), &admitted, backend.kind()).map_err(
+            |(stage, error)| error.context(format!("warm admission gate refused ({stage})")),
+        )?;
     anyhow::ensure!(
         prepared.rootfs_path == config.rootfs_path,
         "warm claim cannot replace the selected parent image"
@@ -668,7 +655,6 @@ pub fn claim_cli_transient(
         .clone()
         .context("warm claim missing admitted tenant")?;
     let rootfs_path = prepared.rootfs_path.clone();
-    let bundle_json = prepared.bundle_json.clone();
     let audit_context = prepared.audit_context.clone();
     let network_policy = prepared.network_policy.clone();
     prepared.name = handle.id.clone();
@@ -685,7 +671,6 @@ pub fn claim_cli_transient(
         gateway_events_socket: audit.gateway_events_socket,
         plan_json,
         audit_context,
-        bundle_json,
         network_policy,
     };
     // No plan JSON can create this authority: only admission owns this value.
@@ -768,12 +753,8 @@ fn start_admitted_with_finalization(
         {
             verify_selected_runtime(&params.config).map_err(|error| ("guest-runtime", error))?;
         }
-        let (config, built_runtime) = final_gates::run_post_admission_gates(
-            params.config,
-            &admitted,
-            backend.kind(),
-            params.policy_bundle,
-        )?;
+        let (config, built_runtime) =
+            final_gates::run_post_admission_gates(params.config, &admitted, backend.kind())?;
         if entrypoint
             && verified_runtime.is_none()
             && built_runtime.is_none()

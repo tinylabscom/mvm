@@ -48,10 +48,8 @@ async fn both_paths_append_and_verify_the_same_chain() {
     let old_as_new: Arc<dyn audit::signer::AuditSigner> = old;
     let new_as_old: Arc<dyn supervisor::AuditSigner> = new;
     let plan = mvm_core::plan::test_support::PlanFixture::new().build();
-    let first: audit::signer::PlanAuditEntry =
-        supervisor::for_plan(&plan, None, "plan.admitted", []);
-    let second: supervisor::PlanAuditEntry =
-        audit::signer::for_plan(&plan, None, "plan.exited", []);
+    let first: audit::signer::PlanAuditEntry = supervisor::for_plan(&plan, "plan.admitted", []);
+    let second: supervisor::PlanAuditEntry = audit::signer::for_plan(&plan, "plan.exited", []);
     old_as_new.sign_and_emit(&first).await.unwrap();
     new_as_old.sign_and_emit(&second).await.unwrap();
     old_as_new.sign_and_emit(&first).await.unwrap();

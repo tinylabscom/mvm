@@ -451,7 +451,7 @@ impl Metrics {
             &mut out,
             "mvm_audit_policy_total",
             s.audit_policy_total,
-            "Audit events in the `policy` category (PolicyBundle operations)",
+            "Audit events in the `policy` category",
         );
         write_metric(
             &mut out,

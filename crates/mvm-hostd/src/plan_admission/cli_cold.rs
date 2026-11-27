@@ -112,10 +112,6 @@ impl<C> PreparedCliCold<C> {
             config.plan_json == self.prepared.config.plan_json,
             "legacy launch plan projection differs from prepared CLI cold authority"
         );
-        anyhow::ensure!(
-            config.bundle_json == self.prepared.config.bundle_json,
-            "legacy launch policy projection differs from prepared CLI cold authority"
-        );
         Ok(())
     }
 }
@@ -179,7 +175,6 @@ pub fn start_prepared_cli_cold<C>(
     let LaunchAdmission {
         admitted,
         emitter,
-        policy_bundle,
         continuation,
     } = admission;
     let plan = admitted.plan().clone();
@@ -195,7 +190,6 @@ pub fn start_prepared_cli_cold<C>(
                 backend,
                 admitted,
                 config,
-                policy_bundle: policy_bundle.as_ref(),
                 emitter: Some(&emitter),
                 assurance: None,
             },
@@ -219,7 +213,6 @@ pub fn abandon_prepared_cli_cold<C>(prepared: PreparedCliCold<C>) -> DispatchedC
     let LaunchAdmission {
         admitted,
         emitter,
-        policy_bundle: _,
         continuation,
     } = prepared.prepared.admission;
     DispatchedCliCold {
@@ -254,7 +247,6 @@ pub fn claim_prepared_cli_cold<C>(
     let LaunchAdmission {
         admitted,
         emitter,
-        policy_bundle,
         continuation,
     } = admission;
     let plan = admitted.plan().clone();
@@ -277,7 +269,6 @@ pub fn claim_prepared_cli_cold<C>(
         backend,
         admitted,
         config,
-        policy_bundle.as_ref(),
         verified_runtime.as_deref(),
         ctx,
         handle,
@@ -298,7 +289,6 @@ pub fn claim_prepared_cli_cold<C>(
                     admission: LaunchAdmission {
                         admitted: *admitted,
                         emitter,
-                        policy_bundle,
                         continuation,
                     },
                 },

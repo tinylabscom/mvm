@@ -1,10 +1,9 @@
-//! Bundle-pin plumbing and generated network-policy bundle synthesis for
-//! launch admission — the in-memory bundle resolver used when the caller
-//! already has archive bytes in hand, and the helpers that turn a
-//! resolved --allow-host egress policy into a signed PolicyBundle.
+//! Bundle-pin plumbing and network-policy labels for launch admission — the
+//! in-memory bundle resolver used when the caller already has archive bytes
+//! in hand, and the helpers that name a launch's network policy in the signed
+//! plan and the audit chain.
 
 use anyhow::{Context, Result};
-use mvm_core::policy::PolicyBundle;
 use mvm_runtime::image;
 
 /// Inputs for [`admit_plan_for_boot`]. Grouped so the helper avoids
@@ -135,9 +134,34 @@ pub fn shares_from_volume_cfg(
         .collect()
 }
 
-fn generated_policy_ref(tenant: &str, vm_name: &str) -> Result<String> {
+/// The signed policy-ref label for a launch's network policy:
+/// `<tenant>:<vm>` when it grants any egress (an allow-list or
+/// unrestricted), `None` (synthesis writes `local-default`) when it grants
+/// none. The label names the policy asset identity that binds the
+/// `NetworkPolicy` digest into the plan; nothing resolves it into a file.
+///
+/// Refuses, before anything is signed, a destination host the endpoint's
+/// gate could never pin (see [`mvm_policy::allow_host::check_destination_host`]),
+/// whichever source supplied it. A well-formed name that does not resolve
+/// is not refused here.
+pub(crate) fn generated_policy_ref(
+    tenant: &str,
+    vm_name: &str,
+    policy: &mvm_core::network_policy::NetworkPolicy,
+) -> Result<Option<String>> {
     fn valid_component(s: &str) -> bool {
         !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains(':')
+    }
+    if !policy.allows_egress() {
+        return Ok(None);
+    }
+    for rule in policy.resolve_rules().unwrap_or_default() {
+        mvm_policy::allow_host::check_destination_host(&rule.host).with_context(|| {
+            format!(
+                "egress destination {}:{} cannot be enforced",
+                rule.host, rule.port
+            )
+        })?;
     }
     if !valid_component(tenant) {
         anyhow::bail!(
@@ -149,128 +173,24 @@ fn generated_policy_ref(tenant: &str, vm_name: &str) -> Result<String> {
             "vm name {vm_name:?} cannot be encoded into a generated signed network policy ref"
         );
     }
-    Ok(format!("{tenant}:{vm_name}"))
+    Ok(Some(format!("{tenant}:{vm_name}")))
 }
 
-pub fn generated_policy_bundle_for_network_policy(
-    tenant: &str,
-    vm_name: &str,
+/// The `(host, port)` destinations a launch's network policy admits, sorted
+/// and de-duplicated, for the `plan.egress_destinations` audit record.
+/// Empty for deny-all and for unrestricted egress, which names no list.
+pub(crate) fn egress_destinations(
     policy: &mvm_core::network_policy::NetworkPolicy,
-) -> Result<Option<(String, PolicyBundle)>> {
-    use mvm_core::policy::bundle::{PolicyId, SCHEMA_VERSION as POLICY_SCHEMA_VERSION};
-    use mvm_core::policy::policies::{
-        ArtifactPolicy, AuditPolicy, BundleNetworkPolicy, EgressPolicy, KeyPolicy, L4RuleSpec,
-        PiiPolicy, WasiCapPolicy,
-    };
-    use std::net::{IpAddr, ToSocketAddrs};
-
-    let Some(rules) = policy.resolve_rules() else {
-        let policy_ref = generated_policy_ref(tenant, vm_name)?;
-        let mut egress = EgressPolicy {
-            mode: Some("open".to_string()),
-            ..Default::default()
-        };
-        egress.redaction = mvm_core::policy::RedactionPolicy::default();
-        return Ok(Some((
-            policy_ref,
-            PolicyBundle {
-                schema_version: POLICY_SCHEMA_VERSION,
-                bundle_id: PolicyId(format!("{tenant}/{vm_name}/cli-egress")),
-                bundle_version: 1,
-                network: BundleNetworkPolicy::default(),
-                egress,
-                pii: PiiPolicy::default(),
-                artifact: ArtifactPolicy::default(),
-                keys: KeyPolicy::default(),
-                audit: AuditPolicy {
-                    chain_signing: true,
-                    ..Default::default()
-                },
-                wasi: WasiCapPolicy::default(),
-            },
-        )));
-    };
-    if rules.is_empty() {
-        return Ok(None);
-    }
-
-    let policy_ref = generated_policy_ref(tenant, vm_name)?;
-    let mut l4 = Vec::new();
-    let mut egress_allow = Vec::new();
-    for rule in rules {
-        let ips: Vec<IpAddr> = if let Ok(ip) = rule.host.parse::<IpAddr>() {
-            vec![ip]
-        } else {
-            (rule.host.as_str(), 0u16)
-                .to_socket_addrs()
-                .with_context(|| {
-                    format!(
-                        "resolving {} for generated signed network policy",
-                        rule.host
-                    )
-                })?
-                .map(|sa| sa.ip())
-                .collect()
-        };
-        if ips.is_empty() {
-            anyhow::bail!(
-                "resolving {} for generated signed network policy returned no addresses",
-                rule.host
-            );
-        }
-        egress_allow.push((rule.host.clone(), rule.port));
-        for ip in ips {
-            let dst_cidr = match ip {
-                IpAddr::V4(v4) => format!("{v4}/32"),
-                IpAddr::V6(v6) => format!("{v6}/128"),
-            };
-            l4.push(L4RuleSpec {
-                proto: "tcp".to_string(),
-                dst_cidr,
-                port_lo: rule.port,
-                port_hi: rule.port,
-            });
-        }
-    }
-    l4.sort_by(|a, b| {
-        (&a.proto, &a.dst_cidr, a.port_lo, a.port_hi).cmp(&(
-            &b.proto,
-            &b.dst_cidr,
-            b.port_lo,
-            b.port_hi,
-        ))
-    });
-    l4.dedup();
-    egress_allow.sort();
-    egress_allow.dedup();
-
-    let bundle = PolicyBundle {
-        schema_version: POLICY_SCHEMA_VERSION,
-        bundle_id: PolicyId(format!("{tenant}/{vm_name}/cli-egress")),
-        bundle_version: 1,
-        network: BundleNetworkPolicy {
-            preset: Some("cli-allow-list".to_string()),
-            l4,
-            observers: Vec::new(),
-            flow_byte_log: None,
-        },
-        egress: EgressPolicy {
-            allow_list: egress_allow,
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            ..Default::default()
-        },
-        pii: PiiPolicy::default(),
-        artifact: ArtifactPolicy::default(),
-        keys: KeyPolicy::default(),
-        audit: AuditPolicy {
-            chain_signing: true,
-            ..Default::default()
-        },
-        wasi: WasiCapPolicy::default(),
-    };
-    mvm_core::policy::canonicalize_l4(&bundle.network.l4)
-        .context("validating generated signed network policy L4 rules")?;
-    Ok(Some((policy_ref, bundle)))
+) -> Vec<(String, u16)> {
+    let mut destinations: Vec<(String, u16)> = policy
+        .resolve_rules()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|rule| (rule.host, rule.port))
+        .collect();
+    destinations.sort();
+    destinations.dedup();
+    destinations
 }
 
 #[cfg(test)]

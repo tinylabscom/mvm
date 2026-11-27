@@ -627,7 +627,7 @@ fn pruned_history_refuses_even_when_original_creation_is_retained() {
         .unwrap();
     for _ in 0..2 {
         runtime
-            .block_on(signer.sign_and_emit(&for_plan(&fixture.plan, None, "plan.launched", [])))
+            .block_on(signer.sign_and_emit(&for_plan(&fixture.plan, "plan.launched", [])))
             .unwrap();
     }
     drop(signer);

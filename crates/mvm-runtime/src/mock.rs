@@ -618,7 +618,6 @@ mod tests {
             audit_context: None,
             mailbox_conversation: None,
             caller_registration: None,
-            bundle_json: None,
             warm_pool_size: 0,
             network_policy: Default::default(),
             dev_console: false,

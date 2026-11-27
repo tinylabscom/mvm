@@ -742,7 +742,6 @@ pub fn resume_and_boot(
             backend: req.backend,
             admitted: resumed.admitted,
             config,
-            policy_bundle: None,
             emitter: req.emitter,
             assurance: None,
         })?;

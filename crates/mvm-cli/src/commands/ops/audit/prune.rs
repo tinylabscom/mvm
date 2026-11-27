@@ -91,14 +91,13 @@ mod tests {
             signer
                 .sign_and_emit(&for_plan(
                     &plan,
-                    None,
                     "transcript.opened",
                     [("capture_id".into(), "synthetic-opaque-id".into())],
                 ))
                 .await
                 .unwrap();
             signer
-                .sign_and_emit(&for_plan(&plan, None, "plan.exited", std::iter::empty()))
+                .sign_and_emit(&for_plan(&plan, "plan.exited", std::iter::empty()))
                 .await
                 .unwrap();
         });

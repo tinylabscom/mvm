@@ -911,12 +911,6 @@ mod tests {
             cpus: 1,
             memory_mib: 128,
             plan_json: Some(serde_json::to_string(context.admitted.signed()).expect("signed plan")),
-            bundle_json: context
-                .policy_bundle
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()
-                .expect("policy bundle"),
             ..Default::default()
         };
         (

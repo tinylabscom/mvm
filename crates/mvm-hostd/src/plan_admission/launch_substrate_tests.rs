@@ -26,16 +26,12 @@ fn thread_tenant_id_sets_only_tenant_label_not_the_bridge_plan() {
         cfg.tenant_id.as_deref(),
         Some(admitted.plan().tenant.0.as_str())
     );
-    // It must NOT thread the signed plan / policy bundle — that flips
+    // It must NOT thread the signed plan — that flips
     // libkrun/HVF onto the gateway-bridge supervisor (+ its ~/.mvm/keys
     // substrate validation), which is a separate opt-in concern.
     assert!(
         cfg.plan_json.is_none(),
         "thread_tenant_id must not set plan_json"
-    );
-    assert!(
-        cfg.bundle_json.is_none(),
-        "thread_tenant_id must not set bundle_json"
     );
 }
 
@@ -57,7 +53,7 @@ fn populate_audit_substrate_threads_tenant_and_signed_envelope() {
     .expect("happy admit");
 
     let mut cfg = VmStartConfig::default();
-    populate_audit_substrate(&mut cfg, &admitted, None).expect("populate");
+    populate_audit_substrate(&mut cfg, &admitted).expect("populate");
     assert_eq!(
         cfg.tenant_id.as_deref(),
         Some(admitted.plan().tenant.0.as_str())
@@ -75,56 +71,6 @@ fn populate_audit_substrate_threads_tenant_and_signed_envelope() {
     let recovered =
         mvm_core::plan::verify_plan(&roundtrip, &trusted).expect("envelope re-verifies");
     assert_eq!(&recovered.plan_id, admitted.plan_id());
-    // fixture has no bundle pin, so bundle_json stays None
-    assert!(cfg.bundle_json.is_none());
-}
-
-#[test]
-fn bundle_json_carries_a_policy_bundle_not_the_artifact_pin() {
-    // De-conflation: bundle_json is the tenant PolicyBundle the
-    // supervisor's L4 gate + observers consume — sourced from the
-    // policy_bundle arg, NOT from `admitted.plan().bundle` (the .mvmpkg
-    // PlanArtifact pin, a different bundle verified separately).
-    use mvm_core::vm_backend::VmStartConfig;
-    let (_env, _home) = host_with_ceiling(Default::default());
-    let dir = tempfile::tempdir().unwrap();
-    let clock = SystemClock;
-    let ledger = InMemoryNonceLedger::new();
-    let admitted = admit_for_run(
-        &fixture_input("vm-policy-bundle"),
-        &clock,
-        &ledger,
-        Some(dir.path()),
-        None,
-        RunPosture::without_backend(Variant::Dev),
-    )
-    .expect("happy admit");
-
-    let bundle = mvm_core::policy::PolicyBundle {
-        schema_version: mvm_core::policy::SCHEMA_VERSION,
-        bundle_id: mvm_core::policy::PolicyId("test".into()),
-        bundle_version: 1,
-        network: Default::default(),
-        egress: Default::default(),
-        pii: Default::default(),
-        artifact: Default::default(),
-        keys: Default::default(),
-        audit: Default::default(),
-        wasi: Default::default(),
-    };
-
-    let mut cfg = VmStartConfig::default();
-    populate_audit_substrate(&mut cfg, &admitted, Some(&bundle)).expect("populate");
-    let bj = cfg.bundle_json.expect("bundle_json populated");
-    let roundtrip: mvm_core::policy::PolicyBundle =
-        serde_json::from_str(&bj).expect("bundle_json deserializes as a PolicyBundle");
-    assert_eq!(roundtrip, bundle);
-
-    // No policy bundle → None (the de-conflated default; a pinned artifact
-    // no longer leaks into this field).
-    let mut cfg2 = VmStartConfig::default();
-    populate_audit_substrate(&mut cfg2, &admitted, None).expect("populate none");
-    assert!(cfg2.bundle_json.is_none());
 }
 
 // ───────────────────────────────────────────────────────────────
@@ -159,7 +105,6 @@ fn shared_launch_preparation_persists_exact_admitted_envelope_and_guest_grant() 
         config,
         &admitted,
         mvm_core::vm_backend::BackendKind::Mock,
-        None,
     )
     .unwrap();
     assert_eq!(std::fs::read(state.join("plan.json")).unwrap(), expected);
@@ -193,7 +138,6 @@ fn shared_launch_preparation_refuses_unwritable_plan_before_dispatch() {
         },
         &admitted,
         mvm_core::vm_backend::BackendKind::Mock,
-        None,
     );
     let Err((stage, _)) = result else {
         panic!("plan persistence failure must refuse launch preparation");
@@ -297,7 +241,7 @@ fn stash_plan_for_bridge_skips_when_plan_json_none() {
 
 #[test]
 #[cfg(unix)]
-fn stash_plan_for_bridge_writes_both_files_when_present() {
+fn stash_plan_for_bridge_writes_only_the_private_plan() {
     use mvm_core::vm_backend::VmStartConfig;
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
@@ -307,7 +251,6 @@ fn stash_plan_for_bridge_writes_both_files_when_present() {
     let cfg = VmStartConfig {
         name: "with-plan".into(),
         plan_json: Some("{\"plan\":\"body\"}".into()),
-        bundle_json: Some("{\"bundle\":\"pin\"}".into()),
         ..Default::default()
     };
     stash_plan_for_bridge(&cfg).expect("stash succeeds");
@@ -315,20 +258,11 @@ fn stash_plan_for_bridge_writes_both_files_when_present() {
     let plan_path = dir.path().join("vms/with-plan/plan.json");
     let bundle_path = dir.path().join("vms/with-plan/bundle.json");
     assert!(plan_path.exists(), "plan.json must be written");
-    assert!(bundle_path.exists(), "bundle.json must be written");
+    assert!(!bundle_path.exists(), "no policy bundle is persisted");
     assert_eq!(
         std::fs::metadata(&plan_path).unwrap().permissions().mode() & 0o777,
         0o600,
         "plan.json must be mode 0600"
-    );
-    assert_eq!(
-        std::fs::metadata(&bundle_path)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600,
-        "bundle.json must be mode 0600"
     );
 }
 
@@ -367,7 +301,7 @@ fn stash_plan_for_bridge_writes_verb_grant_when_agent_verbs_present() {
         name: "vm-verb-grant".into(),
         ..Default::default()
     };
-    populate_audit_substrate(&mut cfg, &admitted, None).expect("populate");
+    populate_audit_substrate(&mut cfg, &admitted).expect("populate");
     let issued = stash_plan_and_mint_verb_grant(&cfg)
         .expect("stash succeeds")
         .expect("agent verbs mint a grant");
@@ -436,7 +370,7 @@ fn stash_plan_for_bridge_no_verb_grant_when_agent_verbs_absent() {
         name: "vm-no-verbs".into(),
         ..Default::default()
     };
-    populate_audit_substrate(&mut cfg, &admitted, None).expect("populate");
+    populate_audit_substrate(&mut cfg, &admitted).expect("populate");
     stash_plan_for_bridge(&cfg).expect("stash succeeds");
 
     assert!(
@@ -474,7 +408,7 @@ fn stash_plan_for_bridge_removes_stale_verb_grant_on_grant_less_restash() {
         name: vm_name.into(),
         ..Default::default()
     };
-    populate_audit_substrate(&mut cfg_with, &admitted_with, None).expect("populate");
+    populate_audit_substrate(&mut cfg_with, &admitted_with).expect("populate");
     stash_plan_for_bridge(&cfg_with).expect("first stash succeeds");
 
     let grant_path = dir.path().join(format!("vms/{vm_name}/verb-grant.json"));
@@ -497,7 +431,7 @@ fn stash_plan_for_bridge_removes_stale_verb_grant_on_grant_less_restash() {
         name: vm_name.into(),
         ..Default::default()
     };
-    populate_audit_substrate(&mut cfg_without, &admitted_without, None).expect("populate");
+    populate_audit_substrate(&mut cfg_without, &admitted_without).expect("populate");
     stash_plan_for_bridge(&cfg_without).expect("second stash succeeds");
 
     assert!(

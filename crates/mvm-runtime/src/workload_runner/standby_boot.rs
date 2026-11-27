@@ -158,7 +158,6 @@ pub fn factory_parent_config(
         audit_context: _,
         mailbox_conversation: _,
         caller_registration: _,
-        bundle_json: _,
         warm_pool_size: _,
         network_policy: _,
         dev_console: _,
@@ -251,7 +250,6 @@ pub fn factory_parent_config(
         audit_context: None,
         mailbox_conversation: None,
         caller_registration: None,
-        bundle_json: None,
         warm_pool_size: 0,
         network_policy: parent_egress_enablement(spec.vsock_egress),
         dev_console: false,
@@ -830,7 +828,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut launch = sealed_launch(tmp.path(), home.path());
         launch.plan_json = Some("{\"signed\":\"plan\"}".into());
-        launch.bundle_json = Some("{\"pin\":\"bundle\"}".into());
         launch.tenant_id = Some("tenant-a".into());
         launch.cpu_grant = Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 });
         launch.allowed_cpus = Some(mvm_contract::protocol::cpu_set::CpuSet::parse("0").unwrap());
@@ -890,7 +887,6 @@ mod tests {
 
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
         assert_eq!(parent_cfg.plan_json, None);
-        assert_eq!(parent_cfg.bundle_json, None);
         assert_eq!(parent_cfg.tenant_id, None);
         assert_eq!(parent_cfg.cpu_grant, None);
         assert_eq!(parent_cfg.allowed_cpus, None);

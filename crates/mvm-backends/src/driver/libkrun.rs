@@ -190,7 +190,6 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
         tenant_id: None,
         gateway_audit_socket: None,
         gateway_events_socket: None,
-        bundle: None,
         // The plan and the two paths its wall-clock kill is audited under are
         // the exception. The supervisor owns the guest for its whole life, so
         // it holds the only timer that can still fire once `mvmctl` is gone —
@@ -920,7 +919,6 @@ mod tests {
         // Role fields all inert — no admission, no policy, no audit substrate.
         assert_eq!(cfg.tenant_id, None);
         assert_eq!(cfg.plan, None);
-        assert_eq!(cfg.bundle, None);
         assert_eq!(cfg.network_policy, None);
         assert_eq!(cfg.audit_dir, None);
         assert_eq!(cfg.gateway_audit_socket, None);

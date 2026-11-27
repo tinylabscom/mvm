@@ -155,9 +155,9 @@ and other applies. It needs a durable binding from each live workload to
 the policy inputs and effective generation it was admitted under. An apply
 that cannot identify or fence every affected workload refuses publication;
 it must not guess from a VM's name or re-read a mutable policy file and
-call that the already-admitted policy. A default or project policy, a
-named profile/group, and a tenant bundle are different input sources,
-but must resolve through the same policy owner. An unsupported source
+call that the already-admitted policy. A default or project policy and a
+named profile/group are different input sources, but must resolve
+through the same policy owner. An unsupported source
 cannot silently opt out of live policy updates.
 
 This owner is local to MVM, not `mvmd`. Today the CLI calls
@@ -441,7 +441,7 @@ An offline lease is an explicit signed exception only for the operations
 and expiry it already permits. The plan's short validity window gates
 *launch admission*; checking its `valid_until` again on resume would
 incorrectly turn it into a workload lease. Arbitrary external edits to
-project `mvm.toml`, named profiles, and tenant bundles are still read
+project `mvm.toml` and named profiles are still read
 at launch outside the explicitly activated project path, without a common
 resident file-to-instance binding for live cutover. A watcher
 learns of an edit after it happens and cannot substitute for the atomic
