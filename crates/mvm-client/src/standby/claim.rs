@@ -148,6 +148,9 @@ fn build_claim_context(backend: &AnyBackend, handle: &StandbyHandle) -> Result<C
     let checkpoints = crate::checkpoint::CheckpointStore::open();
     let snapshots =
         mvm_fs::snapshot_store::FsSnapshotStore::new(mvm_core::config::snapshots_dir())?;
+    // Closes the parent selection, so the host key load the anchor makes next
+    // is lapped on its own.
+    mvm_core::launch_trace::lap("warm_claim.parent_selected");
     let anchor: Box<dyn crate::checkpoint::CheckpointChainAnchor> =
         if backend.as_vm_backend().supports_resident_handoff() {
             Box::new(SignedChainAnchor::empty())

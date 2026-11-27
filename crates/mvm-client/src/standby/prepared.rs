@@ -12,7 +12,6 @@ use mvm_hostd::plan_admission::PreparedBuiltPackRuntime;
 use mvm_runtime::checkpoint::{CheckpointChainAnchor, CheckpointStore};
 use mvm_runtime::runtime_evidence::VerifiedRuntimeSet;
 use rand::Rng;
-use sha2::{Digest, Sha256};
 
 use super::SupervisorStandbyPool;
 use crate::{AnyBackend, SpawnContext};
@@ -241,7 +240,10 @@ pub fn standby_compat(config: &VmStartConfig) -> Result<StandbyCompat> {
         .kernel_path
         .as_deref()
         .context("launch config has no kernel path for the compat key")?;
-    let kernel = std::fs::read(kernel).with_context(|| format!("read kernel {kernel}"))?;
+    // The sealed cache keys the digest on the file's device, inode, size,
+    // mtime and ctime, so a replaced or edited kernel is hashed again.
+    let kernel_sha256 = mvm_core::crypto::image_verify::sha256_file_cached(Path::new(kernel))
+        .with_context(|| format!("hashing kernel for the warm-pool compat key: {kernel}"))?;
     let image_sha256 =
         mvm_core::crypto::image_verify::sha256_file_cached(Path::new(&config.rootfs_path))
             .with_context(|| {
@@ -252,7 +254,7 @@ pub fn standby_compat(config: &VmStartConfig) -> Result<StandbyCompat> {
             })?;
     Ok(StandbyCompat {
         template_id: config.template_id.clone(),
-        kernel_sha256: hex::encode(Sha256::digest(kernel)),
+        kernel_sha256,
         vcpus: u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
         mem_mib: config.memory_mib,
         image_sha256: Some(image_sha256),
@@ -494,6 +496,7 @@ impl CheckpointChainAnchor for PlanlessWarmParentAnchor {
 mod tests {
     use super::*;
     use mvm_runtime::checkpoint::CheckpointChainAnchor;
+    use sha2::{Digest, Sha256};
 
     fn planless_config(dir: &Path) -> VmStartConfig {
         let kernel = dir.join("vmlinux");
@@ -523,6 +526,54 @@ mod tests {
         .unwrap();
 
         assert_eq!(prepared.compat(), &expected);
+    }
+
+    /// Write `bytes` and wait out the digest cache's racy window, so a hash
+    /// of the file may be sealed.
+    fn settled_file(path: &Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).unwrap();
+        std::thread::sleep(
+            mvm_core::crypto::verified_digest::RACY_WINDOW + std::time::Duration::from_millis(50),
+        );
+    }
+
+    /// The kernel half of the pool key comes from the sealed digest cache, as
+    /// the rootfs half does, so a warm claim does not read and hash the whole
+    /// kernel again; a kernel replaced in place is still hashed afresh.
+    #[test]
+    fn the_kernel_half_of_the_key_is_served_from_the_sealed_digest_cache() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        let config = planless_config(dir.path());
+        let kernel = Path::new(config.kernel_path.as_deref().unwrap());
+        settled_file(kernel, b"kernel one");
+
+        let first = standby_compat(&config).unwrap();
+        assert_eq!(
+            first.kernel_sha256,
+            hex::encode(Sha256::digest(b"kernel one"))
+        );
+        let (cached, source) =
+            mvm_core::crypto::image_verify::sha256_file_cached_report_source(kernel).unwrap();
+        assert_eq!(
+            (cached, source),
+            (
+                first.kernel_sha256.clone(),
+                mvm_core::crypto::image_verify::DigestSource::Sidecar
+            ),
+            "computing the key sealed the kernel digest for the next claim"
+        );
+
+        let replacement = dir.path().join("vmlinux.new");
+        settled_file(&replacement, b"kernel two");
+        std::fs::rename(&replacement, kernel).unwrap();
+        assert_eq!(
+            standby_compat(&config).unwrap().kernel_sha256,
+            hex::encode(Sha256::digest(b"kernel two")),
+            "a replaced kernel is never served the old digest"
+        );
     }
 
     #[test]
