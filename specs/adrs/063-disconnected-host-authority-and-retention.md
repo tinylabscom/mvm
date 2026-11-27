@@ -12,9 +12,9 @@ owning issue's design discussion.
 **Refines:** [Host interface and distributed execution](../contracts/host-interface-distributed-execution.md).
 **Complements:** [ADR-001](001-microvm-security-posture.md) and
 [ADR-057](057-mailbox-semantics-and-threat-model.md).
-**Related proposals:** [ADR-060](060-mailbox-rebuild-handoff.md) and
-[ADR-062](062-workload-actor-lifecycle-and-causal-evidence.md). Neither is
-accepted or implemented by this decision.
+**Related proposal:** [ADR-062](062-workload-actor-lifecycle-and-causal-evidence.md),
+including its rebuild outbox (§4.2). It is not accepted or implemented by this
+decision.
 
 This document records architectural choices, not implementation progress or
 new shipped security claims. GitHub owns remaining work and acceptance.

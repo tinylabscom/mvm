@@ -13,7 +13,7 @@ and claim witnesses belong to the dependent mailbox issues.
 **Supersedes:** ADR-046 for mailbox identity, envelope ownership, delivery,
 durability, storage, host-blindness, and the `mvmd` boundary. ADR-046 remains a
 proposed design for its non-mailbox lanes and their migration.
-**Reconciles:** ADR-051. The workload actor model remains, but its inbox uses
+**Reconciles:** ADR-062 §0. The workload actor model remains, but its inbox uses
 the contract and identities defined here.
 **Complements:** ADR-001, ADR-014, ADR-020, ADR-023, ADR-042, ADR-045,
 ADR-047, and ADR-056.
@@ -35,8 +35,8 @@ authority too broadly:
 
 - ADR-046 combined mailboxes with streams, telemetry, input, system events,
   SQLite shards, and `mvmd` committed-command groups.
-- ADR-051 selected ADR-046's `mvm_contract::fabric` vocabulary and one
-  `ExclusiveInbox` per workload.
+- The original workload actor model (now ADR-062 §0) selected ADR-046's
+  `mvm_contract::fabric` vocabulary and one `ExclusiveInbox` per workload.
 - Prototype mailbox DTOs and crypto live in `mvmd`, even though standalone
   `mvm` must work without `mvmd`.
 

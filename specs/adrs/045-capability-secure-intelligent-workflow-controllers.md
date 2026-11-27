@@ -14,9 +14,9 @@ message-fabric lanes. This ADR defines no message types of its own and consumes
 `mvm_contract::protocol::mailbox`.
 The workflow communication workstream cannot start before the fabric's local
 mailbox milestone lands.  
-**Reconciled by:** ADR-051, as amended by ADR-057, which names the shared
+**Reconciled by:** ADR-062 §0, as amended by ADR-057, which names the shared
 workload actor model, settles the vocabulary split against this ADR, and
-records the rejection of a third-party actor framework.
+records the rejection of a third-party actor framework (ADR-062 §10).
 **Research basis:**
 specs/research/intelligent-capability-secure-microvm-workflows.md (retired; recover from tag specs-archive-2026-11-02).
 

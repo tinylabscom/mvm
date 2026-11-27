@@ -21,7 +21,7 @@ roots, fan-out, and operator debugging.
 ADR-042, and ADR-063.  
 **Consumed by:** ADR-045 and its plan, which depend on this fabric and define
 no message types of their own.  
-**Reconciled by:** ADR-051, then narrowed by ADR-057. ADR-057's
+**Reconciled by:** ADR-062 §0, then narrowed by ADR-057. ADR-057's
 `mvm_contract::protocol::mailbox` vocabulary is authoritative for mailboxes.
 
 ## Context
