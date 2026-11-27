@@ -40,7 +40,7 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 // conformance's optional bdd dependency is enabled, not in ordinary tests.
 // The shared authored-policy extraction adds one first-party package only.
 // Direct coordinator observation uses the existing Unix socket dependencies.
-const FEATURE_CLOSURE_BUDGET: usize = 549;
+const FEATURE_CLOSURE_BUDGET: usize = 548;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

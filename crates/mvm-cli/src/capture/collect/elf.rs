@@ -4,7 +4,7 @@
 //! architecture, interpreter, declared shared-library dependencies, and the
 //! build identifier. It does not use `ldd` and does not execute the file.
 
-use crate::CaptureError;
+use crate::capture::CaptureError;
 
 /// ELF metadata relevant to environment capture.
 #[derive(Clone, Debug, Default, PartialEq)]

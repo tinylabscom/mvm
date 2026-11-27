@@ -1,9 +1,9 @@
 //! Deterministic resolution from raw capture report to canonical MVM IR.
 
-pub use crate::report::ResolutionResult;
+pub use crate::capture::report::ResolutionResult;
 
-use crate::CaptureError;
-use crate::report::{
+use crate::capture::CaptureError;
+use crate::capture::report::{
     CaptureReportV1, Confidence, Observation, ObservationKind, ResolutionRecord,
     ResolutionStrategy, UnresolvedItem,
 };
@@ -248,7 +248,9 @@ fn resolve_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::report::{CaptureReportV1, Confidence, Evidence, Observation, ObservationKind};
+    use crate::capture::report::{
+        CaptureReportV1, Confidence, Evidence, Observation, ObservationKind,
+    };
     use mvm_contract::ir::Image;
 
     fn nix_index_obs(package_name: &str) -> Observation {

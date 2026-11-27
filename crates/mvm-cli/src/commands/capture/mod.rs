@@ -92,12 +92,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 }
 
 fn run_project(args: ProjectArgs) -> Result<()> {
-    let options = mvm_capture::collect::CollectOptions {
+    let options = crate::capture::collect::CollectOptions {
         project_path: args.path.clone(),
         explicit_commands: args.run,
         ..Default::default()
     };
-    let report = mvm_capture::collect::collect_project(&options)
+    let report = crate::capture::collect::collect_project(&options)
         .with_context(|| format!("capturing project {}", args.path.display()))?;
     let json = serde_json::to_string_pretty(&report).context("serializing capture report")?;
     if let Some(parent) = args.output.parent() {
@@ -111,10 +111,10 @@ fn run_project(args: ProjectArgs) -> Result<()> {
 fn run_resolve(args: ResolveArgs) -> Result<()> {
     let text = fs::read_to_string(&args.report)
         .with_context(|| format!("reading {}", args.report.display()))?;
-    let report: mvm_capture::report::CaptureReportV1 =
+    let report: crate::capture::report::CaptureReportV1 =
         serde_json::from_str(&text).context("parsing capture report")?;
     let result =
-        mvm_capture::resolve::resolve_report(&report).context("resolving capture report")?;
+        crate::capture::resolve::resolve_report(&report).context("resolving capture report")?;
     let json = serde_json::to_string_pretty(&result).context("serializing resolved workload")?;
     if let Some(parent) = args.output.parent() {
         fs::create_dir_all(parent).context("creating output directory")?;
@@ -131,7 +131,7 @@ fn run_resolve(args: ResolveArgs) -> Result<()> {
 fn run_verify(args: VerifyArgs) -> Result<()> {
     let text = fs::read_to_string(&args.environment)
         .with_context(|| format!("reading {}", args.environment.display()))?;
-    let mut result: mvm_capture::resolve::ResolutionResult =
+    let mut result: crate::capture::resolve::ResolutionResult =
         serde_json::from_str(&text).context("parsing canonical IR")?;
 
     let manifest_dir = match args.manifest_dir.clone() {
@@ -176,8 +176,8 @@ fn run_verification_records(
     out_dir: &Path,
     exec_in_builder_vm: bool,
     boot_and_replay: bool,
-) -> Result<Vec<mvm_capture::report::VerificationRecord>> {
-    use mvm_capture::verify::{
+) -> Result<Vec<crate::capture::report::VerificationRecord>> {
+    use crate::capture::verify::{
         BootReplayVerifier, BuilderVmConfig, BuilderVmVerifier, RecordOnlyVerifier,
         VerificationRequest,
     };
@@ -212,12 +212,12 @@ fn run_verification_records(
 
 fn run_or_record<V>(
     verifier: V,
-    request: mvm_capture::verify::VerificationRequest,
-) -> mvm_capture::report::VerificationRecord
+    request: crate::capture::verify::VerificationRequest,
+) -> crate::capture::report::VerificationRecord
 where
-    V: mvm_capture::verify::Verifier,
+    V: crate::capture::verify::Verifier,
 {
-    use mvm_capture::report::{VerificationRecord, VerificationStatus};
+    use crate::capture::report::{VerificationRecord, VerificationStatus};
 
     verifier
         .verify(&request)

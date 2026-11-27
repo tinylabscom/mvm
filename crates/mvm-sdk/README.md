@@ -20,8 +20,8 @@ package docs.
 
 `mvm-sdk` provides workload authoring, decorator parsing, and runtime-recording
 lowering. Host compilation and dependency-volume auditing live in
-`mvm-compiler`; first-party host tools depend on it directly. `mvm-capture`
-and `mvm-conformance` use the SDK authoring surface in tests. The crate
+`mvm-compiler`; first-party host tools depend on it directly. `mvm-cli`'s
+capture tests and `mvm-conformance` use the SDK authoring surface. The crate
 re-exports the canonical IR from `mvm-contract`; it does not maintain a second
 workload schema.
 

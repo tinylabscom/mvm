@@ -1,6 +1,6 @@
 //! Bounded `strace`-backed dynamic tracer for explicit user commands.
 
-use crate::CaptureError;
+use crate::capture::CaptureError;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 

@@ -38,12 +38,12 @@ A crate depends only on crates on its own line or above; each `lib.rs` documents
 1. `mvm-contract` (`no_std` Workload IR, wire protocol, policy DTOs, audit verifier; builds for wasm), `mvm-crypto` (primitives), `mvm-http` (minimal HTTP/1.1 client), `mvm-setpriv` (guest privilege-drop helper), `crates/deps/mvm-macho-sign`.
 2. `mvm-core` -- types, config and `~/.mvm` paths, signed `ExecutionPlan` and `.mvmpkg` bundles, policy, crypto, guest-service channels; no tokio by default (`check-core-runtime-free`); keeps only code several crates share.
 3. `mvm-policy` (authored policy composition), `mvm-fs` (OCI client, allow-listed unpacker, pure-Rust ext4 writer), `crates/deps/libkrun-sys` (FFI + safe wrapper), `mvm-agentd` (guest agent, vsock protocol, console), `mvm-compiler` (workload compilation; no builds, network or signing), `mvm-gpu` (host GPU endpoint; guest shims are its cdylib examples).
-4. `mvm-vmm` (device model, hypervisor traits, `VmmDriver` seam), `mvm-host-services` (guest `libmvm_host_services.so`), `mvm-builder-guest` (builder-VM binaries + contract), `mvm-capture`.
+4. `mvm-vmm` (device model, hypervisor traits, `VmmDriver` seam), `mvm-host-services` (guest `libmvm_host_services.so`), `mvm-builder-guest` (builder-VM binaries + contract).
 5. `mvm-backends` (Firecracker/HVF/libkrun/QEMU drivers), `mvm-build` (Nix builder pipeline, artifact cache, runtime-piece assembly).
 6. `mvm-runtime` -- `VmBackend` + `AnyBackend`, VM lifecycle, workload runners.
 7. `mvm-hostd` -- supervisor, broker, signers, jailer, per-VM supervisors.
 8. `mvm-client` (`MvmClient`, `LocalBackend`, machine inventory); `mvm-sdk` (decorators to IR; language SDKs in `crates/mvm-sdk/sdks/`).
-9. `mvm-cli` (the `mvmctl` surface) and `mvm-hostlib` (C ABI the language SDKs load in-process).
+9. `mvm-cli` (the `mvmctl` surface, including `capture`) and `mvm-hostlib` (C ABI the language SDKs load in-process).
 
 Root package `mvmctl` (`src/lib.rs` facade, `src/main.rs` calls
 `mvm_cli::run()`); `xtask` holds tooling and gates; `mvm-conformance` is the

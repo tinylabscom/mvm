@@ -1,8 +1,10 @@
 //! Project-directory inspection: manifests, lockfiles, and ignore rules.
 
-use crate::CaptureError;
-use crate::collect::{TraverseLimits, obs_id, read_limited};
-use crate::report::{CaptureReportV1, Evidence, Observation, ObservationKind, Sensitivity};
+use crate::capture::CaptureError;
+use crate::capture::collect::{TraverseLimits, obs_id, read_limited};
+use crate::capture::report::{
+    CaptureReportV1, Evidence, Observation, ObservationKind, Sensitivity,
+};
 use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -172,7 +174,7 @@ fn visit(
                 sensitivity,
                 ..Default::default()
             },
-            confidence: crate::report::Confidence::Observed,
+            confidence: crate::capture::report::Confidence::Observed,
             warnings: vec![],
             provenance: vec![format!("scanned {}", rel.display())],
         });
@@ -186,7 +188,7 @@ fn visit(
             rel,
             super::InspectMeta {
                 source: "project-executable-scan",
-                confidence: crate::report::Confidence::Observed,
+                confidence: crate::capture::report::Confidence::Observed,
                 name: rel.file_name().and_then(|n| n.to_str()),
                 warnings: vec!["executable metadata only; file was not run".to_owned()],
                 provenance: vec![format!("mode bits on {}", rel.display())],

@@ -1,9 +1,9 @@
 //! Linux-specific collectors: PATH executables, package ownership, and tracing.
 
-use crate::CaptureError;
-use crate::collect::package::all_providers;
-use crate::collect::{TraverseLimits, inspect_executable, obs_id};
-use crate::report::{CaptureReportV1, Confidence, Evidence, Observation, ObservationKind};
+use crate::capture::CaptureError;
+use crate::capture::collect::package::all_providers;
+use crate::capture::collect::{TraverseLimits, inspect_executable, obs_id};
+use crate::capture::report::{CaptureReportV1, Confidence, Evidence, Observation, ObservationKind};
 use std::path::Path;
 
 /// Resolve PATH executables and their native package ownership.
@@ -18,7 +18,7 @@ pub(super) fn collect_path_executables(
                 report,
                 &path,
                 &path,
-                crate::collect::InspectMeta {
+                crate::capture::collect::InspectMeta {
                     source: "linux-path-resolution",
                     confidence: Confidence::Observed,
                     name: Some(tool),
@@ -91,8 +91,9 @@ pub(super) fn trace_explicit_commands(
     commands: &[String],
     project_dir: &Path,
 ) -> Result<(), CaptureError> {
-    let tracer =
-        crate::collect::trace::StraceTracer::new(crate::collect::trace::StraceLimits::default());
+    let tracer = crate::capture::collect::trace::StraceTracer::new(
+        crate::capture::collect::trace::StraceLimits::default(),
+    );
     for cmd in commands {
         let argv: Vec<String> = cmd.split_whitespace().map(str::to_owned).collect();
         match tracer.trace_command(&argv, project_dir) {
@@ -123,7 +124,7 @@ pub(super) fn trace_explicit_commands(
 fn record_trace_events(
     report: &mut CaptureReportV1,
     argv: &[String],
-    events: Vec<crate::collect::trace::TraceEvent>,
+    events: Vec<crate::capture::collect::trace::TraceEvent>,
 ) {
     let command_line = argv.join(" ");
     report.observations.push(Observation {
@@ -143,7 +144,7 @@ fn record_trace_events(
 
     for event in events {
         match event {
-            crate::collect::trace::TraceEvent::Execve { argv: exec_argv } => {
+            crate::capture::collect::trace::TraceEvent::Execve { argv: exec_argv } => {
                 let path = exec_argv.first().cloned().unwrap_or_default();
                 report.observations.push(Observation {
                     id: obs_id("exec", &path),
@@ -161,7 +162,7 @@ fn record_trace_events(
                     provenance: vec!["strace -e execve".to_owned()],
                 });
             }
-            crate::collect::trace::TraceEvent::Open { path } => {
+            crate::capture::collect::trace::TraceEvent::Open { path } => {
                 report.observations.push(Observation {
                     id: obs_id("file", &path),
                     kind: ObservationKind::FilesystemRequirement,
@@ -177,7 +178,7 @@ fn record_trace_events(
                     provenance: vec!["strace -e openat,open".to_owned()],
                 });
             }
-            crate::collect::trace::TraceEvent::Connect { endpoint } => {
+            crate::capture::collect::trace::TraceEvent::Connect { endpoint } => {
                 report.observations.push(Observation {
                     id: obs_id("net", &endpoint),
                     kind: ObservationKind::NetworkEndpoint,

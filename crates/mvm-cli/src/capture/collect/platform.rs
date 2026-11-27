@@ -1,6 +1,6 @@
 //! Platform-fact collection.
 
-use crate::report::PlatformFacts;
+use crate::capture::report::PlatformFacts;
 
 pub(super) fn collect_platform_facts() -> PlatformFacts {
     let mut facts = PlatformFacts {

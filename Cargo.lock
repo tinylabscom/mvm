@@ -3580,23 +3580,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-capture"
-version = "0.28.0-rc.11"
-dependencies = [
- "chrono",
- "hex",
- "mvm-compiler",
- "mvm-contract",
- "mvm-core",
- "mvm-vmm",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "mvm-cli"
 version = "0.28.0-rc.11"
 dependencies = [
@@ -3615,7 +3598,6 @@ dependencies = [
  "mvm-agentd",
  "mvm-backends",
  "mvm-build",
- "mvm-capture",
  "mvm-client",
  "mvm-compiler",
  "mvm-contract",

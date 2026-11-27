@@ -22,7 +22,7 @@ canonical representations so different components agree on identity.
 
 Most product crates consume this crate directly: `mvm-agentd`, `mvm-core`,
 `mvm-vmm`, `mvm-backends`, `mvm-runtime`, `mvm-build`, `mvm-fs`,
-`mvm-sdk`, `mvm-capture`, `mvm-client`, `mvm-cli`, and `mvm-hostd`. External
+`mvm-sdk`, `mvm-client`, `mvm-cli`, and `mvm-hostd`. External
 fleet software can depend on the same contracts without pulling in the local
 runtime.
 

@@ -34,7 +34,6 @@ mvm-compiler.workspace = true
 # default in `mvm-sdk` so the in-guest cdylib built from that crate's lib target
 # links no rustls/ring/tokio; the CLI is the one consumer that needs it.
 mvm-sdk = { workspace = true, features = ["deploy-remote"] }
-mvm-capture.workspace = true
 # Direct IR access (`mvm_contract::ir::…`) for the command surfaces that
 # only need the DTOs, not the rest of the SDK's build-time tooling.
 mvm-contract.workspace = true

@@ -38,7 +38,7 @@ ALLOWED_FILES=(
   "crates/mvm-core/src/crypto/threat_classifier.rs"
   # Capture excludes private-key-shaped project files from diagnostic
   # archives. These names are denylist data, never SSH capability.
-  "crates/mvm-capture/src/collect/project.rs"
+  "crates/mvm-cli/src/capture/collect/project.rs"
   # Host-share parser test: proves the user's SSH credential directory and a
   # private-key-shaped child path are refused as guest mount sources.
   "crates/mvm-cli/src/commands/shared/parse.rs"
