@@ -926,7 +926,7 @@ mod tests {
         let probe = format!("test -f /dev/fd/{fd}");
         let mut selected = std::process::Command::new("/bin/sh");
         selected.args(["-c", &probe]);
-        crate::host::restore_image::inherit_descriptors(&mut selected, inherited);
+        mvm_core::env_hygiene::keep_fds(&mut selected, &inherited);
         assert!(selected.status().unwrap().success());
         assert!(
             !std::process::Command::new("/bin/sh")

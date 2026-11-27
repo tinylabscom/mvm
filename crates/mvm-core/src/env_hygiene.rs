@@ -266,10 +266,11 @@ impl EnvFilter {
 /// A variable the call site then sets explicitly with `.env(...)` is that
 /// site's own, named decision; this removes only what would otherwise have
 /// arrived unasked. Descriptors work the same way: one this process inherited
-/// or left inheritable (a harness's held `flock`, say) never reaches a helper,
-/// and a site that hands a helper a descriptor names it with a later
-/// `pre_exec` hook that runs after this one (`dup2` into place, or clear its
-/// close-on-exec flag). Standard input, output and error are untouched.
+/// or left inheritable (a harness's held `flock`, say) never reaches a helper.
+/// A site that hands a helper descriptors names all of them in one
+/// [`keep_fds`] call. Standard input, output and error are untouched. Through
+/// [`std::os::unix::process::CommandExt::exec`] the marking happens in this
+/// process, so a failed exec leaves its own descriptors close-on-exec.
 #[must_use]
 pub fn helper_command(program: impl AsRef<OsStr>) -> Command {
     helper_command_with(program, &EnvReadmit::none())
@@ -284,8 +285,17 @@ pub fn helper_command_with(program: impl AsRef<OsStr>, readmit: &EnvReadmit) -> 
     spawn_recorder::note(program.as_ref());
     let mut command = Command::new(program);
     scrub_command(&mut command, readmit);
-    mvm_setpriv::fd_hygiene::configure_close_fds(&mut command, 3, None);
+    mvm_setpriv::fd_hygiene::configure_close_fds(&mut command, 3, &[]);
     command
+}
+
+/// Hand `command`'s child exactly the descriptors in `keep`, numbered as they
+/// are here, on top of its standard streams; every other descriptor closes at
+/// exec. Call it once per command with the complete set: one hook marks the
+/// rest and clears the flag on these, so the result does not depend on hook
+/// order, and a second call replaces the first.
+pub fn keep_fds(command: &mut Command, keep: &[std::ffi::c_int]) {
+    mvm_setpriv::fd_hygiene::configure_close_fds(command, 3, keep);
 }
 
 /// This process's environment without its denied variables, other than those
@@ -697,6 +707,9 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
+        // Inheritable only while the helper spawns, so a concurrent test's raw
+        // child in this same process cannot pick the lock up afterwards.
+        rustix::io::fcntl_setfd(&held, rustix::io::FdFlags::CLOEXEC).unwrap();
         drop(held);
         let next = std::fs::File::open(&path).unwrap();
         let acquired = flock(&next, FlockOperation::NonBlockingLockExclusive);

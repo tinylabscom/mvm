@@ -188,11 +188,7 @@ pub fn preflight_startup_files(
         .iter()
         .flat_map(|disk| [disk.backing, disk.sidecar])
         .collect::<Vec<_>>();
-    let all = readonly
-        .iter()
-        .chain(&writable)
-        .copied()
-        .collect::<Vec<_>>();
+    let all = cfg.startup_descriptors();
     validate_descriptor_namespace(&all)?;
     validate_startup_descriptors(&readonly)?;
     validate_writable_descriptors(&writable)?;

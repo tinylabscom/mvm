@@ -215,7 +215,7 @@ fn stream_command_with_environment<F: FnMut(ExecEvent)>(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crate::fd_hygiene::configure_close_fds(&mut builder, 3, None);
+    crate::fd_hygiene::configure_close_fds(&mut builder, 3, &[]);
     #[cfg(unix)]
     builder.process_group(0);
     // Every site that runs workload code applies the same strip: no_new_privs

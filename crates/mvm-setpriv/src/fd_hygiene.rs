@@ -10,31 +10,23 @@
 
 use std::process::Command;
 
-/// Configure a child command so every unintended descriptor closes atomically
-/// when `execve(2)` succeeds.
+/// Configure a child command so every descriptor from `first` up closes when
+/// `execve(2)` succeeds, except the ones in `keep`, which reach the child
+/// whatever their close-on-exec flag was.
 ///
-/// The registered hook uses only raw syscalls, so callers do not have to
-/// duplicate the `pre_exec` safety boundary at every spawn site. Hooks run in
-/// registration order, so a hook registered after this one may still hand a
-/// named descriptor on by `dup2` or by clearing its flag. Hosts other than
-/// Linux and macOS leave the command unchanged.
-pub fn configure_close_fds(command: &mut Command, first: u32, keep: Option<u32>) {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::process::CommandExt;
-
-        // SAFETY: the closure runs after fork and before exec, calls only the
-        // async-signal-safe raw-syscall implementation below, and captures
-        // only plain integers.
-        unsafe {
-            command.pre_exec(move || mark_descriptors_close_on_exec_from(first, keep));
-        }
-    }
-    #[cfg(target_os = "macos")]
+/// One hook does both, so a keep-set never depends on the order of other
+/// hooks. A command takes one keep-set: a second call marks the first call's
+/// kept descriptors again unless it lists them too. The hook uses only raw
+/// syscalls, so callers do not repeat the `pre_exec` safety boundary. Hosts
+/// other than Linux and macOS leave the command unchanged.
+pub fn configure_close_fds(command: &mut Command, first: u32, keep: &[std::ffi::c_int]) {
+    #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
 
         // Allocated here, before the fork, because the child may not allocate.
+        let keep = keep.to_vec();
+        #[cfg(target_os = "macos")]
         let mut open = vec![
             libc::proc_fdinfo {
                 proc_fd: 0,
@@ -43,12 +35,18 @@ pub fn configure_close_fds(command: &mut Command, first: u32, keep: Option<u32>)
             LISTED_DESCRIPTORS
         ];
         // SAFETY: the closure runs after fork and before exec, calls only raw
-        // syscalls, and writes only into the buffer it owns, allocated above.
+        // syscalls, and reads or writes only buffers it owns, allocated above.
         unsafe {
-            command.pre_exec(move || mark_listed_close_on_exec(&mut open, first, keep));
+            command.pre_exec(move || {
+                #[cfg(target_os = "macos")]
+                mark_listed_close_on_exec(&mut open, first, None)?;
+                #[cfg(not(target_os = "macos"))]
+                mark_descriptors_close_on_exec_from(first, None)?;
+                keep.iter().try_for_each(|fd| clear_close_on_exec(*fd))
+            });
         }
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(unix))]
     let _ = (command, first, keep);
 }
 
@@ -156,6 +154,18 @@ fn mark_close_on_exec(fd: libc::c_int) -> std::io::Result<()> {
     }
     // SAFETY: `flags` came from F_GETFD for this same descriptor.
     if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Let one descriptor survive exec.
+#[cfg(unix)]
+fn clear_close_on_exec(fd: libc::c_int) -> std::io::Result<()> {
+    // SAFETY: both operations take a descriptor number and integer flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    // SAFETY: `flags` came from F_GETFD for this same descriptor.
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
@@ -293,7 +303,7 @@ mod tests {
             "control: an unconfigured child inherits it"
         );
         assert!(!child_holds(&leaked, |command| {
-            configure_close_fds(command, 3, None)
+            configure_close_fds(command, 3, &[])
         }));
     }
 
@@ -322,12 +332,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn the_kept_descriptor_still_reaches_a_configured_child() {
+    fn every_kept_descriptor_reaches_the_child_even_when_close_on_exec() {
         use std::os::fd::AsRawFd;
-        let kept = inheritable_descriptor();
-        let fd = u32::try_from(kept.as_raw_fd()).unwrap();
-        assert!(child_holds(&kept, |command| {
-            configure_close_fds(command, 3, Some(fd))
+        // Opened by std, so close-on-exec: the keep-set has to clear it.
+        let kept = [
+            std::fs::File::open("/dev/null").unwrap(),
+            std::fs::File::open("/dev/null").unwrap(),
+        ];
+        let leaked = inheritable_descriptor();
+        let keep = kept.each_ref().map(|file| file.as_raw_fd());
+        for file in &kept {
+            assert!(child_holds(file, |command| {
+                configure_close_fds(command, 3, &keep)
+            }));
+        }
+        assert!(!child_holds(&leaked, |command| {
+            configure_close_fds(command, 3, &keep)
         }));
     }
 
@@ -335,7 +355,7 @@ mod tests {
     #[test]
     fn a_missing_executable_is_reported_without_losing_the_exec_error_pipe() {
         let mut command = Command::new("/definitely/not/a/real/executable");
-        configure_close_fds(&mut command, 3, None);
+        configure_close_fds(&mut command, 3, &[]);
 
         let error = command.status().unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);

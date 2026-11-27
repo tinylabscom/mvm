@@ -423,7 +423,7 @@ pub fn seed_resolv_conf_bytes(seed: &[u8]) -> Result<(), String> {
             "/run/mvm/resolv.conf",
             "/etc/resolv.conf",
         ]);
-        crate::fd_hygiene::configure_close_fds(&mut command, 3, None);
+        crate::fd_hygiene::configure_close_fds(&mut command, 3, &[]);
         let bound = command.status().map(|st| st.success()).unwrap_or(false);
         if bound {
             return Ok(());
@@ -481,7 +481,7 @@ pub fn configure_guest_network(
     if std::path::Path::new(script).is_file() {
         cmd.args(["-s", script]);
     }
-    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
+    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, &[]);
     let udhcpc_success = match cmd.status() {
         Ok(status) => status.success(),
         Err(e) => {

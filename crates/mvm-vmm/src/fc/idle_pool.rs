@@ -1188,6 +1188,11 @@ mod tests {
         }
 
         start_reaper(&entry).unwrap();
+        // Inheritable only while the reaper spawns, so a concurrent test's raw
+        // child in this same process cannot pick the lock up afterwards.
+        // SAFETY: descriptor flags of a file this test owns.
+        let marked = unsafe { libc::fcntl(held.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+        assert_eq!(marked, 0);
         drop(held);
         let next = std::fs::File::open(&lock).unwrap();
         // SAFETY: an advisory lock on a file this test owns.

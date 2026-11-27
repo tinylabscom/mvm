@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::host::hvf_supervisor::{HvfDisk, HvfRestoreFds, HvfSupervisorConfig};
-use crate::host::restore_image::{PrivateCopy, VerifiedRestoreFile, inherit_descriptors};
+use crate::host::restore_image::{PrivateCopy, VerifiedRestoreFile};
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_core::checkpoint::{
     ContentBlob, DEVICE_ANCHORS_BLOB, DeviceAnchors, HVF_FRAME_BLOB, MEMORY_BLOB, ROOTFS_BLOB,
@@ -391,7 +391,7 @@ fn bounded_restore_command(
     inherited: &[RawFd],
 ) -> Result<mvm_core::spawn_scope::BoundCommand> {
     let mut command = mvm_core::env_hygiene::helper_command(supervisor);
-    inherit_descriptors(&mut command, inherited.to_vec());
+    mvm_core::env_hygiene::keep_fds(&mut command, inherited);
     let bound = mvm_core::spawn_scope::bind_spawn(
         command,
         req.vm_name,

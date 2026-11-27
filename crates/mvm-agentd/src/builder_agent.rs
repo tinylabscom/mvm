@@ -22,7 +22,7 @@ pub const BUILDER_AGENT_PORT: u32 = 21470;
 
 fn child_command(program: &str) -> Command {
     let mut command = Command::new(program);
-    crate::fd_hygiene::configure_close_fds(&mut command, 3, None);
+    crate::fd_hygiene::configure_close_fds(&mut command, 3, &[]);
     command
 }
 

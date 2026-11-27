@@ -35,7 +35,7 @@ pub(crate) fn run_shell_with_timeout(
         .arg(cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
+    mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, &[]);
     mvm_agentd::workload_seccomp::confine(&mut command);
     let mut child = command.spawn()?;
     let _owned = mvm_agentd::child_wait::OwnedChild::new(child.id());

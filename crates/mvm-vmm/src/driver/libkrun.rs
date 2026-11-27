@@ -301,9 +301,9 @@ impl LibkrunDriver {
             .unwrap_or_else(|_| Stdio::null());
         let stderr = crate::host::console_capture::supervisor_stderr(&state_dir);
         let mut command = bounded_supervisor_command(&supervisor, spec, &state_dir);
-        crate::host::restore_image::inherit_descriptors(
+        mvm_core::env_hygiene::keep_fds(
             command.as_command_mut(),
-            disks.map_or_else(Vec::new, |disks| disks.inherited_descriptors()),
+            &disks.map_or_else(Vec::new, |disks| disks.inherited_descriptors()),
         );
         let mut child = command
             .stdin(Stdio::piped())

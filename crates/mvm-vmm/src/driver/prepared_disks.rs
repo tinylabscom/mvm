@@ -565,7 +565,7 @@ mod tests {
                 .args(["-c", "printf x; exec sleep 30"])
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null());
-            crate::host::restore_image::inherit_descriptors(&mut command, fds);
+            mvm_core::env_hygiene::keep_fds(&mut command, &fds);
             let mut child = command.spawn().unwrap();
             drop(held);
             let mut ready = [0_u8; 1];

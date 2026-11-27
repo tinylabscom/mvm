@@ -15,7 +15,7 @@ The policy is not "no process creation". It is three rules:
 
 Where the tree stands against it (see `process-spawn-inventory.md` for every site):
 
-- Host spawns go through `helper_command` and `helper_command_with` in `mvm-core`'s `env_hygiene`, which scrub the environment but neither pin the program nor apply descriptor hygiene. `xtask check-helper-env-hygiene` holds the raw constructors to its `RAW_SITES` list. Neither is yet the launcher of rule 3.
+- Host spawns go through `helper_command` and `helper_command_with` in `mvm-core`'s `env_hygiene`, which scrub the environment and mark every descriptor from 3 up close-on-exec in the child (a site that hands a helper descriptors names all of them in one `env_hygiene::keep_fds` call), but do not pin the program. `xtask check-helper-env-hygiene` holds the raw constructors to its `RAW_SITES` list. Neither is yet the launcher of rule 3.
 - Shell strings remain behind the host bash seams, the Firecracker launch, `mvmctl env uninstall` and the Firecracker idle reaper. The inventory lists them as open review, and its `OPEN_REVIEW_CEILING` keeps that list from growing.
 - External tools with an in-tree replacement are being replaced site by site.
 

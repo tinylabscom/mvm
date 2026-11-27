@@ -350,8 +350,8 @@ def guard(rel, kinds, places, fns):
     src = open(os.path.join(ROOT, rel)).read()
     if "refuse_cli_spawn" in src or "CliSpawn::" in src or "refuse_toolchain_spawn" in src:
         g.append("embedder refusal")
-    if "inherit_descriptors(" in src:
-        g.append("fd keep-list (`inherit_descriptors`)")
+    if "keep_fds(" in src:
+        g.append("fd keep-list (`keep_fds`)")
     if "network_endpoint" in rel or "gpu_endpoint" in rel:
         g.append("check-single-network-path")
     if crate_of(rel) in ("mvm-client", "mvm-hostlib", "mvm-sdk"):

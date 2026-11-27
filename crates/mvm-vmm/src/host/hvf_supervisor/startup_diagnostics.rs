@@ -4,7 +4,7 @@
 
 use std::fs::File;
 use std::io::{self, PipeReader, PipeWriter, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -136,14 +136,16 @@ impl StartupDiagnostics {
     /// Descriptor handoff works on the native, unwrapped macOS launch. A scope
     /// wrapper may discard pre-exec hooks; that launch then has no diagnostics,
     /// not permission to skip resource bounds or to claim readiness.
-    pub fn configure(command: &mut Command, diagnostics: Option<&Self>) {
+    ///
+    /// Returns the writer's descriptor, which the caller adds to the command's
+    /// one keep-set ([`mvm_core::env_hygiene::keep_fds`]).
+    #[must_use]
+    pub fn configure(command: &mut Command, diagnostics: Option<&Self>) -> Option<RawFd> {
         // Never adopt a descriptor number supplied by the launcher's environment.
         command.env_remove(DIAGNOSTICS_FD);
-        if let Some(writer) = diagnostics.and_then(|diagnostics| diagnostics.writer.as_ref()) {
-            let fd = writer.as_raw_fd();
-            command.env(DIAGNOSTICS_FD, fd.to_string());
-            crate::host::restore_image::inherit_descriptors(command, vec![fd]);
-        }
+        let fd = diagnostics?.writer.as_ref()?.as_raw_fd();
+        command.env(DIAGNOSTICS_FD, fd.to_string());
+        Some(fd)
     }
 
     pub fn launched(&mut self) {
@@ -236,13 +238,14 @@ impl StartupReporter {
         }
     }
 
-    pub fn configure_reexec(&self, command: &mut Command) {
+    /// Name the adopted writer to a re-exec of this process, returning its
+    /// descriptor for the command's one keep-set.
+    #[must_use]
+    pub fn configure_reexec(&self, command: &mut Command) -> Option<RawFd> {
         command.env_remove(DIAGNOSTICS_FD);
-        if let Some(file) = &self.0 {
-            let fd = file.as_raw_fd();
-            command.env(DIAGNOSTICS_FD, fd.to_string());
-            crate::host::restore_image::inherit_descriptors(command, vec![fd]);
-        }
+        let fd = self.0.as_ref()?.as_raw_fd();
+        command.env(DIAGNOSTICS_FD, fd.to_string());
+        Some(fd)
     }
 }
 
@@ -347,7 +350,8 @@ mod tests {
             command
                 .args(["--exact", FAKE_TEST, "--nocapture"])
                 .env(FAKE_CHILD, "exit");
-            reporter.configure_reexec(&mut command);
+            let keep = reporter.configure_reexec(&mut command);
+            mvm_core::env_hygiene::keep_fds(&mut command, keep.as_slice());
             let error = command.exec();
             panic!("fake helper reexec failed: {error}");
         }
@@ -368,7 +372,8 @@ mod tests {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(super::super::protected_supervisor_stderr());
-        StartupDiagnostics::configure(&mut command, Some(&diagnostics));
+        let keep = StartupDiagnostics::configure(&mut command, Some(&diagnostics));
+        mvm_core::env_hygiene::keep_fds(&mut command, keep.as_slice());
         let mut child = FixtureChild::spawn(&mut command);
         diagnostics.launched();
         let status = child.wait();
@@ -444,8 +449,12 @@ mod tests {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(super::super::protected_supervisor_stderr());
-        StartupDiagnostics::configure(&mut command, Some(&diagnostics));
-        crate::host::restore_image::inherit_descriptors(&mut command, vec![child_sync.as_raw_fd()]);
+        let mut keep = vec![child_sync.as_raw_fd()];
+        keep.extend(StartupDiagnostics::configure(
+            &mut command,
+            Some(&diagnostics),
+        ));
+        mvm_core::env_hygiene::keep_fds(&mut command, &keep);
         let mut child = FixtureChild::spawn(&mut command);
         drop(child_sync);
         diagnostics.launched();
