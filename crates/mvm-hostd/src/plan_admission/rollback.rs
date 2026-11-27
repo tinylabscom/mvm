@@ -49,6 +49,12 @@ pub(super) fn undo_cli_launch(undo: UndoLaunch<'_>) -> anyhow::Error {
     )
 }
 
+/// The host budget refused to spend an admission's hold at dispatch, so no
+/// backend was started.
+#[derive(Debug, thiserror::Error)]
+#[error("host-budget dispatch refused")]
+pub struct HostBudgetRefused;
+
 /// A post-start refusal whose compensating stop could not be confirmed.
 #[derive(Debug, thiserror::Error)]
 #[error("{primary:#}; rollback remains unconfirmed: {stop:#}")]

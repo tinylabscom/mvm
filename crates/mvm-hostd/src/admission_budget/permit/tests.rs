@@ -951,3 +951,64 @@ fn a_persistently_unreadable_record_is_warned_about_once() {
         "one warning for one bad machine, however often it is evaluated: {logged}"
     );
 }
+
+fn dispatched(home: &Path, name: &str) -> HostBudgetPermit {
+    let permit = HostBudgetPermit::reserve_at(home, &budget(), name, charge()).unwrap();
+    let plan = plan(name);
+    permit.bind_plan(&plan).unwrap();
+    permit.mark_dispatching(&plan).unwrap();
+    permit
+}
+
+#[test]
+fn a_failed_launch_with_no_process_marker_releases_its_hold() {
+    let home = tempfile::tempdir().unwrap();
+    let permit = dispatched(home.path(), "first");
+    permit.settle_failed_launch("first").unwrap();
+    permit.settle_failed_launch("first").unwrap();
+    drop(permit);
+    HostBudgetPermit::reserve_at(home.path(), &budget(), "second", charge()).unwrap();
+}
+
+#[test]
+fn a_failed_launch_whose_process_lives_stays_charged() {
+    let home = tempfile::tempdir().unwrap();
+    let permit = dispatched(home.path(), "first");
+    let directory = mvm_core::config::vm_state_dir_at(home.path(), "first");
+    std::fs::create_dir_all(&directory).unwrap();
+    atomic_io::write_private(
+        &directory.join("hvf.pid"),
+        platform::current_owner().unwrap().as_bytes(),
+    )
+    .unwrap();
+    permit.settle_failed_launch("first").unwrap();
+    drop(permit);
+    assert!(HostBudgetPermit::reserve_at(home.path(), &budget(), "second", charge()).is_err());
+}
+
+#[test]
+fn a_failed_launch_with_an_unprovable_marker_stays_charged() {
+    let home = tempfile::tempdir().unwrap();
+    let permit = dispatched(home.path(), "first");
+    let directory = mvm_core::config::vm_state_dir_at(home.path(), "first");
+    std::fs::create_dir_all(&directory).unwrap();
+    // A bare PID with no start time cannot prove which process it named.
+    atomic_io::write_private(
+        &directory.join("hvf.pid"),
+        std::process::id().to_string().as_bytes(),
+    )
+    .unwrap();
+    permit.settle_failed_launch("first").unwrap();
+    drop(permit);
+    assert!(HostBudgetPermit::reserve_at(home.path(), &budget(), "second", charge()).is_err());
+}
+
+#[test]
+fn a_coordinated_hold_is_never_settled_as_an_ordinary_failure() {
+    let home = tempfile::tempdir().unwrap();
+    let permit = HostBudgetPermit::reserve_at(home.path(), &budget(), "first", charge()).unwrap();
+    permit.bind_coordinator(&"a".repeat(64)).unwrap();
+    assert!(permit.settle_failed_launch("first").is_err());
+    drop(permit);
+    assert!(HostBudgetPermit::reserve_at(home.path(), &budget(), "second", charge()).is_err());
+}

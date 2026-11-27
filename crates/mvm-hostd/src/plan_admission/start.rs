@@ -905,7 +905,7 @@ fn start_admitted_with_finalization(
         {
             tracing::warn!(error = %audit_error, "audit emit_failed failed (non-fatal)");
         }
-        return Err(error.context("host-budget dispatch refused"));
+        return Err(error.context(super::HostBudgetRefused));
     }
     admitted.dispatched = true;
     mvm_core::launch_trace::lap("gate.host_budget_dispatching");

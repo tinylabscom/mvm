@@ -416,6 +416,17 @@ not paraphrase this row without them.
    instead. Each of these is a deliberate choice of the undercount failure over
    the lockout failure, which is the same judgement limit 4's counting rule
    makes.
+
+   A `vm_full` fork child
+   is charged like any other launch: its own admitted plan's configured memory
+   (copy-on-write sharing with the parent is not credited) is reserved at
+   admission, re-checked against the budget immediately before the restore can
+   start a VMM, and recorded once the child runs
+   (`fn:a_vm_full_fork_that_fits_is_charged_and_counted_by_the_next_admission`,
+   `fn:a_vm_full_fork_past_the_budget_at_dispatch_is_refused_before_restore`).
+   A fork that fails releases its hold when the child has no PID marker or
+   every marker is confirmed dead; a child whose process is still live, or
+   whose marker cannot prove its identity, stays charged.
 6. **Memory and task ceilings at spawn hold only on a Linux host with a systemd
    user session. (PARTIAL, by host.)** Where they hold, every VMM spawn —
    Firecracker cold boots and every Firecracker snapshot load (fork, pool

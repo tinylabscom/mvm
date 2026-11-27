@@ -646,6 +646,280 @@ mod tests {
         );
     }
 
+    fn configure_host_budget(home: &std::path::Path, memory_mib: u64) {
+        let config = home.join("config");
+        mvm_core::config::create_private_dir(&config).unwrap();
+        mvm_core::atomic_io::write_private(
+            &config.join("config.toml"),
+            format!("host_budget_memory_mib = {memory_mib}").as_bytes(),
+        )
+        .unwrap();
+    }
+
+    /// Publish a backend PID marker for `vm` naming `pid`, as a restore does.
+    fn write_pid_marker(home: &std::path::Path, vm: &str, pid: u32) {
+        let directory = mvm_core::config::vm_state_dir_at(home, vm);
+        std::fs::create_dir_all(&directory).unwrap();
+        mvm_core::atomic_io::write_private(
+            &directory.join("hvf.pid"),
+            mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(pid)
+                .render()
+                .as_bytes(),
+        )
+        .unwrap();
+    }
+
+    fn exited_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    /// Whether the host can still admit a machine of `memory_mib` right now.
+    fn host_admits(memory_mib: u64) -> bool {
+        mvm_hostd::admission_budget::HostBudgetPermit::reserve(
+            "budget-probe",
+            mvm_contract::grants::budget::MachineCharge {
+                memory_mib,
+                cpu_millicores: 0,
+            },
+        )
+        .is_ok()
+    }
+
+    fn bound_fork(
+        store: &CheckpointStore,
+        meta: &CheckpointMeta,
+        root: &std::path::Path,
+    ) -> (
+        mvm_hostd::plan_admission::RetainedVmFullFork,
+        CheckpointStore,
+        SignedChainAnchor,
+        u64,
+    ) {
+        let prepared = prepare_vm_full_fork(store, request(meta, root)).unwrap();
+        let memory_mib = prepared.admitted_plan().resources.mem_mib;
+        let PreparedVmFullFork {
+            store,
+            anchor,
+            source,
+            admission,
+            params,
+        } = prepared;
+        let crate::admission::AdmissionContext { admitted, .. } = admission;
+        (
+            source.bind_child(admitted, params),
+            store,
+            anchor,
+            memory_mib,
+        )
+    }
+
+    const BUDGET_MIB: u64 = 1 << 20;
+
+    #[test]
+    fn a_vm_full_fork_that_fits_is_charged_and_counted_by_the_next_admission() {
+        let (_env, home, root, store, meta) = fixture();
+        configure_host_budget(home.path(), BUDGET_MIB);
+        let (bound, store, anchor, memory_mib) = bound_fork(&store, &meta, root.path());
+        let restorer = |child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
+            write_pid_marker(home.path(), child.vm_name, std::process::id());
+            Ok(())
+        };
+        let dispatched = bound.dispatch_test_hvf(&store, &restorer, &anchor, &|_| Ok(()));
+        dispatched.result.expect("a fork that fits is admitted");
+        drop(dispatched.admitted);
+
+        assert!(
+            !host_admits(BUDGET_MIB - memory_mib + 1),
+            "the running fork's configured memory must be charged to the host"
+        );
+        assert!(host_admits(BUDGET_MIB - memory_mib));
+    }
+
+    #[test]
+    fn a_vm_full_fork_past_the_budget_at_dispatch_is_refused_before_restore() {
+        use std::cell::Cell;
+
+        let (_env, home, root, store, meta) = fixture();
+        configure_host_budget(home.path(), BUDGET_MIB);
+        let (bound, store, anchor, memory_mib) = bound_fork(&store, &meta, root.path());
+        // A machine that started after this fork was admitted takes the rest.
+        mvm_hostd::admission_budget::record_charge_at(
+            home.path(),
+            "neighbour",
+            mvm_contract::grants::budget::MachineCharge {
+                memory_mib: BUDGET_MIB - memory_mib + 1,
+                cpu_millicores: 0,
+            },
+        )
+        .unwrap();
+        write_pid_marker(home.path(), "neighbour", std::process::id());
+        let restored = Cell::new(false);
+        let restorer = |_child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
+            restored.set(true);
+            Ok(())
+        };
+        let dispatched = bound.dispatch_test_hvf(&store, &restorer, &anchor, &|_| Ok(()));
+        let error = dispatched.result.expect_err("a fork past the budget");
+        assert!(!restored.get(), "no VMM may start: {error:#}");
+        assert!(
+            error
+                .downcast_ref::<mvm_hostd::plan_admission::HostBudgetRefused>()
+                .is_some(),
+            "the refusal is the launch tail's typed host-budget refusal: {error:#}"
+        );
+        assert!(format!("{error:#}").contains("host-budget dispatch refused"));
+
+        std::fs::remove_dir_all(mvm_core::config::vm_state_dir_at(home.path(), "neighbour"))
+            .unwrap();
+        assert!(
+            host_admits(BUDGET_MIB),
+            "a refused fork holds nothing, even before its admission is dropped"
+        );
+        drop(dispatched.admitted);
+    }
+
+    #[test]
+    fn a_vm_full_fork_past_the_budget_is_refused_at_admission() {
+        let (_env, home, root, store, meta) = fixture();
+        configure_host_budget(home.path(), 1);
+        let error = prepare_vm_full_fork(&store, request(&meta, root.path()))
+            .err()
+            .expect("a child larger than the host budget is not admitted");
+        assert!(format!("{error:#}").contains("budget"), "{error:#}");
+    }
+
+    /// How a fork's launch fails once its hold may have been spent.
+    #[derive(Clone, Copy, Debug)]
+    enum LaunchFailure {
+        /// The restorer refuses before publishing any process.
+        RestoreWithoutProcess,
+        /// The restorer started a VMM, then failed and reaped it.
+        RestoreReapedItsProcess,
+        /// The restored child is contained by the workload ledger and stopped.
+        ContainedAfterRestore,
+        /// The child's charge record cannot be written, so it is stopped.
+        ChargeRecordUnwritable,
+    }
+
+    fn fork_failing_with(failure: LaunchFailure) {
+        let (_env, home, root, store, meta) = fixture();
+        configure_host_budget(home.path(), BUDGET_MIB);
+        let (bound, store, anchor, _) = bound_fork(&store, &meta, root.path());
+        let restorer = |child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
+            match failure {
+                LaunchFailure::RestoreWithoutProcess => anyhow::bail!("restore refused"),
+                LaunchFailure::RestoreReapedItsProcess => {
+                    write_pid_marker(home.path(), child.vm_name, exited_pid());
+                    anyhow::bail!("restore failed after spawning")
+                }
+                LaunchFailure::ContainedAfterRestore => {
+                    write_pid_marker(home.path(), child.vm_name, exited_pid());
+                    mvm_hostd::policy_generation::workload_store::OwnedWorkloadStore::open(
+                        home.path(),
+                    )?
+                    .commit(
+                        &mvm_core::host_interface::workload::WorkloadChange::Quarantine {
+                            workload: child.vm_name.into(),
+                        },
+                    )?;
+                }
+                LaunchFailure::ChargeRecordUnwritable => {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    write_pid_marker(home.path(), child.vm_name, exited_pid());
+                    std::fs::set_permissions(
+                        mvm_core::config::vm_state_dir_at(home.path(), child.vm_name),
+                        std::fs::Permissions::from_mode(0o500),
+                    )?;
+                }
+            }
+            Ok(())
+        };
+        let dispatched = bound.dispatch_test_hvf(&store, &restorer, &anchor, &|_| Ok(()));
+        let error = dispatched.result.expect_err("the launch fails");
+        assert!(
+            error
+                .downcast_ref::<mvm_runtime::checkpoint::ForkStopUncertain>()
+                .is_none(),
+            "{failure:?}: {error:#}"
+        );
+        if let LaunchFailure::ChargeRecordUnwritable = failure {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(
+                mvm_core::config::vm_state_dir_at(home.path(), "child-vm"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            assert!(
+                format!("{error:#}").contains("recording the fork child's host charge"),
+                "{error:#}"
+            );
+        }
+        assert!(
+            host_admits(BUDGET_MIB),
+            "{failure:?}: a failed fork must not leave phantom load ({error:#})"
+        );
+        drop(dispatched.admitted);
+    }
+
+    #[test]
+    fn a_fork_whose_restore_fails_before_any_process_releases_its_charge() {
+        fork_failing_with(LaunchFailure::RestoreWithoutProcess);
+    }
+
+    #[test]
+    fn a_fork_whose_restore_reaped_its_process_releases_its_charge() {
+        fork_failing_with(LaunchFailure::RestoreReapedItsProcess);
+    }
+
+    #[test]
+    fn a_fork_contained_after_restore_releases_its_charge() {
+        fork_failing_with(LaunchFailure::ContainedAfterRestore);
+    }
+
+    #[test]
+    fn a_fork_whose_charge_cannot_be_recorded_releases_its_charge() {
+        fork_failing_with(LaunchFailure::ChargeRecordUnwritable);
+    }
+
+    #[test]
+    fn a_failed_fork_whose_vmm_still_runs_stays_charged() {
+        let (_env, home, root, store, meta) = fixture();
+        configure_host_budget(home.path(), BUDGET_MIB);
+        let (bound, store, anchor, memory_mib) = bound_fork(&store, &meta, root.path());
+        let restorer = |child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
+            write_pid_marker(home.path(), child.vm_name, std::process::id());
+            anyhow::bail!("restore failed and could not reap its process")
+        };
+        let dispatched = bound.dispatch_test_hvf(&store, &restorer, &anchor, &|_| Ok(()));
+        assert!(dispatched.result.is_err());
+        drop(dispatched.admitted);
+        assert!(
+            !host_admits(BUDGET_MIB - memory_mib + 1),
+            "a VMM that may still run keeps its capacity reserved"
+        );
+    }
+
+    #[test]
+    fn without_a_host_budget_a_vm_full_fork_writes_no_accounting() {
+        let (_env, home, root, store, meta) = fixture();
+        let (bound, store, anchor, _) = bound_fork(&store, &meta, root.path());
+        let restorer = |child: &mvm_runtime::checkpoint::RestoredChild<'_>| {
+            write_pid_marker(home.path(), child.vm_name, std::process::id());
+            Ok(())
+        };
+        let dispatched = bound.dispatch_test_hvf(&store, &restorer, &anchor, &|_| Ok(()));
+        dispatched.result.expect("an unbudgeted fork");
+        assert!(
+            !mvm_core::config::vm_state_dir_at(home.path(), "child-vm")
+                .join("admitted-charge.json")
+                .exists()
+        );
+        assert!(!home.path().join("admission-budget").exists());
+    }
+
     #[test]
     fn retained_fork_keeps_uncertain_stop_custody() {
         let (error, restored, stopped) = retained_fork_contained_after_admission(true);

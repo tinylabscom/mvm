@@ -446,6 +446,58 @@ impl HostBudgetPermit {
         })
     }
 
+    /// Settle an ordinary hold whose launch failed, by the evidence the budget
+    /// counts machines with: a launch that never dispatched holds nothing; a
+    /// machine whose process is live and provably ours stays charged until it
+    /// dies; one with no PID marker, or whose every marker is confirmed dead,
+    /// is released. An unprovable marker keeps the dispatch charged.
+    pub fn settle_failed_launch(&self, vm_name: &str) -> Result<()> {
+        if matches!(self.mode, PermitMode::UnboundedOrdinary { .. }) {
+            return Ok(());
+        }
+        validate_name(vm_name)?;
+        let directory = mvm_core::config::vm_state_dir_at(&self.home, vm_name);
+        self.update(|ledger| {
+            let Some(record) = ledger.reservations.get_mut(&self.id) else {
+                return Ok(());
+            };
+            ensure!(
+                record.ownership == Ownership::Ordinary,
+                "coordinated host reservation requires terminal reconciliation"
+            );
+            match record.phase {
+                Phase::Prepared => {
+                    ledger.reservations.remove(&self.id);
+                    return Ok(());
+                }
+                Phase::OrdinaryStopped | Phase::Terminal { .. } => return Ok(()),
+                Phase::NoDispatch => anyhow::bail!("ordinary host reservation has no dispatch"),
+                Phase::Dispatching | Phase::Running { .. } => {}
+            }
+            ensure!(
+                record.vm_name == vm_name,
+                "host reservation names another machine"
+            );
+            if let Some(process) = platform::machine_identity(&directory)? {
+                record.phase = Phase::Running { process };
+                return Ok(());
+            }
+            let has_marker = mvm_vmm::host::process_liveness::PID_FILE_NAMES
+                .iter()
+                .any(|file| directory.join(file).symlink_metadata().is_ok());
+            if !has_marker || platform::machine_is_confirmed_dead(&directory)? {
+                remove_legacy_charge(&self.home, record)?;
+                record.phase = Phase::OrdinaryStopped;
+            }
+            Ok(())
+        })
+    }
+
+    /// Whether this permit is a durable hold against a configured host budget.
+    pub(crate) fn is_tracked(&self) -> bool {
+        matches!(self.mode, PermitMode::Tracked)
+    }
+
     /// Record original runtime refusal before any helper/native dispatch.
     /// Coordinated holds remain charged until their owner durably cancels them.
     pub(crate) fn record_runtime_no_dispatch(

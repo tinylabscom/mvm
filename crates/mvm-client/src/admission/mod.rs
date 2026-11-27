@@ -17,8 +17,8 @@ use anyhow::{Context, Result, bail};
 use mvm_core::deploy_record::{BootArtifactIdentity, read_deploy_record, verify_boot_artifact};
 use mvm_core::plan::{StreamRetention, SynthesisInput, Variant};
 pub use mvm_hostd::plan_admission::{
-    AdmittedPlan, BundleAdmissionContext, BundleImageAdmissionContext, InMemoryNonceLedger,
-    RunPosture, SystemClock, admit_for_run, populate_audit_substrate,
+    AdmittedPlan, BundleAdmissionContext, BundleImageAdmissionContext, HostBudgetRefused,
+    InMemoryNonceLedger, RunPosture, SystemClock, admit_for_run, populate_audit_substrate,
     stash_plan_and_mint_verb_grant, stash_plan_for_bridge,
 };
 
