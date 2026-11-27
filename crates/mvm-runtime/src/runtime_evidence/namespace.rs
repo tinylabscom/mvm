@@ -157,7 +157,20 @@ pub(super) fn validate_private_directory(path: &Path) -> Result<()> {
 }
 
 pub(super) fn private_directory(path: &Path) -> Result<()> {
-    match std::fs::symlink_metadata(path) {
+    if private_directory_unsynced(path)?
+        && let Some(parent) = path.parent()
+    {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+/// [`private_directory`] without syncing the parent of a directory it had to
+/// create. Returns whether it went to create one, in which case the caller
+/// owns making that entry durable before anything relies on it surviving a
+/// host crash.
+pub(super) fn private_directory_unsynced(path: &Path) -> Result<bool> {
+    let created = match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             if !metadata.file_type().is_dir() {
                 bail!("runtime directory is not a real directory");
@@ -166,6 +179,7 @@ pub(super) fn private_directory(path: &Path) -> Result<()> {
             if mvm_core::private_fs::mode_bits(path, &metadata)? & 0o022 != 0 {
                 bail!("runtime directory is writable by another uid");
             }
+            false
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut builder = std::fs::DirBuilder::new();
@@ -181,14 +195,48 @@ pub(super) fn private_directory(path: &Path) -> Result<()> {
                 }
                 Err(error) => return Err(error.into()),
             }
-            if let Some(parent) = path.parent() {
-                mvm_core::util::atomic_io::sync_dir(parent)?;
-            }
+            true
         }
         Err(error) => return Err(error.into()),
-    }
+    };
     mvm_core::private_fs::set_mode(path, 0o700)?;
-    validate_private_directory(path)
+    validate_private_directory(path)?;
+    Ok(created)
+}
+
+/// [`mvm_core::util::atomic_io::sync_dir`], recorded for the tests that check
+/// the order in which this namespace becomes durable.
+pub(super) fn sync_dir(path: &Path) -> Result<()> {
+    #[cfg(test)]
+    durable_steps::record(path);
+    mvm_core::util::atomic_io::sync_dir(path)
+}
+
+/// [`mvm_core::util::atomic_io::sync_file`], recorded like [`sync_dir`].
+pub(super) fn sync_file(path: &Path) -> Result<()> {
+    #[cfg(test)]
+    durable_steps::record(path);
+    mvm_core::util::atomic_io::sync_file(path)
+}
+
+/// The paths this thread has synced through [`sync_dir`] and [`sync_file`].
+#[cfg(test)]
+pub(super) mod durable_steps {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    thread_local! {
+        static STEPS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(in crate::runtime_evidence) fn record(path: &Path) {
+        STEPS.with(|steps| steps.borrow_mut().push(path.to_path_buf()));
+    }
+
+    /// Every path synced since the last call, in order.
+    pub(in crate::runtime_evidence) fn take() -> Vec<PathBuf> {
+        STEPS.with(RefCell::take)
+    }
 }
 
 pub(super) fn lock(directory: &Path) -> Result<File> {

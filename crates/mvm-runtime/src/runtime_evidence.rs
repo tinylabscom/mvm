@@ -16,14 +16,14 @@ use mvm_core::plan::{RuntimeArtifactDigests, RuntimeIdentity};
 use mvm_core::protocol::runtime_release::{
     CliRuntimeLaunchBinding, RuntimeBindingProvenance, RuntimeLaunchBinding,
 };
-use mvm_core::util::atomic_io::{sync_dir, sync_file, write_private_new};
+use mvm_core::util::atomic_io::write_private_new;
 use mvm_core::vm_backend::VmStartConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod namespace;
 mod retire;
-use namespace::{check_owner, private_directory};
+use namespace::{check_owner, private_directory, sync_dir, sync_file};
 pub use retire::remove_retired_vm_evidence;
 
 /// Guest RPC compatibility, distinct from the host instance-control protocol.
@@ -872,6 +872,10 @@ pub const SHARED_CONTENT_DIR: &str = "shared_content";
 /// is outside VM state, so PID-based orphan reconciliation cannot erase bytes.
 pub(crate) struct RuntimeLifecycleLease {
     directory: PathBuf,
+    /// Whether `acquire` created `directory` and left its entry in the
+    /// namespace root unsynced. `bind` syncs it after the generation it
+    /// publishes, so one round makes both durable before the spawn.
+    entry_unsynced: bool,
     _lock: std::fs::File,
 }
 
@@ -966,10 +970,11 @@ impl RuntimeLifecycleLease {
         mvm_core::naming::validate_vm_name(vm_name)?;
         let root = namespace::root(true)?;
         let directory = root.join(vm_name);
-        private_directory(&directory)?;
+        let entry_unsynced = namespace::private_directory_unsynced(&directory)?;
         let lock = namespace::lock(&directory)?;
         Ok(Self {
             directory,
+            entry_unsynced,
             _lock: lock,
         })
     }
@@ -1019,7 +1024,25 @@ impl RuntimeLifecycleLease {
         )
     }
 
+    /// Every bind ends here, so a lease this process created is durable before
+    /// any bound config reaches a backend.
     fn bind_checked_ref(
+        &self,
+        config: &VmStartConfig,
+        verified: Option<CheckedLaunchRuntime<'_>>,
+    ) -> Result<VmStartConfig> {
+        let bound = self.publish_generation(config, verified)?;
+        if self.entry_unsynced {
+            sync_dir(
+                self.directory
+                    .parent()
+                    .context("runtime lifecycle namespace has no root")?,
+            )?;
+        }
+        Ok(bound)
+    }
+
+    fn publish_generation(
         &self,
         config: &VmStartConfig,
         verified: Option<CheckedLaunchRuntime<'_>>,
@@ -1196,6 +1219,114 @@ mod tests {
         mvm_core::private_fs::set_mode(&overlay, 0o600).unwrap();
         std::fs::write(&overlay, b"swapped").unwrap();
         assert!(verify_runtime_binding(&binding).is_err());
+    }
+
+    /// A new lease's directory entry is made durable once, at the end of
+    /// `bind`, after the generation it publishes: still before any spawn, but
+    /// in the same round as the generation rather than one of its own.
+    #[test]
+    fn a_new_lease_entry_is_synced_once_after_the_generation_it_publishes() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"fixture rootfs").unwrap();
+        let (fixture, _) = checked_source_runtime_fixture("fixture-vm", &rootfs).unwrap();
+        // An earlier launch on this host already created the shared content
+        // store, whose own first creation syncs the root once.
+        RuntimeLifecycleLease::acquire("earlier-launch")
+            .unwrap()
+            .bind(&VmStartConfig {
+                name: "earlier-launch".into(),
+                ..fixture.clone()
+            })
+            .unwrap();
+        let root = namespace::root(false).unwrap();
+        namespace::durable_steps::take();
+
+        let lease = RuntimeLifecycleLease::acquire("durable-lease").unwrap();
+        assert_eq!(
+            namespace::durable_steps::take(),
+            Vec::<PathBuf>::new(),
+            "acquiring a new lease leaves its entry for bind to sync"
+        );
+        let bound = lease
+            .bind(&VmStartConfig {
+                name: "durable-lease".into(),
+                ..fixture
+            })
+            .unwrap();
+
+        let steps = namespace::durable_steps::take();
+        let record = Path::new(bound.initrd_path.as_deref().unwrap()).with_file_name("launch.json");
+        let record_synced = steps
+            .iter()
+            .position(|path| path == &record)
+            .expect("the launch record is synced");
+        assert_eq!(
+            steps.iter().filter(|path| **path == root).count(),
+            1,
+            "the namespace root is synced exactly once: {steps:?}"
+        );
+        assert_eq!(
+            steps.last(),
+            Some(&root),
+            "the lease entry is synced last, after the launch record at {record_synced}: {steps:?}"
+        );
+    }
+
+    /// A bind that publishes no generation still makes a new lease durable
+    /// before it returns, so no path to a spawn skips the sync.
+    #[test]
+    fn a_bind_without_runtime_evidence_still_syncs_a_new_lease_entry() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"fixture rootfs").unwrap();
+        let config = VmStartConfig {
+            name: "plain-lease".into(),
+            rootfs_path: rootfs.display().to_string(),
+            ..Default::default()
+        };
+
+        let lease = RuntimeLifecycleLease::acquire("plain-lease").unwrap();
+        let root = namespace::root(false).unwrap();
+        namespace::durable_steps::take();
+        lease.bind(&config).unwrap();
+
+        assert_eq!(namespace::durable_steps::take(), vec![root]);
+    }
+
+    /// Re-acquiring a lease whose entry already exists syncs nothing new.
+    #[test]
+    fn an_existing_lease_entry_is_not_synced_again() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"fixture rootfs").unwrap();
+        let config = VmStartConfig {
+            name: "existing-lease".into(),
+            rootfs_path: rootfs.display().to_string(),
+            ..Default::default()
+        };
+        drop(RuntimeLifecycleLease::acquire("existing-lease").unwrap());
+        namespace::durable_steps::take();
+
+        let lease = RuntimeLifecycleLease::acquire("existing-lease").unwrap();
+        lease.bind(&config).unwrap();
+
+        assert_eq!(namespace::durable_steps::take(), Vec::<PathBuf>::new());
     }
 
     #[test]
