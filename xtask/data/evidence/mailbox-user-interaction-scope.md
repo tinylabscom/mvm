@@ -128,7 +128,7 @@ same ID conflicts. A second application reply and a late reply cannot satisfy a
 later call. Correlation and an opaque request handle are not authorization.
 
 For the first slice, preserve current epoch fencing. Cross-replacement
-conversation continuity remains a separately reviewed #5126/ADR-060 concern;
+conversation continuity remains a separately reviewed #5126/ADR-062 §4.2 concern;
 do not weaken stale-epoch rejection to keep a conversation alive.
 
 ### 4. Recoverable per-message audit

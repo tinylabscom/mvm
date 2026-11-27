@@ -1,17 +1,17 @@
 # ADR-062 — Workload actors: recipe identity, residency, supervision, and causal evidence
 
 Backing: preview
-Validation: none — this is a proposed design; no code implements it and no
-test exercises it.
+Validation: none — this is a proposed design. A depth-one actor lifecycle
+slice (#5672) is on main but in no release tag, and no witness qualifies it.
 
 **Status:** Proposed
 **Date:** 2026-11-14
 **Owner:** `mvm` maintainers
-**Extends, if accepted:** ADR-051 (the workload actor model). It fixes what
-ADR-051 left open: identity across VMs, residency, supervision policy,
-evidence that spans actors, trace storage, and the density budget.
-**Complements:** ADR-001, ADR-014, ADR-025, ADR-035, ADR-045, ADR-057,
-ADR-060, and ADR-110.
+**Absorbs:** the workload actor model (decision record 051, 2026-08-25), now
+section 0, and the proposed rebuild outbox (record 060), now section 4.2. Both
+were Proposed and stay Proposed here.
+**Complements:** ADR-001, ADR-014, ADR-025, ADR-035, ADR-045, ADR-057 and
+ADR-110.
 **Related issues:** #5097 (distributed host interface), #5292 (shared mailbox
 daemon and its key-custody decision D1), #5510 (density), #5121 and the
 factory-edge presentation merged in #5396.
@@ -19,15 +19,15 @@ factory-edge presentation merged in #5396.
 #5539, #5540, #5541, #5542 and #5543. Nothing here may be described as shipped,
 and no ADR-001 claim changes, until the evidence listed at the end exists.
 **Continuation design:** [#5126](https://github.com/tinylabscom/mvm/issues/5126)
-and proposed [ADR-060](060-mailbox-rebuild-handoff.md). Neither accepts a
-mailbox protocol amendment or qualifies cross-epoch Call completion.
+and sections 4.1 and 4.2. Neither accepts a mailbox protocol amendment or
+qualifies cross-epoch Call completion.
 
 ## Context
 
 MVM microVMs are used as functions, not only as isolated sandboxes: a workload
-receives a message, does bounded work, replies, and waits. ADR-051 named this
-the workload actor model and rejected an in-process actor framework. ADR-057
-gave the mailbox Erlang-style semantics: `call`, `cast`, `reply`, monitors,
+receives a message, does bounded work, replies, and waits. Section 0 names
+this the workload actor model and section 10 rejects an in-process actor
+framework. ADR-057 gave the mailbox Erlang-style semantics: `call`, `cast`, `reply`, monitors,
 links, signed restart policy and `ExecutionEpoch` fencing.
 
 What remains undecided is the lifecycle around those messages:
@@ -53,7 +53,7 @@ What remains undecided is the lifecycle around those messages:
 The interface is function-like; the logical lifetime is actor-like. A workload
 receives immutable signed inputs, performs capability-bounded work, and emits
 an explicit result or reply. These are not mathematically pure functions:
-identical inputs need not produce identical output or effects. ADR-051 names
+identical inputs need not produce identical output or effects. Section 0 names
 one VM incarnation with its mailbox, lifecycle handle, authority and evidence;
 this proposal extends logical identity across incarnations, not across
 multiple workloads inside one guest.
@@ -83,6 +83,51 @@ MVM background components are not external-service dependencies; their presence
 does not qualify an unattended OS-manager deployment profile.
 
 ## Decision
+
+### 0. The workload actor
+
+A **workload actor** is one microVM incarnation together with:
+
+- one capability-bound mailbox (ADR-057), its only inbound message path;
+- one `ActorHandle`, the lifecycle capability its parent holds;
+- one attenuated authority envelope;
+- one audit lineage rooted in the signed `ExecutionPlan` it booted under.
+
+It is not a new runtime object, only the name for a workload seen through those
+four bindings. Section 1 extends its identity across incarnations.
+
+Four invariants:
+
+1. **One guest is one actor.** No multi-workload guest, no nested
+   virtualization.
+2. **Every actor is an ordinary admitted workload.** Spawning a child reuses
+   plan synthesis, signing, admission, backend dispatch, secrets, network
+   policy and the audit chain unchanged. A child is not a privileged object.
+3. **Authority only attenuates.** A child's capabilities, egress, secrets,
+   filesystem, tools, resources and delegation are subsets of every applicable
+   parent, workflow, tenant, template and host ceiling.
+4. **Every message is bounded and audited, with declared durability.**
+   ADR-057's admission and durability classes apply; an accepted `cast` is
+   never silently dropped. No control path may deliver a message the mailbox
+   contract would refuse, and no lifecycle transition may escape the
+   chain-signed log.
+
+**One vocabulary.** Mailbox addresses, message IDs, envelopes, correlation,
+causation, acknowledgements and delivery outcomes have exactly one definition,
+in `mvm_contract::protocol::mailbox`. ADR-045 defines no message types of its
+own. `ActorHandle` is not a second address: it pairs a redacted lifecycle token
+with the child's `MailboxAddress`, and never carries a VM name, node address,
+CID, socket path or file descriptor.
+
+**What exists.** The depth-one slice (#5672) is on main: the
+`launch_child`, `observe_child` and `release_child` verbs of `host.actor.v1`,
+their contracts in `mvm_contract::protocol::workload_actor`, the host journal in
+`mvm-hostd`'s `actor_lifecycle` module and `mvmctl actor`. It is in no release
+tag and qualifies nothing in this ADR. Still open from the original slice: the
+negative witnesses for each invariant, namely a child requesting authority its
+parent lacks is refused, an over-bound message is refused rather than truncated,
+a response survives a host crash between accept and acknowledgement, and the
+exchange is in the chain-signed log with no payload bytes.
 
 ### 1. Identity: workload, epoch, recipe
 
@@ -244,8 +289,7 @@ Authenticated duplicate recognition follows that version's reviewed rule,
 not an invented cross-version raw JSON or signature-byte equality rule.
 Lost commit responses require reconciliation, not a new identity.
 
-As proposed in [ADR-060](060-mailbox-rebuild-handoff.md#proposed-boundary), a
-never-dispatched intent may be freshly sealed by its authorized sender for an
+As section 4.2 proposes, a never-dispatched intent may be freshly sealed by its authorized sender for an
 admitted replacement. Eligibility requires evidence of no prior disclosure at
 the actual source handoff boundary: a missing receipt or locally absent
 dispatch marker does not prove no disclosure occurred. Partial or lost handoff
@@ -285,6 +329,65 @@ syntax. It depends on the transfer and crash-consistency proofs above.
    external effects are not generally exactly once. Expiry, revocation, lost
    keys or unprovable ownership refuse or report uncertainty, never success.
    A late Reply cannot resurrect a timed-out Call.
+
+### 4.2 Rebuild outbox: queue the intent, sign for the replacement
+
+Proposed; ADR-057's restart and epoch rules remain authoritative. A developer
+stays connected to one logical work session while approved declarative inputs
+are rebuilt into a replacement VM, and tasks submitted meanwhile wait for it
+without a second shell or an in-place guest install. Production application
+messages use the same mailbox authorization rule; an application message
+cannot authorize a production rebuild.
+
+- **Queue an intent, not an envelope.** The outbox belongs to the sender's
+  logical work session, not to the VM being replaced or the destination
+  mailbox. The sender seals a new envelope only after the replacement is
+  admitted. Signing for the old VM and retargeting later is rejected: sender,
+  recipient, epoch, policy, route binding and ciphertext commitment are
+  authenticated, and relaxing validation would make stale authority current.
+  If a bounded, trustworthy outbox cannot be built, refuse sends while
+  rebuilding.
+- **What an intent binds.** Sender principal, logical task ID, payload
+  commitment, intended workload and target revision, handler and schema
+  version, deadline and authorization policy, under a finite byte, count and
+  age budget. Its status may be `queued_for_rebuild`, never an acceptance,
+  delivery or completion status: those are destination and application facts.
+  A lost outbox-commit response is reconciled by task ID and payload
+  commitment; conflicting reuse is refused.
+- **Fence before cutover.** The old owner and every mailbox, credential, egress
+  and shared-state holder are durably fenced before the new owner accepts
+  MVM-mediated effects. A missing PID or a fresh directory does not show that a
+  detached holder retired; unknown custody refuses the cutover. A replacement
+  may be prewarmed alongside only if it cannot run effectful code before
+  fencing.
+- **Dispatch.** After the new VM and its handlers are verified, the sender
+  rechecks capability, tenant, recipient, policy, handler and schema, expiry and
+  route and epoch, then persists the canonical signed envelope, the
+  task-to-envelope relation and a dispatch-start marker before any I/O. Only the
+  destination's receipt is acceptance. A retry reuses the same signed envelope
+  and message ID while its authority and epoch hold; it never mints a new
+  envelope after a possible dispatch. An epoch change or unreconciled result is
+  `unknown`.
+- **Failure.** If the build fails, the old VM stays the ready owner where
+  possible and queued intents stay visibly queued until bounded retry,
+  cancellation or expiry; they are never sent to the old revision. Unsupported
+  handlers, changed schemas, revoked grants, missing keys, outbox corruption,
+  quota exhaustion and failed fencing refuse or block dispatch. Messages already
+  dispatched or accepted under the old epoch do not move because a rebuild
+  finished; that is section 4.1's transfer question.
+- **Custody and ownership.** The local dev outbox may use a trusted-host
+  encrypted store with stated key and host-loss limits; it cannot inherit a
+  host-blind claim. `mvm` owns the outbox protocol, admission, deduplication and
+  fencing. `mvmd` may orchestrate administrator-authorized production rebuilds,
+  but mints no destination receipt, decrypts no host-blind message and
+  overrides no local refusal.
+
+Open: a reviewed finite-state model of outbox commit, build outcome, fencing,
+switch, envelope persistence, dispatch, lost response, receipt and application
+outcome, with crash injection at every commit and I/O edge; build-to-ready,
+cutover and queued-send latency measured separately from cold and warm boot.
+The local mailbox service (#4629) and durable store (#4630) come first;
+cross-host movement stays under #4631.
 
 ### 5. Evidence and tracing
 
@@ -497,10 +600,17 @@ rules:
 
 ### 10. No actor framework
 
-ADR-051 §4 stands and now also covers ractor and tellus: their actors are tasks
-in one process, their references act as addresses rather than capabilities, and
-their restarts keep the same address and mailbox where MVM requires a new
-epoch.
+No in-process actor framework is the substrate; `kameo` was evaluated and
+rejected, and ractor and tellus fall under the same reasoning. The actors are
+microVMs: separate kernels behind vsock running workloads in several languages.
+A framework's actors are tasks in one process, its references act as addresses
+rather than capabilities, and its restarts keep the same address and mailbox
+where MVM requires a new epoch (section 4). Against what ADR-057 requires
+(durable cursors, deduplication, bounded encrypted queues, capability-bound
+sends, host-stamped sender identity, payload-free audit) it supplies a bounded
+channel and nothing else. What is adopted is the model, built on `mvm`'s own
+types in `mvm-contract`. Revisiting this needs new evidence about the microVM
+boundary, not a preference for the ergonomics.
 
 ## Compatibility with the factory-edge presentation (#5396)
 
@@ -536,7 +646,7 @@ Requirements the presentation makes visible:
 
 ## Consequences
 
-- ADR-051 gains identity, residency, supervision and evidence rules. ADR-057's
+- The actor model gains identity, residency, supervision and evidence rules. ADR-057's
   wire contract gains two fields in the encrypted inner header (sender leaf
   hash, trace context), which needs a protocol version step.
 - #5097's host interface gains a residency report and a wake preflight.
@@ -621,8 +731,10 @@ Each item needs a test or CI lane named in the implementing issue:
   original envelope.
 - Pending-Call transfer is qualified separately from committed-outcome
   recovery; neither retained context nor a late Reply revives a superseded wait.
-- Crash injection at continuation commit, source handoff, receipt, Reply and
-  ACK boundaries preserves authorization and budgets. Possibly disclosed work
+- Crash injection at continuation commit, outbox commit, owner fencing, source
+  handoff, receipt, Reply and ACK boundaries preserves authorization and
+  budgets; conflicting task-ID reuse is refused and no old and new owner accept
+  effects at once. Possibly disclosed work
   is never misclassified as never dispatched or automatically resealed.
 - A wake under revoked policy is refused and the queued message receives a
   terminal receipt.
