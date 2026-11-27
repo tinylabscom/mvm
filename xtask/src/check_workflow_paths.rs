@@ -603,16 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn linux_evidence_dispatch_is_read_only_main_and_keeps_full_coverage() {
-        let dispatch = workflow("e2e-docs-linux-evidence.yml");
-        let macos = workflow("e2e-docs-macos-evidence.yml");
-        let expected = macos
-            .replace("macOS", "Linux")
-            .replace("the self-hosted lane", "the live lane")
-            .replace("run_linux: false", "run_linux: true")
-            .replace("run_macos: true", "run_macos: false")
-            .replace("      macos_blocks_on_unusable_host: true\n", "");
-        assert_eq!(dispatch, expected);
+    fn linux_evidence_lane_keeps_full_coverage() {
         let reusable = workflow("e2e-docs.yml");
         let linux = job_block(&reusable, "e2e-docs-linux");
         assert_eq!(job_if(linux), "inputs.run_linux");
@@ -650,9 +641,11 @@ mod tests {
     }
 
     #[test]
-    fn macos_evidence_dispatch_is_read_only_main_and_keeps_full_coverage() {
-        let dispatch = workflow("e2e-docs-macos-evidence.yml");
-        assert!(dispatch.contains("on:\n  workflow_dispatch:\n"));
+    fn evidence_dispatch_is_read_only_main_and_keeps_full_coverage() {
+        let dispatch = workflow("e2e-docs-evidence.yml");
+        assert!(dispatch.contains(
+            "on:\n  workflow_dispatch:\n    inputs:\n      lane:\n        description: Which documented surface to run, linux or macos\n        required: true\n        type: choice\n        options:\n          - linux\n          - macos\n\npermissions:"
+        ));
         assert!(dispatch.contains("permissions:\n  contents: read\n"));
         let lane = job_block(&dispatch, "evidence");
         assert_eq!(
@@ -661,8 +654,8 @@ mod tests {
         );
         for required in [
             "uses: ./.github/workflows/e2e-docs.yml",
-            "run_linux: false",
-            "run_macos: true",
+            "run_linux: ${{ inputs.lane == 'linux' }}",
+            "run_macos: ${{ inputs.lane == 'macos' }}",
             "allow_runtime_candidate_skip: true",
             "macos_blocks_on_unusable_host: true",
         ] {
@@ -673,7 +666,6 @@ mod tests {
             "write",
             "release.yml",
             "steps:",
-            "inputs:",
             "publish",
             "deploy",
         ] {
