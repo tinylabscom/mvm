@@ -185,7 +185,6 @@ impl EntrypointAdmission {
             ledger: &ledger,
             keys_dir: None,
             audit_dir: None,
-            policy_dir: None,
             bundle_pin: bundle_archive.map(crate::admission::BundlePin::boots),
             bundle_posture: self.bundle_posture,
             deps_volume: None,

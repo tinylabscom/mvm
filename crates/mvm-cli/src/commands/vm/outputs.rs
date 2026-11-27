@@ -371,7 +371,6 @@ mod tests {
                 ledger: &ledger,
                 keys_dir: Some(keys_dir),
                 audit_dir: Some(audit_dir),
-                policy_dir: None,
                 bundle_pin: None,
                 bundle_posture: None,
                 deps_volume: None,

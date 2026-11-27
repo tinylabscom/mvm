@@ -1,22 +1,15 @@
 //! Egress policy projection seam.
 //!
-//! One resolved [`EffectivePolicy`] projects to two enforcement
-//! shapes: the canonical CIDR-keyed grant set the per-VM endpoint's
-//! egress gate consumes, and the
-//! hostname-keyed outbound grant set the WASI context builder
-//! consumes. Hostnames are pinned to IPs at projection time (via
-//! the admission-time `DnsPinRegistry`) so both projections are
-//! compared and enforced over the same pinned address space —
-//! live DNS never widens reach. Mandatory-deny ranges refuse at
-//! projection time, unconditionally: a grant that resolves into a
-//! denied range is an error, not a pin.
+//! A launch's [`NetworkPolicy`] projects to the canonical CIDR-keyed grant
+//! set the per-VM endpoint's egress gate consumes. Hostnames are pinned to
+//! IPs at projection time (via the admission-time `DnsPinRegistry`), so live
+//! DNS never widens reach. [`CanonicalEgress::permits`] is the one decision
+//! function, and it denies the mandatory-deny ranges whatever the rules say.
 //!
 //! This module is decision logic only — no enforcement, no I/O,
-//! no resolver. The cross-projection consistency property test is
-//! the anti-drift witness: both projections must decide
-//! identically for every probe.
+//! no resolver.
 //!
-//! [`EffectivePolicy`]: crate::policy::resolver::EffectivePolicy
+//! [`NetworkPolicy`]: crate::policy::network_policy::NetworkPolicy
 
 use core::net::IpAddr;
 
@@ -27,8 +20,7 @@ use ipnet::IpNet;
 use thiserror::Error;
 
 use crate::policy::dns_pin::DnsPinRegistry;
-use crate::policy::network_policy::{is_banned_ssh_port, is_mandatory_deny, mandatory_deny_ranges};
-use crate::policy::resolver::EffectivePolicy;
+use crate::policy::network_policy::{is_banned_ssh_port, is_mandatory_deny};
 
 /// L4 protocol of a canonical rule. The string forms `"tcp"` /
 /// `"udp"` are the `L4RuleSpec.proto` wire values; anything else
@@ -129,9 +121,8 @@ fn is_banned_ssh_flow(proto: &Proto, port: u16) -> bool {
     *proto == Proto::Tcp && is_banned_ssh_port(port)
 }
 
-/// Projection-time refusals. Every variant is a fail-closed
-/// admission error: the plan does not admit with a grant the
-/// projections could not agree on.
+/// Projection-time refusals. Every variant is fail-closed: a grant that
+/// cannot be projected admits nothing.
 #[derive(Debug, Error)]
 pub enum ProjectionError {
     #[error("unknown proto {proto:?} (expected \"tcp\" or \"udp\")")]
@@ -147,35 +138,12 @@ pub enum ProjectionError {
     ExpiredPin { host: String, expires_at: String },
     #[error("DNS pin for {host:?} has an empty IP set")]
     EmptyPin { host: String },
-    #[error("grant for {dest:?} overlaps mandatory-deny range {range}")]
-    MandatoryDenyOverlap { dest: String, range: IpNet },
     #[error("inverted port range {port_lo}..={port_hi} for {dest:?}")]
     InvertedPortRange {
         dest: String,
         port_lo: u16,
         port_hi: u16,
     },
-}
-
-/// True when two CIDRs share any address. For valid CIDRs, two
-/// nets overlap iff one contains the other's network address.
-fn nets_overlap(a: &IpNet, b: &IpNet) -> bool {
-    a.contains(&b.network()) || b.contains(&a.network())
-}
-
-/// Refuse any grant net that intersects a mandatory-deny range.
-/// Projection-time belt; `CanonicalEgress::permits` keeps the
-/// decision-time suspenders.
-fn refuse_mandatory_overlap(dest: &str, net: &IpNet) -> Result<(), ProjectionError> {
-    for deny in mandatory_deny_ranges() {
-        if nets_overlap(&deny, net) {
-            return Err(ProjectionError::MandatoryDenyOverlap {
-                dest: dest.to_string(),
-                range: deny,
-            });
-        }
-    }
-    Ok(())
 }
 
 /// Normalize the wire-format any-port wildcard `(0, 0)` to the
@@ -202,14 +170,9 @@ fn refuse_inverted_ports(dest: &str, lo: u16, hi: u16) -> Result<(), ProjectionE
     Ok(())
 }
 
-/// Lower L4 rule specs to canonical rules. `refuse_overlap` gates the
-/// admission-time mandatory-deny refusal: the projection/preview path
-/// (canonicalize_effective) passes true; the lenient lowering passes
-/// false, because permits() denies mandatory-deny ranges at decision
-/// time.
+/// Lower L4 rule specs to canonical rules.
 fn lower_l4_specs(
     specs: &[crate::policy::policies::L4RuleSpec],
-    refuse_overlap: bool,
 ) -> Result<Vec<CanonicalRule>, ProjectionError> {
     let mut rules = Vec::new();
     for spec in specs {
@@ -220,9 +183,6 @@ fn lower_l4_specs(
                 cidr: spec.dst_cidr.clone(),
                 source,
             })?;
-        if refuse_overlap {
-            refuse_mandatory_overlap(&spec.dst_cidr, &net)?;
-        }
         refuse_inverted_ports(&spec.dst_cidr, spec.port_lo, spec.port_hi)?;
         let (port_lo, port_hi) = normalize_ports(spec.port_lo, spec.port_hi);
         rules.push(CanonicalRule {
@@ -242,27 +202,7 @@ fn lower_l4_specs(
 pub fn canonicalize_l4(
     specs: &[crate::policy::policies::L4RuleSpec],
 ) -> Result<CanonicalEgress, ProjectionError> {
-    let mut rules = lower_l4_specs(specs, false)?;
-    rules.sort();
-    rules.dedup();
-    Ok(CanonicalEgress::Rules(rules))
-}
-
-/// Lower a resolved policy + admission-time pin registry into the
-/// canonical egress grant set. Pure; fail-closed on every
-/// malformed or unpinnable input. `now` is an RFC 3339 UTC
-/// timestamp (the caller's clock — tests pass a fixed string),
-/// used to refuse expired pins.
-pub fn canonicalize_effective(
-    eff: &EffectivePolicy,
-    pins: &DnsPinRegistry,
-    now: &str,
-) -> Result<CanonicalEgress, ProjectionError> {
-    if eff.egress.mode.as_deref() == Some("open") {
-        return Ok(CanonicalEgress::Unrestricted);
-    }
-    let mut rules = lower_l4_specs(&eff.network.l4, true)?;
-    rules.extend(pinned_allow_list_rules(eff, pins, now)?);
+    let mut rules = lower_l4_specs(specs)?;
     rules.sort();
     rules.dedup();
     Ok(CanonicalEgress::Rules(rules))
@@ -270,8 +210,7 @@ pub fn canonicalize_effective(
 
 /// Lower a bare [`crate::policy::network_policy::NetworkPolicy`] (the
 /// no-signed-bundle transient/dev path) + admission-time DNS pins into the
-/// canonical egress grant set — the transient analogue of
-/// [`canonicalize_effective`]. The endpoint's egress gate is built from this, so
+/// canonical egress grant set. The endpoint's egress gate is built from this, so
 /// a bare allow-list gates `host:port` on the pinned addresses and a direct dial
 /// to an unlisted address is refused, not just an unlisted name.
 ///
@@ -338,199 +277,6 @@ fn host_net(ip: IpAddr) -> IpNet {
     }
 }
 
-/// Lower `egress.allow_list` (hostname, port) entries through the
-/// pin registry. Allow-list destinations are L7/TCP (they feed the
-/// CONNECT-shaped egress proxy), so the canonical rules are TCP.
-/// Fail-closed: a host without a live pin refuses the whole
-/// projection rather than silently dropping the entry.
-fn pinned_allow_list_rules(
-    eff: &EffectivePolicy,
-    pins: &DnsPinRegistry,
-    now: &str,
-) -> Result<Vec<CanonicalRule>, ProjectionError> {
-    let mut rules = Vec::new();
-    for (host, port) in &eff.egress.allow_list {
-        let pin = pins
-            .lookup(host)
-            .ok_or_else(|| ProjectionError::MissingPin { host: host.clone() })?;
-        if !pin.is_valid_at(now) {
-            return Err(ProjectionError::ExpiredPin {
-                host: host.clone(),
-                expires_at: pin.expires_at.clone(),
-            });
-        }
-        if pin.ips.is_empty() {
-            return Err(ProjectionError::EmptyPin { host: host.clone() });
-        }
-        let (port_lo, port_hi) = normalize_ports(*port, *port);
-        for pinned in &pin.ips {
-            let net = host_net(*pinned);
-            refuse_mandatory_overlap(host, &net)?;
-            rules.push(CanonicalRule {
-                proto: Proto::Tcp,
-                net,
-                port_lo,
-                port_hi,
-            });
-        }
-    }
-    Ok(rules)
-}
-
-/// One outbound target in the WASI-facing (hostname-keyed) shape.
-/// `PinnedHost` is what a `WasiCtx` outbound-host grant becomes
-/// once pinned; `Net` carries an L4 CIDR rule that has no
-/// hostname. The wasmtime runner maps this shape onto the actual
-/// `WasiCtxBuilder`; nothing here depends on wasmtime.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WasiTarget {
-    PinnedHost { host: String, ips: Vec<IpAddr> },
-    Net(IpNet),
-}
-
-/// One outbound grant in the WASI-facing shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WasiOutboundGrant {
-    pub target: WasiTarget,
-    pub proto: Proto,
-    pub port_lo: u16,
-    pub port_hi: u16,
-}
-
-/// The WASI-facing projection of a resolved policy's egress.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WasiEgress {
-    Unrestricted,
-    Grants(Vec<WasiOutboundGrant>),
-}
-
-/// Project the resolved policy into the WASI-facing shape. A
-/// deliberately separate walk from [`canonicalize_effective`] —
-/// the cross-projection witness compares the two paths' decisions
-/// and exists to catch drift between them. The refusal ladder
-/// (bad CIDR, unknown proto, missing/expired/empty pin,
-/// mandatory-deny overlap) is intentionally identical.
-pub fn to_wasi_grants(
-    eff: &EffectivePolicy,
-    pins: &DnsPinRegistry,
-    now: &str,
-) -> Result<WasiEgress, ProjectionError> {
-    if eff.egress.mode.as_deref() == Some("open") {
-        return Ok(WasiEgress::Unrestricted);
-    }
-    let mut grants = Vec::new();
-    for spec in &eff.network.l4 {
-        let net: IpNet = spec
-            .dst_cidr
-            .parse()
-            .map_err(|source| ProjectionError::BadCidr {
-                cidr: spec.dst_cidr.clone(),
-                source,
-            })?;
-        refuse_mandatory_overlap(&spec.dst_cidr, &net)?;
-        refuse_inverted_ports(&spec.dst_cidr, spec.port_lo, spec.port_hi)?;
-        let (port_lo, port_hi) = normalize_ports(spec.port_lo, spec.port_hi);
-        grants.push(WasiOutboundGrant {
-            target: WasiTarget::Net(net),
-            proto: Proto::parse(&spec.proto)?,
-            port_lo,
-            port_hi,
-        });
-    }
-    for (host, port) in &eff.egress.allow_list {
-        let pin = pins
-            .lookup(host)
-            .ok_or_else(|| ProjectionError::MissingPin { host: host.clone() })?;
-        if !pin.is_valid_at(now) {
-            return Err(ProjectionError::ExpiredPin {
-                host: host.clone(),
-                expires_at: pin.expires_at.clone(),
-            });
-        }
-        if pin.ips.is_empty() {
-            return Err(ProjectionError::EmptyPin { host: host.clone() });
-        }
-        for pinned in &pin.ips {
-            refuse_mandatory_overlap(host, &host_net(*pinned))?;
-        }
-        let (port_lo, port_hi) = normalize_ports(*port, *port);
-        grants.push(WasiOutboundGrant {
-            target: WasiTarget::PinnedHost {
-                host: host.clone(),
-                ips: pin.ips.clone(),
-            },
-            proto: Proto::Tcp,
-            port_lo,
-            port_hi,
-        });
-    }
-    Ok(WasiEgress::Grants(grants))
-}
-
-/// True when `covering` admits every probe `covered` admits:
-/// same proto, supernet-or-equal, port-range superset.
-fn covers(covering: &CanonicalRule, covered: &CanonicalRule) -> bool {
-    covering.proto == covered.proto
-        && covering.net.contains(&covered.net)
-        && covering.port_lo <= covered.port_lo
-        && covered.port_hi <= covering.port_hi
-}
-
-/// Intersection-only merge of a *requested* grant set against the
-/// *resolved* (authoritative) one. The request can attenuate,
-/// never widen: a requested rule survives only when some resolved
-/// rule fully covers it; partial overlaps drop whole (fail-closed,
-/// no rule splitting). `Unrestricted` on the request side grants
-/// exactly the resolved set.
-pub fn clamp(requested: &CanonicalEgress, resolved: &CanonicalEgress) -> CanonicalEgress {
-    match (requested, resolved) {
-        (CanonicalEgress::Unrestricted, _) => resolved.clone(),
-        // An unrestricted resolved policy names no private address, so it
-        // cannot back a requested rule that re-admits one: such a rule is
-        // dropped rather than let the request widen what was resolved.
-        (CanonicalEgress::Rules(req), CanonicalEgress::Unrestricted) => CanonicalEgress::Rules(
-            req.iter()
-                .filter(|r| !crate::policy::restricted_address::names_readmittable_range(&r.net))
-                .cloned()
-                .collect(),
-        ),
-        (CanonicalEgress::Rules(req), CanonicalEgress::Rules(res)) => CanonicalEgress::Rules(
-            req.iter()
-                .filter(|r| res.iter().any(|s| covers(s, r)))
-                .cloned()
-                .collect(),
-        ),
-    }
-}
-
-/// The WASI-side decision function. Must agree with
-/// [`CanonicalEgress::permits`] for every probe — that agreement
-/// is the cross-projection witness.
-pub fn wasi_allows(egress: &WasiEgress, proto: &Proto, ip_addr: IpAddr, port: u16) -> bool {
-    if is_mandatory_deny(ip_addr) {
-        return false;
-    }
-    if is_banned_ssh_flow(proto, port) {
-        return false;
-    }
-    use crate::policy::restricted_address::{classify, grant_readmits};
-    match egress {
-        WasiEgress::Unrestricted => classify(ip_addr).is_none(),
-        WasiEgress::Grants(grants) => grants.iter().any(|g| {
-            g.proto == *proto
-                && g.port_lo <= port
-                && port <= g.port_hi
-                && match &g.target {
-                    // A pinned host names each of its addresses exactly.
-                    WasiTarget::PinnedHost { ips, .. } => {
-                        ips.contains(&ip_addr) && grant_readmits(&host_net(ip_addr), ip_addr)
-                    }
-                    WasiTarget::Net(net) => net.contains(&ip_addr) && grant_readmits(net, ip_addr),
-                }
-        }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,7 +284,6 @@ mod tests {
     use crate::policy::dns_pin::{DnsPin, DnsPinRegistry};
     use crate::policy::network_policy::BANNED_SSH_PORT;
     use crate::policy::policies::L4RuleSpec;
-    use crate::policy::resolver::EffectivePolicy;
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
@@ -557,44 +302,6 @@ mod tests {
             port_lo: lo,
             port_hi: hi,
         }
-    }
-
-    fn eff_with_l4(rules: Vec<L4RuleSpec>) -> EffectivePolicy {
-        let mut eff = EffectivePolicy::default();
-        eff.network.l4 = rules;
-        eff
-    }
-
-    #[test]
-    fn canonicalize_default_policy_is_deny_all() {
-        let eff = EffectivePolicy::default();
-        let eg = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap();
-        assert_eq!(eg, CanonicalEgress::Rules(vec![]));
-    }
-
-    #[test]
-    fn canonicalize_open_mode_is_unrestricted() {
-        let mut eff = EffectivePolicy::default();
-        eff.egress.mode = Some("open".to_string());
-        let eg = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap();
-        assert_eq!(eg, CanonicalEgress::Unrestricted);
-    }
-
-    #[test]
-    fn canonicalize_lowers_l4_rules_verbatim() {
-        let eff = eff_with_l4(vec![l4("tcp", "93.184.216.0/24", 443, 443)]);
-        let eg = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap();
-        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
-        assert!(!eg.permits(&Proto::Tcp, ip("93.184.216.34"), 80));
-    }
-
-    #[test]
-    fn canonicalize_normalizes_any_port_wildcard() {
-        // (0, 0) is the wire-format any-port wildcard.
-        let eff = eff_with_l4(vec![l4("udp", "8.8.8.8/32", 0, 0)]);
-        let eg = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap();
-        assert!(eg.permits(&Proto::Udp, ip("8.8.8.8"), 53));
-        assert!(eg.permits(&Proto::Udp, ip("8.8.8.8"), 65535));
     }
 
     // ── canonicalize_network_policy: the bare (no-bundle) transient lowering ──
@@ -701,26 +408,6 @@ mod tests {
         );
         let err = canonicalize_network_policy(&np, &registry(vec![stale]), NOW).unwrap_err();
         assert!(matches!(err, ProjectionError::ExpiredPin { .. }));
-    }
-
-    #[test]
-    fn canonicalize_refuses_unparseable_cidr() {
-        let eff = eff_with_l4(vec![l4("tcp", "not-a-cidr", 443, 443)]);
-        let err = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap_err();
-        assert!(
-            matches!(err, ProjectionError::BadCidr { .. }),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn canonicalize_refuses_unknown_proto() {
-        let eff = eff_with_l4(vec![l4("icmp", "8.8.8.8/32", 0, 0)]);
-        let err = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap_err();
-        assert!(
-            matches!(err, ProjectionError::UnknownProto { .. }),
-            "got {err:?}"
-        );
     }
 
     #[test]
@@ -879,10 +566,6 @@ mod tests {
         assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 80));
     }
 
-    // ─────────────────────────────────────────────────
-    // allow-list via DNS pin registry
-    // ─────────────────────────────────────────────────
-
     fn pin(dest: &str, ips: &[&str]) -> DnsPin {
         DnsPin::at(
             dest,
@@ -900,316 +583,12 @@ mod tests {
         reg
     }
 
-    fn eff_with_allow(list: Vec<(&str, u16)>) -> EffectivePolicy {
-        let mut eff = EffectivePolicy::default();
-        eff.egress.allow_list = list.into_iter().map(|(h, p)| (h.to_string(), p)).collect();
-        eff
-    }
-
-    #[test]
-    fn allow_list_host_lowers_to_pinned_host_nets() {
-        let eff = eff_with_allow(vec![("api.example.com", 443)]);
-        let pins = registry(vec![pin(
-            "api.example.com",
-            &["93.184.216.34", "93.184.216.35"],
-        )]);
-        let eg = canonicalize_effective(&eff, &pins, NOW).unwrap();
-        // Both pinned addresses admitted, TCP, exactly port 443.
-        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
-        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.35"), 443));
-        // An unpinned address of the "same host" is NOT admitted —
-        // the projection enforces pins, not live DNS.
-        assert!(!eg.permits(&Proto::Tcp, ip("93.184.216.36"), 443));
-        assert!(!eg.permits(&Proto::Tcp, ip("93.184.216.34"), 80));
-        assert!(!eg.permits(&Proto::Udp, ip("93.184.216.34"), 443));
-    }
-
-    #[test]
-    fn allow_list_port_zero_is_any_port() {
-        let eff = eff_with_allow(vec![("api.example.com", 0)]);
-        let pins = registry(vec![pin("api.example.com", &["93.184.216.34"])]);
-        let eg = canonicalize_effective(&eff, &pins, NOW).unwrap();
-        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
-        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 8080));
-    }
-
-    #[test]
-    fn allow_list_ipv6_pin_lowers_to_slash128() {
-        let eff = eff_with_allow(vec![("v6.example.com", 443)]);
-        let pins = registry(vec![pin("v6.example.com", &["2001:db8::42"])]);
-        let eg = canonicalize_effective(&eff, &pins, NOW).unwrap();
-        assert!(eg.permits(&Proto::Tcp, ip("2001:db8::42"), 443));
-        assert!(!eg.permits(&Proto::Tcp, ip("2001:db8::43"), 443));
-    }
-
-    #[test]
-    fn allow_list_host_without_pin_refuses() {
-        let eff = eff_with_allow(vec![("unpinned.example.com", 443)]);
-        let err = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap_err();
-        assert!(
-            matches!(err, ProjectionError::MissingPin { .. }),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn allow_list_expired_pin_refuses() {
-        let eff = eff_with_allow(vec![("stale.example.com", 443)]);
-        let stale = DnsPin::at(
-            "stale.example.com",
-            vec![ip("93.184.216.34")],
-            "2026-01-01T00:00:00Z",
-            "2026-02-01T00:00:00Z", // expired before NOW
-        );
-        let err = canonicalize_effective(&eff, &registry(vec![stale]), NOW).unwrap_err();
-        assert!(
-            matches!(err, ProjectionError::ExpiredPin { .. }),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn allow_list_empty_pin_set_refuses() {
-        let eff = eff_with_allow(vec![("empty.example.com", 443)]);
-        let pins = registry(vec![pin("empty.example.com", &[])]);
-        let err = canonicalize_effective(&eff, &pins, NOW).unwrap_err();
-        assert!(
-            matches!(err, ProjectionError::EmptyPin { .. }),
-            "got {err:?}"
-        );
-    }
-
-    // ─────────────────────────────────────────────────
-    // mandatory-deny overlap refusals
-    // ─────────────────────────────────────────────────
-
-    #[test]
-    fn l4_rule_overlapping_mandatory_deny_refuses() {
-        for cidr in [
-            "169.254.0.0/16",
-            "169.254.169.254/32",
-            "127.0.0.0/8",
-            "100.64.0.0/10",
-        ] {
-            let eff = eff_with_l4(vec![l4("tcp", cidr, 0, 0)]);
-            let err = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap_err();
-            assert!(
-                matches!(err, ProjectionError::MandatoryDenyOverlap { .. }),
-                "{cidr}: got {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn l4_supernet_of_mandatory_deny_refuses() {
-        // A /0 covers every deny range — refuse, don't carve.
-        let eff = eff_with_l4(vec![l4("tcp", "0.0.0.0/0", 443, 443)]);
-        let err = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap_err();
-        assert!(
-            matches!(err, ProjectionError::MandatoryDenyOverlap { .. }),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn rebinding_pin_into_metadata_range_refuses() {
-        // A policy-permitted host whose admission-time resolution
-        // lands in the cloud metadata range is a refusal, not a pin.
-        let eff = eff_with_allow(vec![("rebind.example.com", 443)]);
-        let pins = registry(vec![pin("rebind.example.com", &["169.254.169.254"])]);
-        let err = canonicalize_effective(&eff, &pins, NOW).unwrap_err();
-        assert!(
-            matches!(err, ProjectionError::MandatoryDenyOverlap { .. }),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn rebinding_pin_into_loopback_v6_refuses() {
-        let eff = eff_with_allow(vec![("rebind6.example.com", 443)]);
-        let pins = registry(vec![pin("rebind6.example.com", &["::1"])]);
-        let err = canonicalize_effective(&eff, &pins, NOW).unwrap_err();
-        assert!(
-            matches!(err, ProjectionError::MandatoryDenyOverlap { .. }),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn mixed_pin_one_bad_ip_refuses_whole_projection() {
-        // One good IP + one metadata IP: fail-closed on the whole
-        // projection, no partial admit.
-        let eff = eff_with_allow(vec![("mixed.example.com", 443)]);
-        let pins = registry(vec![pin(
-            "mixed.example.com",
-            &["93.184.216.34", "169.254.169.254"],
-        )]);
-        let err = canonicalize_effective(&eff, &pins, NOW).unwrap_err();
-        assert!(
-            matches!(err, ProjectionError::MandatoryDenyOverlap { .. }),
-            "got {err:?}"
-        );
-    }
-
-    // ─────────────────────────────────────────────────
-    // WASI-facing projection
-    // ─────────────────────────────────────────────────
-
-    #[test]
-    fn wasi_projection_default_policy_denies_everything() {
-        let eff = EffectivePolicy::default();
-        let w = to_wasi_grants(&eff, &DnsPinRegistry::new(), NOW).unwrap();
-        assert!(!wasi_allows(&w, &Proto::Tcp, ip("93.184.216.34"), 443));
-    }
-
-    #[test]
-    fn wasi_projection_pinned_host_allows_only_pinned_ips() {
-        let eff = eff_with_allow(vec![("api.example.com", 443)]);
-        let pins = registry(vec![pin("api.example.com", &["93.184.216.34"])]);
-        let w = to_wasi_grants(&eff, &pins, NOW).unwrap();
-        assert!(wasi_allows(&w, &Proto::Tcp, ip("93.184.216.34"), 443));
-        assert!(!wasi_allows(&w, &Proto::Tcp, ip("93.184.216.35"), 443));
-        assert!(!wasi_allows(&w, &Proto::Tcp, ip("93.184.216.34"), 80));
-    }
-
-    #[test]
-    fn wasi_projection_l4_net_target() {
-        let eff = eff_with_l4(vec![l4("udp", "8.8.8.0/24", 53, 53)]);
-        let w = to_wasi_grants(&eff, &DnsPinRegistry::new(), NOW).unwrap();
-        assert!(wasi_allows(&w, &Proto::Udp, ip("8.8.8.8"), 53));
-        assert!(!wasi_allows(&w, &Proto::Udp, ip("8.8.9.8"), 53));
-        assert!(!wasi_allows(&w, &Proto::Tcp, ip("8.8.8.8"), 53));
-    }
-
-    #[test]
-    fn wasi_projection_mandatory_deny_unconditional() {
-        let mut eff = EffectivePolicy::default();
-        eff.egress.mode = Some("open".to_string());
-        let w = to_wasi_grants(&eff, &DnsPinRegistry::new(), NOW).unwrap();
-        assert!(matches!(w, WasiEgress::Unrestricted));
-        assert!(!wasi_allows(&w, &Proto::Tcp, ip("169.254.169.254"), 443));
-        assert!(!wasi_allows(&w, &Proto::Tcp, ip("93.184.216.34"), 22));
-        assert!(wasi_allows(&w, &Proto::Tcp, ip("93.184.216.34"), 443));
-    }
-
-    #[test]
-    fn wasi_projection_refuses_same_inputs_canonical_refuses() {
-        // Shared refusal ladder: missing pin and rebinding pin
-        // refuse here exactly as in the canonical walk.
-        let eff = eff_with_allow(vec![("unpinned.example.com", 443)]);
-        assert!(matches!(
-            to_wasi_grants(&eff, &DnsPinRegistry::new(), NOW).unwrap_err(),
-            ProjectionError::MissingPin { .. }
-        ));
-        let eff = eff_with_allow(vec![("rebind.example.com", 443)]);
-        let pins = registry(vec![pin("rebind.example.com", &["169.254.169.254"])]);
-        assert!(matches!(
-            to_wasi_grants(&eff, &pins, NOW).unwrap_err(),
-            ProjectionError::MandatoryDenyOverlap { .. }
-        ));
-    }
-
-    #[test]
-    fn l4_inverted_port_range_refuses() {
-        let eff = eff_with_l4(vec![l4("tcp", "93.184.216.0/24", 443, 80)]);
-        let err = canonicalize_effective(&eff, &DnsPinRegistry::new(), NOW).unwrap_err();
-        assert!(
-            matches!(err, ProjectionError::InvertedPortRange { .. }),
-            "got {err:?}"
-        );
-        let err = to_wasi_grants(&eff, &DnsPinRegistry::new(), NOW).unwrap_err();
-        assert!(
-            matches!(err, ProjectionError::InvertedPortRange { .. }),
-            "got {err:?}"
-        );
-    }
-
-    // ─────────────────────────────────────────────────
-    // clamp — intersection-only merge
-    // ─────────────────────────────────────────────────
-
-    fn rule(proto: Proto, cidr: &str, lo: u16, hi: u16) -> CanonicalRule {
-        CanonicalRule {
-            proto,
-            net: net(cidr),
-            port_lo: lo,
-            port_hi: hi,
-        }
-    }
-
-    #[test]
-    fn clamp_request_wider_than_resolved_yields_intersection() {
-        // A requested grant can attenuate the resolved one, never
-        // widen it.
-        let requested = CanonicalEgress::Rules(vec![
-            rule(Proto::Tcp, "93.184.216.34/32", 443, 443), // covered → kept
-            rule(Proto::Tcp, "203.0.113.0/24", 0, 65535),   // not granted → dropped
-        ]);
-        let resolved = CanonicalEgress::Rules(vec![rule(Proto::Tcp, "93.184.216.0/24", 443, 443)]);
-        let granted = clamp(&requested, &resolved);
-        assert!(granted.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
-        assert!(!granted.permits(&Proto::Tcp, ip("203.0.113.7"), 443));
-    }
-
-    #[test]
-    fn clamp_unrestricted_request_cannot_widen() {
-        let requested = CanonicalEgress::Unrestricted;
-        let resolved = CanonicalEgress::Rules(vec![rule(Proto::Tcp, "93.184.216.34/32", 443, 443)]);
-        let granted = clamp(&requested, &resolved);
-        assert_eq!(granted, resolved);
-    }
-
-    #[test]
-    fn clamp_request_can_attenuate_unrestricted() {
-        let requested =
-            CanonicalEgress::Rules(vec![rule(Proto::Tcp, "93.184.216.34/32", 443, 443)]);
-        let resolved = CanonicalEgress::Unrestricted;
-        let granted = clamp(&requested, &resolved);
-        assert_eq!(granted, requested);
-    }
-
-    #[test]
-    fn clamp_partial_port_overlap_drops_fail_closed() {
-        // Conservative intersection: a requested rule only
-        // partially covered by the resolved grant is dropped
-        // whole, not split.
-        let requested =
-            CanonicalEgress::Rules(vec![rule(Proto::Tcp, "93.184.216.34/32", 80, 8080)]);
-        let resolved = CanonicalEgress::Rules(vec![rule(Proto::Tcp, "93.184.216.34/32", 443, 443)]);
-        let granted = clamp(&requested, &resolved);
-        assert_eq!(granted, CanonicalEgress::Rules(vec![]));
-    }
-
-    #[test]
-    fn clamp_is_never_wider_than_resolved_pointwise() {
-        let requested = CanonicalEgress::Rules(vec![
-            rule(Proto::Tcp, "10.0.0.0/8", 0, 65535),
-            rule(Proto::Udp, "8.8.8.8/32", 53, 53),
-        ]);
-        let resolved = CanonicalEgress::Rules(vec![rule(Proto::Udp, "8.8.8.0/24", 53, 53)]);
-        let granted = clamp(&requested, &resolved);
-        for (proto, addr, port) in [
-            (Proto::Tcp, "10.1.2.3", 443u16),
-            (Proto::Udp, "8.8.8.8", 53),
-            (Proto::Udp, "8.8.8.9", 53),
-        ] {
-            if granted.permits(&proto, ip(addr), port) {
-                assert!(
-                    resolved.permits(&proto, ip(addr), port),
-                    "clamp widened: {proto:?} {addr}:{port}"
-                );
-            }
-        }
-        // And the covered request survives.
-        assert!(granted.permits(&Proto::Udp, ip("8.8.8.8"), 53));
-    }
-
     // ─────────────────────────────────────────────────
     // canonicalize_l4 — lenient kernel-path lowering
     // ─────────────────────────────────────────────────
 
     #[test]
-    fn canonicalize_l4_lowers_rules_like_canonicalize_effective() {
+    fn canonicalize_l4_lowers_rules_and_normalizes_the_any_port_wildcard() {
         let specs = vec![
             l4("tcp", "93.184.216.0/24", 443, 443),
             l4("udp", "8.8.8.8/32", 0, 0),
@@ -1238,8 +617,7 @@ mod tests {
 
     #[test]
     fn canonicalize_l4_does_not_refuse_mandatory_deny_overlap_but_permits_denies_it() {
-        // The lenient kernel lowering BUILDS a metadata-overlapping rule
-        // (unlike canonicalize_effective, which refuses it), but the
+        // The lenient lowering BUILDS a metadata-overlapping rule, but the
         // decision function still denies the metadata IP — mandatory-deny
         // is checked first in permits().
         let eg = canonicalize_l4(&[l4("tcp", "169.254.0.0/16", 0, 0)])
@@ -1255,194 +633,5 @@ mod tests {
         let eg = canonicalize_l4(&[]).unwrap();
         assert!(!eg.permits(&Proto::Tcp, ip("8.8.8.8"), 53));
         assert_eq!(eg, CanonicalEgress::Rules(vec![]));
-    }
-}
-
-#[cfg(test)]
-mod property {
-    use super::*;
-    use crate::policy::dns_pin::{DnsPin, DnsPinRegistry};
-    use crate::policy::policies::L4RuleSpec;
-    use crate::policy::resolver::EffectivePolicy;
-    use std::net::{IpAddr, Ipv4Addr};
-
-    const NOW: &str = "2026-06-11T00:00:00Z";
-
-    /// Deterministic xorshift64 — no rand dep at this layer.
-    struct Xs(u64);
-
-    impl Xs {
-        fn next(&mut self) -> u64 {
-            let mut x = self.0;
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            self.0 = x;
-            x
-        }
-        fn below(&mut self, n: u64) -> u64 {
-            self.next() % n
-        }
-    }
-
-    fn random_v4(rng: &mut Xs) -> Ipv4Addr {
-        Ipv4Addr::from(u32::try_from(rng.next() & 0xFFFF_FFFF).unwrap())
-    }
-
-    /// One generated policy + pins. L4 rules use random v4 nets;
-    /// allow-list hosts get 1–3 pinned IPs each.
-    fn generate(rng: &mut Xs) -> (EffectivePolicy, DnsPinRegistry) {
-        let mut eff = EffectivePolicy::default();
-        let mut pins = DnsPinRegistry::new();
-        // ~1 in 16 policies exercise the open kill-switch.
-        if rng.below(16) == 0 {
-            eff.egress.mode = Some("open".to_string());
-            return (eff, pins);
-        }
-        for _ in 0..rng.below(4) {
-            let prefix = 8 + u8::try_from(rng.below(25)).unwrap();
-            let lo = u16::try_from(rng.below(1024)).unwrap();
-            let hi = lo.saturating_add(u16::try_from(rng.below(2048)).unwrap());
-            eff.network.l4.push(L4RuleSpec {
-                proto: if rng.below(2) == 0 { "tcp" } else { "udp" }.to_string(),
-                dst_cidr: format!("{}/{prefix}", random_v4(rng)),
-                port_lo: lo,
-                port_hi: hi,
-            });
-        }
-        for i in 0..rng.below(3) {
-            let host = format!("h{i}.example.test");
-            let ips: Vec<IpAddr> = (0..1 + rng.below(3))
-                .map(|_| IpAddr::V4(random_v4(rng)))
-                .collect();
-            pins.add(DnsPin::at(
-                &host,
-                ips,
-                "2026-06-10T00:00:00Z",
-                "2027-01-01T00:00:00Z",
-            ));
-            let port = u16::try_from(rng.below(9000)).unwrap();
-            eff.egress.allow_list.push((host, port));
-        }
-        (eff, pins)
-    }
-
-    /// Probes biased to decision edges: for every canonical rule,
-    /// an inside hit, a port-boundary miss, and a proto miss; plus
-    /// the fixed mandatory-deny set and pure-random probes.
-    fn probes(rng: &mut Xs, eg: &CanonicalEgress) -> Vec<(Proto, IpAddr, u16)> {
-        let mut out: Vec<(Proto, IpAddr, u16)> = vec![
-            (Proto::Tcp, "169.254.169.254".parse().unwrap(), 443),
-            (Proto::Tcp, "127.0.0.1".parse().unwrap(), 80),
-            (Proto::Udp, "100.64.0.1".parse().unwrap(), 53),
-            (Proto::Tcp, "::1".parse().unwrap(), 443),
-        ];
-        if let CanonicalEgress::Rules(rules) = eg {
-            for r in rules {
-                out.push((r.proto, r.net.network(), r.port_lo));
-                out.push((r.proto, r.net.network(), r.port_hi.wrapping_add(1)));
-                out.push((
-                    match r.proto {
-                        Proto::Tcp => Proto::Udp,
-                        Proto::Udp => Proto::Tcp,
-                    },
-                    r.net.network(),
-                    r.port_lo,
-                ));
-            }
-        }
-        for _ in 0..32 {
-            out.push((
-                if rng.below(2) == 0 {
-                    Proto::Tcp
-                } else {
-                    Proto::Udp
-                },
-                IpAddr::V4(random_v4(rng)),
-                u16::try_from(rng.below(65536)).unwrap(),
-            ));
-        }
-        out
-    }
-
-    /// The cross-projection consistency witness: for every
-    /// generated policy, the canonical (CIDR-keyed) and WASI
-    /// (hostname-keyed) projections either refuse identically or
-    /// decide identically on every probe — and no projection ever
-    /// admits a mandatory-deny address. Agreement between the two
-    /// independently-coded walks is the anti-drift guarantee the
-    /// seam exists to provide.
-    #[test]
-    fn cross_projection_consistency_property() {
-        let mut rng = Xs(0x184_0b5e55ed);
-        let mut policies_checked = 0u32;
-        let mut probes_checked = 0u32;
-        for _ in 0..512 {
-            let (eff, pins) = generate(&mut rng);
-            let canonical = canonicalize_effective(&eff, &pins, NOW);
-            let wasi = to_wasi_grants(&eff, &pins, NOW);
-            match (canonical, wasi) {
-                (Err(c), Err(w)) => {
-                    // Identical refusal ladder: same variant.
-                    assert_eq!(
-                        std::mem::discriminant(&c),
-                        std::mem::discriminant(&w),
-                        "refusal drift: canonical={c:?} wasi={w:?}"
-                    );
-                }
-                (Ok(eg), Ok(w)) => {
-                    policies_checked += 1;
-                    for (proto, addr, port) in probes(&mut rng, &eg) {
-                        probes_checked += 1;
-                        let c = eg.permits(&proto, addr, port);
-                        let ww = wasi_allows(&w, &proto, addr, port);
-                        assert_eq!(
-                            c, ww,
-                            "projection drift on {proto:?} {addr}:{port}\n eff={eff:?}"
-                        );
-                        if is_mandatory_deny(addr) {
-                            assert!(!c, "mandatory-deny admitted: {addr}");
-                        }
-                    }
-                }
-                (c, w) => panic!("one projection refused, the other admitted: {c:?} / {w:?}"),
-            }
-        }
-        // Generator sanity: the property must have exercised real
-        // grants, not 512 vacuous deny-alls.
-        assert!(
-            policies_checked > 200,
-            "only {policies_checked} policies admitted"
-        );
-        assert!(
-            probes_checked > 5_000,
-            "only {probes_checked} probes checked"
-        );
-    }
-
-    /// Clamp soundness over the same generator: the granted set
-    /// never admits a probe the resolved set denies.
-    #[test]
-    fn clamp_never_widens_property() {
-        let mut rng = Xs(0x184_c1a3b);
-        for _ in 0..256 {
-            let (req_eff, req_pins) = generate(&mut rng);
-            let (res_eff, res_pins) = generate(&mut rng);
-            let (Ok(requested), Ok(resolved)) = (
-                canonicalize_effective(&req_eff, &req_pins, NOW),
-                canonicalize_effective(&res_eff, &res_pins, NOW),
-            ) else {
-                continue;
-            };
-            let granted = clamp(&requested, &resolved);
-            for (proto, addr, port) in probes(&mut rng, &granted) {
-                if granted.permits(&proto, addr, port) {
-                    assert!(
-                        resolved.permits(&proto, addr, port),
-                        "clamp widened: {proto:?} {addr}:{port}"
-                    );
-                }
-            }
-        }
     }
 }

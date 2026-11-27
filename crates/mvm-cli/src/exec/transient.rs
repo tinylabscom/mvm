@@ -886,7 +886,6 @@ mod tests {
                 ledger: &ledger,
                 keys_dir: Some(&home.join("keys")),
                 audit_dir: Some(&home.join("audit")),
-                policy_dir: None,
                 bundle_pin: None,
                 bundle_posture: None,
                 deps_volume: None,

@@ -1,6 +1,4 @@
-//! Security policy, audit log, secret bindings, network policy, plus
-//! the tenant policy-bundle authoring/resolution/signing surface folded
-//! in from the former `mvm-policy` crate.
+//! Security policy, audit log, secret bindings and network policy.
 
 pub mod audit;
 /// Strict DNS answer filtering for SSRF and rebinding defense. Lives in
@@ -12,16 +10,6 @@ pub mod dns_pin;
 pub mod network_policy;
 pub mod security_profile;
 
-// Tenant policy bundles — authoring, resolution, signing, TOML loading.
-// Folded in from the former `mvm-policy` crate. mvmd consumes the
-// resolver + bundle types via the facade.
-pub mod projection_fs_env;
-pub mod resolver;
-pub mod signing;
-// TOML policy-bundle loading happens where host tooling reads user files.
-#[cfg(feature = "host-state")]
-pub mod toml_loader;
-
 // `security`, `reversible_replacement`, `policies`, `redaction`, and
 // `bundle` are pure-DTO leaves that now live in `mvm-contract`, and
 // `projection` is the pure egress-decision core alongside them; re-exported
@@ -29,35 +17,27 @@ pub mod toml_loader;
 // `crate::policy::{security,reversible_replacement,policies,redaction,bundle,projection}::X`
 // path keeps resolving unchanged.
 pub use mvm_contract::policy::{
-    action_budget, approval, bundle, policies, projection, protected_paths, redaction,
+    action_budget, approval, bundle, policies, projection, protected_paths, redaction, resolver,
     reversible_replacement, security,
 };
 
 pub use action_budget::ActionBudget;
-pub use bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION, TenantOverlay};
+pub use bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION};
 pub use policies::{
     ArtifactPolicy, AuditPolicy, BundleNetworkPolicy, DEFAULT_BODY_CAP_BYTES, EgressPolicy,
     FlowByteLogDirections, FlowByteLogSpec, FsGrantSpec, KeyPolicy, L4RuleSpec, PiiPolicy,
     WasiCapPolicy,
 };
-pub use projection::{
-    CanonicalEgress, CanonicalRule, ProjectionError, Proto, WasiEgress, WasiOutboundGrant,
-    WasiTarget, canonicalize_effective, canonicalize_l4, clamp, to_wasi_grants, wasi_allows,
-};
-pub use projection_fs_env::{
-    CanonicalEnv, CanonicalFs, FsAccess, FsEnvError, FsGrant, WasiPreopen, canonicalize_env,
-    canonicalize_fs, clamp_env, clamp_fs, to_wasi_env_names, to_wasi_preopens,
-};
+pub use projection::{CanonicalEgress, CanonicalRule, ProjectionError, Proto, canonicalize_l4};
 pub use protected_paths::{
     ProtectedPath, ProtectedPathSet, ProtectedPathsMode, ProtectedPathsPolicy,
 };
 pub use redaction::{
     EntropyMode, NameMode, RedactionAction, RedactionPolicy, RedactionProfile, SecretAction,
 };
-pub use resolver::{EffectivePolicy, resolve};
+pub use resolver::EffectivePolicy;
 pub use reversible_replacement::{
     OpaqueRewriteToken, ReversibleFallback, ReversibleReplacementAction,
     ReversibleReplacementPolicy, ReversibleReplacementProfile, RewriteFlowId, RewriteProofRecord,
     RewriteSurface, SensitiveClass,
 };
-pub use signing::{BundleVerifyError, SignedPolicyBundle, sign_bundle, verify_bundle};

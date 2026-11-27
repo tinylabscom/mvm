@@ -157,7 +157,7 @@ fn check_no_host_state_feature(workspace: &Path, package: &str) -> Result<()> {
              {GUEST_TARGET} enables mvm-core/host-state — a guest binary must not depend on \
              the host-state-gated mvm-core modules (did_key, workload_address, command_gate, \
              threat_classifier, keystore/secret_store, pii, receipt, stream_client, \
-             registry_pack*, toml_loader, train_lock, domain::manifest, user_config, \
+             registry_pack*, train_lock, domain::manifest, user_config, \
              config::fc_version, plan::bundle archive I/O). Drop the \
              reference; do not enable `host-state` for a guest crate."
         );
@@ -221,7 +221,7 @@ fn check_one(workspace: &Path, package: &str) -> Result<()> {
             "check-guest-agent-runtime-free: {package}'s non-dev closure on {GUEST_TARGET} \
              pulls host-state-owned dep(s) {} — a guest binary must not depend on the \
              `host-state`-gated mvm-core modules (did_key, workload_address, command_gate, \
-             threat_classifier, keystore/secret_store, pii, registry_pack*, toml_loader, \
+             threat_classifier, keystore/secret_store, pii, registry_pack*, \
              train_lock, domain::manifest, user_config, config::fc_version, \
              plan::bundle::stream). Drop the reference; do not enable \
              `host-state` for a guest crate.",

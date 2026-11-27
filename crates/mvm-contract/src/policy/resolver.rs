@@ -1,13 +1,7 @@
-//! `EffectivePolicy` — the wire DTO the policy resolver produces.
-//!
-//! - `EffectivePolicy` is the fully-resolved policy a workload boots
-//!   under: same shape as `PolicyBundle`'s sub-policies, but
-//!   flattened — no `Option<T>`, no overlays.
-//!
-//! The merge algorithm that produces an `EffectivePolicy` from a
-//! `PolicyBundle` + tenant (`resolve()`, plus its
-//! `pick()` helper) stays in `mvm_core::policy::resolver` — it isn't
-//! itself a wire type, just the pure function that builds one.
+//! `EffectivePolicy` — a flattened policy shape the workload actor
+//! lifecycle carries and compares between parent and child. Nothing
+//! resolves it from a policy bundle: the actor lifecycle requires the
+//! default value.
 
 use serde::{Deserialize, Serialize};
 
@@ -16,13 +10,9 @@ use crate::policy::policies::{
     WasiCapPolicy,
 };
 
-/// The fully-resolved policy a workload boots under. Same shape as
-/// `PolicyBundle`'s sub-policies, but flattened: no `Option<T>`,
-/// no overlays. Every field is the value the supervisor should
-/// enforce.
-///
-/// The supervisor consumes this; `mvmctl plan inspect <plan>` can
-/// also print it for operator review.
+/// A flattened policy shape. The actor lifecycle refuses anything but
+/// [`EffectivePolicy::default`] and compares a child's value with its
+/// parent's; no field is enforced on its own.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EffectivePolicy {

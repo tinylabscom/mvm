@@ -69,12 +69,12 @@ no guest NIC, nothing reachable, until the plan says otherwise),
 optional `release_pin`, `post_run` lifecycle, the `valid_from`/
 `valid_until` validity window, and a replay-protecting `nonce`.
 
-Several `*Ref`-typed fields (`network_policy`, `fs_policy`,
-`egress_policy`) resolve at admission through
-`policy_resolver::validate_policy_refs`: a `"local-default"` ref keeps the
-host bridge's mandatory-deny posture without constructing placeholder
-controls; a `"<tenant>:<workload>"` ref loads and validates
-`~/.mvm/policies/<tenant>/<workload>.toml` for the bridge. The validity window is
+The `*Ref`-typed fields (`network_policy`, `fs_policy`, `egress_policy`) are
+signed labels. Admission writes `"local-default"` for a deny-all launch and
+`"<tenant>:<workload>"` for a launch that grants egress, and loads no policy
+file for either. What the per-VM egress gate enforces is the launch's
+`NetworkPolicy`, bound to the plan by its content digest as a policy asset
+identity. The validity window is
 deliberately short — long enough for boot plus verification, short enough
 that a captured plan cannot be replayed hours later — and is checked
 together with the nonce ledger so neither a stale-window replay nor a

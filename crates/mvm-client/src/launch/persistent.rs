@@ -517,7 +517,6 @@ fn finish_admitted_persistent(
                 ledger: &admission_ledger,
                 keys_dir: None,
                 audit_dir: None,
-                policy_dir: None,
                 bundle_pin: bundle_archive
                     .as_deref()
                     .map(crate::admission::BundlePin::boots),

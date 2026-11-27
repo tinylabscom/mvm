@@ -11,9 +11,7 @@
 //!
 //! Every type uses `#[serde(deny_unknown_fields)]` so a future
 //! field addition is a fail-closed schema bump for older verifiers,
-//! and every type derives `Default` so `TenantOverlay`'s
-//! `Option<T>` semantics ("None inherits from base") compose
-//! cleanly with the bundle's resolution algorithm.
+//! and every type derives `Default`.
 
 use alloc::string::String;
 use alloc::vec::Vec;

@@ -148,7 +148,6 @@ pub fn prepare_vm_full_fork(
             ledger: &ledger,
             keys_dir: None,
             audit_dir: None,
-            policy_dir: None,
             bundle_pin: parent_bundle
                 .as_ref()
                 .map(crate::admission::InheritedBundle::pin),

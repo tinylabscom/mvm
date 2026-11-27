@@ -133,7 +133,7 @@ os-keyring = ["dep:keyring"]
 # `crypto::keystore` except the pure `validate_shell_id` validator),
 # `pii`, `receipt`/`receipt_archive` (their signing API is did:key-shaped),
 # `stream_client` (its console redactor holds a `PiiRedactor`), the
-# `registry_pack*` family, `policy::toml_loader`, `image_set::train_lock`,
+# `registry_pack*` family, `image_set::train_lock`,
 # `domain::manifest` (the `mvm.toml` workload file), `user_config` (the
 # operator `config.toml` store), `config::fc_version` (the host's
 # Firecracker toolchain pin), and the tar archive I/O half of
