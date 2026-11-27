@@ -18,7 +18,7 @@ A site is one of:
 
 `.spawn()`/`.output()`/`.status()` on a command built elsewhere add no row of their own; the constructor is the row. Four terminals take a command from a caller and are listed under "Spawn terminals" below so none is missed.
 
-Excluded: items and files whose `cfg` holds only in a test or `test-support` build, such as `#[cfg(test)]` or `#[cfg(any(test, feature = "test-support"))]` (including such `mod x;` targets, a `#[path]` on them, and `*_tests.rs`), `tests/`, `examples/`, `benches/`, `build.rs`, `xtask`, `fuzz/`, `crates/mvm-sdk/sdks/` (non-Rust SDK trees, covered by `check-no-cli-shellout`), and `third_party/`.
+Excluded: items and files whose `cfg` holds only in a test or `test-support` build, such as `#[cfg(test)]` or `#[cfg(any(test, feature = "test-support"))]` (including such `mod x;` targets, a `#[path]` on them, and `*_tests.rs`), `tests/`, `examples/`, `benches/`, `build.rs`, `xtask`, `fuzz/`, `crates/mvm-sdk/sdks/` (non-Rust SDK trees, covered by `check-no-cli-shellout`), and `third_party/`. Counting `test-support` as test is sound only while no shipped crate enables that feature outside its dev-dependencies; the generator checks every manifest for that and fails when one does.
 
 ## Rerun
 

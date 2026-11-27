@@ -339,7 +339,7 @@ pub(crate) fn require_local_volume_host_path_encrypted(path: &std::path::Path) -
 /// Where managed volume plaintext is materialized by default, and whether that
 /// storage is verified encrypted.
 ///
-/// Warn-only, like the host FDE line: an unverified host can still run
+/// Warn-only (`ok: true`): an unverified host can still run
 /// everything that does not unlock a managed volume or create a writable disk
 /// image, and those refuse on their own with the same explanation.
 pub(super) fn security_volume_storage_check() -> Check {
@@ -1376,7 +1376,7 @@ mod tests {
             HostFdeStatus::not_enabled("synthetic plain disk"),
             false,
         );
-        assert!(refused.ok, "warn-only like the host FDE line");
+        assert!(refused.ok, "the volume storage line is warn-only");
         assert!(refused.info.contains("is refused"), "{}", refused.info);
         assert!(
             refused.info.contains("synthetic plain disk"),

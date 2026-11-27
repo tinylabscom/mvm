@@ -966,8 +966,11 @@ fn run_qemu_bounded(
             Ok(Some(out.status))
         }
         Err(BoundedRunError::TimedOut(_)) => Ok(None),
-        Err(e) => Err(BuilderVmError::NixBuildFailed(format!(
+        Err(e @ BoundedRunError::Spawn(_)) => Err(BuilderVmError::NixBuildFailed(format!(
             "spawning qemu ({qemu_bin}): {e}"
+        ))),
+        Err(e @ BoundedRunError::Wait(_)) => Err(BuilderVmError::NixBuildFailed(format!(
+            "waiting for qemu ({qemu_bin}): {e}"
         ))),
     }
 }

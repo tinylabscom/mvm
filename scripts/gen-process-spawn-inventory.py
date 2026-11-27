@@ -11,7 +11,7 @@ annotation fails the run, so a new spawn cannot land unclassified. The static
 reachability columns need `cargo tree --offline` and a name-based call graph;
 see the doc for what they do and do not prove.
 """
-import collections, json, os, re, subprocess, sys
+import collections, json, os, re, subprocess, sys, tomllib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOC = os.path.join(ROOT, "specs/contracts/process-spawn-inventory.md")
@@ -112,6 +112,48 @@ def cfg_value(pred):
         return False if name == "test" else None
 
     return parse()
+
+
+# Crates no shipped crate depends on; they may enable `test-support` freely.
+DEV_ONLY_CRATES = {"mvm-conformance"}
+
+
+def test_support_leaks(name, manifest):
+    """Where a shipped manifest turns on `test-support` outside dev-dependencies.
+
+    The cfg evaluation above counts `test-support` items as test code, which is
+    true only while no shipped build enables the feature.
+    """
+    tables = [("workspace.dependencies", manifest.get("workspace", {}).get("dependencies", {}))]
+    tables += [(k, manifest.get(k, {})) for k in ("dependencies", "build-dependencies")]
+    tables += [("target.%s.%s" % (t, k), v.get(k, {}))
+               for t, v in manifest.get("target", {}).items() for k in ("dependencies", "build-dependencies")]
+    out = ["%s [%s] %s" % (name, where, dep) for where, deps in tables for dep, spec in deps.items()
+           if isinstance(spec, dict) and "test-support" in spec.get("features", [])]
+    feats, seen, todo = manifest.get("features", {}), set(), list(manifest.get("features", {}).get("default", []))
+    while todo:
+        f = todo.pop()
+        if f not in seen:
+            seen.add(f)
+            todo += feats.get(f, [])
+    out += ["%s [features] default reaches %s" % (name, f) for f in sorted(seen)
+            if f == "test-support" or f.endswith("/test-support")]
+    return out
+
+
+def shipped_test_support_leaks():
+    dirs = [ROOT]
+    for dp, dn, fn in os.walk(os.path.join(ROOT, "crates")):
+        dn[:] = [d for d in dn if d not in SKIP_DIRS]
+        if "Cargo.toml" in fn:
+            dirs.append(dp)
+    out = []
+    for d in dirs:
+        manifest = tomllib.load(open(os.path.join(d, "Cargo.toml"), "rb"))
+        name = manifest.get("package", {}).get("name", os.path.relpath(d, ROOT))
+        if name not in DEV_ONLY_CRATES:
+            out += test_support_leaks(name, manifest)
+    return out
 
 
 def test_only_attrs(s):
@@ -464,6 +506,10 @@ def disposition(key, cls, auth, linked, guard_text):
 
 
 def render():
+    leaks = shipped_test_support_leaks()
+    if leaks:
+        sys.exit("a shipped crate enables test-support, so its fenced spawns would ship uncounted:\n  "
+                 + "\n  ".join(leaks))
     sites, defs = scan()
     clos, tr = closures(), traced(sites, defs)
     places = gate_places()
@@ -531,6 +577,11 @@ def self_test():
                        ('feature = "test-support"', False), ("not(test)", True), ("unix", None),
                        ('any(feature = "test-support", feature = "wasm-backend")', None)):
         assert cfg_value(pred) is want, (pred, cfg_value(pred))
+    leak = {"dependencies": {"mvm-core": {"features": ["test-support"]}},
+            "features": {"default": ["extra"], "extra": ["mvm-vmm/test-support"]}}
+    assert len(test_support_leaks("x", leak)) == 2, test_support_leaks("x", leak)
+    assert not test_support_leaks("x", {"dev-dependencies": {"mvm-core": {"features": ["test-support"]}},
+                                        "features": {"test-support": ["mvm-core/test-support"]}})
 
 
 def main():
