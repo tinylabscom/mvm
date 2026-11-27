@@ -906,6 +906,13 @@ impl AnyBackend {
                         .map_err(|error| {
                             mvm_core::vm_backend::StandbyError::ClaimFailed(error.to_string())
                         })?;
+                claim
+                    .start_config
+                    .as_ref()
+                    .map_or(Ok(()), VmStartConfig::wait_for_admission_durability)
+                    .map_err(|error| {
+                        mvm_core::vm_backend::StandbyError::ClaimFailed(format!("{error:#}"))
+                    })?;
                 let id = backend.claim_standby(handle, claim)?;
                 Ok(OwnedWarmClaim { id, lifecycle })
             }

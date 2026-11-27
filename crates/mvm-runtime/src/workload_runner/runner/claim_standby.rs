@@ -428,6 +428,17 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             admitted_plan: Some(&claim.plan_json),
             late_volumes: &late_volumes,
         };
+        // The restored guest runs the moment the fork resumes it, so this is
+        // the warm counterpart of activation: everything above prepared the
+        // child on the host beside the admission's audit sync, and nothing the
+        // plan authorizes may run until that sync has succeeded. A failure
+        // here unwinds through `cleanup` with no child VMM to stop.
+        claim
+            .start_config
+            .as_ref()
+            .map_or(Ok(()), VmStartConfig::wait_for_admission_durability)
+            .map_err(|error| StandbyError::ClaimFailed(format!("{error:#}")))?;
+        claim_phase!("admission_durability");
         let forked = if preloaded_child_name.is_some() {
             self.driver.resume_preloaded_child(&fork_request)
         } else {

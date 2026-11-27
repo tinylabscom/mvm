@@ -229,12 +229,6 @@ pub fn claim_prepared_cli_cold<C>(
     ctx: &mvm_runtime::workload_runner::ClaimContext<'_>,
     handle: &StandbyHandle,
 ) -> PreparedCliWarmClaim<C> {
-    if let Err(error) = prepared.config().wait_for_admission_durability() {
-        return PreparedCliWarmClaim::Refused {
-            error,
-            dispatched: abandon_prepared_cli_cold(prepared),
-        };
-    }
     let PreparedCliCold {
         prepared:
             PreparedLaunch {
@@ -265,7 +259,6 @@ pub fn claim_prepared_cli_cold<C>(
         };
     }
     let retained_config = config.clone();
-    mvm_core::launch_trace::lap("warm_claim.admission_durability");
     match claim_cli_transient(
         backend,
         admitted,

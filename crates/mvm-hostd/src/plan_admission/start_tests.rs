@@ -1518,7 +1518,7 @@ fn uncertain_warm_stop_maps_to_cli_uncertain_without_becoming_terminal_refusal()
 }
 
 #[test]
-fn required_cli_warm_durability_refusal_spends_authority_before_runner_claim() {
+fn required_cli_warm_durability_refusal_spends_authority_without_claiming() {
     struct NoAnchor;
     impl mvm_runtime::checkpoint::CheckpointChainAnchor for NoAnchor {
         fn recorded_creation_digest(
@@ -1605,7 +1605,7 @@ fn required_cli_warm_durability_refusal_spends_authority_before_runner_claim() {
     let (error, dispatched) = match claim_prepared_cli_cold(prepared, &backend, &ctx, &handle) {
         PreparedCliWarmClaim::Refused { error, dispatched } => (error, dispatched),
         PreparedCliWarmClaim::Claimed { .. } => panic!("durability failure cannot claim"),
-        PreparedCliWarmClaim::ReservationLost(_) => panic!("durability failure precedes reserve"),
+        PreparedCliWarmClaim::ReservationLost(_) => panic!("durability failure is not a lost race"),
     };
     assert!(
         format!("{error:#}").contains("injected required audit sync failure"),
