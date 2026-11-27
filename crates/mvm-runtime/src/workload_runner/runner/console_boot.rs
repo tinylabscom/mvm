@@ -6,20 +6,23 @@ pub(super) fn supervisor_owns_console(kind: mvm_core::vm_backend::BackendKind) -
     kind == mvm_core::vm_backend::BackendKind::Hvf
 }
 
-/// Boot the VMM while the best-effort console follower is being installed.
-pub(super) fn boot_while_starting_console<T>(
+/// Boot the VMM while `beside` runs on its own thread: installing the
+/// best-effort console follower, and on a cold start syncing the launch's
+/// lease and generation first.
+pub(super) fn boot_beside<T>(
     boot: impl FnOnce() -> Result<T>,
-    start_console: impl FnOnce() + Send,
+    beside: impl FnOnce() + Send,
     boot_finished: impl FnOnce(),
 ) -> Result<T> {
     std::thread::scope(|scope| {
-        let console = scope.spawn(start_console);
+        let beside = scope.spawn(beside);
         let result = boot();
         boot_finished();
-        // Console capture is best-effort and must never turn a successful VM
-        // boot into a failure. Joining still ensures the follower is installed
-        // before activation can produce output.
-        let _ = console.join();
+        // A panic in `beside` must not turn a successful boot into a failure
+        // here: a caller that needs its outcome records it from inside.
+        // Joining ensures the follower is installed, and any sync finished,
+        // before activation.
+        let _ = beside.join();
         result
     })
 }

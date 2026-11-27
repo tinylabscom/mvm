@@ -280,7 +280,7 @@ impl ColdHvfChannel {
             redaction: &preparation.redaction,
             retention: plan_stream_retention(config.plan_json.as_deref()),
         };
-        let boot = console_boot::boot_while_starting_console(
+        let boot = console_boot::boot_beside(
             || {
                 Ok(HvfDriver::new().boot_cold_owned_verified(
                     &preparation.prepared.spec,

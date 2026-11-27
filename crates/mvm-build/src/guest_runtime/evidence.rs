@@ -428,28 +428,19 @@ impl VerifiedRuntimeArtifacts {
     }
 
     /// Transfer deletion responsibility to the launch lifecycle, without moving
-    /// or recopying any artifact. Failure keeps RAII cleanup in force.
-    pub fn persist(self) -> Result<PersistedRuntimeArtifacts, GuestRuntimeError> {
-        for path in [
-            self.overlay_path(),
-            self.overlay_verity_path(),
-            self.initramfs_path(),
-        ] {
-            std::fs::File::open(path)?.sync_all()?;
-        }
-        std::fs::File::open(self.directory.path())?.sync_all()?;
-        if let Some(parent) = self.directory.path().parent() {
-            std::fs::File::open(parent)?.sync_all()?;
-        }
-        Ok(PersistedRuntimeArtifacts {
+    /// or recopying any artifact. Nothing is synced: the lifecycle makes the
+    /// files and the directory entries naming them durable before anything
+    /// relies on them surviving a host crash.
+    pub fn keep(self) -> PersistedRuntimeArtifacts {
+        PersistedRuntimeArtifacts {
             directory: self.directory.keep(),
             archive_sha256: self.archive_sha256,
             declaration: self.declaration,
-        })
+        }
     }
 }
 
-/// Durable verified generation with no automatic deletion. This does not prove
+/// Verified generation with no automatic deletion. This does not prove
 /// execution or grant permission to delete: the lifecycle must bind these paths
 /// to its supervisor generation and prove termination before cleanup.
 #[derive(Debug)]
@@ -1368,7 +1359,7 @@ mod tests {
                 0o700
             );
             let inode = std::fs::metadata(first.overlay_path()).unwrap().ino();
-            let persisted = first.persist().unwrap();
+            let persisted = first.keep();
             assert_eq!(persisted.directory_path(), first_path);
             assert_eq!(
                 std::fs::metadata(persisted.overlay_path()).unwrap().ino(),
@@ -1469,26 +1460,6 @@ mod tests {
         assert_eq!(inode(snapshot().initramfs_path()), inode(initramfs_blob));
         // No staging names are left in the store.
         assert_eq!(std::fs::read_dir(&shared).unwrap().count(), 3);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn failed_persistence_cleans_only_its_own_unpublished_generation() {
-        let (dir, verified) = fixture();
-        let parent = tempfile::tempdir().unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let paths = ["overlay", "verity", "initramfs"].map(|name| dir.path().join(name));
-        let root = "a".repeat(64);
-        let selected = selection(&paths, &root);
-        let snapshot = verified
-            .snapshot_artifacts_in(&selected, parent.path())
-            .unwrap();
-        let generation = snapshot.directory_path().to_path_buf();
-        std::fs::remove_file(snapshot.initramfs_path()).unwrap();
-        assert!(snapshot.persist().is_err());
-        assert!(!generation.exists());
-        assert!(parent.path().is_dir());
     }
 
     #[test]

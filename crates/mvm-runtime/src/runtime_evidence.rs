@@ -20,9 +20,12 @@ use mvm_core::util::atomic_io::write_private_new;
 use mvm_core::vm_backend::VmStartConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod namespace;
 mod retire;
+#[cfg(test)]
+pub(crate) use namespace::durable_steps;
 use namespace::{check_owner, private_directory, sync_dir, sync_file};
 pub use retire::remove_retired_vm_evidence;
 
@@ -868,14 +871,55 @@ fn runtime_selection(
 /// content. The underscore keeps it outside the VM-name space.
 pub const SHARED_CONTENT_DIR: &str = "shared_content";
 
+/// What a bind wrote but has not made durable: each file, then the
+/// directories naming them, the namespace root last.
+#[derive(Debug, Default)]
+#[must_use = "a bind is not durable until its writes are synced"]
+pub(crate) struct UnsyncedBind {
+    files: Vec<PathBuf>,
+    directories: Vec<PathBuf>,
+    generation: Option<PathBuf>,
+}
+
+impl UnsyncedBind {
+    /// A file written under the lease after the bind, synced before the
+    /// directories that name it.
+    pub(crate) fn add_file(&mut self, file: PathBuf) {
+        self.files.push(file);
+    }
+
+    pub(crate) fn sync(self) -> Result<()> {
+        self.files.iter().try_for_each(|file| sync_file(file))?;
+        self.directories.iter().try_for_each(|dir| sync_dir(dir))
+    }
+
+    /// [`Self::sync`] before anything has started from the bind: a generation
+    /// that cannot be made durable is removed again.
+    pub(crate) fn sync_before_spawn(self) -> Result<()> {
+        let generation = self.generation.clone();
+        self.sync().inspect_err(|_| {
+            if let Some(generation) = generation
+                && let Err(error) = std::fs::remove_dir_all(&generation)
+            {
+                tracing::warn!(
+                    path = %generation.display(),
+                    %error,
+                    "could not remove a runtime generation that was never made durable"
+                );
+            }
+        })
+    }
+}
+
 /// A narrow lock distinct from the outer instance restore lock. Its directory
 /// is outside VM state, so PID-based orphan reconciliation cannot erase bytes.
 pub(crate) struct RuntimeLifecycleLease {
     directory: PathBuf,
     /// Whether `acquire` created `directory` and left its entry in the
-    /// namespace root unsynced. `bind` syncs it after the generation it
-    /// publishes, so one round makes both durable before the spawn.
-    entry_unsynced: bool,
+    /// namespace root unsynced. A bind syncs it after the generation it
+    /// publishes, in the same round, or at once before an installed bundle
+    /// records this VM as its user.
+    entry_unsynced: AtomicBool,
     _lock: std::fs::File,
 }
 
@@ -889,13 +933,15 @@ impl RuntimeLifecycleLease {
     /// no VM name can collide with it, and never deleted: it holds one copy per
     /// distinct runtime.
     fn shared_content(&self) -> Result<PathBuf> {
-        let root = self
-            .directory
-            .parent()
-            .context("runtime lifecycle namespace has no root")?;
-        let shared = root.join(SHARED_CONTENT_DIR);
+        let shared = self.root()?.join(SHARED_CONTENT_DIR);
         private_directory(&shared)?;
         Ok(shared)
+    }
+
+    fn root(&self) -> Result<&Path> {
+        self.directory
+            .parent()
+            .context("runtime lifecycle namespace has no root")
     }
 
     fn bundle_use_record(&self) -> PathBuf {
@@ -925,6 +971,11 @@ impl RuntimeLifecycleLease {
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
             "an unresolved bundle use already owns this VM name"
         );
+        // The registry's use must never outlive, across a power loss, the
+        // record under this VM that releases it.
+        if self.entry_unsynced.swap(false, Ordering::Relaxed) {
+            sync_dir(self.root()?)?;
+        }
         registry.retain_for_vm(sha, &config.name)?;
         write_private_new(&record, sha.as_bytes())?;
         sync_file(&record)?;
@@ -974,17 +1025,43 @@ impl RuntimeLifecycleLease {
         let lock = namespace::lock(&directory)?;
         Ok(Self {
             directory,
-            entry_unsynced,
+            entry_unsynced: entry_unsynced.into(),
             _lock: lock,
         })
     }
 
-    /// Publish a fresh immutable generation before any backend side effect.
-    /// Once persisted, neither an error return nor dropping the VM handle
-    /// removes the artifacts.
-    #[tracing::instrument(name = "runtime_lifecycle.bind", skip_all)]
+    /// [`Self::bind_unsynced`], durable before it returns.
     pub(crate) fn bind(&self, config: &VmStartConfig) -> Result<VmStartConfig> {
+        let (bound, unsynced) = self.bind_unsynced(config, None)?;
+        unsynced.sync_before_spawn()?;
+        Ok(bound)
+    }
+
+    /// Publish a fresh immutable generation before any backend side effect.
+    /// Once published, neither an error return nor dropping the VM handle
+    /// removes the artifacts; the caller syncs the returned writes before
+    /// anything relies on them surviving a host crash.
+    ///
+    /// `release` is a launch's signed archive, borrowed through the custody
+    /// boundary without reopening its mutable source path or repeating
+    /// signature verification.
+    #[tracing::instrument(name = "runtime_lifecycle.bind", skip_all)]
+    pub(crate) fn bind_unsynced(
+        &self,
+        config: &VmStartConfig,
+        release: Option<&mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime>,
+    ) -> Result<(VmStartConfig, UnsyncedBind)> {
         self.retain_installed_bundle(config)?;
+        if let Some(release) = release {
+            anyhow::ensure!(
+                config.runtime_release_proof.as_ref() == Some(release.proof()),
+                "runtime proof identity changed"
+            );
+            return self.bind_checked_ref(
+                config,
+                Some(CheckedLaunchRuntime::Release(release.manifest())),
+            );
+        }
         let minimum_protocol = mvm_agentd::vsock::MIN_SUPPORTED_PROTOCOL_VERSION;
         let home = self
             .directory
@@ -992,60 +1069,29 @@ impl RuntimeLifecycleLease {
             .and_then(Path::parent)
             .context("runtime lifecycle namespace has no home")?;
         let verified = verify_runtime_for_launch_at(config, minimum_protocol, Some(home))?;
-        self.bind_checked(config, verified.as_ref())
+        self.bind_checked_ref(config, verified.as_ref().map(CheckedLaunchRuntime::from))
     }
 
-    /// Bind an already authenticated selection without repeating release
-    /// signature verification. The selection still has to match this config;
-    /// copying and hashing the selected artifacts remains the custody point.
-    pub(crate) fn bind_checked(
-        &self,
-        config: &VmStartConfig,
-        verified: Option<&VerifiedLaunchRuntime>,
-    ) -> Result<VmStartConfig> {
-        self.bind_checked_ref(config, verified.map(CheckedLaunchRuntime::from))
-    }
-
-    /// Borrow a launch's signed archive through the custody boundary without
-    /// reopening its mutable source path or repeating signature verification.
-    pub(crate) fn bind_verified_release(
-        &self,
-        config: &VmStartConfig,
-        release: &mvm_build::guest_runtime::evidence::VerifiedReleaseRuntime,
-    ) -> Result<VmStartConfig> {
-        self.retain_installed_bundle(config)?;
-        anyhow::ensure!(
-            config.runtime_release_proof.as_ref() == Some(release.proof()),
-            "runtime proof identity changed"
-        );
-        self.bind_checked_ref(
-            config,
-            Some(CheckedLaunchRuntime::Release(release.manifest())),
-        )
-    }
-
-    /// Every bind ends here, so a lease this process created is durable before
-    /// any bound config reaches a backend.
+    /// Every bind ends here, so a lease this process created is among the
+    /// writes the caller makes durable.
     fn bind_checked_ref(
         &self,
         config: &VmStartConfig,
         verified: Option<CheckedLaunchRuntime<'_>>,
-    ) -> Result<VmStartConfig> {
-        let bound = self.publish_generation(config, verified)?;
-        if self.entry_unsynced {
-            sync_dir(
-                self.directory
-                    .parent()
-                    .context("runtime lifecycle namespace has no root")?,
-            )?;
+    ) -> Result<(VmStartConfig, UnsyncedBind)> {
+        let mut unsynced = UnsyncedBind::default();
+        let bound = self.publish_generation(config, verified, &mut unsynced)?;
+        if self.entry_unsynced.load(Ordering::Relaxed) {
+            unsynced.directories.push(self.root()?.to_path_buf());
         }
-        Ok(bound)
+        Ok((bound, unsynced))
     }
 
     fn publish_generation(
         &self,
         config: &VmStartConfig,
         verified: Option<CheckedLaunchRuntime<'_>>,
+        unsynced: &mut UnsyncedBind,
     ) -> Result<VmStartConfig> {
         let minimum_protocol = mvm_agentd::vsock::MIN_SUPPORTED_PROTOCOL_VERSION;
         let Some(verified) = verified else {
@@ -1139,9 +1185,18 @@ impl RuntimeLifecycleLease {
             "status": "retained-before-spawn",
         });
         write_private_new(&binding, &serde_json::to_vec(&record)?)?;
-        sync_file(&binding)?;
-        sync_dir(artifacts.directory_path())?;
-        let artifacts = artifacts.persist()?;
+        let artifacts = artifacts.keep();
+        unsynced.files.extend([
+            binding,
+            artifacts.overlay_path(),
+            artifacts.overlay_verity_path(),
+            artifacts.initramfs_path(),
+        ]);
+        unsynced.directories.extend([
+            artifacts.directory_path().to_path_buf(),
+            self.directory.clone(),
+        ]);
+        unsynced.generation = Some(artifacts.directory_path().to_path_buf());
         tracing::warn!(
             path = %artifacts.directory_path().display(),
             "retaining runtime generation before spawn; deletion requires independently confirmed absence of all VM readers"
@@ -1412,6 +1467,77 @@ mod tests {
         assert!(rootfs.exists(), "an older install is not eviction-eligible");
     }
 
+    /// A new lease entry is durable before an installed bundle records this VM
+    /// as its user, so a power loss cannot leave the registry's use behind
+    /// with no record under the VM to release it. The root is synced once.
+    #[test]
+    fn a_new_lease_entry_is_durable_before_an_installed_bundle_is_retained() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let registry = mvm_core::plan::bundle::BundleRegistry::default_path().unwrap();
+        let sha = "b".repeat(64);
+        let rootfs = registry.install_dir(&sha).join("artifacts/rootfs.ext4");
+        mvm_core::config::create_private_dir(rootfs.parent().unwrap()).unwrap();
+        std::fs::write(&rootfs, b"fixture rootfs").unwrap();
+        let config = VmStartConfig {
+            name: "bundle-root-first".into(),
+            rootfs_path: rootfs.display().to_string(),
+            ..Default::default()
+        };
+
+        let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
+        let root = namespace::root(false).unwrap();
+        namespace::durable_steps::take();
+        lease.bind(&config).unwrap();
+
+        let steps = namespace::durable_steps::take();
+        assert_eq!(
+            steps.first(),
+            Some(&root),
+            "the lease entry is synced before the bundle use is recorded: {steps:?}"
+        );
+        assert_eq!(steps.iter().filter(|path| **path == root).count(), 1);
+        assert!(steps.contains(&lease.bundle_use_record()));
+    }
+
+    /// A bind that cannot make its generation durable removes it again, as
+    /// nothing has been started from it yet.
+    #[test]
+    fn a_bind_whose_sync_fails_removes_the_generation_it_published() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"fixture rootfs").unwrap();
+        let (fixture, _) = checked_source_runtime_fixture("unsynced-source", &rootfs).unwrap();
+        let lease = RuntimeLifecycleLease::acquire("unsynced-bind").unwrap();
+        let _hook = namespace::durable_steps::hook(|path| {
+            anyhow::ensure!(!path.ends_with("launch.json"), "fsync: input/output error");
+            Ok(())
+        });
+
+        let error = lease
+            .bind(&VmStartConfig {
+                name: "unsynced-bind".into(),
+                ..fixture
+            })
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("input/output error"));
+        let generations = std::fs::read_dir(&lease.directory)
+            .unwrap()
+            .filter(|entry| entry.as_ref().unwrap().path().is_dir())
+            .count();
+        assert_eq!(generations, 0, "the unsynced generation is removed");
+    }
+
     #[test]
     fn generic_preflight_refuses_mixed_provenance_before_proof_or_snapshot_effects() {
         let home = tempfile::tempdir().unwrap();
@@ -1554,7 +1680,7 @@ mod tests {
         let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
         assert!(
             lease
-                .bind_checked(&config, None)
+                .bind_checked_ref(&config, None)
                 .unwrap_err()
                 .to_string()
                 .contains("no verified launch evidence"),
@@ -1565,7 +1691,7 @@ mod tests {
         );
         assert!(
             lease
-                .bind_checked(&config, Some(&checked))
+                .bind_checked_ref(&config, Some(CheckedLaunchRuntime::from(&checked)))
                 .unwrap_err()
                 .to_string()
                 .contains("originally selected archive"),

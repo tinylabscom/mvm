@@ -411,6 +411,15 @@ mvmctl machine checkpoint create <machine> --class vm-full
 
 `mvmctl cache prune` also removes an untagged one once it ages out.
 
+### "bundle … is already retained for a VM named …"
+
+An installed bundle records each machine that boots from it, and a confirmed
+stop releases that record. A power loss while such a machine was starting can
+leave the record with nothing to release it, so the same machine name and
+bundle are refused, and the bundle cannot be removed or reinstalled. Check
+with `mvmctl machine ls` that no machine of that name is running, then delete
+the file the error names (under `~/.mvm/bundles/`).
+
 ## Network Issues
 
 ### MicroVM has no internet

@@ -3405,7 +3405,7 @@ mod tests {
             assert!(checked.snapshot_artifacts(&selection).is_err());
             fs::write(path, original).unwrap();
         }
-        let persisted = snapshot.persist().unwrap();
+        let persisted = snapshot.keep();
         assert_eq!(
             file_digest(&persisted.overlay_path()).unwrap(),
             checked.declaration(arch).unwrap().overlay_sha256

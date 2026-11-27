@@ -64,8 +64,25 @@ fn exact_final_config_and_physical_recipe_are_checked_before_native_effects() {
     owner.bind_to_config(&mut config).unwrap();
     let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
     assert!(!has_retained_kernel(&lease).unwrap());
-    assert!(KernelBoundLaunch::bind(config.clone(), BackendKind::Qemu, &lease).is_err());
-    let bound = KernelBoundLaunch::bind(config, BackendKind::Hvf, &lease).unwrap();
+    assert!(
+        KernelBoundLaunch::bind(
+            config.clone(),
+            BackendKind::Qemu,
+            &lease,
+            &mut Default::default()
+        )
+        .is_err()
+    );
+    let mut unsynced = crate::runtime_evidence::UnsyncedBind::default();
+    let bound = KernelBoundLaunch::bind(config, BackendKind::Hvf, &lease, &mut unsynced).unwrap();
+    // The pending record's contents are synced in the launch's deferred
+    // round, before the lease directory that names it.
+    crate::runtime_evidence::durable_steps::take();
+    unsynced.sync().unwrap();
+    assert_eq!(
+        crate::runtime_evidence::durable_steps::take(),
+        vec![lease.canonical_kernel_record()]
+    );
     assert!(Arc::ptr_eq(
         bound.config().canonical_kernel.as_ref().unwrap(),
         &owner
@@ -184,7 +201,13 @@ fn bound_firecracker_launch(
     };
     owner.bind_to_config(&mut config).unwrap();
     let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
-    let bound = KernelBoundLaunch::bind(config, BackendKind::Firecracker, &lease).unwrap();
+    let bound = KernelBoundLaunch::bind(
+        config,
+        BackendKind::Firecracker,
+        &lease,
+        &mut Default::default(),
+    )
+    .unwrap();
     (owner, bound, lease)
 }
 
@@ -308,9 +331,14 @@ fn observe_booted_binds_the_firecracker_process_witness_not_an_hvf_instance() {
         ..Default::default()
     };
     rebound.bind_to_config(&mut config).unwrap();
-    let error = KernelBoundLaunch::bind(config, BackendKind::Firecracker, &lease)
-        .err()
-        .expect("a retained generation must block reuse of the VM name");
+    let error = KernelBoundLaunch::bind(
+        config,
+        BackendKind::Firecracker,
+        &lease,
+        &mut Default::default(),
+    )
+    .err()
+    .expect("a retained generation must block reuse of the VM name");
     assert!(format!("{error:#}").contains("still retained"), "{error:#}");
     drop(rebound);
     drop(lease);

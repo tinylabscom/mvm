@@ -60,6 +60,7 @@ mod claim_tests;
 mod cold_hvf_channel;
 mod console_boot;
 mod durability;
+mod lease_sync_tests;
 mod list_tests;
 mod parent_verify;
 mod preload;
