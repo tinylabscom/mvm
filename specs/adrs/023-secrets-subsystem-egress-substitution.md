@@ -296,6 +296,40 @@ exactly as for any other bound secret.
   exposure this design eliminates. Signing happens host-side, in the
   keyholder.
 
+## Encryption layering — one primitive per boundary, never stacked
+
+Each trust boundary gets the primitive its own threat calls for, and no second
+layer is stacked on a transport that already authenticates both ends:
+
+| Boundary | Transport | Mechanism |
+|---|---|---|
+| Fleet coordinator ↔ fleet agent | `mvmd`'s own transport (QUIC through iroh) | TLS native to the transport, authenticated by both nodes' identities; mvm adds no TLS layer of its own |
+| Host ↔ guest control plane | virtio-vsock, no TLS | `SealedFrame` (`mvm_core::net::session`): an AES-GCM sealed payload, an Ed25519 signature over the frame context and ciphertext, and a session id with a monotonic sequence for replay rejection |
+| Host process ↔ OS keystore | Keychain, Secret Service or Credential Manager | `KeyProvider` (`mvm_core::crypto::keystore`) returns key material as `secrecy::SecretBox`, zeroized on drop |
+| Volume and snapshot bytes at rest | local disk | AES-256-GCM (`mvm_core::crypto::snapshot_crypto`), chunked for large snapshots (`snapshot_encryption`), with an HMAC-SHA256 integrity envelope (`snapshot_hmac`) |
+| Outbound HTTPS the host terminates for a workload | TLS | the per-VM name-constrained CA (`mvm_core::crypto::egress_ca`) described above |
+
+The egress CA is self-signed per VM rather than an intermediate under a
+long-lived host root. An intermediate handed to the guest would need
+partial-chain verification, which older OpenSSL-backed clients do not do, and
+the mechanism exists so that an unmodified client works. A per-VM anchor also
+keeps a leaked key's reach inside that VM.
+
+Secret-carrying types return `SecretBox`-wrapped material (`KeyProvider`,
+`SecretStore`), and `xtask check-no-display-on-secret-types` rejects a derived
+or hand-written `Debug`/`Display` on a type whose name looks secret-shaped.
+Key rotation (`mvm_core::crypto::key_rotation`) re-wraps data keys under a new
+master-key version without touching the ciphertext they protect, and an
+interrupted migration converges when re-run: records already at the target
+version are skipped. A passphrase handed to a
+subprocess such as `cryptsetup` is staged through a mode-0600 tempfile that is
+unlinked on drop, never placed in argv.
+
+mvm owns these single-host primitives. Object-store volume encryption,
+per-volume key derivation for it, and fleet-wide key orchestration belong to
+`mvmd`, built on this substrate; so does `mvmd`'s own key hierarchy. Hardware
+key attestation stays out of scope, as ADR-001 records.
+
 ## Primitive selection — wire, crypto and storage stay on in-tree primitives
 
 The wire format is `serde` with canonical

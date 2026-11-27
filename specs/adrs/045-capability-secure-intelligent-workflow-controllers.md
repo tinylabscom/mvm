@@ -736,7 +736,7 @@ Before implementation reaches production:
 1. Amend ADR-001 with the controller, workflow, mailbox, resource-amplification,
    semantic-planning, and cross-node threat model and preview claims.
 2. Amend ADR-014's `mvmd` launch-authority rule with the precise `mvmd`-rooted delegation rule.
-3. Write a guest-host encrypted-session ADR reconciling ADR-008 and ADR-020.
+3. Write a guest-host encrypted-session ADR reconciling ADR-023's encryption layering and ADR-020.
 4. Write or finalize the mailbox transactional-storage and archive ADR.
 5. Decide private actor checkpoint semantics and classification/declassification
    policy if not fully covered by existing checkpoint decisions.

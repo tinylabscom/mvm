@@ -12,7 +12,7 @@ backend, or block the initial trusted-host persistence hardening.
 The current governing model is [ADR-001](../adrs/001-microvm-security-posture.md):
 the host is trusted with execution and private data. Its hardware-backed
 signer amendment does not make guest execution confidential from that host.
-[ADR-008](../adrs/008-iroh-aware-encryption-layering.md) assigns encryption and
+[ADR-023](../adrs/023-secrets-subsystem-egress-substitution.md#encryption-layering--one-primitive-per-boundary-never-stacked) assigns encryption and
 authentication to distinct boundaries; [ADR-023](../adrs/023-secrets-subsystem-egress-substitution.md#primitive-selection--wire-crypto-and-storage-stay-on-in-tree-primitives)
 retains focused in-tree primitives rather than replacing the crypto/storage
 stack. This proposal preserves those decisions for trusted-host operation.
@@ -225,7 +225,7 @@ approval model.
 
 | Surface | Trusted-host requirement | Additional host-blind requirement |
 | --- | --- | --- |
-| Transport ingress and egress | Authenticated peers and explicit termination boundary per ADR-008. | End-to-end protected channel terminates inside the attested guest and at the authorized client/service. Host proxies relay ciphertext. Host TLS termination or credential substitution on protected data is incompatible unless moved into the approved boundary. Vsock alone is not confidential from the host. |
+| Transport ingress and egress | Authenticated peers and explicit termination boundary per ADR-023. | End-to-end protected channel terminates inside the attested guest and at the authorized client/service. Host proxies relay ciphertext. Host TLS termination or credential substitution on protected data is incompatible unless moved into the approved boundary. Vsock alone is not confidential from the host. |
 | Outputs, tools and exports | Authorized destinations and declared plaintext lifetime. | Encrypt before leaving the guest to the authorized recipient. Include stdout/stderr, streaming deltas, tool arguments/results and error bodies. A host-executed tool needing plaintext is refused or explicitly outside the host-blind workload profile. |
 | Diagnostics and audit | Minimize capture, bound retention and access; align with #4184. | No host plaintext console, traces, crash/core dumps or support bundles. Encrypt sensitive diagnostics to an approved recipient; host-visible audit uses bounded codes and opaque references. Signing diagnostic content does not hide it. |
 | Snapshots/checkpoints and volumes | Explicit protection, protected staging, cleanup and restore verification under #4179–#4183. | Memory, registers, device state, disks, manifests and guest keys stay encrypted outside the boundary. Do not reuse a host-plaintext snapshot API. Unsupported protected capture/restore is refused; disabling snapshots is a valid initial profile restriction. |

@@ -110,7 +110,6 @@ const PENDING: &[&str] = &[
     "specs/adrs/004-sealed-signed-builder-image.md",
     "specs/adrs/005-function-call-entrypoints.md",
     "specs/adrs/007-vmbackend-single-trait.md",
-    "specs/adrs/008-iroh-aware-encryption-layering.md",
     "specs/adrs/014-signed-audited-execution-plans.md",
     "specs/adrs/015-hostd-protocol-versioning.md",
     "specs/adrs/020-host-services-broker.md",
