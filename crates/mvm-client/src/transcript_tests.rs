@@ -256,10 +256,7 @@ impl Fixture {
             .build()
             .unwrap();
         runtime
-            .block_on(
-                self.signer
-                    .sign_and_emit(&for_plan(&self.plan, None, kind, [])),
-            )
+            .block_on(self.signer.sign_and_emit(&for_plan(&self.plan, kind, [])))
             .unwrap();
     }
 }
@@ -640,7 +637,7 @@ fn valid_pruned_history_cannot_be_used_to_assert_a_missing_original_seal() {
         .unwrap();
     for _ in 0..3 {
         runtime
-            .block_on(signer.sign_and_emit(&for_plan(&plan, None, "plan.observed", [])))
+            .block_on(signer.sign_and_emit(&for_plan(&plan, "plan.observed", [])))
             .unwrap();
     }
     signer

@@ -645,10 +645,9 @@ pub struct TimeoutSpec {
     pub exec_secs: u32,
 }
 
-/// Opaque pointer to a policy bundle. Until the real
-/// `mvm-core::policy::PolicyBundle` resolver lands, this is a name the
-/// supervisor's `Noop` resolver maps to a default-deny / open stance
-/// per its bundle.
+/// Signed policy label. Nothing resolves it into a policy file; what is
+/// enforced is bound to the plan by digest elsewhere (for network policy, a
+/// policy asset identity).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PolicyRef(pub String);

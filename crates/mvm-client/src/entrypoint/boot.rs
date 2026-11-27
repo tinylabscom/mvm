@@ -65,7 +65,6 @@ impl OwnedClientBoot {
                 &resources.backend,
                 &mut resources.admission.admitted,
                 &mut resources.config,
-                resources.admission.policy_bundle.as_ref(),
                 resources.verified_runtime.as_deref(),
                 &mut resources.built_runtime,
                 &mut group.runtime,
@@ -462,8 +461,6 @@ pub struct SessionAuditSubstrate {
     pub mailbox_posture: Option<mvm_hostd::plan_admission::MailboxLaunchPosture>,
     /// Trusted admission's optional caller registration, never a producer ACK.
     pub caller_registration: Option<mvm_core::vm_backend::caller_registration::CallerRegistration>,
-    /// The tenant policy bundle the plan resolved, serialized, when it has one.
-    pub bundle_json: Option<String>,
     /// Config-drive files the plan's guest boot config needs.
     pub config_files: Vec<mvm_core::vm_backend::VmFile>,
     /// Frozen host-directory images admission hardened to read-only.
@@ -488,7 +485,6 @@ impl SessionAuditSubstrate {
         start_config.plan_json = Some(self.plan_json);
         start_config.audit_context = Some(self.audit_context);
         start_config.caller_registration = self.caller_registration;
-        start_config.bundle_json = self.bundle_json;
         start_config.config_files.extend(self.config_files);
         start_config.admission_durability = self.durability;
         self.read_only_materialized_images
@@ -965,7 +961,6 @@ fn boot_session_core(
     let crate::admission::AdmissionContext {
         admitted,
         emitter,
-        policy_bundle,
         host_signer_public_path,
     } = context;
     let audit_plan = admitted.plan().clone();
@@ -974,7 +969,6 @@ fn boot_session_core(
             backend: &backend,
             admitted,
             config: start_config,
-            policy_bundle: policy_bundle.as_ref(),
             emitter: Some(&emitter),
             assurance: None,
         },
@@ -988,7 +982,6 @@ fn boot_session_core(
         Box::new(crate::admission::AdmissionContext {
             admitted: started.admitted,
             emitter,
-            policy_bundle,
             host_signer_public_path,
         }),
     ))
@@ -1535,7 +1528,6 @@ mod tests {
                 audit_context: test_audit_context(),
                 mailbox_posture: None,
                 caller_registration: None,
-                bundle_json: Some("policy-bundle".into()),
                 config_files: Vec::new(),
                 read_only_materialized_images: vec!["image.ext4".into()],
                 built_pack_check: None,
@@ -1556,7 +1548,6 @@ mod tests {
                 Some(test_audit_context()),
                 "the endpoint refuses to start without the admitted audit identity"
             );
-            assert_eq!(config.bundle_json.as_deref(), Some("policy-bundle"));
             assert_eq!(
                 config.admission_durability.as_ref().unwrap().wait().is_ok(),
                 should_succeed,

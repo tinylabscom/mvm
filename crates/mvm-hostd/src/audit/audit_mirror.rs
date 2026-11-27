@@ -268,7 +268,6 @@ mod tests {
                         crate::audit::audit_recorder::EventCategory::Plan,
                         "plan.launched",
                         &crate::audit::signer::tests::sample_plan(),
-                        None,
                         [],
                     ))
             }))

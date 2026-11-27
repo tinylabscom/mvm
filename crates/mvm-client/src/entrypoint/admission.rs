@@ -238,12 +238,6 @@ impl EntrypointAdmission {
         }
         let plan_json = serde_json::to_string(ctx.admitted.signed())
             .context("serializing admitted plan for the entrypoint VM")?;
-        let bundle_json = ctx
-            .policy_bundle
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .context("serializing admitted policy bundle for the entrypoint VM")?;
         let caller_registration = producer
             .map(|(identity, client)| {
                 use mvm_core::vm_backend::caller_registration::CallerRegistration;
@@ -277,7 +271,6 @@ impl EntrypointAdmission {
                 audit_context: ctx.admitted.workload_audit_context(),
                 mailbox_posture: ctx.admitted.mailbox_posture(),
                 caller_registration,
-                bundle_json,
                 built_pack_check: ctx.admitted.built_pack_boot_check()?,
                 config_files: start_config.config_files,
                 read_only_materialized_images: ctx
@@ -703,8 +696,6 @@ mod tests {
             .write_to_dir(dir.path())
             .expect("write sidecar");
 
-        // A literal-IP allow-list skips DNS resolution in the generated signed
-        // policy, so this exercises the real threading without a resolver.
         let admitted = EntrypointAdmission::builder("firecracker")
             .agent_verb_override(vec!["run-entrypoint".into()])
             .network_policy(NetworkPolicy::allow_list(vec![HostPort::new(
@@ -716,27 +707,21 @@ mod tests {
             .admit(inputs(&rootfs, "invoke-proof-allow"))
             .expect("entrypoint boot admitted");
 
-        // deny_all resolves to no generated bundle; the allow-list resolves to
-        // concrete L4 rules, so the bundle's presence proves the resolved
-        // policy survived rather than being hardcoded to deny_all.
-        let bundle = admitted
-            .context
-            .policy_bundle
-            .as_ref()
-            .expect("allow-list admission must generate a signed egress policy bundle");
-        assert!(
-            bundle
-                .egress
-                .allow_list
-                .iter()
-                .any(|(host, port)| host == "127.0.0.1" && *port == 443)
-        );
-        assert!(
-            bundle
-                .network
-                .l4
-                .iter()
-                .any(|r| r.dst_cidr == "127.0.0.1/32" && r.port_lo == 443 && r.port_hi == 443)
+        // deny_all signs the `local-default` label and the deny-all digest; the
+        // allow-list signs a generated label and the digest of exactly that
+        // allow-list, so the plan proves the resolved policy survived rather
+        // than being hardcoded to deny_all.
+        let allow = NetworkPolicy::allow_list(vec![HostPort::new("127.0.0.1", 443)]);
+        let plan = admitted.context.admitted.plan();
+        assert_ne!(plan.network_policy.0, mvm_core::plan::DEFAULT_POLICY_REF);
+        let policy_asset = plan
+            .asset_identities
+            .iter()
+            .find(|asset| asset.kind == mvm_core::plan::AssetKind::Policy)
+            .expect("the signed plan binds the network policy as an asset");
+        assert_eq!(
+            policy_asset.digest,
+            mvm_core::policy::network_policy::content_sha256(&allow)
         );
     }
 

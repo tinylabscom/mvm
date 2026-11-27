@@ -3405,8 +3405,9 @@ fn tenant_orchestration_commands_are_not_mvmctl_surface() {
     let err = Cli::try_parse_from(["mvmctl", "tenant"])
         .expect_err("mvmd-owned command should not parse under mvmctl");
     assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
-    // `policy` is the workload's own authored policy, resolved locally. The
-    // tenant bundle verbs — authoring, rollout, rollback — stay in mvmd.
+    // `policy` is the workload's own authored policy, resolved locally.
+    // Tenant policy verbs — authoring, rollout, rollback — are not mvmctl
+    // surface.
     for verb in ["apply", "rollback", "rollout", "publish"] {
         let err = Cli::try_parse_from(["mvmctl", "policy", verb])
             .expect_err("tenant policy verbs are not mvmctl surface");

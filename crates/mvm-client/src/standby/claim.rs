@@ -233,11 +233,6 @@ mod tests {
                 )?;
                 config.admission_durability = Some(durability);
                 config.plan_json = Some(serde_json::to_string(context.admitted.signed())?);
-                config.bundle_json = context
-                    .policy_bundle
-                    .as_ref()
-                    .map(serde_json::to_string)
-                    .transpose()?;
                 Ok(crate::admission::CliColdAdmissionInput::new(
                     CliAdmission::new_for_rootfs(context, &rootfs),
                     None,

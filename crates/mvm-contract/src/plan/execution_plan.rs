@@ -131,8 +131,10 @@ pub struct ExecutionPlan {
     /// enforce for this boot.
     pub admission_profile: AdmissionProfile,
 
-    /// Network policy reference: the tenant bundle whose egress policy is
-    /// projected into the per-VM endpoint's egress gate.
+    /// Network policy label: `local-default` for a launch that grants no
+    /// egress, otherwise `<tenant>:<workload>`, the name of the policy asset
+    /// identity that binds the launch's `NetworkPolicy` digest. A label, not
+    /// a reference: nothing resolves it into a file.
     pub network_policy: PolicyRef,
 
     /// Networking transport mode. Closed by default ([`NetworkMode::None`]): no

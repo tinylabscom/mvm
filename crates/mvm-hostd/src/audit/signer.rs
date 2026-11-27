@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mvm_core::plan::{ExecutionPlan, PlanId, TenantId};
-use mvm_core::policy::{PolicyBundle, PolicyId};
+use mvm_core::policy::PolicyId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -28,12 +28,12 @@ pub type PlanAuditEntry =
 /// On-disk representation of one host audit line.
 pub type SignedEnvelope = mvm_contract::verify::SignedEnvelope<PlanAuditEntry>;
 
-/// Construct an audit entry bound to a plan + (optional) bundle.
+/// Construct an audit entry bound to a plan. `bundle_id` and
+/// `bundle_version` stay `None`: no policy bundle is admitted.
 /// The plan's `audit_labels` are merged into the entry's labels;
 /// per-event extras override on collision.
 pub fn for_plan(
     plan: &ExecutionPlan,
-    bundle: Option<&PolicyBundle>,
     event: impl Into<String>,
     extras: impl IntoIterator<Item = (String, String)>,
 ) -> PlanAuditEntry {
@@ -44,8 +44,8 @@ pub fn for_plan(
         tenant: plan.tenant.clone(),
         plan_id: plan.plan_id.clone(),
         plan_version: plan.plan_version,
-        bundle_id: bundle.map(|b| b.bundle_id.clone()),
-        bundle_version: bundle.map(|b| b.bundle_version),
+        bundle_id: None,
+        bundle_version: None,
         image_name: plan.image.name.clone(),
         image_sha256: plan.image.sha256.to_ascii_lowercase(),
         event: event.into(),
@@ -59,13 +59,11 @@ pub fn for_plan(
 /// calls this on the first byte per direction of a new flow.
 pub fn flow_opened(
     plan: &ExecutionPlan,
-    bundle: Option<&PolicyBundle>,
     flow_id: &str,
     direction: FlowDirection,
 ) -> PlanAuditEntry {
     for_plan(
         plan,
-        bundle,
         FLOW_OPENED_EVENT,
         [
             ("flow_id".to_string(), flow_id.to_string()),
@@ -80,14 +78,12 @@ pub fn flow_opened(
 /// shutdown).
 pub fn flow_closed(
     plan: &ExecutionPlan,
-    bundle: Option<&PolicyBundle>,
     flow_id: &str,
     direction: FlowDirection,
     reason: FlowCloseReason,
 ) -> PlanAuditEntry {
     for_plan(
         plan,
-        bundle,
         FLOW_CLOSED_EVENT,
         [
             ("flow_id".to_string(), flow_id.to_string()),
@@ -104,7 +100,6 @@ pub fn flow_closed(
 /// observer killed this flow and why?" from the signed chain alone.
 pub fn flow_observer_fault(
     plan: &ExecutionPlan,
-    bundle: Option<&PolicyBundle>,
     flow_id: &str,
     direction: FlowDirection,
     observer: &str,
@@ -112,7 +107,6 @@ pub fn flow_observer_fault(
 ) -> PlanAuditEntry {
     for_plan(
         plan,
-        bundle,
         FLOW_OBSERVER_FAULT_EVENT,
         [
             ("flow_id".to_string(), flow_id.to_string()),
@@ -128,7 +122,6 @@ pub fn flow_observer_fault(
 /// digests to the audit stream.
 pub fn transcript_sealed(
     plan: &ExecutionPlan,
-    bundle: Option<&PolicyBundle>,
     capture_id: &str,
     vm_name: &str,
     sealed_root_hex: &str,
@@ -137,7 +130,6 @@ pub fn transcript_sealed(
 ) -> PlanAuditEntry {
     for_plan(
         plan,
-        bundle,
         TRANSCRIPT_SEALED_EVENT,
         [
             (LABEL_CAPTURE_ID.to_string(), capture_id.to_string()),
@@ -314,7 +306,6 @@ pub(crate) mod tests {
         KeyRotationSpec, Nonce, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
         RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TimeoutSpec, WorkloadId,
     };
-    use mvm_core::policy::{AuditPolicy, BundleNetworkPolicy, EgressPolicy, KeyPolicy, PiiPolicy};
     use std::collections::BTreeMap;
 
     pub(crate) fn sample_plan() -> ExecutionPlan {
@@ -402,21 +393,6 @@ pub(crate) mod tests {
         }
     }
 
-    fn sample_bundle() -> PolicyBundle {
-        PolicyBundle {
-            schema_version: 1,
-            bundle_id: PolicyId("bundle-y".to_string()),
-            bundle_version: 3,
-            network: BundleNetworkPolicy::default(),
-            egress: EgressPolicy::default(),
-            pii: PiiPolicy::default(),
-            artifact: mvm_core::policy::policies::ArtifactPolicy::default(),
-            keys: KeyPolicy::default(),
-            audit: AuditPolicy::default(),
-            wasi: Default::default(),
-        }
-    }
-
     #[test]
     fn noop_audit_signer_is_constructable() {
         let _: Box<dyn AuditSigner> = Box::new(NoopAuditSigner);
@@ -443,15 +419,23 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn entry_for_plan_binds_plan_bundle_image() {
+    fn entry_for_plan_copies_the_typed_caller_commitment() {
+        let mut plan = sample_plan();
+        let commitment = mvm_core::plan::CallerCommitment::from_bytes([0x5a; 32]);
+        plan.caller_commitment = Some(commitment.clone());
+        let entry = for_plan(&plan, "plan.admitted", []);
+        assert_eq!(entry.caller_commitment, Some(commitment));
+    }
+
+    #[test]
+    fn entry_for_plan_binds_plan_and_image_and_no_bundle() {
         let plan = sample_plan();
-        let bundle = sample_bundle();
-        let entry = for_plan(&plan, Some(&bundle), "plan.verified", []);
+        let entry = for_plan(&plan, "plan.verified", []);
         assert_eq!(entry.plan_id, plan.plan_id);
         assert_eq!(entry.plan_version, plan.plan_version);
         assert_eq!(entry.tenant, plan.tenant);
-        assert_eq!(entry.bundle_id, Some(bundle.bundle_id.clone()));
-        assert_eq!(entry.bundle_version, Some(bundle.bundle_version));
+        assert_eq!(entry.bundle_id, None);
+        assert_eq!(entry.bundle_version, None);
         assert_eq!(entry.image_name, plan.image.name);
         // SHA is normalised to lowercase regardless of plan input.
         assert_eq!(entry.image_sha256, "abc123");
@@ -461,30 +445,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn entry_for_plan_copies_the_typed_caller_commitment() {
-        let mut plan = sample_plan();
-        let commitment = mvm_core::plan::CallerCommitment::from_bytes([0x5a; 32]);
-        plan.caller_commitment = Some(commitment.clone());
-        let entry = for_plan(&plan, None, "plan.admitted", []);
-        assert_eq!(entry.caller_commitment, Some(commitment));
-    }
-
-    #[test]
-    fn entry_for_plan_handles_missing_bundle() {
-        let plan = sample_plan();
-        let entry = for_plan(&plan, None, "plan.verified", []);
-        assert_eq!(entry.bundle_id, None);
-        assert_eq!(entry.bundle_version, None);
-        // Image still bound from plan.
-        assert_eq!(entry.image_name, plan.image.name);
-    }
-
-    #[test]
     fn entry_for_plan_extras_override_plan_labels() {
         let plan = sample_plan(); // has workflow=etl-1
         let entry = for_plan(
             &plan,
-            None,
             "evt",
             [("workflow".to_string(), "override".to_string())],
         );
@@ -559,7 +523,7 @@ pub(crate) mod tests {
     #[test]
     fn flow_opened_helper_carries_canonical_event_and_labels() {
         let plan = sample_plan();
-        let entry = flow_opened(&plan, None, "f00ba4", FlowDirection::Egress);
+        let entry = flow_opened(&plan, "f00ba4", FlowDirection::Egress);
 
         assert_eq!(entry.event, FLOW_OPENED_EVENT);
         assert_eq!(entry.event, "gateway.flow_opened");
@@ -574,7 +538,7 @@ pub(crate) mod tests {
     fn transcript_sealed_helper_carries_only_ciphertext_root_metadata() {
         let plan = sample_plan();
         let root = "ab".repeat(32);
-        let entry = transcript_sealed(&plan, None, "capture-1", "vm-1", &root, 7, false);
+        let entry = transcript_sealed(&plan, "capture-1", "vm-1", &root, 7, false);
 
         assert_eq!(entry.event, TRANSCRIPT_SEALED_EVENT);
         assert_eq!(
@@ -624,8 +588,8 @@ pub(crate) mod tests {
         let plan = sample_plan();
         let root = "cd".repeat(32);
 
-        let owned = transcript_sealed(&plan, None, "capture-2", "vm-2", &root, 4, false);
-        let adopted = transcript_sealed(&plan, None, "capture-2", "vm-2", &root, 4, true);
+        let owned = transcript_sealed(&plan, "capture-2", "vm-2", &root, 4, false);
+        let adopted = transcript_sealed(&plan, "capture-2", "vm-2", &root, 4, true);
 
         assert_eq!(owned.labels.get(LABEL_ADOPTED), Some(&"false".to_string()));
         assert_eq!(adopted.labels.get(LABEL_ADOPTED), Some(&"true".to_string()));
@@ -637,7 +601,6 @@ pub(crate) mod tests {
         let plan = sample_plan();
         let entry = flow_closed(
             &plan,
-            None,
             "f00ba4",
             FlowDirection::Ingress,
             FlowCloseReason::Eof,
@@ -657,7 +620,7 @@ pub(crate) mod tests {
         // "what workload was this flow attributed to?" without
         // dereferencing plan_id separately.
         let plan = sample_plan(); // sample_plan adds workflow=etl-1.
-        let entry = flow_opened(&plan, None, "f1", FlowDirection::Egress);
+        let entry = flow_opened(&plan, "f1", FlowDirection::Egress);
         assert_eq!(entry.labels.get("workflow"), Some(&"etl-1".to_string()));
     }
 
@@ -674,7 +637,7 @@ pub(crate) mod tests {
             FlowCloseReason::PolicyDropped,
             FlowCloseReason::Shutdown,
         ] {
-            let entry = flow_closed(&plan, None, "f1", FlowDirection::Egress, reason);
+            let entry = flow_closed(&plan, "f1", FlowDirection::Egress, reason);
             emitted.insert(entry.labels.get("reason").cloned().unwrap());
         }
         assert_eq!(emitted.len(), 4, "all four reasons must be distinguishable");
@@ -685,7 +648,6 @@ pub(crate) mod tests {
         let plan = sample_plan();
         let entry = flow_observer_fault(
             &plan,
-            None,
             "vm-egress",
             FlowDirection::Egress,
             "egress-redactor",
@@ -709,7 +671,7 @@ pub(crate) mod tests {
     fn capturing_audit_signer_records_entries() {
         let signer = CapturingAuditSigner::new();
         let plan = sample_plan();
-        let entry = for_plan(&plan, None, "plan.verified", []);
+        let entry = for_plan(&plan, "plan.verified", []);
 
         // Sync block_on via a fresh tokio runtime — the trait method
         // is async; mvm-supervisor's tokio dev-dep covers this.

@@ -696,11 +696,8 @@ each asserted, and where it holds now:
   cannot be used to reach a resolver of the guest's choosing, public or on the
   host's own network. The endpoint refuses a UDP association outright when the
   admitted policy admits no datagram, and records the refusal as a chain-signed
-  `host.flow.denied` entry with `class=udp` and `reason=policy_denied`. Where a
-  signed policy does grant UDP by explicit L4 rule, a datagram outside those
-  rules is refused and audited once per destination per association; raw
-  datagrams admitted by such a rule, or by an unrestricted policy, carry no
-  qname check.
+  `host.flow.denied` entry with `class=udp` and `reason=policy_denied`. Only an
+  unrestricted policy admits datagrams, and those carry no qname check.
 - *A placeholder outside the substituted headers*: no equivalent. The typed
   HTTP path substitutes and checks headers only, so a placeholder in a URL or
   body is forwarded as-is (#3297). The placeholder is not the secret, so this

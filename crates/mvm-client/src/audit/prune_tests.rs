@@ -33,7 +33,6 @@ impl Fixture {
             runtime
                 .block_on(signer.sign_and_emit(&for_plan(
                     &plan,
-                    None,
                     kind,
                     [("capture_id".into(), "synthetic-capture".into())],
                 )))

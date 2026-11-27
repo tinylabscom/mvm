@@ -185,7 +185,6 @@ pub(crate) fn start_admitted_persistent(
     let crate::admission::AdmissionContext {
         admitted,
         emitter,
-        policy_bundle,
         host_signer_public_path,
     } = admission;
     // Read-only audit continuation: the one-use admitted owner still moves to
@@ -197,7 +196,6 @@ pub(crate) fn start_admitted_persistent(
             backend: &backend,
             admitted,
             config,
-            policy_bundle: policy_bundle.as_ref(),
             emitter: Some(&emitter),
             assurance: None,
         },
@@ -215,7 +213,6 @@ pub(crate) fn start_admitted_persistent(
         crate::admission::AdmissionContext {
             admitted: dispatched.admitted,
             emitter,
-            policy_bundle,
             host_signer_public_path,
         },
         dispatched.config,

@@ -54,7 +54,6 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use mvm_core::observability::metrics::Metrics;
 use mvm_core::plan::{ExecutionPlan, PlanId, TenantId};
-use mvm_core::policy::PolicyBundle;
 
 use crate::audit::audit_mirror;
 use crate::audit::signer::{AuditError, AuditSigner, PlanAuditEntry, for_plan};
@@ -254,7 +253,6 @@ impl Recorder {
     ///     EventCategory::Plan,
     ///     "plan.admitted",
     ///     &plan,
-    ///     None,
     ///     [("signer_id".to_string(), "host:localhost".to_string())],
     /// ).await?;
     /// ```
@@ -263,13 +261,12 @@ impl Recorder {
         category: EventCategory,
         event_name: impl Into<String>,
         plan: &ExecutionPlan,
-        bundle: Option<&PolicyBundle>,
         extras: impl IntoIterator<Item = (String, String)>,
     ) -> Result<(), RecorderError> {
         let event_name = event_name.into();
         validate_event_prefix(category, &event_name)?;
         let merged = merge_extras(category, extras);
-        let entry = for_plan(plan, bundle, event_name, merged);
+        let entry = for_plan(plan, event_name, merged);
         self.signer.sign_and_emit(&entry).await?;
         audit_mirror::emit_mirror_event(&entry);
         self.bump_metric(category);
@@ -519,7 +516,7 @@ pub(crate) mod tests {
             .unwrap();
         rt.block_on(async {
             recorder
-                .record_plan_bound(EventCategory::Plan, "plan.admitted", &plan, None, [])
+                .record_plan_bound(EventCategory::Plan, "plan.admitted", &plan, [])
                 .await
                 .unwrap();
         });
@@ -541,7 +538,6 @@ pub(crate) mod tests {
                     EventCategory::Plan,
                     "admitted", // missing "plan." prefix
                     &plan,
-                    None,
                     [],
                 )
                 .await
@@ -568,7 +564,6 @@ pub(crate) mod tests {
                     EventCategory::Plan,
                     "policy.something", // wrong category prefix
                     &plan,
-                    None,
                     [],
                 )
                 .await
@@ -588,7 +583,7 @@ pub(crate) mod tests {
             .unwrap();
         let err = rt.block_on(async {
             recorder
-                .record_plan_bound(EventCategory::Plan, "planet.exploded", &plan, None, [])
+                .record_plan_bound(EventCategory::Plan, "planet.exploded", &plan, [])
                 .await
                 .unwrap_err()
         });
@@ -728,7 +723,7 @@ pub(crate) mod tests {
             .unwrap();
         rt.block_on(async {
             recorder
-                .record_plan_bound(EventCategory::Plan, "plan.admitted", &plan, None, [])
+                .record_plan_bound(EventCategory::Plan, "plan.admitted", &plan, [])
                 .await
                 .unwrap();
         });
@@ -755,11 +750,11 @@ pub(crate) mod tests {
             .unwrap();
         rt.block_on(async {
             recorder
-                .record_plan_bound(EventCategory::Plan, "plan.admitted", &plan, None, [])
+                .record_plan_bound(EventCategory::Plan, "plan.admitted", &plan, [])
                 .await
                 .unwrap();
             recorder
-                .record_plan_bound(EventCategory::Plan, "plan.launched", &plan, None, [])
+                .record_plan_bound(EventCategory::Plan, "plan.launched", &plan, [])
                 .await
                 .unwrap();
         });
@@ -888,7 +883,6 @@ pub(crate) mod tests {
                     EventCategory::Plan,
                     "plan.admitted",
                     &plan,
-                    None,
                     [("category".to_string(), "override".to_string())],
                 )
                 .await

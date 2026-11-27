@@ -59,7 +59,7 @@ impl Chain {
     pub(super) fn append_seal(&self, plan: &ExecutionPlan, labels: Vec<(String, String)>) {
         self.emitter
             .emit_entry_for_evidence(
-                &for_plan(plan, None, SESSION_SEALED_EVENT, labels),
+                &for_plan(plan, SESSION_SEALED_EVENT, labels),
                 crate::audit::evidence::EvidenceReceipt::Omitted,
             )
             .unwrap();
@@ -324,7 +324,6 @@ fn a_checkpoint_without_a_digest_cannot_be_sealed() {
         .emit_entry_for_evidence(
             &for_plan(
                 &p,
-                None,
                 crate::audit::emitter::checkpoint_audit::CREATED_EVENT,
                 vec![],
             ),
@@ -471,7 +470,7 @@ fn a_seal_signed_by_another_key_is_a_signature_mismatch() {
     let chain = Chain::new();
     let p = plan("sha256:aaaa1111");
     let seal = chain.run_and_seal(&p, 0);
-    let forged = for_plan(&p, None, SESSION_SEALED_EVENT, seal.to_labels());
+    let forged = for_plan(&p, SESSION_SEALED_EVENT, seal.to_labels());
     let mut lines = chain.lines();
     let prev = hash_line(lines.last().unwrap().as_bytes());
     let envelope = mvm_contract::verify::seal(&forged, prev, &key(9)).expect("sign");

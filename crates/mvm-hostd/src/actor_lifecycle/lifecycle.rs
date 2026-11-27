@@ -155,7 +155,7 @@ impl ActorLifecycle {
             .validate_parent_charge(host.parent.plan())?;
         ensure!(
             host.constraints.effective_policy == EffectivePolicy::default(),
-            "actor profile requires the ordinary default policy bundle"
+            "actor profile requires the default effective policy"
         );
         let membership = host
             .parent
@@ -621,7 +621,6 @@ impl ActorLifecycle {
                 backend: &self.host.backend,
                 admitted,
                 config,
-                policy_bundle: None,
                 emitter: Some(&self.host.emitter),
                 assurance: None,
             },

@@ -76,7 +76,6 @@ pub(super) fn classify_start_error(
 pub(crate) struct PreparedOperatorTrial<'a> {
     backend: &'a AnyBackend,
     prepared: PreparedLaunch<AdmittedPlan>,
-    policy_bundle: Option<&'a mvm_core::policy::PolicyBundle>,
     emitter: &'a crate::audit::emitter::AuditEmitter,
     assurance: &'a crate::assurance_session::CampaignRequest,
 }
@@ -124,7 +123,6 @@ fn prepare_with_attachment<'a>(
     let assurance = params
         .assurance
         .context("operator trial admission requires a campaign binding")?;
-    let policy_bundle = params.policy_bundle;
     let config = std::mem::take(&mut params.config);
     let prepared = prepare_launch(
         LaunchSource::OperatorTrial {
@@ -142,7 +140,6 @@ fn prepare_with_attachment<'a>(
     Ok(PreparedOperatorTrial {
         backend,
         prepared,
-        policy_bundle,
         emitter,
         assurance,
     })
@@ -197,7 +194,6 @@ impl PreparedOperatorTrial<'_> {
                 backend: self.backend,
                 admitted,
                 config,
-                policy_bundle: self.policy_bundle,
                 emitter: Some(self.emitter),
                 assurance: Some(self.assurance),
             },

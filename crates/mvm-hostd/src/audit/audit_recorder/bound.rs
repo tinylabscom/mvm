@@ -65,7 +65,7 @@ impl Recorder {
         }
         let extras = merge_extras(category, extras);
         let mut entry = match context {
-            AuditContext::Workload { plan, .. } => for_plan(plan, None, event, extras),
+            AuditContext::Workload { plan, .. } => for_plan(plan, event, extras),
             AuditContext::Builder { .. } => self.unbound_entry(category, event.into(), extras),
         };
         // Sanitize after the plan's author labels and event extras have merged.

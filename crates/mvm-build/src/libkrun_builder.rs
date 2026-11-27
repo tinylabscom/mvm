@@ -464,7 +464,6 @@ impl LibkrunBuilderVm {
             gateway_events_socket: None,
             signing_key_path: None,
             plan: None,
-            bundle: None,
             // This supervisor retains the legacy non-bridge path. The
             // authenticated builder egress endpoint is launched separately,
             // so no bridge policy crosses this configuration boundary.
@@ -669,7 +668,6 @@ impl LibkrunBuilderVm {
             gateway_events_socket: None,
             signing_key_path: None,
             plan: None,
-            bundle: None,
             // This supervisor retains the legacy non-bridge path. The
             // authenticated builder egress endpoint is launched separately,
             // so no bridge policy crosses this configuration boundary.
@@ -1180,7 +1178,6 @@ impl BuilderVm for LibkrunBuilderVm {
             gateway_events_socket: None,
             signing_key_path: None,
             plan: None,
-            bundle: None,
             // This supervisor retains the legacy non-bridge path. The
             // authenticated builder egress endpoint is launched separately,
             // so no bridge policy crosses this configuration boundary.
@@ -1437,7 +1434,6 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             gateway_events_socket: None,
             signing_key_path: None,
             plan: None,
-            bundle: None,
             // This supervisor retains the legacy non-bridge path. The
             // authenticated builder egress endpoint is launched separately,
             // so no bridge policy crosses this configuration boundary.
@@ -3243,7 +3239,6 @@ impl LibkrunPersistentHostVm {
             gateway_events_socket: None,
             signing_key_path: None,
             plan: None,
-            bundle: None,
             // This supervisor retains the legacy non-bridge path. The
             // authenticated builder egress endpoint is launched separately,
             // so no bridge policy crosses this configuration boundary.

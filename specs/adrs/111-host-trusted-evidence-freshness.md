@@ -441,7 +441,7 @@ An offline lease is an explicit signed exception only for the operations
 and expiry it already permits. The plan's short validity window gates
 *launch admission*; checking its `valid_until` again on resume would
 incorrectly turn it into a workload lease. Arbitrary external edits to
-project `mvm.toml`, named profiles, and tenant bundles are still read
+project `mvm.toml` and named profiles are still read
 at launch outside the explicitly activated project path, without a common
 resident file-to-instance binding for live cutover. A watcher
 learns of an edit after it happens and cannot substitute for the atomic

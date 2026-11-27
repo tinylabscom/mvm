@@ -13,7 +13,7 @@
 
 use core::net::IpAddr;
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use ipnet::IpNet;
@@ -22,35 +22,11 @@ use thiserror::Error;
 use crate::policy::dns_pin::DnsPinRegistry;
 use crate::policy::network_policy::{is_banned_ssh_port, is_mandatory_deny};
 
-/// L4 protocol of a canonical rule. The string forms `"tcp"` /
-/// `"udp"` are the `L4RuleSpec.proto` wire values; anything else
-/// refuses at projection time (loud failure at admission, not a
-/// silent drop at runtime).
+/// L4 protocol of a canonical rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Proto {
     Tcp,
     Udp,
-}
-
-impl core::str::FromStr for Proto {
-    type Err = ProjectionError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "tcp" => Ok(Self::Tcp),
-            "udp" => Ok(Self::Udp),
-            other => Err(ProjectionError::UnknownProto {
-                proto: other.to_string(),
-            }),
-        }
-    }
-}
-
-impl Proto {
-    /// Named alias for [`core::str::FromStr`] used by the lowering code.
-    pub fn parse(s: &str) -> Result<Self, ProjectionError> {
-        s.parse()
-    }
 }
 
 /// One canonical egress rule over the pinned address space.
@@ -125,25 +101,12 @@ fn is_banned_ssh_flow(proto: &Proto, port: u16) -> bool {
 /// cannot be projected admits nothing.
 #[derive(Debug, Error)]
 pub enum ProjectionError {
-    #[error("unknown proto {proto:?} (expected \"tcp\" or \"udp\")")]
-    UnknownProto { proto: String },
-    #[error("unparseable dst_cidr {cidr:?}: {source}")]
-    BadCidr {
-        cidr: String,
-        source: ipnet::AddrParseError,
-    },
     #[error("no admission-time DNS pin for allow-list host {host:?}")]
     MissingPin { host: String },
     #[error("DNS pin for {host:?} expired at {expires_at}")]
     ExpiredPin { host: String, expires_at: String },
     #[error("DNS pin for {host:?} has an empty IP set")]
     EmptyPin { host: String },
-    #[error("inverted port range {port_lo}..={port_hi} for {dest:?}")]
-    InvertedPortRange {
-        dest: String,
-        port_lo: u16,
-        port_hi: u16,
-    },
 }
 
 /// Normalize the wire-format any-port wildcard `(0, 0)` to the
@@ -154,58 +117,6 @@ fn normalize_ports(lo: u16, hi: u16) -> (u16, u16) {
     } else {
         (lo, hi)
     }
-}
-
-/// Refuse a wire-format range with `lo > hi`. A silent
-/// never-matching rule would be fail-closed but invisible;
-/// loud refusal at projection matches the L4 gate's posture.
-fn refuse_inverted_ports(dest: &str, lo: u16, hi: u16) -> Result<(), ProjectionError> {
-    if lo > hi {
-        return Err(ProjectionError::InvertedPortRange {
-            dest: dest.to_string(),
-            port_lo: lo,
-            port_hi: hi,
-        });
-    }
-    Ok(())
-}
-
-/// Lower L4 rule specs to canonical rules.
-fn lower_l4_specs(
-    specs: &[crate::policy::policies::L4RuleSpec],
-) -> Result<Vec<CanonicalRule>, ProjectionError> {
-    let mut rules = Vec::new();
-    for spec in specs {
-        let net: IpNet = spec
-            .dst_cidr
-            .parse()
-            .map_err(|source| ProjectionError::BadCidr {
-                cidr: spec.dst_cidr.clone(),
-                source,
-            })?;
-        refuse_inverted_ports(&spec.dst_cidr, spec.port_lo, spec.port_hi)?;
-        let (port_lo, port_hi) = normalize_ports(spec.port_lo, spec.port_hi);
-        rules.push(CanonicalRule {
-            proto: Proto::parse(&spec.proto)?,
-            net,
-            port_lo,
-            port_hi,
-        });
-    }
-    Ok(rules)
-}
-
-/// Lenient L4 lowering: malformed-input refusals only (bad CIDR, unknown
-/// proto, inverted ports). Does NOT refuse mandatory-deny overlap —
-/// permits() denies mandatory-deny ranges at decision time, whatever the
-/// rules say.
-pub fn canonicalize_l4(
-    specs: &[crate::policy::policies::L4RuleSpec],
-) -> Result<CanonicalEgress, ProjectionError> {
-    let mut rules = lower_l4_specs(specs)?;
-    rules.sort();
-    rules.dedup();
-    Ok(CanonicalEgress::Rules(rules))
 }
 
 /// Lower a bare [`crate::policy::network_policy::NetworkPolicy`] (the
@@ -222,9 +133,8 @@ pub fn canonicalize_l4(
 ///   raw datagrams to a resolver of its choosing.
 ///
 /// Fail-closed: a host with no live, non-empty pin returns an error and the
-/// caller drops to deny-all. Lenient on mandatory-deny overlap (matching
-/// [`canonicalize_l4`]) — [`CanonicalEgress::permits`] denies those ranges at
-/// decision time.
+/// caller drops to deny-all. Lenient on mandatory-deny overlap —
+/// [`CanonicalEgress::permits`] denies those ranges at decision time.
 pub fn canonicalize_network_policy(
     policy: &crate::policy::network_policy::NetworkPolicy,
     pins: &DnsPinRegistry,
@@ -283,7 +193,6 @@ mod tests {
 
     use crate::policy::dns_pin::{DnsPin, DnsPinRegistry};
     use crate::policy::network_policy::BANNED_SSH_PORT;
-    use crate::policy::policies::L4RuleSpec;
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
@@ -294,15 +203,6 @@ mod tests {
     }
 
     const NOW: &str = "2026-06-11T00:00:00Z";
-
-    fn l4(proto: &str, cidr: &str, lo: u16, hi: u16) -> L4RuleSpec {
-        L4RuleSpec {
-            proto: proto.to_string(),
-            dst_cidr: cidr.to_string(),
-            port_lo: lo,
-            port_hi: hi,
-        }
-    }
 
     // ── canonicalize_network_policy: the bare (no-bundle) transient lowering ──
     // (reuses the `pin` / `registry` helpers defined lower in this module)
@@ -456,16 +356,6 @@ mod tests {
     }
 
     #[test]
-    fn proto_parses_tcp_udp_and_refuses_unknown() {
-        assert_eq!(Proto::parse("tcp").unwrap(), Proto::Tcp);
-        assert_eq!(Proto::parse("udp").unwrap(), Proto::Udp);
-        assert!(matches!(
-            Proto::parse("icmp"),
-            Err(ProjectionError::UnknownProto { .. })
-        ));
-    }
-
-    #[test]
     fn canonical_rule_port_range_is_inclusive_at_both_ends() {
         let rule = CanonicalRule {
             proto: Proto::Tcp,
@@ -491,13 +381,6 @@ mod tests {
         };
         assert!(rule.permits(&Proto::Tcp, ip("10.0.0.7"), 0));
         assert!(!rule.permits(&Proto::Tcp, ip("10.0.0.7"), 1));
-    }
-
-    #[test]
-    fn proto_fromstr_roundtrip() {
-        assert_eq!("tcp".parse::<Proto>().unwrap(), Proto::Tcp);
-        assert_eq!("udp".parse::<Proto>().unwrap(), Proto::Udp);
-        assert!("TCP".parse::<Proto>().is_err());
     }
 
     #[test]
@@ -581,57 +464,5 @@ mod tests {
             reg.add(p);
         }
         reg
-    }
-
-    // ─────────────────────────────────────────────────
-    // canonicalize_l4 — lenient kernel-path lowering
-    // ─────────────────────────────────────────────────
-
-    #[test]
-    fn canonicalize_l4_lowers_rules_and_normalizes_the_any_port_wildcard() {
-        let specs = vec![
-            l4("tcp", "93.184.216.0/24", 443, 443),
-            l4("udp", "8.8.8.8/32", 0, 0),
-        ];
-        let eg = canonicalize_l4(&specs).unwrap();
-        assert!(eg.permits(&Proto::Tcp, ip("93.184.216.34"), 443));
-        assert!(eg.permits(&Proto::Udp, ip("8.8.8.8"), 53)); // (0,0) any-port
-        assert!(!eg.permits(&Proto::Tcp, ip("93.184.216.34"), 80));
-    }
-
-    #[test]
-    fn canonicalize_l4_refuses_bad_cidr_and_unknown_proto_and_inverted_ports() {
-        assert!(matches!(
-            canonicalize_l4(&[l4("tcp", "nope", 1, 1)]).unwrap_err(),
-            ProjectionError::BadCidr { .. }
-        ));
-        assert!(matches!(
-            canonicalize_l4(&[l4("icmp", "8.8.8.8/32", 0, 0)]).unwrap_err(),
-            ProjectionError::UnknownProto { .. }
-        ));
-        assert!(matches!(
-            canonicalize_l4(&[l4("tcp", "8.8.8.8/32", 443, 80)]).unwrap_err(),
-            ProjectionError::InvertedPortRange { .. }
-        ));
-    }
-
-    #[test]
-    fn canonicalize_l4_does_not_refuse_mandatory_deny_overlap_but_permits_denies_it() {
-        // The lenient lowering BUILDS a metadata-overlapping rule, but the
-        // decision function still denies the metadata IP — mandatory-deny
-        // is checked first in permits().
-        let eg = canonicalize_l4(&[l4("tcp", "169.254.0.0/16", 0, 0)])
-            .expect("lenient: builds, no refusal");
-        assert!(
-            !eg.permits(&Proto::Tcp, ip("169.254.169.254"), 80),
-            "metadata denied at decision time"
-        );
-    }
-
-    #[test]
-    fn canonicalize_l4_empty_is_deny_all() {
-        let eg = canonicalize_l4(&[]).unwrap();
-        assert!(!eg.permits(&Proto::Tcp, ip("8.8.8.8"), 53));
-        assert_eq!(eg, CanonicalEgress::Rules(vec![]));
     }
 }

@@ -230,7 +230,7 @@ fn authenticated_opening_is_exact_and_preserves_historical_recovery_attribution(
     seed.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&seed).unwrap();
     let key = f.emitter.verifying_key();
     assert!(authenticate_opening(f.emitter.audit_dir(), &key, &seed).is_err());
-    let mut entry = for_plan(&f.plan, None, TRANSCRIPT_OPENED_EVENT, []);
+    let mut entry = for_plan(&f.plan, TRANSCRIPT_OPENED_EVENT, []);
     entry.labels = opening_labels(&seed).unwrap();
     f.emitter
         .emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)
@@ -281,12 +281,7 @@ fn appended_opening_fixture(
     use mvm_core::transcript::evidence::{TRANSCRIPT_OPENED_EVENT, opening_labels};
     let f = Fixture::new(false);
     for n in 0..history {
-        let unrelated = for_plan(
-            &f.plan,
-            None,
-            "plan.launched",
-            [("n".to_string(), n.to_string())],
-        );
+        let unrelated = for_plan(&f.plan, "plan.launched", [("n".to_string(), n.to_string())]);
         f.emitter
             .emit_entry_for_evidence(&unrelated, EvidenceReceipt::Omitted)
             .unwrap();
@@ -295,7 +290,7 @@ fn appended_opening_fixture(
     seed.chunks.clear();
     seed.sealed_unix_secs = None;
     seed.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&seed).unwrap();
-    let mut entry = for_plan(&f.plan, None, TRANSCRIPT_OPENED_EVENT, []);
+    let mut entry = for_plan(&f.plan, TRANSCRIPT_OPENED_EVENT, []);
     entry.labels = opening_labels(&seed).unwrap();
     f.emitter
         .emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)
@@ -470,7 +465,7 @@ fn recovery_fixture() -> (Fixture, TranscriptManifest, TranscriptManifest) {
     seed.chunks.clear();
     seed.sealed_unix_secs = None;
     seed.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&seed).unwrap();
-    let mut entry = for_plan(&f.plan, None, TRANSCRIPT_OPENED_EVENT, []);
+    let mut entry = for_plan(&f.plan, TRANSCRIPT_OPENED_EVENT, []);
     entry.labels = opening_labels(&seed).unwrap();
     f.emitter
         .emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)
@@ -530,7 +525,7 @@ fn seal_lookup_does_not_turn_conflicting_evidence_into_absence() {
         let key = f.emitter.verifying_key();
         match kind {
             "retired-first" => {
-                let mut entry = for_plan(&f.plan, None, TRANSCRIPT_RETIRED_EVENT, []);
+                let mut entry = for_plan(&f.plan, TRANSCRIPT_RETIRED_EVENT, []);
                 entry.labels = labels(&recovered).unwrap();
                 f.emitter
                     .emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)
@@ -600,7 +595,7 @@ fn historical_pruning_does_not_prove_that_a_seal_never_existed() {
         .unwrap();
     emitter
         .emit_entry_for_evidence(
-            &for_plan(&f.plan, None, "test.after-seal", []),
+            &for_plan(&f.plan, "test.after-seal", []),
             EvidenceReceipt::Omitted,
         )
         .unwrap();
@@ -639,7 +634,6 @@ fn historical_pruning_does_not_prove_that_a_seal_never_existed() {
         .emit_entry_for_evidence(
             &for_plan(
                 &f.plan,
-                None,
                 mvm_core::audit_verify::segment::CHAIN_PRUNED,
                 mvm_core::audit_verify::segment::pruned_labels(&prune),
             ),
@@ -744,7 +738,7 @@ fn missing_authority_bad_clock_and_live_owner_never_unlink() {
 fn crash_after_signed_evidence_before_unlink_is_resumable() {
     let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
     let f = Fixture::new(true);
-    let mut entry = for_plan(&f.plan, None, TRANSCRIPT_RETIRED_EVENT, []);
+    let mut entry = for_plan(&f.plan, TRANSCRIPT_RETIRED_EVENT, []);
     entry.labels = labels(&f.manifest).unwrap();
     f.emitter
         .emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)
@@ -779,7 +773,7 @@ fn conflict_or_unsigned_missing_payload_refuses() {
         .unwrap()
     );
     let f = Fixture::new(true);
-    let mut entry = for_plan(&f.plan, None, TRANSCRIPT_RETIRED_EVENT, []);
+    let mut entry = for_plan(&f.plan, TRANSCRIPT_RETIRED_EVENT, []);
     entry.labels = labels(&f.manifest).unwrap();
     entry
         .labels
@@ -899,7 +893,7 @@ fn crash_after_one_payload_unlink_resumes_without_new_evidence() {
             false,
         )
         .unwrap();
-    let mut entry = for_plan(&f.plan, None, TRANSCRIPT_RETIRED_EVENT, []);
+    let mut entry = for_plan(&f.plan, TRANSCRIPT_RETIRED_EVENT, []);
     entry.labels = labels(&f.manifest).unwrap();
     f.emitter
         .emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)

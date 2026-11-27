@@ -11,9 +11,8 @@ developer/SDK workflows. Fleet and tenant control-plane verbs live in `mvmd`.
 `mvmctl deploy` builds and records a local workload artifact and can request
 authenticated delivery to `mvmd` with `--mvmd-url`; `mvmctl deployments ls`
 lists the local records. `mvmctl` does not expose `tenant` subcommands;
-tenant lifecycle and tenant policy authoring/review remain `mvmd`
-responsibilities. `mvmctl policy` covers only a workload's own authored
-policy, resolved on this host.
+tenant lifecycle is an `mvmd` responsibility. `mvmctl policy` covers only a
+workload's own authored policy, resolved on this host.
 
 ### CLI option sources
 
@@ -800,17 +799,14 @@ boot path does not bind the pack identity.
 
 ## Policy Contracts
 
-`mvmctl machine run` still synthesizes and admits signed execution plans with policy
-references. The default local ref is `local-default`; tenant-scoped policy
-bundle authoring, diffing, rollout, and review are exposed by `mvmd`. An
-authored workload policy (above) is lowered into the same flags a launch
-carries before synthesis, so it reaches the plan the same way.
-
-When admission resolves a workload policy bundle, `[audit].chain_signing = true`
-is required. The default local chain remains active, and `file://...` entries in
-`[audit].stream_destinations` receive exact JSONL replica chains. Other
-destination schemes validate at the policy-shape layer but fail closed during
-admission until their transports are wired.
+`mvmctl machine run` synthesizes and admits signed execution plans whose policy
+references are labels: `local-default` for a launch that grants no egress, and
+`<tenant>:<vm>` for one that does. Admission loads no policy file for either.
+What the egress gate enforces is the launch's network policy (`--network-preset`,
+`--allow`, grants), bound into the signed plan by its content digest as a policy
+asset identity. An authored workload policy (above) is lowered into the same
+flags a launch carries before synthesis, so it reaches the plan the same way.
+Every admission record is written to the local chain-signed audit log.
 
 ## Flake Validation
 

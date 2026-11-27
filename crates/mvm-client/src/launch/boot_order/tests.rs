@@ -63,7 +63,7 @@ impl Host {
     /// What the launch does next: thread the plan into the config and mint
     /// the grant the guest will check.
     fn mint(&self, config: &mut VmStartConfig, admission: &AdmissionContext) -> VerbGrantEnvelope {
-        populate_audit_substrate(config, &admission.admitted, None).expect("substrate");
+        populate_audit_substrate(config, &admission.admitted).expect("substrate");
         stash_plan_and_mint_verb_grant(config)
             .expect("mint")
             .expect("a restricted plan carries a grant")

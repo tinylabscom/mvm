@@ -922,12 +922,6 @@ pub(in crate::commands) fn run_secure_started(
         )?;
         let plan_json = serde_json::to_string(c.admitted.signed())
             .context("serializing admitted plan for the transient run")?;
-        let bundle_json = c
-            .policy_bundle
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .context("serializing admitted policy bundle for the transient run")?;
         let substrate = crate::exec::SessionAuditSubstrate {
             host_budget: c.admitted.host_budget_permit(),
             tenant_id: c.admitted.plan().tenant.0.clone(),
@@ -936,7 +930,6 @@ pub(in crate::commands) fn run_secure_started(
             mailbox_posture: c.admitted.mailbox_posture(),
             built_pack_check: c.admitted.built_pack_boot_check()?,
             caller_registration: None,
-            bundle_json,
             config_files: start_config.config_files,
             read_only_materialized_images: c
                 .admitted

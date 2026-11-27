@@ -1,13 +1,13 @@
-//! Sub-policy types referenced by `PolicyBundle`.
+//! Sub-policy shapes carried by [`EffectivePolicy`].
 //!
-//! Each sub-policy starts as a minimal shape placeholder; real
-//! enforcement contracts are filled in incrementally:
+//! No field here is enforced. The workload actor lifecycle carries an
+//! `EffectivePolicy` in its manifest, requires the default value, and
+//! compares a child's with its parent's. Egress is enforced from the
+//! launch's [`NetworkPolicy`], not from these types. `PiiPolicy` is also the
+//! shape the stream plane's redactor reads from its own configuration.
 //!
-//! - `EgressPolicy` (egress rules) and `PiiPolicy` (detect / redact / refuse modes).
-//! - `KeyPolicy` (per-run secret grants) and `AuditPolicy` (chain
-//!   signing, per-tenant streams).
-//! - `BundleNetworkPolicy` (per-tenant netns) and `ArtifactPolicy` retention
-//!   sweeps.
+//! [`EffectivePolicy`]: crate::policy::resolver::EffectivePolicy
+//! [`NetworkPolicy`]: crate::policy::network_policy::NetworkPolicy
 //!
 //! Every type uses `#[serde(deny_unknown_fields)]` so a future
 //! field addition is a fail-closed schema bump for older verifiers,
@@ -18,39 +18,20 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-/// Network policy. `l4` is the L4 allow-list, projected into the
-/// canonical egress set the per-VM endpoint's egress gate enforces. `preset` is a stub kept for
-/// forward compat with the `mvm-core::policy::network_policy` shape that
-/// older bundles may still carry.
-///
-/// `l4` is `#[serde(default)]` so bundles authored without
-/// `[[network.l4]]` rows continue to parse — they evaluate as
-/// **default-deny** at the gate, matching the fail-closed posture. To
-/// allow outbound traffic, add explicit rows.
+/// Network policy shape. Not enforced: the egress gate is built from the
+/// launch's `NetworkPolicy`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BundleNetworkPolicy {
-    /// Name of the network preset
-    /// (`open` / `agent` / `tenant-isolated` / etc.). Stub.
+    /// Network preset name.
     pub preset: Option<String>,
-    /// L4 allow-list (`proto`, `dst_cidr`, port range), enforced by the
-    /// endpoint's egress gate after projection. Empty = default-deny.
+    /// L4 rows (`proto`, `dst_cidr`, port range).
     #[serde(default)]
     pub l4: Vec<L4RuleSpec>,
-    /// Observer chain. Each entry is a name resolved against the host's
-    /// `ObserverAllowlist` (`~/.mvm/observers/allowlist.toml`). Empty Vec
-    /// = no observers (only the always-on chain signer fires).
-    ///
-    /// Default is empty for backward compatibility: claim-10 v1 bundles
-    /// that don't have this field still parse and behave identically
-    /// (no fan-out, chain entries unchanged).
+    /// Observer names.
     #[serde(default)]
     pub observers: Vec<String>,
-    /// Opt-in per-VM flow-byte log. `None` (default) = off. When set, the
-    /// bridge appends length-prefixed payload records
-    /// to `~/.mvm/audit/flow-bytes/<tenant>/<vm>-<utc>.bin`; the signed
-    /// chain references each record by `(file, record_id, sha256)` without
-    /// inlining payload bytes.
+    /// Flow-byte log settings. Nothing writes a flow-byte log from it.
     #[serde(default)]
     pub flow_byte_log: Option<FlowByteLogSpec>,
 }
@@ -75,37 +56,14 @@ pub enum FlowByteLogDirections {
     Both,
 }
 
-/// Wire-format L4 rule row inside `[[network.l4]]`. The supervisor's
-/// `canonicalize_l4` (in `mvm_core::policy`) parses `dst_cidr` via
-/// `ipnet::IpNet` and lowers the rows into a `CanonicalEgress`; this
-/// crate stays free of `ipnet` so the policy schema doesn't take a
-/// hard dep on the address-family crate.
-///
-/// Example TOML:
-///
-/// ```toml
-/// [[network.l4]]
-/// proto    = "tcp"
-/// dst_cidr = "10.0.0.0/24"
-/// port_lo  = 443
-/// port_hi  = 443
-///
-/// [[network.l4]]
-/// proto    = "udp"
-/// dst_cidr = "8.8.8.8/32"
-/// port_lo  = 0
-/// port_hi  = 0   # any-port wildcard
-/// ```
+/// L4 rule row shape inside `[[network.l4]]`. Not parsed into a gate
+/// rule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct L4RuleSpec {
-    /// `"tcp"` or `"udp"`. `canonicalize_l4` refuses unknown protocols
-    /// at translate time (loud failure at admission, not silent drop at
-    /// runtime).
+    /// `"tcp"` or `"udp"`.
     pub proto: String,
-    /// Destination CIDR — parsed by `ipnet::IpNet`; both v4 and v6
-    /// supported. The supervisor refuses unparseable CIDRs at
-    /// translate time.
+    /// Destination CIDR.
     pub dst_cidr: String,
     /// Inclusive low bound of the destination port range.
     pub port_lo: u16,
@@ -114,23 +72,15 @@ pub struct L4RuleSpec {
     pub port_hi: u16,
 }
 
-/// Egress policy. What reaches enforcement today:
-/// - `allow_list` is projected into the per-VM endpoint's egress gate as
-///   the (host, port) destination policy.
-/// - `mode = Some("open")` projects to unrestricted egress.
-///
-/// `allow_plain_http`, `body_cap_bytes` and `disabled_inspectors` are
-/// parsed, signed and (for `disabled_inspectors`) validated at admission,
-/// but nothing enforces them. New fields are `#[serde(default)]` so older
-/// bundles continue to parse.
+/// Egress policy shape. Not enforced: the egress gate is built from the
+/// launch's `NetworkPolicy`, and a plan's redaction and reversible
+/// replacement come from the launch, not from here.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EgressPolicy {
-    /// `open` — unrestricted egress. Any other value leaves the
-    /// `allow_list` in force.
+    /// Egress mode name.
     pub mode: Option<String>,
-    /// (host, port) allowlist, projected into the endpoint's egress gate.
-    /// `port = 0` is the explicit "any port for this host" wildcard.
+    /// (host, port) allowlist.
     #[serde(default)]
     pub allow_list: Vec<(String, u16)>,
     /// Whether plain HTTP (not just CONNECT/HTTPS) is permitted. No
@@ -147,13 +97,10 @@ pub struct EgressPolicy {
     /// the field today.
     #[serde(default)]
     pub disabled_inspectors: Vec<String>,
-    /// Per-destination egress redaction. Synthesized into the signed
-    /// `ExecutionPlan.redaction` at admission. Default = all-off.
+    /// Per-destination egress redaction.
     #[serde(default)]
     pub redaction: crate::policy::redaction::RedactionPolicy,
-    /// Per-destination reversible replacement / reinjection. Synthesized into
-    /// the signed `ExecutionPlan.reversible_replacement` at admission. Default
-    /// = disabled.
+    /// Per-destination reversible replacement / reinjection.
     #[serde(default)]
     pub reversible_replacement: crate::policy::reversible_replacement::ReversibleReplacementPolicy,
 }
@@ -195,9 +142,8 @@ pub struct PiiPolicy {
     pub categories: Vec<String>,
 }
 
-/// Artifact policy. Distinct from `mvm-core::plan::ArtifactPolicy` —
-/// the plan field is a per-run snapshot; this is the bundle-side
-/// source of truth. Nothing collects artifacts from it today.
+/// Artifact policy shape. Distinct from `mvm-core::plan::ArtifactPolicy`,
+/// the per-run plan field. Nothing collects artifacts from it.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ArtifactPolicy {
@@ -213,15 +159,14 @@ pub struct KeyPolicy {
     pub rotation_interval_days: u32,
 }
 
-/// Audit policy. Wires chain signing + per-tenant streams.
+/// Audit policy shape. Nothing configures an emitter from it.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AuditPolicy {
     /// Whether the supervisor should chain-sign each entry into the
     /// previous's hash for tamper-evidence.
     pub chain_signing: bool,
-    /// Per-tenant audit-stream destinations. Resolved by
-    /// `AuditSigner`.
+    /// Audit-stream destinations.
     pub stream_destinations: Vec<String>,
 }
 

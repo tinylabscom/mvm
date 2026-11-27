@@ -1,5 +1,5 @@
 //! Policy DTO leaves — the pure serde types describing session/frame
-//! security posture, sub-policy shapes referenced by `PolicyBundle`,
+//! security posture, the sub-policy shapes `EffectivePolicy` carries,
 //! per-destination egress redaction, per-destination reversible-
 //! replacement rules, admission-time DNS pins, and CLI secret bindings —
 //! plus the egress-projection decision core, which is pure decision logic

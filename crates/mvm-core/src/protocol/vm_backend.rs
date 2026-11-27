@@ -256,11 +256,6 @@ pub struct VmStartConfig {
     /// Optional caller registration from the trusted entrypoint admission path.
     /// This is not producer readiness and is not accepted by warm launches.
     pub caller_registration: Option<caller_registration::CallerRegistration>,
-    /// JSON-encoded `PlanArtifact` (bundle pin)
-    /// when `admitted.plan.bundle.is_some()`. `None` when the plan
-    /// has no `.mvmpkg` pin (the common case). Same "do not log"
-    /// rule as `plan_json`.
-    pub bundle_json: Option<String>,
     /// Target warm-pool size. `0` (default) = feature off: no
     /// standbys, no idle RAM, no control UDS, no behaviour change. A future
     /// Firecracker standby reads the same field (it's why this lives on the
@@ -400,8 +395,6 @@ pub struct StandbyClaim {
     pub plan_json: String,
     /// This child's admitted audit identity, never the standby parent's.
     pub audit_context: Option<crate::audit_sink::AuditContext>,
-    /// JSON-encoded `PolicyBundle`, if any.
-    pub bundle_json: Option<String>,
     /// The launcher's resolved bare egress policy, threaded so a warm-claimed
     /// standby enforces the SAME deny-by-default posture a cold boot would. The
     /// no-bundle bridge arm lowers this; without it a pool hit on a bundle-less
@@ -788,7 +781,6 @@ mod tests {
             gateway_events_socket: None,
             plan_json: "{}".into(),
             audit_context: None,
-            bundle_json: None,
             network_policy: crate::network_policy::NetworkPolicy::deny_all(),
         }
     }

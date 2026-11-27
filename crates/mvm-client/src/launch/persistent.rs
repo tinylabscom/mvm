@@ -581,13 +581,11 @@ fn finish_admitted_persistent(
             let crate::admission::AdmissionContext {
                 admitted,
                 emitter,
-                policy_bundle,
                 host_signer_public_path,
             } = admission;
             Ok(mvm_hostd::plan_admission::LaunchAdmission {
                 admitted,
                 emitter,
-                policy_bundle,
                 continuation: host_signer_public_path,
             })
         },
@@ -601,13 +599,11 @@ fn finish_admitted_persistent(
     let mvm_hostd::plan_admission::LaunchAdmission {
         admitted,
         emitter,
-        policy_bundle,
         continuation: host_signer_public_path,
     } = admission;
     let admission = crate::admission::AdmissionContext {
         admitted,
         emitter,
-        policy_bundle,
         host_signer_public_path,
     };
     let started = crate::boot::StartedVm::from_started(backend, vm_id);

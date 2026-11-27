@@ -88,7 +88,6 @@ fn supervisor_takes_bridge_path_when_tenant_id_some() {
         // path is taken; we expect that to happen and then fail
         // downstream on the missing kernel.
         plan: Some(serde_json::json!({"placeholder": true})),
-        bundle: None,
         network_policy: None,
         bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         egress_relay_socket: None,
@@ -165,7 +164,6 @@ fn supervisor_takes_legacy_path_when_tenant_id_none() {
         gateway_events_socket: None,
         signing_key_path: None,
         plan: None,
-        bundle: None,
         network_policy: None,
         bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         egress_relay_socket: None,

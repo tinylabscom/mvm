@@ -145,7 +145,6 @@ fn start(bootstrap: ActorBootstrap, ready: &mut ActorDeadlineStream) -> Result<(
                 backend: &backend,
                 admitted,
                 config,
-                policy_bundle: None,
                 emitter: Some(&emitter),
                 assurance: None,
             },

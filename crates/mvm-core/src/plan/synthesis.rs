@@ -109,9 +109,7 @@ pub struct SynthesisInput<'a> {
     /// prove which filter tier the boot was bound to.
     pub seccomp_tier: PlanSeccompTier,
     /// Policy refs selected by the caller. `None` falls back to
-    /// `DEFAULT_POLICY_REF`. Keeping refs in the synthesis input
-    /// lets intent profiles bind to live policy bundles without a
-    /// later mutation step.
+    /// `DEFAULT_POLICY_REF`.
     pub network_policy_ref: Option<&'a str>,
     pub fs_policy_ref: Option<&'a str>,
     pub egress_policy_ref: Option<&'a str>,
