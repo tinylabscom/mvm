@@ -2376,3 +2376,47 @@ async fn persistent_definition_restart_does_not_inherit_request_mailbox() {
         "plain restart must not recover an earlier request's mailbox grant"
     );
 }
+
+/// A persistent launch and its stop leave no runtime state behind: no state
+/// dir, and no short `/tmp` socket dir, which a home this deep moves the
+/// sockets into.
+#[tokio::test]
+async fn a_stopped_machine_leaves_no_state_dir_and_no_socket_dir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join("d".repeat(60));
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let rootfs = home.join("rootfs.ext4");
+    std::fs::write(&rootfs, b"hashable-rootfs-bytes\n").unwrap();
+    let client = mock_client();
+    let name = "p-teardown";
+    let state_dir = vm_state_dir(name);
+    let socket_dir = mvm_core::config::vm_socket_dir_at(&state_dir);
+    assert_ne!(
+        socket_dir, state_dir,
+        "the fixture must keep its sockets apart"
+    );
+
+    let launched = client
+        .launch(
+            persistent_request(&rootfs.to_string_lossy(), name)
+                .build()
+                .expect("request"),
+        )
+        .await
+        .expect("launch");
+    mvm_core::config::secure_fallback_socket_dir_at(&state_dir).unwrap();
+    client
+        .stop_machine(&launched.machine.id)
+        .await
+        .expect("stop");
+
+    let left: Vec<_> = [&state_dir, &socket_dir]
+        .into_iter()
+        .filter(|path| path.exists())
+        .cloned()
+        .collect();
+    let _ = std::fs::remove_dir_all(&socket_dir);
+    assert!(left.is_empty(), "left behind: {left:?}");
+}

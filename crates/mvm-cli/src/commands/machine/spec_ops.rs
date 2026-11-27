@@ -165,6 +165,11 @@ pub(super) fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
 pub(super) fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
     let json = args.json;
     let targets = resolve_remove_targets(args.all, &args.names)?;
+    // Standbys and idle Firecracker processes hold no definition or user
+    // state, so `--all` drains them rather than refusing over them below.
+    if args.all {
+        mvm_client::standby::drain(&mvm_client::LocalBackend::new())?;
+    }
     // `--all` removes definitions, so a live VM that has none (a standby, an
     // unnamed run) is not a target; it must not be passed over as absent.
     let undefined = if args.all {

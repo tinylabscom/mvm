@@ -203,14 +203,45 @@ impl SupervisorStandbyPool {
             .fold(0u64, |total, h| total.saturating_add(u64::from(h.mem_mib))))
     }
 
+    /// Remove every unclaimed record and hand back what it named, for the
+    /// caller to tear down. A claimed record belongs to the launcher consuming
+    /// it and stays. Nothing is signalled here.
+    pub fn take_unclaimed(&self) -> Result<Vec<StandbyHandle>> {
+        let mut taken = Vec::new();
+        self.take_oldest_where(None, |_| true, |h| taken.push(h))?;
+        Ok(taken)
+    }
+
     fn evict_oldest_where(
         &self,
         max_memory_mib: u64,
         selects: impl Fn(&StandbyHandle) -> bool,
     ) -> Result<Vec<String>> {
+        let mut evicted = Vec::new();
+        self.take_oldest_where(Some(max_memory_mib), selects, |h| {
+            if !h.is_saved_state() && pid_alive(h.pid) {
+                // SAFETY: the pid belongs to a live supervisor recorded by this
+                // pool; a subsequent claim cannot race because only idle/parked
+                // records are taken under the claim lock.
+                unsafe { libc::kill(h.pid as libc::pid_t, libc::SIGTERM) };
+            }
+            evicted.push(h.id);
+        })?;
+        Ok(evicted)
+    }
+
+    /// Remove the oldest selected idle or parked records until those left hold
+    /// at most `max_memory_mib` (all of them with `None`), handing each one to
+    /// `taken` as soon as its record is gone.
+    fn take_oldest_where(
+        &self,
+        max_memory_mib: Option<u64>,
+        selects: impl Fn(&StandbyHandle) -> bool,
+        mut taken: impl FnMut(StandbyHandle),
+    ) -> Result<()> {
         // Share the claim lock with reservation so a parent cannot be selected
-        // for eviction from an idle listing while another launcher claims it.
-        let _budget_guard = mvm_core::atomic_io::FileLock::acquire(&self.root.join("claim"))?;
+        // from an idle listing while another launcher claims it.
+        let _claim_guard = mvm_core::atomic_io::FileLock::acquire(&self.root.join("claim"))?;
         let mut candidates: Vec<_> = self
             .list()?
             .into_iter()
@@ -221,22 +252,15 @@ impl SupervisorStandbyPool {
             .fold(0u64, |total, h| total.saturating_add(u64::from(h.mem_mib)));
         candidates.sort_by_key(|h| h.spawned_unix_secs);
 
-        let mut evicted = Vec::new();
         for h in candidates {
-            if memory_mib <= max_memory_mib {
+            if max_memory_mib.is_some_and(|max| memory_mib <= max) {
                 break;
-            }
-            if !h.is_saved_state() && pid_alive(h.pid) {
-                // SAFETY: the pid belongs to a live supervisor recorded by this
-                // pool; a subsequent claim cannot race because only idle/parked
-                // records are candidates under the budget lock.
-                unsafe { libc::kill(h.pid as libc::pid_t, libc::SIGTERM) };
             }
             self.remove(&h.id)?;
             memory_mib = memory_mib.saturating_sub(u64::from(h.mem_mib));
-            evicted.push(h.id);
+            taken(h);
         }
-        Ok(evicted)
+        Ok(())
     }
 
     /// Mark a standby `Claimed` (persisted) — so a concurrent launch won't double-claim.
@@ -459,6 +483,34 @@ mod tests {
             preloaded_child_vm_name: None,
             vsock_egress: false,
         }
+    }
+
+    /// Draining takes every unclaimed record and leaves a claimed one to the
+    /// launcher consuming it. It signals nothing: the records name this test's
+    /// own pid, which a drain that killed through the record would end.
+    #[test]
+    fn draining_takes_unclaimed_records_and_signals_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        for (id, state) in [
+            ("idle", StandbyState::Idle),
+            ("parked", StandbyState::Parked),
+            ("claimed", StandbyState::Claimed),
+        ] {
+            pool.record(&handle(id, "k", state)).unwrap();
+        }
+
+        let mut taken: Vec<_> = pool
+            .take_unclaimed()
+            .unwrap()
+            .into_iter()
+            .map(|h| h.id)
+            .collect();
+        taken.sort();
+
+        assert_eq!(taken, ["idle", "parked"]);
+        let left: Vec<_> = pool.list().unwrap().into_iter().map(|h| h.id).collect();
+        assert_eq!(left, ["claimed"]);
     }
 
     /// A fully populated `StandbyHandle` for tests that don't care about the

@@ -90,6 +90,50 @@ pub fn watch_idle(idle_timeout: Duration) {
     }
 }
 
+/// Release everything this host keeps for launches that have not happened
+/// yet: every unclaimed standby and every idle Firecracker process.
+///
+/// A standby whose VM was started is stopped through the teardown a machine
+/// gets ([`crate::LocalBackend::stop_machine_in_lifecycle`]); one with nothing
+/// running has its state removed the way that teardown ends. A claimed
+/// standby belongs to the launch consuming it and is left alone, as is an
+/// idle process a refill is still starting.
+///
+/// # Errors
+///
+/// If the pool cannot be read, or a standby could not be released; the others
+/// are still released.
+pub fn drain(client: &crate::LocalBackend) -> Result<()> {
+    let taken = SupervisorStandbyPool::open()?.take_unclaimed()?;
+    let failed: Vec<String> = taken
+        .into_iter()
+        .flat_map(|h| std::iter::once(h.id).chain(h.preloaded_child_vm_name))
+        .filter_map(|name| {
+            release_standby_vm(client, &name)
+                .err()
+                .map(|error| format!("{name}: {error:#}"))
+        })
+        .collect();
+    mvm_vmm::fc::idle_pool::drain();
+    anyhow::ensure!(
+        failed.is_empty(),
+        "could not release standby VM(s): {}",
+        failed.join("; ")
+    );
+    Ok(())
+}
+
+fn release_standby_vm(client: &crate::LocalBackend, name: &str) -> Result<()> {
+    let lifecycle = crate::lifecycle::MachineLifecycleLock::acquire(name)?;
+    if mvm_runtime::AnyBackend::for_started_vm(name).is_some() {
+        client
+            .stop_machine_in_lifecycle(&crate::dto::MachineId(name.to_string()), &lifecycle, None)
+            .map_err(|error| anyhow::anyhow!(error))
+    } else {
+        lifecycle.reap_unowned_state().map(|_| ())
+    }
+}
+
 /// What the host budget leaves for standbys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HostRoom {
@@ -315,6 +359,63 @@ mod tests {
             preloaded_child_vm_name: None,
             vsock_egress: false,
         }
+    }
+
+    /// What `machine stop --all` / `rm --all` drain: every unclaimed standby,
+    /// with its state dir and the separate `/tmp` socket dir a deep home puts
+    /// its sockets in, and every idle-pool entry nobody is adopting. A claimed
+    /// standby and its state belong to the launcher consuming it.
+    #[test]
+    fn drain_leaves_nothing_but_what_a_live_launcher_owns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("d".repeat(60));
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(&home);
+        let pool = SupervisorStandbyPool::open().unwrap();
+        let mut claimed = idle_handle("standby-claimed", 0);
+        claimed.state = StandbyState::Claimed;
+        let mut parked = idle_handle("standby-parked", 0);
+        parked.state = StandbyState::Parked;
+        for handle in [idle_handle("standby-idle", 0), parked, claimed] {
+            pool.record(&handle).unwrap();
+            let state_dir = mvm_core::config::vm_state_dir(&handle.id);
+            std::fs::create_dir_all(&state_dir).unwrap();
+            mvm_core::config::secure_fallback_socket_dir_at(&state_dir).unwrap();
+        }
+        let idle_entry = mvm_core::config::fc_idle_pool_dir().join("idle-left");
+        std::fs::create_dir_all(&idle_entry).unwrap();
+        std::fs::File::open(&idle_entry)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
+        let socket_dir =
+            |id: &str| mvm_core::config::vm_socket_dir_at(&mvm_core::config::vm_state_dir(id));
+        assert_ne!(
+            socket_dir("standby-idle"),
+            mvm_core::config::vm_state_dir("standby-idle")
+        );
+
+        let drained = drain(&crate::LocalBackend::with_hypervisor("mock"));
+
+        let left: Vec<_> = pool.list().unwrap().into_iter().map(|h| h.id).collect();
+        let leaked: Vec<_> = ["standby-idle", "standby-parked"]
+            .into_iter()
+            .filter(|id| mvm_core::config::vm_state_dir(id).exists() || socket_dir(id).exists())
+            .collect();
+        let claimed_kept = mvm_core::config::vm_state_dir("standby-claimed").is_dir();
+        for id in ["standby-idle", "standby-parked", "standby-claimed"] {
+            let _ = std::fs::remove_dir_all(socket_dir(id));
+        }
+        assert!(drained.is_ok(), "{drained:?}");
+        assert_eq!(left, ["standby-claimed"]);
+        assert!(leaked.is_empty(), "left behind: {leaked:?}");
+        assert!(claimed_kept, "a claimed standby's state is its launcher's");
+        assert_eq!(
+            std::fs::read_dir(mvm_core::config::fc_idle_pool_dir())
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     #[test]

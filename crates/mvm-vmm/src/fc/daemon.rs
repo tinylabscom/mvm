@@ -322,8 +322,9 @@ pub(crate) fn start_idle_firecracker(abs_dir: &str, abs_socket: &str, scope: &st
         "required Firecracker scope is missing"
     );
     let firecracker = launch_binary()?;
+    // The API socket is the only socket an idle process binds, and it lives in
+    // its pool entry, so no short `/tmp` socket dir is made for it.
     ensure_api_socket_fits(abs_socket)?;
-    secure_socket_dir(abs_dir)?;
     let identity = std::path::Path::new(abs_dir).join(super::idle_pool::FC_IDENTITY_FILE);
     let output = crate::host::shell::run_in_vm(&idle_firecracker_launch_script(
         abs_dir,
@@ -1448,6 +1449,34 @@ mod tests {
             ran.lock().unwrap().is_empty(),
             "no launch script may run without a resolved Firecracker"
         );
+    }
+
+    /// An idle process binds its API socket inside its own pool entry, so a
+    /// pool under a deep home must not create the short `/tmp` socket dir a VM
+    /// would fall back to: nothing would ever use or remove it.
+    #[test]
+    fn an_idle_process_creates_no_fallback_socket_dir() {
+        let named = std::env::current_exe().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set(super::super::binary::OVERRIDE_ENV, &named);
+        let (_ran, _handler) = capture_scripts();
+        let home = tempfile::tempdir().unwrap();
+        let mut dir = home.path().join("idle-deep");
+        while mvm_core::config::vm_socket_dir_at(&dir) == dir {
+            dir = dir.join("d");
+        }
+        assert!(mvm_core::config::fits_unix_socket_path(
+            &dir.join("fc.socket")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fallback = mvm_core::config::vm_socket_dir_at(&dir);
+        let abs_dir = dir.to_str().unwrap();
+
+        // The mock answers as a failed launch; what matters is what it left.
+        let _ = start_idle_firecracker(abs_dir, &format!("{abs_dir}/fc.socket"), "mvm-scope");
+        let created = fallback.exists();
+        let _ = std::fs::remove_dir_all(&fallback);
+        assert!(!created, "{} was created", fallback.display());
     }
 
     #[test]

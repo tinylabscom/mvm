@@ -34,9 +34,10 @@
 //! path ([`CLAIM_ORIGIN_FILE`]) for the stop path's identity check.
 //!
 //! **Release.** Every idle process has a reaper beside it, a detached shell
-//! that stops it once it has sat unclaimed for the residency idle timeout, or
-//! as soon as the pool directory is gone (a deleted home). Claiming stops the
-//! reaper. The pool holds at most one process per shape and
+//! that stops it once it has sat unclaimed for the residency idle timeout,
+//! even when the pool directory is gone by then (a deleted home). Claiming
+//! stops the reaper. [`drain`] stops every process and reaper the pool holds;
+//! [`recover`] takes only what a crashed process left. The pool holds at most one process per shape and
 //! [`MAX_IDLE_PROCESSES`] in all, is off under `MVM_RESIDENCY=cold`, and is
 //! off when [`IDLE_POOL_ENV`] is `0`.
 
@@ -192,7 +193,7 @@ fn is_pool_socket_path(path: &Path) -> bool {
 ///
 /// Crash recovery: the claim writes a journal inside the claimed entry before
 /// it begins moving files, recording the target `state_dir`. If the process
-/// dies mid-adopt, [`recover_incomplete_claims`] reads the journal back and
+/// dies mid-adopt, the next claim, [`recover`] or [`drain`] reads the journal back and
 /// cleans up — destroying the process if it is still running. The journal
 /// uses the same identity-stable signalling as the pool itself (`EndpointPid`
 /// records), never bare numeric PIDs.
@@ -332,13 +333,9 @@ fn read_claim_journal(claimed: &Path) -> Option<PathBuf> {
 /// is removed. Files that were already moved into the target state dir are
 /// cleaned up there too.
 ///
-/// Called on the next launch, or by a host-agent restart. Safe to call
-/// concurrently — each entry is handled at most once because destroying
+/// Called before every claim, and through [`recover`] and [`drain`]. Safe to
+/// call concurrently — each entry is handled at most once because destroying
 /// removes the directory.
-pub fn recover_incomplete_claims() {
-    recover_incomplete_claims_in(&mvm_core::config::fc_idle_pool_dir());
-}
-
 fn recover_incomplete_claims_in(root: &Path) {
     let Ok(read) = std::fs::read_dir(root) else {
         return;
@@ -674,23 +671,61 @@ const ABANDONED_AFTER: Duration = Duration::from_secs(10);
 /// is slow and recovering it would kill the process it is handing over.
 const INTERRUPTED_CLAIM_AFTER: Duration = Duration::from_secs(120);
 
+/// Stop every idle process the pool holds, with its reaper, and finish any
+/// claim whose launcher died. What `machine stop --all` and `machine rm --all`
+/// call: afterwards the pool holds only what a live launcher owns — a claim
+/// being adopted, and an entry a refill is still starting.
+pub fn drain() {
+    drain_in(&mvm_core::config::fc_idle_pool_dir());
+}
+
+fn drain_in(root: &Path) {
+    for dir in idle_entries(root) {
+        // An entry whose process is not confirmed yet belongs to a refill
+        // still starting it, until it is old enough to be abandoned.
+        if confirmed_firecracker(&dir, &dir.join(API_SOCKET)).is_some()
+            || older_than(&dir, ABANDONED_AFTER)
+        {
+            retire(&dir);
+        }
+    }
+    recover_incomplete_claims_in(root);
+}
+
+/// Remove only what a crashed process left: entries whose process never came
+/// up and claims whose launcher died mid-adoption. A healthy idle process is
+/// kept. What `reconcile` and `cache prune` call.
+pub fn recover() {
+    recover_in(&mvm_core::config::fc_idle_pool_dir());
+}
+
+fn recover_in(root: &Path) {
+    discard_abandoned(root);
+    recover_incomplete_claims_in(root);
+}
+
 /// Remove entries whose process never came up, so they do not hold a shape's
 /// place in the pool until their reaper's timer runs out.
 fn discard_abandoned(root: &Path) {
     for dir in idle_entries(root) {
-        if is_ready(&dir) || !older_than(&dir, ABANDONED_AFTER) {
-            continue;
+        if !is_ready(&dir) && older_than(&dir, ABANDONED_AFTER) {
+            retire(&dir);
         }
-        let parked = dir.with_file_name(format!(
-            "{CLAIMED_PREFIX}abandoned-{}",
-            dir.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        ));
-        if std::fs::rename(&dir, &parked).is_ok() {
-            stop_reaper(&parked, &dir);
-            destroy(&parked, &dir, &parked);
-        }
+    }
+}
+
+/// Take an entry out of the pool the way a claim does, by renaming it, so a
+/// concurrent claim or reaper cannot act on it too; then stop its reaper and
+/// its process. An interruption leaves a claim-shaped entry that
+/// [`recover_incomplete_claims_in`] finishes.
+fn retire(dir: &Path) {
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let taken = dir.with_file_name(format!("{CLAIMED_PREFIX}{name}-{}", claim_token()));
+    if std::fs::rename(dir, &taken).is_ok() {
+        stop_reaper(&taken, dir);
+        destroy(&taken, dir, &taken);
     }
 }
 
@@ -1345,6 +1380,95 @@ mod tests {
         recover_incomplete_claims_in(root.path());
 
         assert!(!claimed.exists(), "the incomplete claim must be removed");
+    }
+
+    fn age(dir: &Path, by: Duration) {
+        std::fs::File::open(dir)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - by)
+            .unwrap();
+    }
+
+    /// Drain empties the pool of everything nobody else is in the middle of:
+    /// abandoned entries and crashed claims go; a refill still starting its
+    /// process and a claim another launcher is adopting stay with their owners.
+    #[test]
+    fn drain_empties_the_pool_except_what_a_live_launcher_owns() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let abandoned = entry(root.path(), "idle-abandoned", Some(512));
+        let starting = entry(root.path(), "idle-starting", Some(512));
+        let crashed = entry(root.path(), "claimed-idle-crashed-aabbccdd", Some(512));
+        write_claim_journal(&crashed, state.path()).unwrap();
+        let adopting = entry(root.path(), "claimed-idle-adopting-11223344", Some(512));
+        write_claim_journal(&adopting, state.path()).unwrap();
+        age(&abandoned, ABANDONED_AFTER * 2);
+        age(&crashed, INTERRUPTED_CLAIM_AFTER * 2);
+
+        drain_in(root.path());
+
+        let mut left: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["claimed-idle-adopting-11223344", "idle-starting"]);
+        assert!(starting.is_dir() && adopting.is_dir());
+    }
+
+    /// Recovery after a crash takes only what a dead process left: a healthy
+    /// young entry is the pool doing its job and is kept.
+    #[test]
+    fn recovery_takes_abandoned_entries_and_crashed_claims_only() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let abandoned = entry(root.path(), "idle-abandoned", Some(512));
+        entry(root.path(), "idle-young", Some(512));
+        let crashed = entry(root.path(), "claimed-idle-crashed-aabbccdd", Some(512));
+        write_claim_journal(&crashed, state.path()).unwrap();
+        age(&abandoned, ABANDONED_AFTER * 2);
+        age(&crashed, INTERRUPTED_CLAIM_AFTER * 2);
+
+        recover_in(root.path());
+
+        let left: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(left, ["idle-young"]);
+    }
+
+    /// Draining stops the reaper of the entry it retires, and never signals a
+    /// process the entry's identity record does not confirm.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn drain_stops_the_reaper_and_never_signals_an_unconfirmed_pid() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = entry(root.path(), "idle-leaked", Some(512));
+        let mut reaper = session_child(&dir);
+        let mut decoy = session_child(root.path());
+        std::fs::write(dir.join(REAPER_PID_FILE), record(&reaper).render()).unwrap();
+        let recycled = EndpointPid {
+            started: record(&decoy).started.map(|started| started + 1),
+            ..record(&decoy)
+        };
+        std::fs::write(dir.join(FC_IDENTITY_FILE), recycled.render()).unwrap();
+        std::fs::write(dir.join(PID_FILE), decoy.id().to_string()).unwrap();
+        age(&dir, ABANDONED_AFTER * 2);
+
+        drain_in(root.path());
+
+        assert!(
+            wait_gone(&mut reaper),
+            "the retired entry's reaper is stopped"
+        );
+        assert!(
+            alive(&mut decoy),
+            "a pid with another start time is never signalled"
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        let _ = decoy.kill();
+        let _ = decoy.wait();
     }
 
     /// Pool files are created fresh, owner-only, and never through a symlink.

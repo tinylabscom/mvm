@@ -79,14 +79,17 @@ pub(in crate::commands) fn stop_without_guest(name: &str) -> Result<()> {
 /// Stop every running VM. Fleet/multi-VM is mvmd's job; this is the local
 /// "stop them all" convenience. Each VM is stopped by its owning VMM (resolved
 /// inside the facade), so QEMU/libkrun VMs are stopped too — not just whichever
-/// backend the CLI defaulted to.
+/// backend the CLI defaulted to. Unclaimed standbys and idle Firecracker
+/// processes are drained with them.
 fn stop_all(client: &LocalBackend, runtime: &tokio::runtime::Runtime) -> Result<()> {
     // The backend-observed set (not the registry-folded `list_machines`): it
     // includes a crashed VM that still holds a pid marker so its stop reaps the
     // orphaned per-VM subprocesses, and it leaves registry-only rows untouched.
     // Every listed VM is an unconditional stop target, exactly as the old
     // `AnyBackend::list_all()` scan was. Infallible, so the audit always emits.
-    let mut last_err: Option<anyhow::Error> = None;
+    // Standbys and idle Firecracker processes first: a live standby is then
+    // stopped by the same teardown below rather than left to outlive `--all`.
+    let mut last_err = mvm_client::standby::drain(client).err();
     for m in client.list_stop_targets() {
         record_vm_readiness(&m.name, InstanceReadiness::Stopping);
         let stopped = runtime
