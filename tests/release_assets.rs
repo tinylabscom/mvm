@@ -1424,17 +1424,17 @@ fn qemu_wasm_site_pack_is_fetched_from_the_image_set_not_rebuilt() {
 
 // Owned gate: the Justfile's qemu-wasm local tools recipes.
 #[test]
-fn qemu_wasm_local_tools_use_the_published_pack_and_maintained_harness() {
+fn qemu_wasm_local_tools_use_the_published_pack() {
     let recipes = justfile();
     let downloader = fs::read_to_string("scripts/download-qemu-wasm-smoke-pack.sh")
         .expect("read QEMU-WASM pack downloader");
-    let harness = fs::read_to_string("scripts/run-qemu-wasm-smoke-chromium.py")
-        .expect("read maintained QEMU-WASM Chromium harness");
 
     for retired in [
         "scripts/build-qemu-wasm-smoke-pack.sh",
         "scripts/run-qemu-wasm-demo-chromium.py",
         "scripts/run-qemu-wasm-smoke-suite.py",
+        "scripts/run-qemu-wasm-smoke-chromium.py",
+        "scripts/serve-qemu-wasm-smoke-pack.py",
     ] {
         assert!(
             !Path::new(retired).exists(),
@@ -1455,11 +1455,6 @@ fn qemu_wasm_local_tools_use_the_published_pack_and_maintained_harness() {
         !downloader.contains("NOT currently published")
             && !downloader.contains("build-qemu-wasm-smoke-pack.sh"),
         "the downloader must not direct users back to the retired build path"
-    );
-    assert!(
-        harness.contains("serve-qemu-wasm-smoke-pack.py")
-            && Path::new("scripts/serve-qemu-wasm-smoke-pack.py").is_file(),
-        "the maintained Chromium harness must use its checked-in server"
     );
 }
 
