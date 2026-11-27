@@ -25,9 +25,8 @@ mod warm_start;
 #[cfg(test)]
 mod tests;
 
-// Whole-host FDE diagnostics stay in `security_checks`; the path-specific
-// detector lives in `mvm_core::host_storage_encryption`, shared with the
-// volume service.
+// Storage encryption is detected by `mvm_core::host_storage_encryption`, the
+// detector the volume service enforces with.
 #[cfg(not(test))]
 pub(crate) use security_checks::require_local_volume_host_path_encrypted;
 pub use toolchain::{ZigbuildProbe, probe_zigbuild};
@@ -320,7 +319,6 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(security_checks::security_landlock_check());
     checks.push(security_checks::security_audit_log_check());
     checks.push(security_checks::security_audit_chain_check());
-    checks.push(security_checks::security_host_fde_check());
     checks.push(security_checks::security_volume_storage_check());
     checks.push(security_checks::security_data_dir_mode_check());
     checks.push(security_checks::security_proxy_socket_mode_check());

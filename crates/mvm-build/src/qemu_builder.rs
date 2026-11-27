@@ -20,8 +20,9 @@
 //! the `kvm` group — no root and no guest-ownership restoration.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use crate::builder_boot::stage_image_boot;
 use crate::builder_vm::{
@@ -115,9 +116,12 @@ impl BuilderVm for QemuBuilderVm {
     }
 }
 
-/// Max wall-clock for a Stage 0 QEMU run (kernel compile + downloads). Wraps
-/// the qemu child in `timeout` so a hung guest can't block forever.
+/// Max wall-clock for a Stage 0 QEMU run (kernel compile + downloads), so a
+/// hung guest can't block forever.
 const STAGE0_TIMEOUT_SECS: u32 = 14_400;
+/// Bytes kept of QEMU's own stdout and stderr. The guest console goes to a
+/// file, so these carry only QEMU's diagnostics.
+const QEMU_OUTPUT_CAP: usize = 64 * 1024;
 const QEMU_BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 const QEMU_BUILDER_VSOCK_EGRESS_PORT_TOKEN_PREFIX: &str = "mvm.vsock_egress_port=";
 const QEMU_BUILDER_VSOCK_EGRESS_PORT_BASE: u32 = 45_253;
@@ -262,8 +266,7 @@ fn run_stage0_qemu(
         BuilderEndpointTransport::Vsock { port: egress_port },
         identity_material.spawn_config(),
     )?;
-    let mut cmd = mvm_core::env_hygiene::helper_command("timeout");
-    cmd.arg(STAGE0_TIMEOUT_SECS.to_string()).arg(&qemu_bin);
+    let mut cmd = mvm_core::env_hygiene::helper_command(&qemu_bin);
     let mem_arg = format!("{QEMU_BUILD_MEMORY_MIB}M");
     cmd.args([
         "-nic",
@@ -300,20 +303,22 @@ fn run_stage0_qemu(
         .arg(format!("file:{}", console_log.display()));
     cmd.args(["-monitor", "none", "-no-reboot"]);
 
-    let status = cmd
-        .status()
-        .map_err(|e| BuilderVmError::NixBuildFailed(format!("spawning qemu ({qemu_bin}): {e}")))?;
+    let status = run_qemu_bounded(
+        cmd,
+        &qemu_bin,
+        Duration::from_secs(STAGE0_TIMEOUT_SECS.into()),
+    )?;
     drop(egress_endpoint);
 
     // 3. Decide success from the serial log (the qemu exit code is just the
     //    guest poweroff). `stage0-init` prints a stable terminal line.
     let log = std::fs::read_to_string(&console_log).unwrap_or_default();
-    if !status.success() && status.code() == Some(124) {
+    let Some(status) = status else {
         return Err(BuilderVmError::NixBuildFailed(format!(
             "QEMU Stage 0 timed out after {STAGE0_TIMEOUT_SECS}s; console at {}",
             console_log.display()
         )));
-    }
+    };
     if log.contains("stage0-init: build failed") {
         return Err(BuilderVmError::NixBuildFailed(format!(
             "nix build failed inside the QEMU Stage 0 guest; console at {}\n{}",
@@ -753,9 +758,43 @@ mod tests {
         QEMU_STAGE0_VSOCK_GUEST_MODULES, WORK_EXT4_DIR_OVERHEAD_BYTES,
         WORK_EXT4_FILE_OVERHEAD_BYTES, WORK_EXT4_FIXED_HEADROOM_BYTES, WORK_TREE_EXCLUDE_DIRS,
         attach_stage0_identity_and_store, copy_tree_filtered, debugfs_dump_request, dir_stats,
-        locate_qemu_vsock_module,
+        locate_qemu_vsock_module, run_qemu_bounded,
     };
     use std::fs;
+    use std::time::Duration;
+
+    #[test]
+    fn a_qemu_run_past_its_bound_is_killed_and_reported_as_timed_out() {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let started = std::time::Instant::now();
+        let status = run_qemu_bounded(cmd, "sleep", Duration::from_millis(200))
+            .expect("a run that outlives its bound is not a spawn error");
+        assert!(status.is_none(), "the bound must report a timeout");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_qemu_run_within_its_bound_returns_its_exit_status() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "exit 3"]);
+        let status = run_qemu_bounded(cmd, "sh", Duration::from_secs(30))
+            .expect("run")
+            .expect("finished within the bound");
+        assert_eq!(status.code(), Some(3));
+    }
+
+    #[test]
+    fn a_qemu_binary_that_cannot_start_is_a_spawn_error() {
+        let cmd = std::process::Command::new("/nonexistent/qemu-system-x86_64");
+        let err = run_qemu_bounded(
+            cmd,
+            "/nonexistent/qemu-system-x86_64",
+            Duration::from_secs(5),
+        )
+        .expect_err("a missing binary must fail");
+        assert!(err.to_string().contains("spawning qemu"), "{err}");
+    }
 
     #[test]
     fn stage0_attaches_one_identity_before_one_nix_store() {
@@ -911,6 +950,28 @@ mod tests {
     }
 }
 
+/// Run QEMU under a wall-clock bound, then relay what it printed itself.
+/// `Ok(None)` means it outlived `timeout` and was killed.
+fn run_qemu_bounded(
+    cmd: Command,
+    qemu_bin: &str,
+    timeout: Duration,
+) -> Result<Option<ExitStatus>, BuilderVmError> {
+    use mvm_core::bounded_run::{BoundedRunError, RunBounds, run_bounded};
+    use std::io::Write as _;
+    match run_bounded(cmd, RunBounds::new(timeout, QEMU_OUTPUT_CAP)) {
+        Ok(out) => {
+            let _ = std::io::stdout().write_all(&out.stdout);
+            let _ = std::io::stderr().write_all(&out.stderr);
+            Ok(Some(out.status))
+        }
+        Err(BoundedRunError::TimedOut(_)) => Ok(None),
+        Err(e) => Err(BuilderVmError::NixBuildFailed(format!(
+            "spawning qemu ({qemu_bin}): {e}"
+        ))),
+    }
+}
+
 fn tail(s: &str, n: usize) -> String {
     let lines: Vec<&str> = s.lines().collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
@@ -1059,10 +1120,9 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         .cmdline;
     let cmdline = qemu_build_cmdline(&overlay_cmdline, egress_port);
     let guest_cid = allocate_qemu_builder_guest_cid();
-    let timeout_secs = builder_vm_timeout()?.as_secs();
+    let timeout = builder_vm_timeout()?;
     let mem_arg = format!("{QEMU_BUILD_MEMORY_MIB}M");
-    let mut cmd = mvm_core::env_hygiene::helper_command("timeout");
-    cmd.arg(timeout_secs.to_string()).arg(&qemu_bin);
+    let mut cmd = mvm_core::env_hygiene::helper_command(&qemu_bin);
     cmd.args([
         "-nic",
         "none",
@@ -1138,17 +1198,16 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         .arg(format!("file:{}", console_log.display()));
     cmd.args(["-monitor", "none", "-no-reboot"]);
 
-    let status = cmd
-        .status()
-        .map_err(|e| BuilderVmError::NixBuildFailed(format!("spawning qemu ({qemu_bin}): {e}")))?;
+    let status = run_qemu_bounded(cmd, &qemu_bin, timeout)?;
     drop(egress_endpoint);
 
-    if !status.success() && status.code() == Some(124) {
+    let Some(status) = status else {
         return Err(BuilderVmError::NixBuildFailed(format!(
-            "QEMU builder VM shell job timed out after {timeout_secs}s; console at {}",
+            "QEMU builder VM shell job timed out after {}s; console at {}",
+            timeout.as_secs(),
             console_log.display()
         )));
-    }
+    };
     if !status.success() {
         return Err(BuilderVmError::NixBuildFailed(format!(
             "QEMU builder VM shell job exited {}; console at {}",
@@ -1342,11 +1401,10 @@ fn run_build_qemu(
     let cmdline = qemu_build_cmdline(&overlay_cmdline, egress_port);
     let guest_cid = allocate_qemu_builder_guest_cid();
 
-    // 10. Launch QEMU, serial → console.log, wrapped in `timeout`.
-    let timeout_secs = builder_vm_timeout()?.as_secs();
+    // 10. Launch QEMU, serial → console.log, bounded by the builder timeout.
+    let timeout = builder_vm_timeout()?;
     let mem_arg = format!("{QEMU_BUILD_MEMORY_MIB}M");
-    let mut cmd = mvm_core::env_hygiene::helper_command("timeout");
-    cmd.arg(timeout_secs.to_string()).arg(&qemu_bin);
+    let mut cmd = mvm_core::env_hygiene::helper_command(&qemu_bin);
     cmd.args([
         "-nic",
         "none",
@@ -1415,17 +1473,15 @@ fn run_build_qemu(
         .arg(format!("file:{}", console_log.display()));
     cmd.args(["-monitor", "none", "-no-reboot"]);
 
-    let status = cmd
-        .status()
-        .map_err(|e| BuilderVmError::NixBuildFailed(format!("spawning qemu ({qemu_bin}): {e}")))?;
-    drop(egress_endpoint);
-
-    if !status.success() && status.code() == Some(124) {
+    if run_qemu_bounded(cmd, &qemu_bin, timeout)?.is_none() {
+        drop(egress_endpoint);
         return Err(BuilderVmError::NixBuildFailed(format!(
-            "QEMU builder VM timed out after {timeout_secs}s; console at {}",
+            "QEMU builder VM timed out after {}s; console at {}",
+            timeout.as_secs(),
             console_log.display()
         )));
     }
+    drop(egress_endpoint);
 
     // 12. The guest wrote its artifacts onto the output disk rather than into
     //     a shared `/out`, so extract before finalize reads them.

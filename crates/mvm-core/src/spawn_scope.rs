@@ -765,11 +765,13 @@ fn await_detached_launcher_within(
         if probe_launcher_comm(proc_root, pid, &mut LauncherComm::default()).ok()
             == Some(LauncherProbe::Launching)
         {
-            let _ = crate::env_hygiene::helper_command("kill")
-                .args(["-KILL", &pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            #[cfg(unix)]
+            if let Some(pid) = i32::try_from(pid)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+            {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            }
         }
         return Err(scope_creation_timeout(
             machine_id,
