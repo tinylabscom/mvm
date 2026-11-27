@@ -190,10 +190,6 @@ pub(super) fn deferred_path_count(state: &AtomicSyncState) -> usize {
 }
 
 pub(super) fn sync_path(path: &Path) -> std::io::Result<()> {
-    // A deferred directory is the name of a file published in the batch.
-    if std::fs::metadata(path)?.is_dir() {
-        return std::fs::File::open(path)?.sync_all();
-    }
     std::fs::OpenOptions::new()
         .append(true)
         .open(path)?

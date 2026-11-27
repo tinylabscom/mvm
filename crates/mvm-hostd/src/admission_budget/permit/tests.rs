@@ -560,99 +560,113 @@ fn a_group_writable_config_is_refused_with_its_path_and_the_fix() {
     assert!(budget_at(home.path()).is_ok());
 }
 
-fn batch_emitter(dir: &tempfile::TempDir) -> crate::audit::emitter::AuditEmitter {
-    crate::audit::emitter::AuditEmitter::with_dir(
-        ed25519_dalek::SigningKey::from_bytes(&[41; 32]),
-        dir.path(),
-    )
-    .unwrap()
+fn record_path(home: &Path, vm: &str) -> PathBuf {
+    super::super::charge_path_at(home, vm)
 }
 
-/// With no host budget configured, the launch's charge record is written
-/// while admission's audit batch is open, so the batch's one sync makes it
-/// durable before activation; the started machine then needs no write of its
-/// own on the launch path.
+/// With no host budget configured, the charge record is written on its own
+/// thread beside the boot, with the same durable write as before (data synced
+/// before the rename, then the directory), and the start only joins it.
 #[test]
-fn an_unbounded_charge_is_written_in_the_admission_batch_and_not_again_at_start() {
+fn an_unbounded_charge_is_written_beside_the_boot_and_joined_at_start() {
     let home = tempfile::tempdir().unwrap();
     let mut env = mvm_core::util::test_env::TestEnv::new();
     env.isolate_mvm_home(home.path());
-    let audit = tempfile::tempdir().unwrap();
-    let emitter = batch_emitter(&audit);
     let permit = HostBudgetPermit::reserve_ordinary("early-charge", charge()).unwrap();
-    let record = super::super::charge_path_at(home.path(), "early-charge");
 
-    let ((), durability) = emitter
-        .batched_sync_detached(|| permit.record_admitted_charge("early-charge", &emitter))
-        .unwrap();
-    durability
-        .wait()
-        .expect("the batch syncs the charge record");
-    let written = std::fs::read(&record).expect("the charge is recorded before dispatch");
-    assert_eq!(
-        serde_json::from_slice::<MachineCharge>(&written).unwrap(),
-        charge()
-    );
-    let before = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&record).unwrap());
-
+    permit.record_charge_beside_boot("early-charge");
     let plan = plan("early-charge");
     permit.bind_plan(&plan).unwrap();
     permit.mark_dispatching(&plan).unwrap();
     permit.record_started("early-charge").unwrap();
+
+    let record = record_path(home.path(), "early-charge");
+    let written = std::fs::read(&record).expect("the started machine has its record");
     assert_eq!(
-        std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&record).unwrap()),
-        before,
-        "the started machine's record is the one the batch made durable"
+        serde_json::from_slice::<MachineCharge>(&written).unwrap(),
+        charge()
     );
+    drop(permit);
+    assert!(record.is_file(), "a started machine keeps its record");
 }
 
-/// A machine that starts under another name than the one admitted (a warm
-/// claim's child), or whose batch-written record was removed since, is
-/// recorded when it starts, as before.
+/// The early write is not part of the admission's audit durability: when it
+/// fails (here because its state directory cannot be created, as when another
+/// command reaped it), the launch is not refused and the charge is written at
+/// start as before.
 #[test]
-fn a_record_the_batch_did_not_leave_in_place_is_written_at_start() {
+fn a_failed_early_charge_write_is_recorded_at_start_instead() {
     let home = tempfile::tempdir().unwrap();
     let mut env = mvm_core::util::test_env::TestEnv::new();
     env.isolate_mvm_home(home.path());
-    let audit = tempfile::tempdir().unwrap();
-    let emitter = batch_emitter(&audit);
-    let permit = HostBudgetPermit::reserve_ordinary("requested", charge()).unwrap();
-    emitter
-        .batched_sync_detached(|| permit.record_admitted_charge("requested", &emitter))
-        .unwrap()
-        .1
-        .wait()
-        .unwrap();
+    let state = mvm_core::config::vm_state_dir_at(home.path(), "reaped");
+    std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+    std::fs::write(&state, b"not a directory").unwrap();
+    let permit = HostBudgetPermit::reserve_ordinary("reaped", charge()).unwrap();
 
-    permit.record_started("claimed-child").unwrap();
-    assert!(super::super::charge_path_at(home.path(), "claimed-child").is_file());
+    permit.record_charge_beside_boot("reaped");
+    permit.join_early_charge_for_test();
+    std::fs::remove_file(&state).unwrap();
+    permit.record_started("reaped").unwrap();
 
-    let requested = super::super::charge_path_at(home.path(), "requested");
-    std::fs::remove_file(&requested).unwrap();
-    permit.record_started("requested").unwrap();
-    assert!(
-        requested.is_file(),
-        "a batch-written record removed since is written again at start"
-    );
+    assert!(record_path(home.path(), "reaped").is_file());
 }
 
-/// A configured host budget keeps today's order: nothing is written during
-/// admission, and the ledger and charge record are written once the machine
-/// has started.
+/// An early record whose launch never started (refused or failed before boot,
+/// including a budget configured after admission) is removed when the permit
+/// is dropped, so a later budgeted admission cannot count it as phantom load.
 #[test]
-fn a_tracked_charge_is_not_written_in_the_admission_batch() {
+fn an_early_record_with_no_started_machine_is_never_counted_against_a_budget() {
     let home = tempfile::tempdir().unwrap();
-    let audit = tempfile::tempdir().unwrap();
-    let emitter = batch_emitter(&audit);
-    let permit = HostBudgetPermit::reserve_at(home.path(), &budget(), "tracked", charge()).unwrap();
-    let record = super::super::charge_path_at(home.path(), "tracked");
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    let permit = HostBudgetPermit::reserve_ordinary("never-booted", charge()).unwrap();
+    permit.record_charge_beside_boot("never-booted");
+    permit.join_early_charge_for_test();
+    assert!(record_path(home.path(), "never-booted").is_file());
 
-    emitter
-        .batched_sync_detached(|| permit.record_admitted_charge("tracked", &emitter))
-        .unwrap()
-        .1
-        .wait()
-        .unwrap();
+    // A budget configured after the record was written refuses the dispatch.
+    let config = mvm_core::user_config::MvmConfig {
+        host_budget_memory_mib: Some(512),
+        ..Default::default()
+    };
+    mvm_core::user_config::save(&config, None).unwrap();
+    assert!(permit.mark_dispatching(&plan("never-booted")).is_err());
+    drop(permit);
+
+    assert!(!record_path(home.path(), "never-booted").exists());
+    let budgeted = HostBudgetPermit::reserve_ordinary("next", charge())
+        .expect("no phantom charge is left to count against the budget");
+    drop(budgeted);
+}
+
+/// A machine that starts under another name than the one admitted (a warm
+/// claim's child) is recorded at start under its own name, and the admitted
+/// name's early record is removed with the permit.
+#[test]
+fn a_machine_started_under_another_name_is_recorded_under_its_own() {
+    let home = tempfile::tempdir().unwrap();
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    let permit = HostBudgetPermit::reserve_ordinary("requested", charge()).unwrap();
+    permit.record_charge_beside_boot("requested");
+
+    permit.record_started("claimed-child").unwrap();
+    drop(permit);
+
+    assert!(record_path(home.path(), "claimed-child").is_file());
+    assert!(!record_path(home.path(), "requested").exists());
+}
+
+/// A configured host budget keeps today's order: nothing is written beside
+/// the boot, and the ledger and record are written once the machine started.
+#[test]
+fn a_tracked_charge_is_not_written_beside_the_boot() {
+    let home = tempfile::tempdir().unwrap();
+    let permit = HostBudgetPermit::reserve_at(home.path(), &budget(), "tracked", charge()).unwrap();
+    let record = record_path(home.path(), "tracked");
+
+    permit.record_charge_beside_boot("tracked");
     assert!(!record.exists(), "a tracked hold is charged by its ledger");
 
     let plan = plan("tracked");

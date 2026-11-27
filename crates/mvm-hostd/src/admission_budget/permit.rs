@@ -92,9 +92,41 @@ enum PermitMode {
     Tracked,
     UnboundedOrdinary {
         charge: MachineCharge,
-        /// The machine whose charge record admission's batch already wrote.
-        recorded_in_batch: std::sync::OnceLock<String>,
+        /// The charge record started beside the boot, if any.
+        early: std::sync::Mutex<Option<EarlyCharge>>,
     },
+}
+
+/// A charge record written on its own thread while the machine boots.
+#[derive(Debug)]
+struct EarlyCharge {
+    vm_name: String,
+    writer: Option<std::thread::JoinHandle<Result<()>>>,
+    /// Set once a machine started under `vm_name`; until then the record is
+    /// removed with the permit, so a launch that never started leaves none.
+    started: bool,
+}
+
+impl EarlyCharge {
+    /// Wait for the write; `false` when it failed or its thread panicked.
+    fn join(&mut self) -> bool {
+        match self.writer.take().map(std::thread::JoinHandle::join) {
+            Some(Ok(Ok(()))) => true,
+            Some(Ok(Err(error))) => {
+                tracing::warn!(
+                    machine = %self.vm_name,
+                    error = %format!("{error:#}"),
+                    "early host charge write failed; recording at start"
+                );
+                false
+            }
+            Some(Err(_)) => {
+                tracing::warn!(machine = %self.vm_name, "early host charge writer panicked");
+                false
+            }
+            None => false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -124,7 +156,7 @@ impl HostBudgetPermit {
             drop_policy: DropPolicy::Retain,
             mode: PermitMode::UnboundedOrdinary {
                 charge,
-                recorded_in_batch: std::sync::OnceLock::new(),
+                early: std::sync::Mutex::new(None),
             },
         })
     }
@@ -375,20 +407,20 @@ impl HostBudgetPermit {
     /// Persist the legacy charge while retaining the authoritative hold.
     pub fn record_started(&self, vm_name: &str) -> Result<()> {
         validate_name(vm_name)?;
-        if let PermitMode::UnboundedOrdinary {
-            charge,
-            recorded_in_batch,
-        } = &self.mode
-        {
-            // Written and synced in admission's batch, which the boot waited
-            // for before the workload could run. A record a failed claim's
-            // cleanup removed since is written again.
-            if recorded_in_batch.get().is_some_and(|name| name == vm_name)
-                && super::charge_path_at(&self.home, vm_name).is_file()
-            {
-                return Ok(());
+        if let PermitMode::UnboundedOrdinary { charge, early } = &self.mode {
+            let mut early = early
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(early) = early.as_mut().filter(|early| early.vm_name == vm_name) else {
+                return super::record_charge_at(&self.home, vm_name, *charge);
+            };
+            // The write beside the boot is the same durable write as below. A
+            // failed one, or a record removed since, is written now instead.
+            if !(early.join() && super::charge_path_at(&self.home, vm_name).is_file()) {
+                super::record_charge_at(&self.home, vm_name, *charge)?;
             }
-            return super::record_charge_at(&self.home, vm_name, *charge);
+            early.started = true;
+            return Ok(());
         }
         self.mutate(|record| {
             ensure!(
@@ -412,37 +444,54 @@ impl HostBudgetPermit {
         })
     }
 
-    /// Write an ordinary launch's charge record for `vm_name` while admission's
-    /// audit batch is open on `emitter`, so the batch's one sync makes it
-    /// durable before activation rather than a sync of its own after start.
+    /// Start writing an ordinary launch's charge record for `vm_name` on its
+    /// own thread, so its two syncs run beside the boot instead of after
+    /// start. [`Self::record_started`] joins it, and writes the record itself
+    /// if this write failed; a permit dropped before any machine started
+    /// under `vm_name` removes the record.
+    ///
+    /// Deliberately not part of the admission's audit durability, and never
+    /// an error: a bookkeeping file's fault must not refuse a launch, least of
+    /// all as an unrecorded admission. Anything that stops the write here
+    /// leaves the record to [`Self::record_started`], as before.
     ///
     /// Only an unbounded permit writes here. A configured host budget charges
     /// the machine through its ledger reservation and records the charge once
     /// the machine has started, so a tracked permit writes nothing now.
-    ///
-    /// # Errors
-    ///
-    /// If the name is invalid or the record cannot be written.
-    pub fn record_admitted_charge(
-        &self,
-        vm_name: &str,
-        emitter: &crate::audit::emitter::AuditEmitter,
-    ) -> Result<()> {
-        let PermitMode::UnboundedOrdinary {
-            charge,
-            recorded_in_batch,
-        } = &self.mode
-        else {
-            return Ok(());
+    pub fn record_charge_beside_boot(&self, vm_name: &str) {
+        let PermitMode::UnboundedOrdinary { charge, early } = &self.mode else {
+            return;
         };
-        validate_name(vm_name)?;
-        let path = super::charge_path_at(&self.home, vm_name);
-        let json = serde_json::to_vec(charge).context("serializing the admitted charge")?;
-        emitter
-            .write_durable_in_batch(&path, &json)
-            .with_context(|| format!("writing the admitted charge to {}", path.display()))?;
-        let _ = recorded_in_batch.set(vm_name.to_owned());
-        Ok(())
+        if validate_name(vm_name).is_err() {
+            return;
+        }
+        let (home, name, charge) = (self.home.clone(), vm_name.to_owned(), *charge);
+        match std::thread::Builder::new()
+            .name("host-charge".into())
+            .spawn(move || super::record_charge_at(&home, &name, charge))
+        {
+            Ok(writer) => {
+                *early
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(EarlyCharge {
+                    vm_name: vm_name.to_owned(),
+                    writer: Some(writer),
+                    started: false,
+                });
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not start the host charge writer; recording at start");
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn join_early_charge_for_test(&self) {
+        if let PermitMode::UnboundedOrdinary { early, .. } = &self.mode
+            && let Some(early) = early.lock().expect("early charge").as_mut()
+        {
+            early.join();
+        }
     }
 
     /// Release a known pre-effect failure; never releases a dispatched hold.
@@ -703,6 +752,23 @@ impl HostBudgetPermit {
 
 impl Drop for HostBudgetPermit {
     fn drop(&mut self) {
+        if let PermitMode::UnboundedOrdinary { early, .. } = &mut self.mode
+            && let Some(mut early) = early
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            && !early.started
+        {
+            // No machine started under this name, so its record must not
+            // stay behind to be counted as a live machine.
+            early.join();
+            let path = super::charge_path_at(&self.home, &early.vm_name);
+            if let Err(error) = std::fs::remove_file(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(path = %path.display(), %error, "could not remove an unstarted host charge");
+            }
+        }
         if matches!(self.drop_policy, DropPolicy::Retain) {
             return;
         }

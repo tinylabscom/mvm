@@ -1221,15 +1221,6 @@ fn admit_with_runtime_evidence(
         if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {
             tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
         }
-        // A boot that waits for this batch before activation also makes its
-        // host charge durable here, earlier than after start and in the same
-        // sync round. An inline admission's caller records its own charge.
-        if matches!(sync, durability::AdmissionSync::BesideBoot) {
-            admitted
-                .host_budget_permit()
-                .record_admitted_charge(p.vm_name, &emitter)
-                .context("recording the admitted host charge")?;
-        }
         Ok(())
     };
     let durability = match sync {
@@ -1237,7 +1228,16 @@ fn admit_with_runtime_evidence(
             emitter.batched(record)?;
             mvm_core::admission_durability::AdmissionDurability::settled(Ok(()))
         }
-        durability::AdmissionSync::BesideBoot => emitter.batched_sync_detached(record)?.1,
+        durability::AdmissionSync::BesideBoot => {
+            let durability = emitter.batched_sync_detached(record)?.1;
+            // The host charge is not an audit record: its write runs beside
+            // the boot outside this handle and is joined when the machine is
+            // reported started. An inline admission's caller records its own.
+            admitted
+                .host_budget_permit()
+                .record_charge_beside_boot(p.vm_name);
+            durability
+        }
     };
     mvm_core::launch_trace::lap("admit_plan.audit_record");
     tracing::debug!(
@@ -1608,12 +1608,13 @@ pub(crate) mod admit_plan_tests {
         durability.wait().expect("the sync succeeds");
     }
 
-    /// With no host budget configured, a beside-boot admission writes the
-    /// launch's host charge record before it returns, inside the batch whose
-    /// one sync the boot waits for, instead of after the VM has started. An
-    /// inline admission leaves the charge to its caller, as before.
+    /// With no host budget configured, a beside-boot admission starts the
+    /// launch's host charge write beside the boot, outside the admission's
+    /// audit durability: a state directory that cannot take the record does
+    /// not fail that durability, and the record is written by the time the
+    /// machine is reported started. An inline admission writes none.
     #[test]
-    fn a_beside_boot_admission_records_the_host_charge_before_dispatch() {
+    fn a_beside_boot_admission_writes_the_host_charge_outside_its_audit_sync() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(dir.path().join("home"));
@@ -1625,24 +1626,40 @@ pub(crate) mod admit_plan_tests {
         params.keys_dir = Some(&keys_dir);
         params.audit_dir = Some(&audit_dir);
         let vm_name = params.vm_name;
-        let record = mvm_core::config::vm_state_dir(vm_name).join("admitted-charge.json");
+        let state = mvm_core::config::vm_state_dir(vm_name);
+        let record = state.join("admitted-charge.json");
 
-        let (_context, durability) =
+        let (context, durability) =
             admit_plan_for_boot_syncing_beside_boot(params).expect("admission succeeds");
-        assert!(
-            record.is_file(),
-            "the charge is recorded before any dispatch"
-        );
-        durability
-            .wait()
-            .expect("the batch syncs the charge with the admission");
+        durability.wait().expect("the audit sync succeeds");
+        context
+            .admitted
+            .host_budget_permit()
+            .record_started(vm_name)
+            .expect("the started machine is recorded");
+        assert!(record.is_file());
 
-        std::fs::remove_dir_all(mvm_core::config::vm_state_dir(vm_name)).expect("clean");
+        // A state directory replaced by something that cannot hold the record
+        // does not fail the admission's audit durability.
+        std::fs::remove_dir_all(&state).expect("clean");
+        std::fs::write(&state, b"not a directory").expect("blocker");
         let ledger = InMemoryNonceLedger::new();
         let mut params = pinning_params(&rootfs, &ledger);
         params.keys_dir = Some(&keys_dir);
         params.audit_dir = Some(&audit_dir);
-        admit_plan_for_boot(params).expect("inline admission succeeds");
+        let (_context, durability) =
+            admit_plan_for_boot_syncing_beside_boot(params).expect("admission succeeds");
+        durability
+            .wait()
+            .expect("a charge write failure is not an audit durability failure");
+        std::fs::remove_file(&state).expect("clean");
+
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+        let context = admit_plan_for_boot(params).expect("inline admission succeeds");
+        drop(context);
         assert!(
             !record.exists(),
             "an inline admission leaves the charge to its caller"

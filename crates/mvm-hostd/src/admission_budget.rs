@@ -53,8 +53,12 @@ pub fn charge_for(mem_mib: u64, grants: &Grants) -> MachineCharge {
 
 /// Persist what this boot was admitted with, so later admissions can count it.
 ///
-/// Written after the backend has started the VM, into the state dir the
-/// backend created. A failure here is returned rather than logged: a machine
+/// Written once the backend has started the VM, or, for an ordinary launch
+/// with no host budget configured, on its own thread beside the boot and
+/// joined when the start is reported
+/// ([`HostBudgetPermit::record_charge_beside_boot`]). Either way the bytes are
+/// synced before the rename and the directory after it. A failure here is
+/// returned rather than logged: a machine
 /// running without a charge record is invisible to every later budget check,
 /// which is the silent-undercount failure this whole module exists to avoid.
 ///
