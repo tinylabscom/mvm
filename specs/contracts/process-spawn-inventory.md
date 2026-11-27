@@ -18,7 +18,7 @@ A site is one of:
 
 `.spawn()`/`.output()`/`.status()` on a command built elsewhere add no row of their own; the constructor is the row. Four terminals take a command from a caller and are listed under "Spawn terminals" below so none is missed.
 
-Excluded: `#[cfg(test)]` items and files (including `#[cfg(test)] mod x;` targets and `*_tests.rs`), `tests/`, `examples/`, `benches/`, `build.rs`, `xtask`, `fuzz/`, `crates/mvm-sdk/sdks/` (non-Rust SDK trees, covered by `check-no-cli-shellout`), and `third_party/`.
+Excluded: items and files whose `cfg` holds only in a test or `test-support` build, such as `#[cfg(test)]` or `#[cfg(any(test, feature = "test-support"))]` (including such `mod x;` targets, a `#[path]` on them, and `*_tests.rs`), `tests/`, `examples/`, `benches/`, `build.rs`, `xtask`, `fuzz/`, `crates/mvm-sdk/sdks/` (non-Rust SDK trees, covered by `check-no-cli-shellout`), and `third_party/`.
 
 ## Rerun
 
@@ -113,7 +113,6 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-client | `src/secret/source.rs` | 1 | password manager | run the user's configured secret-source CLI (op, etc.) to read a credential | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub and fd hygiene; check-no-cli-shellout | bounded-user-adapter |
 | mvm-conformance | `src/lib.rs` | 1 | test harness | prepare the mvmctl CLI command and sibling-helper search path for conformance runs | dev harness, not shipped | - | - | `helper_command` env scrub and fd hygiene | test-only |
 | mvm-conformance | `src/vmm_reaper.rs` | 3 | test harness | ps / kill / sudo to reap leaked VMMs in conformance runs | dev harness, not shipped | - | - | `helper_command` env scrub and fd hygiene | test-only |
-| mvm-core | `src/bounded_run.rs` | 1 | test harness | test-support only: writes a test script through a short-lived sh (absent from a build without the test-support feature) | dev harness, not shipped | CHS | - | `helper_command` env scrub and fd hygiene | test-only |
 | mvm-core | `src/crypto/key_rotation.rs` | 1 | storage tool | cryptsetup luksChangeKey | library: caller's process (CLI, daemon, embedder) | CHS | - | `helper_command` env scrub and fd hygiene | bounded-fixed-argv-utility |
 | mvm-core | `src/env_hygiene.rs` | 3 | factory | the sanctioned Command constructor: scrubs denied env, then everything above calls it | library: caller's process (CLI, daemon, embedder) | CHS | CH | `helper_command` env scrub and fd hygiene; RAW_SITES (on_host); fd keep-list (`keep_fds`) | required-host-primitive |
 | mvm-core | `src/host_storage_encryption.rs` | 4 | host probe | diskutil / findmnt / tune2fs / lsblk encryption-at-rest probes | library: caller's process (CLI, daemon, embedder) | CHS | - | `helper_command` env scrub and fd hygiene | fixed-argv-utility |
@@ -132,10 +131,8 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-runtime | `src/host_shell.rs` | 3 | shell script | bash -c for ShellEnvironment host commands | library: caller's process (CLI, daemon, embedder) | CH | C | `helper_command` env scrub and fd hygiene | open-review |
 | mvm-runtime | `src/storage/backend.rs` | 1 | storage tool | dmsetup thin-pool operations | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub and fd hygiene | bounded-fixed-argv-utility |
 | mvm-runtime | `src/storage/volume/encrypted_linux.rs` | 7 | storage tool | cryptsetup, mount, umount, mkfs.ext4 for an encrypted volume | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub and fd hygiene | bounded-fixed-argv-utility |
-| mvm-runtime | `src/workload_runner/runner/standby_live_hvf.rs` | 1 | test harness | opt-in native HVF standby witness runs the authenticated conformance reaper test binary | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub and fd hygiene | test-only |
 | mvm-setpriv | `src/lib.rs` | 1 | guest helper | privilege-drop-and-exec of the target command | guest | CHS | - | RAW_SITES (guest) | guest-side |
 | mvm-vmm | `src/driver/hvf.rs` | 2 | hypervisor supervisor | spawn mvm-hvf-supervisor for an HVF VM (cold and restore) | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub and fd hygiene; fd keep-list (`keep_fds`) | required-host-primitive |
-| mvm-vmm | `src/driver/hvf/cold_channel.rs` | 1 | test harness | test-support only: synthetic unconfirmed-launch custody fixture spawning an idle sh child (absent from a build without the test-support feature) | dev harness, not shipped | CH | - | `helper_command` env scrub and fd hygiene; fd keep-list (`keep_fds`) | test-only |
 | mvm-vmm | `src/driver/hvf_restore.rs` | 1 | hypervisor supervisor | spawn mvm-hvf-supervisor for a snapshot restore | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub and fd hygiene; fd keep-list (`keep_fds`) | required-host-primitive |
 | mvm-vmm | `src/driver/libkrun.rs` | 1 | hypervisor supervisor | spawn mvm-libkrun-supervisor | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub and fd hygiene; fd keep-list (`keep_fds`) | required-host-primitive |
 | mvm-vmm | `src/driver/qemu.rs` | 1 | hypervisor | launch QEMU | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub and fd hygiene; fd keep-list (`keep_fds`) | required-host-primitive |
@@ -151,7 +148,7 @@ The scanner is independent of `check-helper-env-hygiene`, and the two agree: eve
 | mvm-vmm | `src/host/network_endpoint_spawn/owned.rs` | 1 | helper bin | spawn an owned network endpoint | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub and fd hygiene; check-single-network-path | required-host-primitive |
 | mvm-vmm | `src/host/shell/exec.rs` | 6 | shell script | run_in_vm / run_host: bash -c and direct program exec for every ShellEnvironment caller | library: caller's process (CLI, daemon, embedder) | CH | - | `helper_command` env scrub and fd hygiene | open-review |
 
-Totals: 191 production sites in 100 files.
+Totals: 188 production sites in 97 files.
 
 | Crate | Sites |
 |---|--:|
@@ -161,12 +158,12 @@ Totals: 191 production sites in 100 files.
 | mvm-cli | 32 |
 | mvm-client | 2 |
 | mvm-conformance | 4 |
-| mvm-core | 15 |
+| mvm-core | 14 |
 | mvm-fs | 2 |
 | mvm-hostd | 11 |
-| mvm-runtime | 12 |
+| mvm-runtime | 11 |
 | mvm-setpriv | 1 |
-| mvm-vmm | 26 |
+| mvm-vmm | 25 |
 
 | Disposition | Sites | Files |
 |---|--:|--:|
@@ -179,7 +176,7 @@ Totals: 191 production sites in 100 files.
 | guest-side | 60 | 27 |
 | open-review | 12 | 3 |
 | required-host-primitive | 38 | 21 |
-| test-only | 7 | 5 |
+| test-only | 4 | 2 |
 
 Reviewed library-reachable sites (disposition, then why):
 
@@ -198,7 +195,6 @@ Reviewed library-reachable sites (disposition, then why):
 | `mvm-fs/src/oci_to_rootfs/verity.rs` | bounded-fixed-argv-utility | `run_veritysetup_format_bounded`: `veritysetup format` with typed options as `--flag=value` args and two paths, no shell. Runs under `run_bounded` (15 min timeout, 64 KiB capture); the error quotes at most 2000 characters of each stream; the `Root hash:` line is parsed from the captured stdout or an error is returned. Linux only. |
 | `mvm-runtime/src/storage/backend.rs` | bounded-fixed-argv-utility | `dmsetup_linux::probe`: `dmsetup --version` availability probe, fixed argv, under `run_bounded` (30 s timeout, 4 KiB capture); a hang or non-zero exit maps to `StorageError::BackendUnavailable`. |
 | `mvm-runtime/src/storage/volume/encrypted_linux.rs` | bounded-fixed-argv-utility | `attach`/`detach`/`format_image`/`close_mapper` through one `check_bounded` helper: fixed programs (`cryptsetup`, `mount`, `umount`, `mkfs.ext4`), argv is fixed subcommands plus typed volume paths and a mapper name derived from a validated `VolumeName` (lowercase alphanumerics, `-`, `_`); the data key goes only through a 0600 tempfile. Each step runs under `run_bounded` (10 min timeout, stdin null, 64 KiB capture) and a failure quotes at most 1000 characters of stderr. Linux only. |
-| `mvm-runtime/src/workload_runner/runner/standby_live_hvf.rs` | test-only | `standby.rs` includes this module only under `cfg(all(test, target_os = "macos", target_arch = "aarch64"))`; `run_reaper` spawns the explicitly supplied conformance test binary only from the ignored, opt-in `native_standby_inventory` witness. No production library path loads this module. |
 | `mvm-vmm/src/fc/fetch.rs` | fixed-argv-utility | `curl` accepts only the lock-derived HTTPS URL and writes to a private temporary file; `tar` extracts only the lock-named member after verifying the archive digest. Both use separate argv under `helper_command`, and the binary's size and digest are checked before installation. Neither spawn has a wall-clock bound. |
 
 Still open-review, and the concrete missing piece:
@@ -209,7 +205,7 @@ Still open-review, and the concrete missing piece:
 | `mvm-vmm/src/host/linux_env.rs` | `NativeEnv::{run, run_visible, run_capture}` run `bash -c <script>` for every `LinuxEnv` caller. Same gap as `shell/exec.rs`: callers are audited and tested, the wrapper is not constrained. |
 | `mvm-vmm/src/host/shell/exec.rs` | `run_in_vm*`/`run_on_vm*` hand a caller-built script to `bash -c` (host bash on native Linux and for custom VM names); `run_host` runs a caller-named program but has CLI callers only. Every library caller was read (see the shell-wrapper caller audit) and the unquoted ones fixed, but the seam itself still accepts any string, so nothing stops a new caller interpolating raw. Missing: a gate or typed command form that makes unquoted interpolation into these scripts unrepresentable, and a wall-clock bound (builds are long-running, so the bound has to be per caller). |
 
-By construct: `Command::new` 57, `helper_command` 123, `helper_command_with` 3, `openpty` 2, `raw:execve` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
+By construct: `Command::new` 57, `helper_command` 120, `helper_command_with` 3, `openpty` 2, `raw:execve` 1, `raw:execvpe` 1, `raw:fork` 2, `scrub_command` 1, `wrap_checked` 1.
 <!-- inventory:end -->
 
 Linked and Traced are host-side facts about the crate and the call graph. A `guest` or `builder VM` row is crate-linked into the host closure (so `CHS`), but its binary only ever runs inside the microVM; the host never calls it. Read those rows by Authority.

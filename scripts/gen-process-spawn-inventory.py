@@ -79,13 +79,61 @@ def block_end(s, j):
     return len(s)
 
 
+def cfg_value(pred):
+    """Evaluate a cfg predicate with `test` and the `test-support` feature off.
+
+    False means the item exists only in a test or test-support build; True or
+    None (depends on some other cfg) means it can be in a shipped build.
+    """
+    toks = re.findall(r'"[^"]*"|\w+|[(),=]', pred)
+    pos = 0
+
+    def parse():
+        nonlocal pos
+        name = toks[pos]
+        pos += 1
+        if pos < len(toks) and toks[pos] == "=":
+            value = toks[pos + 1]
+            pos += 2
+            return False if (name, value) == ("feature", '"test-support"') else None
+        if pos < len(toks) and toks[pos] == "(":
+            pos += 1
+            args = []
+            while toks[pos] != ")":
+                args.append(parse())
+                if toks[pos] == ",":
+                    pos += 1
+            pos += 1
+            if name == "not":
+                return None if args[0] is None else not args[0]
+            if name == "all":
+                return False if False in args else (True if all(args) else None)
+            return True if True in args else (False if all(a is False for a in args) else None)
+        return False if name == "test" else None
+
+    return parse()
+
+
+def test_only_attrs(s):
+    """(start, end) of every `#[cfg(..)]` that holds only in test builds."""
+    for m in re.finditer(r"#\[cfg\(", s):
+        d, p = 1, m.end()
+        while d:
+            d += {"(": 1, ")": -1}.get(s[p], 0)
+            p += 1
+        if cfg_value(s[m.end():p - 1]) is False:
+            yield m.start(), p
+
+
 def test_ranges(s):
+    starts = [a for a, _ in test_only_attrs(s)]
+    starts += [m.start() for m in re.finditer(r"#\[test\]|#\[tokio::test[^\]]*\]", s)]
     spans = []
-    for m in re.finditer(r"#\[cfg\((?:all\()?test\b[^\]]*\]|#\[test\]|#\[tokio::test[^\]]*\]", s):
-        j, k = s.find("{", m.end()), s.find(";", m.end())
+    for a in starts:
+        j, k = s.find("{", a), s.find(";", a)
         if j == -1 or (k != -1 and k < j):
             continue
-        spans.append((m.start(), block_end(s, j)))
+        spans.append((a, block_end(s, j)))
     return spans
 
 
@@ -106,9 +154,13 @@ def test_only_files(files, raw):
             t.add(p)
         b = os.path.splitext(os.path.basename(p))[0]
         d = os.path.dirname(p)
-        for m in re.finditer(r"#\[cfg\((?:all\()?test\b[^\]]*\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", s):
-            n = m.group(1)
-            t.update([os.path.join(d, n + ".rs"), os.path.join(d, n, "mod.rs"),
+        for _, e in test_only_attrs(s):
+            m = re.match(r"\]\s*((?:#\[[^\]]*\]\s*)*)(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", s[e:])
+            if not m:
+                continue
+            n, path = m.group(2), re.search(r'#\[path\s*=\s*"([^"]+)"\]', m.group(1))
+            t.update([os.path.join(d, path.group(1))] if path else
+                     [os.path.join(d, n + ".rs"), os.path.join(d, n, "mod.rs"),
                       os.path.join(d, b, n + ".rs"), os.path.join(d, b, n, "mod.rs")])
         base = os.path.basename(p)
         if base in ("tests.rs", "test_support.rs") or base.endswith(("_tests.rs", "_test.rs")) or base.startswith("test_"):
@@ -242,7 +294,6 @@ A = {
     # host libraries
     "mvm-vmm/src/driver/hvf.rs": ("hypervisor supervisor", "spawn mvm-hvf-supervisor for an HVF VM (cold and restore)"),
     "mvm-vmm/src/driver/hvf_restore.rs": ("hypervisor supervisor", "spawn mvm-hvf-supervisor for a snapshot restore"),
-    "mvm-vmm/src/driver/hvf/cold_channel.rs": ("test harness", "test-support only: synthetic unconfirmed-launch custody fixture spawning an idle sh child (absent from a build without the test-support feature)"),
     "mvm-vmm/src/driver/libkrun.rs": ("hypervisor supervisor", "spawn mvm-libkrun-supervisor"),
     "mvm-vmm/src/driver/qemu.rs": ("hypervisor", "launch QEMU"),
     "mvm-vmm/src/driver/qemu_process.rs": ("mvmctl self re-exec", "start `mvmctl __qemu-vsock-bridge`"),
@@ -260,7 +311,6 @@ A = {
     "mvm-build/src/runtime_overlay.rs": ("network fetch", "curl download of a release artifact"),
     "mvm-build/src/stage0.rs": ("archive tool", "native tar -xJf of the Stage 0 root tarball (pure-Rust path is the alternative)"),
     "mvm-core/src/crypto/key_rotation.rs": ("storage tool", "cryptsetup luksChangeKey"),
-    "mvm-core/src/bounded_run.rs": ("test harness", "test-support only: writes a test script through a short-lived sh (absent from a build without the test-support feature)"),
     "mvm-core/src/env_hygiene.rs": ("factory", "the sanctioned Command constructor: scrubs denied env, then everything above calls it"),
     "mvm-core/src/host_storage_encryption.rs": ("host probe", "diskutil / findmnt / tune2fs / lsblk encryption-at-rest probes"),
     "mvm-core/src/platform/platform.rs": ("host probe", "sw_vers and nix presence probe"),
@@ -270,7 +320,6 @@ A = {
     "mvm-runtime/src/host_shell.rs": ("shell script", "bash -c for ShellEnvironment host commands"),
     "mvm-runtime/src/storage/backend.rs": ("storage tool", "dmsetup thin-pool operations"),
     "mvm-runtime/src/storage/volume/encrypted_linux.rs": ("storage tool", "cryptsetup, mount, umount, mkfs.ext4 for an encrypted volume"),
-    "mvm-runtime/src/workload_runner/runner/standby_live_hvf.rs": ("test harness", "opt-in native HVF standby witness runs the authenticated conformance reaper test binary"),
     "mvm-vmm/src/host/aux_bin.rs": ("helper bin", "`--contract-version` probe of a helper; cargo build of helpers from source"),
     "mvm-vmm/src/host/broker_services_spawn.rs": ("helper bin", "spawn the per-VM host-services broker"),
     "mvm-vmm/src/host/gpu_endpoint_spawn.rs": ("helper bin", "spawn the per-VM GPU endpoint"),
@@ -329,8 +378,6 @@ AUTH_OVERRIDE["mvm-hostd/src/bin/mvm-hvf-supervisor.rs"] = "per-VM supervisor bi
 AUTH_OVERRIDE["mvm-hostd/src/bin/mvm-network-endpoint.rs"] = "per-VM endpoint bin"
 AUTH_OVERRIDE["mvm-hostd/src/bin/mvm-host-agent.rs"] = "host daemon bin"
 AUTH_OVERRIDE["mvm-cli/src/commands/bootstrap.rs"] = "CLI hidden verb"
-AUTH_OVERRIDE["mvm-core/src/bounded_run.rs"] = "dev harness, not shipped"
-AUTH_OVERRIDE["mvm-vmm/src/driver/hvf/cold_channel.rs"] = "dev harness, not shipped"
 LIB_AUTH = "library: caller's process (CLI, daemon, embedder)"
 
 
@@ -381,7 +428,6 @@ REVIEWED = {
     "mvm-client/src/secret/source.rs": ("bounded-user-adapter", "`SecretSourceResolver::run_cli`: the program is one of two fixed names (`Cli::OnePassword`, `Cli::Bitwarden`) found only in trusted directories (`find_trusted`: absolute, canonical, not under an untrusted root, owner and mode checked); argv is a fixed subcommand plus typed references; environment is scrubbed with only that CLI's own session variables re-admitted by exact name (`helper_command_with`); stdin null; run through the shared `mvm_core::bounded_run::run_bounded` with stdout capped at `MAX_SOURCE_BYTES` and stderr at 4 KiB, and a wall-clock timeout that kills the child (`CliTimedOut`); errors carry at most 200 characters of the first stderr line and never the value. It cannot run `mvmctl` (`check-no-cli-shellout`)."),
     "mvm-build/src/stage0.rs": ("fixed-argv-utility", "`extract_nix_store_tarball_with_native_tar`: fixed `tar -xJf <tarball> -C <dir> --strip-components 1` on the Stage 0 root tarball, which is a bootstrap seed digest-verified before extraction; any failure clears the partial extract and falls back to the in-process extractor (`extract_nix_store_tarball_pure_rust`), so the spawn is an optimisation with a typed error and a pure-Rust alternative. No wall-clock bound."),
     "mvm-build/src/embed_toolchain.rs": ("embedder-refused-by-caller", "The module is shared with `build.rs` and the CLI payload build, which are not library paths. The only non-CLI caller is `rustc_has_target`, reached from `guest_agent_build::ensure_rust_targets` after `zigbuild_tools`, whose first statement is `refuse_toolchain_spawn` (`CliSpawn::GuestRuntimeToolchain`); a library embedder is refused before any `rustup`, `cargo`, `rustc`, `zig` or `python3` probe runs. The module cannot call that function itself because `build.rs` includes it without `mvm-vmm`."),
-    "mvm-runtime/src/workload_runner/runner/standby_live_hvf.rs": ("test-only", "`standby.rs` includes this module only under `cfg(all(test, target_os = \"macos\", target_arch = \"aarch64\"))`; `run_reaper` spawns the explicitly supplied conformance test binary only from the ignored, opt-in `native_standby_inventory` witness. No production library path loads this module."),
 }
 
 # What is missing for each file that stays open-review. Every open-review file
@@ -483,7 +529,15 @@ def render():
     return "\n".join(out)
 
 
+def self_test():
+    for pred, want in (("test", False), ('all(unix, any(test, feature = "test-support"))', False),
+                       ('feature = "test-support"', False), ("not(test)", True), ("unix", None),
+                       ('any(feature = "test-support", feature = "wasm-backend")', None)):
+        assert cfg_value(pred) is want, (pred, cfg_value(pred))
+
+
 def main():
+    self_test()
     table = render()
     doc = open(DOC).read()
     a, b = doc.index(BEGIN) + len(BEGIN), doc.index(END)
