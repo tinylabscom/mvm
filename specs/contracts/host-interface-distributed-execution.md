@@ -189,6 +189,17 @@ The microVM must not start unless all required checks pass:
 8. Start the microVM only after the boundary is established.
 9. Emit an authenticated launch receipt and telemetry event.
 
+The local host-interface preflight checks policy, image, enforcement
+readiness, node admission and epoch, volumes and attestation. It does not
+check resources or secrets. Resources are bounded by hostd plan admission:
+the grant ceiling (`admit_grants`) per workload, and the host-budget
+reservation (`reserve_plan_budget`, `verify_plan_resources`) host-wide when a
+host budget is configured. On the host-signed path these run before the plan
+is signed; on the fleet-signed path they run after its signature is
+verified. Secret bindings are checked before admission by the client launch
+paths (`bind_approval`, and the fork paths' own binding checks), and inside
+hostd only for a bundle's required secret slots.
+
 Independent checks should run concurrently. Cached warm-path results must be
 bound to node identity, policy version, image digest, epoch, and validity
 deadline. Revocation and dynamic capacity checks must not be bypassed by cache.

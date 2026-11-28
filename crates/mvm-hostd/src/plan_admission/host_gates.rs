@@ -7,9 +7,15 @@ use mvm_core::plan::ExecutionPlan;
 /// the node is `Active` under a permissive policy, so a plain local run is
 /// unchanged. A revoked or quarantined node, an expired or out-of-scope
 /// policy, an image outside a pinned list, an invalid volume grant or a
-/// required attestation the node cannot meet refuses the boot. Resources are
-/// covered by the durable host-budget reservation and enforcement by the runtime
-/// verification in `RunPosture`, both of which run just before this.
+/// required attestation the node cannot meet refuses the boot. Enforcement is
+/// covered by the runtime verification in `RunPosture`, which runs just before
+/// this. Resources and secrets are not checked here. On both admission paths
+/// that call this, the grant ceiling (`admit_grants`) and the host-budget
+/// reservation (`reserve_plan_budget`, or `verify_plan_resources` against a
+/// pre-held permit) bound resources first. Secret bindings are checked before
+/// admission by the client launch paths (`bind_approval`), and inside hostd
+/// only for a bundle's required secret slots; the fleet-signed path does not
+/// yet check that referenced keystore secrets exist.
 pub(super) fn admit_host_interface(plan: &ExecutionPlan) -> Result<()> {
     use mvm_core::host_interface::{
         Assurance, HostInterface, LaunchRequest, local::LocalHostInterface, store,

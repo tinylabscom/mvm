@@ -290,6 +290,62 @@ fn preflight_missing_required_check_is_a_denial() {
     );
 }
 
+/// Resources and secrets are enforced outside this preflight; every kind that
+/// remains must still deny when it is missing or fails.
+#[test]
+fn every_required_check_denies_when_missing_or_failing() {
+    let names = [
+        "policy",
+        "image",
+        "enforcement",
+        "node-admission",
+        "volumes",
+        "attestation",
+    ];
+    assert_eq!(CheckKind::REQUIRED.len(), names.len());
+    for (i, name) in names.iter().enumerate() {
+        let mut missing = all_ok();
+        missing.remove(i);
+        assert_eq!(
+            run_preflight(&missing).into_result().unwrap_err(),
+            Denial::CheckMissing(name)
+        );
+        let mut failing = all_ok();
+        failing[i] = Box::new(Always(
+            CheckKind::REQUIRED[i],
+            Some(Denial::EnforcementUnavailable),
+        ));
+        assert_eq!(
+            run_preflight(&failing).into_result().unwrap_err(),
+            Denial::EnforcementUnavailable
+        );
+    }
+}
+
+/// A new kind must be listed in `REQUIRED`: the match has no wildcard arm, so
+/// adding a variant fails to compile until this test decides its membership.
+#[test]
+fn every_check_kind_is_required() {
+    let all = [
+        CheckKind::Policy,
+        CheckKind::Image,
+        CheckKind::Enforcement,
+        CheckKind::NodeAdmission,
+        CheckKind::Volumes,
+        CheckKind::Attestation,
+    ];
+    for kind in all {
+        match kind {
+            CheckKind::Policy
+            | CheckKind::Image
+            | CheckKind::Enforcement
+            | CheckKind::NodeAdmission
+            | CheckKind::Volumes
+            | CheckKind::Attestation => assert!(CheckKind::REQUIRED.contains(&kind), "{kind:?}"),
+        }
+    }
+}
+
 #[test]
 fn preflight_panicking_check_fails_closed() {
     let mut c = all_ok();

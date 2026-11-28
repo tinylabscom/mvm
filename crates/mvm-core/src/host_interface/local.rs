@@ -98,8 +98,6 @@ impl HostInterface for LocalHostInterface {
             Box::new(Fn1(CheckKind::Volumes, || {
                 p.volumes.iter().try_for_each(|v| v.validate())
             })),
-            Box::new(Fn1(CheckKind::Resources, || Ok(()))),
-            Box::new(Fn1(CheckKind::Secrets, || Ok(()))),
             Box::new(Fn1(CheckKind::Attestation, || {
                 p.check_assurance(self.assurance)
             })),
