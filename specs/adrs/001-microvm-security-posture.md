@@ -1701,8 +1701,11 @@ signed plan; that digest is the binding. The endpoint's start-up comparison
 of its policy with that digest
 (`a_cleartext_opt_in_the_plan_did_not_sign_is_refused`) is a consistency
 check between two fields of one launcher-written config, not a signature
-check. A production endpoint refuses to start when a bound secret's stored
-allowed hosts cover any host plain HTTP is admitted to — an opted name, an
+check. A production endpoint refuses to start when the hosts the plan lets
+a bound secret reach — its stored allowed hosts narrowed by the plan's
+destinations for it, so a stored host the plan does not admit for that
+secret does not count — cover any host plain HTTP is admitted to: an opted
+name, an
 address that name pinned to at endpoint start, or an opted address literal,
 compared as canonical identities so another spelling of the same address or
 name is the same destination

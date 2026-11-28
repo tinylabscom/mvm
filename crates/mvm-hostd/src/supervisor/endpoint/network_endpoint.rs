@@ -1256,11 +1256,15 @@ mod tests {
             ("93.184.216.34", "::ffff:93.184.216.34"),
             ("mirror.example.com", "::ffff:93.184.216.34"),
             ("mirror.example.com", "MIRROR.Example.com."),
+            // The opted side is canonicalised too, not only the binding.
+            ("mirror.example.com.", "mirror.example.com"),
         ] {
             let dir = tempdir().unwrap();
             let mut all: Vec<(&str, &str)> = pins.to_vec();
             if opted.parse::<std::net::IpAddr>().is_ok() {
                 all.push((opted, opted));
+            } else if opted.ends_with('.') {
+                all.push((opted, "93.184.216.34"));
             }
             let (cfg, projection) = cleartext_secret_cfg(dir.path(), &[opted], &all, bound);
             assert!(
