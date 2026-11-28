@@ -503,7 +503,7 @@ mod tests {
         );
         let mut fixture = prepared_fixture(backend, "selected-parent-child");
         fixture.pool = SupervisorStandbyPool::at(fixture._home.path().join("pool"))
-            .with_stop_child(mvm_runtime::mock::MockBackend::stop_stand_in_vmm);
+            .with_stop_child(mvm_runtime::standby_pool::stop_stand_in);
         let AnyBackend::Mock(mock) = &fixture.backend else {
             panic!("mock backend");
         };

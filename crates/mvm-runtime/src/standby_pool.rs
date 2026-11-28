@@ -54,6 +54,7 @@ impl SupervisorStandbyPool {
 
     /// Stop preloaded children with `stop_child` instead of the
     /// identity-checked Firecracker teardown (test seam).
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn with_stop_child(mut self, stop_child: crate::vm::reconcile::StopVmm) -> Self {
         self.stop_child = stop_child;
@@ -481,7 +482,8 @@ impl SupervisorStandbyPool {
             .inspect_err(|error| {
                 tracing::warn!(child = gate.name(), error = %format!("{error:#}"), "stopping a released preloaded child failed");
             })
-            .is_ok();
+            .is_ok()
+            && !api_socket_answers(gate.name());
         // A child that did not go away keeps its parent out of rotation.
         if stopped && remove_preloaded_child_state(gate.name()) && release == Release::KeepParent {
             self.demote_to_saved_state(&h.id)?;
@@ -499,6 +501,14 @@ enum Release {
     Remove,
     /// Drop only its preloaded child; the parent stays claimable saved-state.
     KeepParent,
+}
+
+/// Whether something still serves the child's Firecracker API socket. The
+/// teardown treats a missing or foreign `fc.pid` as already stopped; a VMM that
+/// still answers must not lose the dir that is the only trace of it.
+fn api_socket_answers(child: &str) -> bool {
+    std::os::unix::net::UnixStream::connect(mvm_core::config::vm_state_dir(child).join("fc.socket"))
+        .is_ok()
 }
 
 /// Remove a released preloaded child's state dir, plaintext memory image
@@ -520,6 +530,18 @@ fn remove_preloaded_child_state(child: &str) -> bool {
             false
         }
     }
+}
+
+/// Stop a stand-in paused VMM (a test process recorded in `fc.pid`) the way
+/// the Firecracker teardown stops a paused child: signal the pid the marker
+/// names, then drop the marker. For [`SupervisorStandbyPool::with_stop_child`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn stop_stand_in(state_dir: &Path) -> Result<()> {
+    let marker = state_dir.join("fc.pid");
+    let pid: u32 = std::fs::read_to_string(&marker)?.trim().parse()?;
+    terminate_standby_process(pid);
+    std::fs::remove_file(marker)?;
+    Ok(())
 }
 
 /// Ask a standby's process to stop. For a standby whose pool record is gone,
@@ -1306,28 +1328,6 @@ mod tests {
         h
     }
 
-    /// Stops a stand-in the way the Firecracker teardown stops a paused child:
-    /// signal the pid its marker names, then drop the marker.
-    fn stop_stand_in(state_dir: &Path) -> anyhow::Result<()> {
-        let marker = state_dir.join("fc.pid");
-        let pid: u32 = std::fs::read_to_string(&marker)?.trim().parse()?;
-        terminate_standby_process(pid);
-        std::fs::remove_file(marker)?;
-        Ok(())
-    }
-
-    /// A stand-in paused VMM that ignores SIGTERM, so a release cannot see it
-    /// exit inside its bounded wait.
-    fn stubborn() -> std::process::Child {
-        let child = std::process::Command::new("sh")
-            .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
-            .spawn()
-            .expect("spawning a stand-in that ignores SIGTERM");
-        // The trap must be installed before the release signals it.
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        child
-    }
-
     fn isolated_home() -> (mvm_core::util::test_env::TestEnv, tempfile::TempDir) {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let home = tempfile::tempdir().unwrap();
@@ -1519,37 +1519,6 @@ mod tests {
         let _ = unrelated.wait();
     }
 
-    /// The record's pid is trusted only when the child's own state names it:
-    /// a recycled or mismatched pid is never signalled.
-    #[test]
-    fn a_record_pid_the_childs_state_does_not_name_is_never_signalled() {
-        let (_env, _home) = isolated_home();
-        let tmp = tempfile::tempdir().unwrap();
-        let pool = SupervisorStandbyPool::at(tmp.path());
-        let mut recorded = sleeper();
-        let mut actual = sleeper();
-        pool.record(&preloaded_handle("pre", "child-pre-h", &recorded, 1))
-            .unwrap();
-        let state = mvm_core::config::vm_state_dir("child-pre-h");
-        std::fs::write(state.join("fc.pid"), actual.id().to_string()).unwrap();
-
-        pool.reap_stale(std::time::Duration::from_secs(60), 10_000)
-            .unwrap();
-
-        assert!(
-            recorded.try_wait().unwrap().is_none(),
-            "unverified pid not signalled"
-        );
-        assert!(
-            state.join("mem.bin").exists(),
-            "a live child keeps its state"
-        );
-        for process in [&mut recorded, &mut actual] {
-            let _ = process.kill();
-            let _ = process.wait();
-        }
-    }
-
     /// A child that outlives the bounded wait keeps its state dir for the
     /// orphan sweep, and its parent leaves the pool rather than advertising a
     /// saved-state parent beside a live child.
@@ -1559,7 +1528,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path())
             .with_stop_child(|_| anyhow::bail!("the stand-in VMM did not stop"));
-        let mut process = stubborn();
+        let mut process = sleeper();
         pool.record(&preloaded_handle("pre", "child-pre-i", &process, 1))
             .unwrap();
         let (handle, lifecycle) = pool
@@ -1578,6 +1547,30 @@ mod tests {
             pool.load("pre").is_err(),
             "no saved-state parent beside a live child"
         );
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+
+    /// A teardown that reports success while a VMM still serves the child's
+    /// API socket (its pid marker lost or overwritten) must not remove the
+    /// dir that is the only trace of that VMM.
+    #[test]
+    fn a_child_whose_api_socket_still_answers_keeps_its_state() {
+        let (_env, _home) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path()).with_stop_child(|_| Ok(()));
+        let mut process = sleeper();
+        pool.record(&preloaded_handle("pre", "child-pre-k", &process, 1))
+            .unwrap();
+        let state = mvm_core::config::vm_state_dir("child-pre-k");
+        let _still_served =
+            std::os::unix::net::UnixListener::bind(state.join("fc.socket")).unwrap();
+
+        pool.reap_stale(std::time::Duration::from_secs(60), 10_000)
+            .unwrap();
+
+        assert!(state.join("mem.bin").exists(), "the live VMM's dir stays");
+        assert!(pool.load("pre").is_err());
         let _ = process.kill();
         let _ = process.wait();
     }

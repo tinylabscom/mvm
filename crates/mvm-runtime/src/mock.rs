@@ -171,21 +171,6 @@ impl MockBackend {
             .spawn()
     }
 
-    /// Stop a stand-in VMM from [`spawn_stand_in_vmm`](Self::spawn_stand_in_vmm)
-    /// the way the Firecracker teardown stops a paused child: signal the pid its
-    /// marker names, then drop the marker. For
-    /// [`SupervisorStandbyPool::with_stop_child`](crate::standby_pool::SupervisorStandbyPool::with_stop_child).
-    pub fn stop_stand_in_vmm(state_dir: &std::path::Path) -> anyhow::Result<()> {
-        let marker = state_dir.join("fc.pid");
-        if let Some(pid) = mvm_vmm::host::process_liveness::read_pid_file(&marker)
-            .and_then(|pid| u32::try_from(pid).ok())
-        {
-            crate::standby_pool::terminate_standby_process(pid);
-        }
-        std::fs::remove_file(marker)?;
-        Ok(())
-    }
-
     /// Whether this mock preloads paused children.
     pub fn supports_preloaded_standby(&self) -> bool {
         self.preloaded_child_pid.is_some()

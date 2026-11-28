@@ -491,6 +491,15 @@ not paraphrase this row without them.
      rootfs-inject helper VM, spawn without a scope.
    - **Wasm has no VMM process to scope** and reports both dimensions as
      `declared`; its store limits are not reported here.
+7. **A claimed standby's process is never stopped by expiry. (OPEN, #6033.)**
+   Expiry drops a `Claimed` standby record without signalling its process,
+   because after a handoff that process is the claimed VM. On the HVF
+   resident handoff, a launcher that dies after reserving a parent and before
+   handing it off therefore leaves the parent's supervisor running, outside
+   both the standby and the host budget. Nothing stops it short of a reboot
+   or a manual kill (`mvmctl cache prune` does not), and the next refill
+   replaces the dropped record with a new parent, so each such crash leaks
+   one parent.
 
 **Preloaded warm standby limits — what a paused child costs while it waits.**
 On Firecracker, a standby may hold a child already restored from the parent's
@@ -512,7 +521,8 @@ are limits, not guarantees:
    the image holds no workload's data. Expiry, budget eviction and a released
    reservation stop the child through the identity-checked Firecracker teardown
    the orphan sweep uses, which signals a pid only after confirming it is the
-   Firecracker serving the child's API socket, and remove that dir
+   Firecracker serving the child's API socket, and remove that dir once
+   nothing answers that socket
    (`fn:expiry_stops_a_preloaded_child_and_removes_its_memory_image`,
    `fn:budget_eviction_removes_a_preloaded_childs_memory_image`). A refill that
    dies after starting the paused VMM and before publishing its record leaves
@@ -539,11 +549,6 @@ are limits, not guarantees:
    moment a child is preloaded. Admission does not count paused children,
    which carry no admitted charge, so guest RAM on the host can reach
    `host_budget_memory_mib` plus `standby_memory_mib`.
-   Expiry never signals the process of a `Claimed` standby record; it only
-   drops the record, since that process may already be a claimed VM. On the
-   HVF resident handoff this means a launcher that dies after reserving a
-   parent and before handing it off leaves the parent's supervisor running,
-   outside both budgets, until reboot or `mvmctl cache prune`.
 4. **Its signed identity is chosen before admission.** The launch reserves the
    child by taking its lifecycle gate, then admits its plan under the child's
    name, so the plan, the dispatch charge, the endpoint, the broker
