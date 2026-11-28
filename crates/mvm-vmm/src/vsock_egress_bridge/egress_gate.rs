@@ -402,7 +402,8 @@ impl EgressGate {
         self.refuse_cleartext
             && !self.cleartext.iter().any(|rule| {
                 rule.port == port
-                    && (mvm_core::policy::network_policy::canonical_host(&rule.host) == host
+                    && ((!host.is_empty()
+                        && mvm_core::policy::network_policy::canonical_host(&rule.host) == host)
                         || addr.is_some_and(|ip| {
                             rule.host.parse::<IpAddr>() == Ok(ip)
                                 || self

@@ -1258,6 +1258,9 @@ mod tests {
             ("mirror.example.com", "MIRROR.Example.com."),
             // The opted side is canonicalised too, not only the binding.
             ("mirror.example.com.", "mirror.example.com"),
+            // Spellings that need the identity to settle in one pass.
+            ("2606:4700:4700::1111", "[2606:4700:4700::1111]."),
+            ("93.184.216.34", "::ffff:93.184.216.34."),
         ] {
             let dir = tempdir().unwrap();
             let mut all: Vec<(&str, &str)> = pins.to_vec();
@@ -1276,6 +1279,25 @@ mod tests {
         let (cfg, projection) =
             cleartext_secret_cfg(dir.path(), &["mirror.example.com"], &pins, "93.184.216.35");
         assert!(assemble_projected(&cfg, &projection).is_ok());
+        // A binding spelled so it names no destination (two trailing dots,
+        // brackets around a name) can never send the secret to the opted
+        // destination, under any spelling of it.
+        for bound in [
+            "mirror.example.com..",
+            "[mirror.example.com].",
+            "[mirror.example.com]",
+        ] {
+            let dir = tempdir().unwrap();
+            let (cfg, projection) =
+                cleartext_secret_cfg(dir.path(), &["mirror.example.com"], &pins, bound);
+            let (service, _, _) = assemble_projected(&cfg, &projection).expect("assembles");
+            for destination in ["mirror.example.com", "mirror.example.com.", ""] {
+                assert!(
+                    !service.secret_reaches("mirror-token", destination),
+                    "{bound} reaches {destination:?}"
+                );
+            }
+        }
     }
 
     /// A secret bound only to a destination that was not opted in starts.

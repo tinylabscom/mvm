@@ -28,7 +28,7 @@ pub fn proxy_request_from_connect_authority(
         .context("request carries no Host header")?;
     let host = host_without_port(&host);
     let identity = crate::supervisor::endpoint::canonical_target_host;
-    if identity(host) != identity(authority_host) {
+    if identity(host).is_none() || identity(host) != identity(authority_host) {
         bail!("request Host does not match the flow authority {authority_host:?}");
     }
     Ok(parsed.into_request(scheme, authority_host))

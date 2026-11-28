@@ -104,7 +104,11 @@ impl HttpFlow {
         }
         let mut head: HttpFlowHead =
             serde_json::from_slice(payload).map_err(|e| HttpFlowError::BadHead(e.to_string()))?;
-        head.url = crate::supervisor::endpoint::canonical_url(head.url);
+        // A host that names no destination stays as sent; the request path
+        // refuses and audits it before anything is decided on it.
+        if let Some(url) = crate::supervisor::endpoint::canonical_url(head.url.clone()) {
+            head.url = url;
+        }
         if head.body_len > MAX_HTTP_BODY_LEN {
             return Err(HttpFlowError::BodyTooLarge {
                 declared: head.body_len,

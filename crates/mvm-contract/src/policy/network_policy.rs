@@ -837,19 +837,33 @@ pub fn is_mandatory_deny(ip: IpAddr) -> bool {
 
 /// The one comparable identity of a destination host, whatever its spelling.
 ///
-/// An address literal, bracketed or not, becomes its canonical text, with an
-/// IPv4-mapped IPv6 address reduced to the IPv4 address it reaches; a name is
-/// lowercased with one trailing dot dropped. Compare two hosts by comparing
-/// their identities, never their spellings.
+/// One trailing dot (the DNS root) is dropped first. Then an address literal,
+/// bracketed or not, becomes its canonical text, with an IPv4-mapped IPv6
+/// address reduced to the IPv4 address it reaches. Anything else is a name,
+/// ASCII-lowercased; a name with an empty label (so two trailing dots), or a
+/// bracket or colon in it, names no destination and its identity is `""`.
+///
+/// The result is a fixed point (`canonical_host(canonical_host(x)) ==
+/// canonical_host(x)`), so a value canonicalised at an entry point and again
+/// at a lookup cannot become two identities. `""` matches nothing: every
+/// entry point refuses a destination whose identity is empty. Compare two
+/// hosts by comparing their identities, never their spellings.
 pub fn canonical_host(host: &str) -> String {
+    let host = match host.strip_suffix('.') {
+        Some(rest) if !rest.ends_with('.') => rest,
+        _ => host,
+    };
     let bare = host
         .strip_prefix('[')
         .and_then(|inner| inner.strip_suffix(']'))
         .unwrap_or(host);
-    match bare.parse::<IpAddr>() {
-        Ok(ip) => unmap_v4_mapped(ip).to_string(),
-        Err(_) => bare.strip_suffix('.').unwrap_or(bare).to_ascii_lowercase(),
+    if let Ok(ip) = bare.parse::<IpAddr>() {
+        return unmap_v4_mapped(ip).to_string();
     }
+    if host.contains(['[', ']', ':']) || host.split('.').any(str::is_empty) {
+        return String::new();
+    }
+    host.to_ascii_lowercase()
 }
 
 /// Collapse an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its embedded
@@ -1066,6 +1080,68 @@ mod tests {
             ("*.Example.com", "*.example.com"),
         ] {
             assert_eq!(canonical_host(spelling), identity, "{spelling}");
+        }
+    }
+
+    /// The identity is a fixed point, and every spelling that needs a second
+    /// pass to settle (two trailing dots, brackets around a name) names no
+    /// destination at all rather than a different one.
+    #[test]
+    fn canonical_host_settles_in_one_pass() {
+        for (spelling, identity) in [
+            ("api.github.com.", "api.github.com"),
+            ("API.GitHub.COM.", "api.github.com"),
+            ("api.github.com..", ""),
+            ("API.GitHub.COM..", ""),
+            ("[api.github.com]", ""),
+            ("[api.github.com].", ""),
+            ("[[::1]]", ""),
+            ("[::1]", "::1"),
+            ("[::1].", "::1"),
+            ("::ffff:1.2.3.4.", "1.2.3.4"),
+            ("1.2.3.4.", "1.2.3.4"),
+            ("a..b", ""),
+            (".a", ""),
+            (".", ""),
+            ("..", ""),
+            ("", ""),
+            ("a:b", ""),
+        ] {
+            assert_eq!(canonical_host(spelling), identity, "{spelling:?}");
+        }
+    }
+
+    /// Exhaustive over every string of up to six characters drawn from the
+    /// characters that shape a host: the identity settles in one pass, and it
+    /// is either empty (names nothing) or an IP address, or a name with no
+    /// trailing dot, no empty label and no bracket or colon.
+    #[test]
+    fn canonical_host_is_a_fixed_point_over_every_short_spelling() {
+        const ALPHABET: [char; 7] = ['a', '.', '[', ']', ':', '1', 'f'];
+        let mut spellings = vec![String::new()];
+        let mut frontier = vec![String::new()];
+        for _ in 0..6 {
+            frontier = frontier
+                .iter()
+                .flat_map(|prefix| ALPHABET.iter().map(move |c| format!("{prefix}{c}")))
+                .collect();
+            spellings.extend(frontier.iter().cloned());
+        }
+        assert_eq!(
+            spellings.len(),
+            (0..=6).map(|n| 7usize.pow(n)).sum::<usize>()
+        );
+        for spelling in &spellings {
+            let identity = canonical_host(spelling);
+            assert_eq!(canonical_host(&identity), identity, "{spelling:?}");
+            let is_ip = identity.parse::<IpAddr>().is_ok();
+            assert!(
+                identity.is_empty()
+                    || is_ip
+                    || (!identity.contains(['[', ']', ':'])
+                        && identity.split('.').all(|label| !label.is_empty())),
+                "{spelling:?} -> {identity:?}"
+            );
         }
     }
 

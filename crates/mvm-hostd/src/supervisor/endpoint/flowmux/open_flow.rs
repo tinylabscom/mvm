@@ -161,7 +161,19 @@ impl FlowMuxSession {
         };
 
         let (host, requested_port) = match parse_host_port(&target) {
-            Ok((host, port)) => (super::super::canonical_target_host(host), port),
+            Ok((host, port)) => match super::super::canonical_target_host(host) {
+                Some(host) => (host, port),
+                None => {
+                    self.deny_unrouted_flow(
+                        stream_id,
+                        registry::FlowClass::Tcp,
+                        &target,
+                        "malformed",
+                    );
+                    self.send_refused(stream_id, "OpenTcp host names no destination")?;
+                    return Ok(None);
+                }
+            },
             Err(e) => {
                 self.deny_unrouted_flow(stream_id, registry::FlowClass::Tcp, "", "malformed");
                 self.send_refused(stream_id, &format!("invalid OpenTcp target: {e}"))?;
@@ -1477,6 +1489,38 @@ mod tests {
                 chain.contains("\"target\":\"api.bound.test:443\""),
                 "{target}: {chain}"
             );
+        }
+    }
+
+    /// A spelling that only settles after a second pass (two trailing dots,
+    /// brackets around a name) names no destination: it is refused at open
+    /// for a routed name and a secret-bound name alike, never admitted under
+    /// the name it resembles and then decided under another.
+    #[test]
+    fn a_spelling_that_names_no_host_is_refused_at_open() {
+        for name in ["api.routed.test", "api.bound.test"] {
+            for target in [
+                format!("{name}..:443"),
+                format!("[{name}].:443"),
+                format!("[{name}]:443"),
+            ] {
+                let (service, _dir) = if name == "api.routed.test" {
+                    substitution_binding_routed("bound.example", true, vec![ungranted_route(name)])
+                } else {
+                    substitution_binding(name, true)
+                };
+                let (opcode, payload, chain) = open_tcp_through(
+                    gate_pinning_name(name, UNDIALED_TEST_IP, 443),
+                    service,
+                    &target,
+                );
+                assert_eq!(opcode, Opcode::Refused, "{target}: {payload}");
+                assert!(
+                    chain.contains("\"reason\":\"malformed\""),
+                    "{target}: {chain}"
+                );
+                assert!(!chain.contains("host.flow.allowed"), "{target}: {chain}");
+            }
         }
     }
 

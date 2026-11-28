@@ -269,3 +269,56 @@ fn every_spelling_of_a_replaced_destination_has_its_request_body_replaced() {
         }
     }
 }
+
+/// A typed HTTP flow whose URL host names no destination (two trailing dots)
+/// is refused at its head and never forwarded.
+#[test]
+fn a_typed_http_flow_to_a_host_that_names_nothing_is_refused() {
+    let ip: std::net::IpAddr = "93.184.216.34".parse().unwrap();
+    for url in [
+        "https://api.example.com../v1",
+        "https://API.Example.COM../v1",
+    ] {
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let directory = tempfile::tempdir().unwrap();
+        let resolver = LocalResolver::new(
+            "flow-nothing",
+            Arc::new(FileSecretStore::with_dir(directory.path())),
+        );
+        let service = SubstitutionService::new(
+            Arc::new(SubstitutionRegistry::new()),
+            Arc::new(resolver),
+            Arc::new(RecordingForwarder {
+                seen: Arc::clone(&seen),
+            }),
+            Arc::new(gate_pinning_name("api.example.com", ip, 443)),
+        );
+        let sink = Arc::new(CapturingSink::default());
+        let supplied = Arc::clone(&sink);
+        let (mut guest, mut session, host) =
+            run_session_on_runtime(move |id, key, anchor, limits| {
+                FlowMuxAccept::new(id, key, anchor, limits, EgressGate::default_deny())
+                    .with_audit_sink(supplied)
+                    .with_substitution(Some(Arc::new(service)))
+            });
+        write_frame(&mut guest, &mut session, Opcode::OpenHttp, 1, b"");
+        assert_eq!(
+            read_flowmux_frame(&mut guest, &mut session).0,
+            Opcode::Opened
+        );
+        let head = serde_json::to_vec(&serde_json::json!({
+            "method": "GET",
+            "url": url,
+            "headers": [],
+            "body_len": 0,
+        }))
+        .unwrap();
+        write_frame(&mut guest, &mut session, Opcode::HttpRequestHead, 1, &head);
+        // The refusal is answered as a response head; what matters is that no
+        // request reached the forward leg.
+        let _answer = read_flowmux_frame(&mut guest, &mut session);
+        drop(guest);
+        host.join().unwrap().unwrap();
+        assert!(seen.lock().unwrap().is_none(), "{url} forwarded");
+    }
+}

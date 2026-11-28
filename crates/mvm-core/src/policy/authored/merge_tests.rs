@@ -351,6 +351,17 @@ fn non_canonical_ipv4_spellings_are_refused_as_denies() {
     }
 }
 
+/// A deny whose host names nothing (two trailing dots, brackets around a
+/// name, an empty label) is refused, not stored as a pattern that matches
+/// nothing.
+#[test]
+fn a_deny_that_names_no_host_is_refused() {
+    for deny in ["b.test..", "[b.test]", "[b.test].", "a..b", ".b.test"] {
+        let error = refused(&[user("a", &format!("[network]\ndeny = [{deny:?}]\n"))]);
+        assert!(error.to_string().contains(deny), "{deny}: {error}");
+    }
+}
+
 /// An unbracketed IPv6 deny that also reads as `ADDRESS:PORT` is refused
 /// rather than guessed; the bracketed spellings say which one is meant.
 #[test]

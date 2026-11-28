@@ -73,12 +73,10 @@ impl GateResolver {
     }
 }
 
-/// The gate's target form of `host:port`.
-fn target_of(host: &str, port: u16) -> String {
-    format!(
-        "{}:{port}",
-        crate::supervisor::endpoint::canonical_target_host(host)
-    )
+/// The gate's target form of `host:port`; `None` when the host names no
+/// destination.
+fn target_of(host: &str, port: u16) -> Option<String> {
+    crate::supervisor::endpoint::canonical_target_host(host).map(|host| format!("{host}:{port}"))
 }
 
 impl mvm_http::resolve::Resolve for GateResolver {
@@ -96,7 +94,9 @@ impl mvm_http::resolve::Resolve for GateResolver {
         }
         let gate = Arc::clone(&self.gate);
         Box::pin(async move {
-            let target = target_of(&host, port);
+            let target = target_of(&host, port).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "malformed destination")
+            })?;
             // An unrestricted gate resolves live, which blocks.
             let verdict = tokio::task::spawn_blocking(move || gate.decide_request(&target))
                 .await
@@ -162,11 +162,21 @@ mod tests {
 
     #[test]
     fn an_ipv6_literal_is_bracketed_for_the_gate() {
-        assert_eq!(target_of("[::1]", 443), "[::1]:443");
-        assert_eq!(target_of("::1", 443), "[::1]:443");
-        assert_eq!(target_of("api.example.com", 443), "api.example.com:443");
-        assert_eq!(target_of("API.Example.COM.", 443), "api.example.com:443");
-        assert_eq!(target_of("[::ffff:192.0.2.1]", 443), "192.0.2.1:443");
+        assert_eq!(target_of("[::1]", 443).as_deref(), Some("[::1]:443"));
+        assert_eq!(target_of("::1", 443).as_deref(), Some("[::1]:443"));
+        assert_eq!(
+            target_of("api.example.com", 443).as_deref(),
+            Some("api.example.com:443")
+        );
+        assert_eq!(
+            target_of("API.Example.COM.", 443).as_deref(),
+            Some("api.example.com:443")
+        );
+        assert_eq!(
+            target_of("[::ffff:192.0.2.1]", 443).as_deref(),
+            Some("192.0.2.1:443")
+        );
+        assert_eq!(target_of("api.example.com..", 443), None);
     }
 
     /// The cache keys an answer by the host's canonical identity, so the

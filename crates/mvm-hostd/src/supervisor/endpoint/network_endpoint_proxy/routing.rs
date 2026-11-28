@@ -195,6 +195,48 @@ mod tests {
         }
     }
 
+    /// A typed request whose host names no destination (two trailing dots)
+    /// is refused before any route, binding or forward leg sees it.
+    #[tokio::test]
+    async fn a_typed_request_to_a_host_that_names_nothing_is_refused() {
+        use mvm_core::substitution_wire::{WireRequest, WireResponse};
+        let gate = Arc::new(
+            (*gate_admitting(&[("api.example.com", 443)]))
+                .clone()
+                .with_routes(
+                    RouteSet::new(vec![EgressRoute {
+                        id: "api".into(),
+                        host: "api.example.com".into(),
+                        port: 443,
+                        rules: Vec::new(),
+                        otherwise: RouteOutcome::Deny,
+                        intercept: true,
+                    }])
+                    .expect("valid route"),
+                ),
+        );
+        let (service, _ph, forwarder, _dir) =
+            service_with_gate("secret", &["api.example.com"], gate);
+        for url in [
+            "https://api.example.com../admin",
+            "https://API.Example.COM../admin",
+        ] {
+            let resp = service
+                .process(WireRequest {
+                    method: "GET".into(),
+                    url: url.into(),
+                    headers: Vec::new(),
+                    body_b64: String::new(),
+                })
+                .await;
+            assert!(
+                matches!(resp, WireResponse::Refused { .. }),
+                "{url}: {resp:?}"
+            );
+            assert!(forwarder.seen.lock().unwrap().is_none(), "{url} forwarded");
+        }
+    }
+
     #[tokio::test]
     async fn an_allowed_route_refuses_without_a_chain_recorder() {
         let service = routed_service(RouteOutcome::Allow);

@@ -117,16 +117,20 @@ impl SubstitutionService {
     /// destination whose canonical identity is `identity`. Its allowed hosts
     /// are compared as identities too, so no spelling of the same address or
     /// name slips past.
+    /// An empty identity names nothing, so it is reached by no secret, and
+    /// an allowed host that names nothing binds the secret to nothing.
     pub(crate) fn secret_reaches(&self, address: &str, identity: &str) -> bool {
         use mvm_contract::policy::network_policy::canonical_host;
-        self.registry.resolve_name(address).is_some_and(|secret| {
-            let allowed: Vec<String> = secret
-                .allowed_hosts
-                .iter()
-                .map(|host| canonical_host(host))
-                .collect();
-            mvm_contract::ir::host_is_bound(&allowed, identity)
-        })
+        !identity.is_empty()
+            && self.registry.resolve_name(address).is_some_and(|secret| {
+                let allowed: Vec<String> = secret
+                    .allowed_hosts
+                    .iter()
+                    .map(|host| canonical_host(host))
+                    .filter(|host| !host.is_empty())
+                    .collect();
+                mvm_contract::ir::host_is_bound(&allowed, identity)
+            })
     }
 
     /// The per-VM egress intermediate a terminated flow mints its per-SNI leaf

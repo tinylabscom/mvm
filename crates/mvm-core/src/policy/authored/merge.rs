@@ -274,7 +274,11 @@ fn parse_deny(entry: &str) -> Result<(String, Option<u16>), String> {
             super::allow_host::NUMERIC_IPV4_REFUSAL
         ));
     }
-    Ok((canonical_host(host), port))
+    let identity = canonical_host(host);
+    if identity.is_empty() {
+        return Err(format!("{entry:?} names no host"));
+    }
+    Ok((identity, port))
 }
 
 /// Whether deny pattern `deny` covers `host:port`.

@@ -173,9 +173,14 @@ impl DnsPinRegistry {
         self.pins.insert(canonical_host(&pin.dest), pin);
     }
 
-    /// O(log n) lookup by destination, whatever its case or trailing dot.
+    /// O(log n) lookup by destination, whatever its case or trailing dot. A
+    /// destination that names no host (an empty identity) has no pin.
     pub fn lookup(&self, dest: &str) -> Option<&DnsPin> {
-        self.pins.get(&canonical_host(dest))
+        let identity = canonical_host(dest);
+        if identity.is_empty() {
+            return None;
+        }
+        self.pins.get(&identity)
     }
 
     /// The first pin whose address set contains `ip`. Lets a numeric-IP

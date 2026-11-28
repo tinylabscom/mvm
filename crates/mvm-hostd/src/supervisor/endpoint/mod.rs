@@ -28,29 +28,35 @@ pub mod terminator;
 /// `OpenTcp` target or `UdpSend` address, a typed request URL through
 /// [`canonical_url`]), so the gate, routes, secret bindings, transform
 /// profiles and audit all compare one host.
-pub(crate) fn canonical_target_host(host: &str) -> String {
+/// `None` when the host names no destination (its identity is empty); the
+/// entry point refuses it.
+pub(crate) fn canonical_target_host(host: &str) -> Option<String> {
     let host = mvm_core::policy::network_policy::canonical_host(host);
-    if host.contains(':') {
-        format!("[{host}]")
+    if host.is_empty() {
+        None
+    } else if host.contains(':') {
+        Some(format!("[{host}]"))
     } else {
-        host
+        Some(host)
     }
 }
 
 /// `url` with its host in canonical form ([`canonical_target_host`]), so every
-/// later check and the forward leg see one spelling of the destination. A URL
-/// whose host is already canonical, or that does not parse, is returned
-/// untouched; the request path refuses an unparseable one.
-pub(crate) fn canonical_url(url: String) -> String {
+/// later check and the forward leg see one spelling of the destination;
+/// `None` when its host names no destination. A URL whose host is already
+/// canonical, or that does not parse or has no host, is returned untouched;
+/// the request path refuses an unparseable one.
+pub(crate) fn canonical_url(url: String) -> Option<String> {
     let Ok(mut parsed) = url::Url::parse(&url) else {
-        return url;
+        return Some(url);
     };
     let Some(host) = parsed.host_str() else {
-        return url;
+        return Some(url);
     };
-    let canonical = canonical_target_host(host);
-    if canonical == host || parsed.set_host(Some(&canonical)).is_err() {
-        return url;
+    let canonical = canonical_target_host(host)?;
+    if canonical == host {
+        return Some(url);
     }
-    parsed.into()
+    parsed.set_host(Some(&canonical)).ok()?;
+    Some(parsed.into())
 }
