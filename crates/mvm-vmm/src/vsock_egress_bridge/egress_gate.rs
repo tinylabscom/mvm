@@ -417,25 +417,22 @@ impl EgressGate {
             })
     }
 
-    /// Every host spelling plain HTTP may be sent to: each opted entry's host
-    /// and, for a name, the addresses it pinned to. An IPv6 address is listed
-    /// bare and bracketed, so a caller matching host strings misses neither.
+    /// Every host plain HTTP may be sent to, as canonical identities
+    /// (`canonical_host`): each opted entry's host and, for a name, the
+    /// addresses it pinned to.
     #[must_use]
     pub fn cleartext_hosts(&self) -> Vec<String> {
+        use mvm_core::policy::network_policy::canonical_host;
         let mut hosts = Vec::new();
         for rule in &self.cleartext {
-            hosts.push(rule.host.clone());
+            hosts.push(canonical_host(&rule.host));
             let pinned = self.pins.lookup(&rule.host).map(|pin| pin.ips.clone());
-            for ip in pinned
-                .into_iter()
-                .flatten()
-                .chain(rule.host.parse::<IpAddr>().ok())
-            {
-                hosts.push(ip.to_string());
-                if ip.is_ipv6() {
-                    hosts.push(format!("[{ip}]"));
-                }
-            }
+            hosts.extend(
+                pinned
+                    .into_iter()
+                    .flatten()
+                    .map(|ip| canonical_host(&ip.to_string())),
+            );
         }
         hosts.sort();
         hosts.dedup();
@@ -940,8 +937,8 @@ mod tests {
         }
     }
 
-    /// Every spelling plain HTTP is admitted to: each opted entry's host and
-    /// the addresses an opted name pinned to, an IPv6 one in both spellings.
+    /// Every host plain HTTP is admitted to, as identities: each opted entry's
+    /// host and the addresses an opted name pinned to.
     /// An allow-listed host that was not opted in contributes nothing.
     #[test]
     fn cleartext_hosts_include_the_addresses_an_opted_name_pinned_to() {
@@ -955,12 +952,7 @@ mod tests {
             true,
         );
         let hosts = gate.cleartext_hosts();
-        for host in [
-            "example.com",
-            "93.184.216.34",
-            "2606:4700:4700::1111",
-            "[2606:4700:4700::1111]",
-        ] {
+        for host in ["example.com", "93.184.216.34", "2606:4700:4700::1111"] {
             assert!(hosts.iter().any(|h| h == host), "{host}: {hosts:?}");
         }
         assert!(

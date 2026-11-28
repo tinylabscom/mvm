@@ -835,6 +835,23 @@ pub fn is_mandatory_deny(ip: IpAddr) -> bool {
             .any(|net| net.contains(&unmap_v4_mapped(ip)))
 }
 
+/// The one comparable identity of a destination host, whatever its spelling.
+///
+/// An address literal, bracketed or not, becomes its canonical text, with an
+/// IPv4-mapped IPv6 address reduced to the IPv4 address it reaches; a name is
+/// lowercased with one trailing dot dropped. Compare two hosts by comparing
+/// their identities, never their spellings.
+pub fn canonical_host(host: &str) -> String {
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host);
+    match bare.parse::<IpAddr>() {
+        Ok(ip) => unmap_v4_mapped(ip).to_string(),
+        Err(_) => bare.strip_suffix('.').unwrap_or(bare).to_ascii_lowercase(),
+    }
+}
+
 /// Collapse an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its embedded
 /// IPv4 address, leaving every other address unchanged.
 ///
@@ -1021,6 +1038,22 @@ mod tests {
     #[test]
     fn host_port_parse_invalid_port() {
         assert!("github.com:abc".parse::<HostPort>().is_err());
+    }
+
+    /// One identity per destination, whatever its spelling.
+    #[test]
+    fn canonical_host_gives_one_identity_per_destination() {
+        for (spelling, identity) in [
+            ("[2001:db8::1]", "2001:db8::1"),
+            ("2001:0db8:0:0:0:0:0:1", "2001:db8::1"),
+            ("::ffff:10.0.0.5", "10.0.0.5"),
+            ("[::ffff:10.0.0.5]", "10.0.0.5"),
+            ("10.0.0.5", "10.0.0.5"),
+            ("API.Example.com.", "api.example.com"),
+            ("*.Example.com", "*.example.com"),
+        ] {
+            assert_eq!(canonical_host(spelling), identity, "{spelling}");
+        }
     }
 
     #[test]

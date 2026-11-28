@@ -1244,6 +1244,36 @@ mod tests {
         }
     }
 
+    /// The refusal compares identities, not spellings: an address bound in
+    /// another textual form — bracketed, uncompressed IPv6, IPv4-mapped — or a
+    /// name in another case or with a trailing dot is the same destination.
+    #[test]
+    fn production_refuses_a_secret_bound_to_another_spelling_of_the_destination() {
+        let pins = [("mirror.example.com", "93.184.216.34")];
+        for (opted, bound) in [
+            ("2606:4700:4700::1111", "[2606:4700:4700::1111]"),
+            ("2606:4700:4700::1111", "2606:4700:4700:0:0:0:0:1111"),
+            ("93.184.216.34", "::ffff:93.184.216.34"),
+            ("mirror.example.com", "::ffff:93.184.216.34"),
+            ("mirror.example.com", "MIRROR.Example.com."),
+        ] {
+            let dir = tempdir().unwrap();
+            let mut all: Vec<(&str, &str)> = pins.to_vec();
+            if opted.parse::<std::net::IpAddr>().is_ok() {
+                all.push((opted, opted));
+            }
+            let (cfg, projection) = cleartext_secret_cfg(dir.path(), &[opted], &all, bound);
+            assert!(
+                assemble_projected(&cfg, &projection).is_err(),
+                "{opted} bound as {bound} must refuse"
+            );
+        }
+        let dir = tempdir().unwrap();
+        let (cfg, projection) =
+            cleartext_secret_cfg(dir.path(), &["mirror.example.com"], &pins, "93.184.216.35");
+        assert!(assemble_projected(&cfg, &projection).is_ok());
+    }
+
     /// A secret bound only to a destination that was not opted in starts.
     #[test]
     fn production_admits_a_secret_bound_elsewhere_than_the_cleartext_destination() {
