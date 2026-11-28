@@ -42,7 +42,8 @@ Useful overrides:
                                              On firecracker a standby is an on-disk snapshot
                                              with no process: it is counted from the pool, its
                                              snapshot bytes are charged, and metadata.json
-                                             records standby_form. Needs a short data dir
+                                             records standby_form. On firecracker, warm and
+                                             standby need a short data dir
                                              (MVM_HVF_DENSITY_DATA_DIR) for the VM sockets.
   MVM_HVF_DENSITY_WAVES="1 5 10 25 50 100"  wave sizes to run
   MVM_HVF_DENSITY_LAUNCH_SAMPLES=20         cold launches of a command that exits, taken
@@ -287,8 +288,9 @@ fi
 
 # A Firecracker standby is captured as a full-VM snapshot, which needs the VM's
 # sockets inside its state dir; the longest is the substitution readiness socket.
+# Warm mode warms one before every claim, so only cold runs skip this.
 # shortcut: a relative MVM_HVF_DENSITY_DATA_DIR is measured as written; give an absolute one.
-if [[ "${BACKEND}" == "firecracker" && "${MODE}" == "standby" ]]; then
+if [[ "${BACKEND}" == "firecracker" && "${MODE}" != "cold" ]]; then
   longest_standby_socket="${DATA_DIR}/vms/standby-0123456789abcdef/substitution-session-ready.sock"
   if [[ "${#longest_standby_socket}" -gt 103 ]]; then
     echo "refusing: a Firecracker standby snapshot needs its sockets in the VM state dir, and this path exceeds the 103-byte Unix socket limit:" >&2
