@@ -416,6 +416,32 @@ not paraphrase this row without them.
    instead. Each of these is a deliberate choice of the undercount failure over
    the lockout failure, which is the same judgement limit 4's counting rule
    makes.
+
+   A `vm_full` fork child is admitted at the memory its restore maps: the
+   saved RAM's authenticated length, which Firecracker sizes the guest from
+   and which the HVF restore refuses to be shorter than the RAM its captured
+   config maps, so the charge is never below the mapped RAM.
+   Copy-on-write sharing with the parent is not credited. Its hold is reserved
+   at admission, re-checked against the budget immediately before the restore
+   can start a VMM, and recorded once the child runs; the charge record is
+   written with or without a budget, as a cold launch writes it
+   (`fn:a_vm_full_fork_that_fits_is_charged_and_counted_by_the_next_admission`,
+   `fn:a_vm_full_fork_past_the_budget_at_dispatch_is_refused_before_restore`,
+   `fn:a_fork_is_admitted_at_the_memory_its_restore_maps_not_the_host_default`).
+   A fork that fails is settled by the ledger's liveness rule above: its hold
+   is released when no marker leaves the child possibly running, and kept
+   charged otherwise. Three gaps remain open. A launcher killed between
+   spending a hold and settling it leaves the hold `Dispatching` permanently:
+   nothing retires that phase, so it overcounts after the machine dies and
+   blocks the name under a budget. That holds for every launch kind, and
+   fs_quick forks reach the same state on every launch because they never
+   record their charge (#6015). Only `vm_full` forks settle a failed launch:
+   a cold transient that fails after spending its hold also leaves it
+   `Dispatching` (#6015). And on Firecracker, a scope or socket wait
+   that times out while the detached launcher is still pending can later exec
+   an idle Firecracker that carried no marker when the hold was released, so
+   it is not counted; before this change the fork's hold was dropped in that
+   case too.
 6. **Memory and task ceilings at spawn hold only on a Linux host with a systemd
    user session. (PARTIAL, by host.)** Where they hold, every VMM spawn —
    Firecracker cold boots and every Firecracker snapshot load (fork, pool

@@ -4,8 +4,13 @@
 //! charges before reserving capacity. Its short ledger lock is released before
 //! boot. Charges use configured maxima, never current balloon usage.
 //!
-//! Possibly dispatched holds survive failure and launcher death. Ordinary
-//! running holds can reconcile only against their persisted original process
+//! Possibly dispatched holds survive launcher death. A failed `vm_full` fork is
+//! settled by `HostBudgetPermit::settle_failed_launch`, which releases an
+//! ordinary hold only when no PID marker leaves its machine possibly running,
+//! the ledger's own liveness rule. Other launch kinds do not call it yet: a
+//! cold transient that fails after spending its hold, and every fs_quick fork,
+//! still leave a `Dispatching` hold that nothing retires. Ordinary running
+//! holds can reconcile only against their persisted original process
 //! identity; coordinated holds require explicit terminal reconciliation.
 //! The older `committed` queries are diagnostic legacy-record projections,
 //! not admission authority, and do not include pending holds.

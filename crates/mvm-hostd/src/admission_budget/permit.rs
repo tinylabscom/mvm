@@ -446,6 +446,48 @@ impl HostBudgetPermit {
         })
     }
 
+    /// Settle an ordinary hold whose launch failed, by the ledger's own
+    /// liveness rule: a launch that never dispatched holds nothing, a machine
+    /// that cannot be running ([`may_be_live`]) is released, and one that may
+    /// be keeps its charge, upgraded to `Running` when its process is provably
+    /// ours so the usual reconciliation retires it once that process dies.
+    pub fn settle_failed_launch(&self, vm_name: &str) -> Result<()> {
+        if matches!(self.mode, PermitMode::UnboundedOrdinary { .. }) {
+            return Ok(());
+        }
+        validate_name(vm_name)?;
+        let directory = mvm_core::config::vm_state_dir_at(&self.home, vm_name);
+        self.update(|ledger| {
+            let Some(record) = ledger.reservations.get_mut(&self.id) else {
+                return Ok(());
+            };
+            ensure!(
+                record.ownership == Ownership::Ordinary,
+                "coordinated host reservation requires terminal reconciliation"
+            );
+            match record.phase {
+                Phase::Prepared => {
+                    ledger.reservations.remove(&self.id);
+                    return Ok(());
+                }
+                Phase::OrdinaryStopped | Phase::Terminal { .. } => return Ok(()),
+                Phase::NoDispatch => anyhow::bail!("ordinary host reservation has no dispatch"),
+                Phase::Dispatching | Phase::Running { .. } => {}
+            }
+            ensure!(
+                record.vm_name == vm_name,
+                "host reservation names another machine"
+            );
+            if !may_be_live(&directory, vm_name) {
+                remove_legacy_charge(&self.home, record)?;
+                record.phase = Phase::OrdinaryStopped;
+            } else if let Ok(Some(process)) = platform::machine_identity(&directory) {
+                record.phase = Phase::Running { process };
+            }
+            Ok(())
+        })
+    }
+
     /// Record original runtime refusal before any helper/native dispatch.
     /// Coordinated holds remain charged until their owner durably cancels them.
     pub(crate) fn record_runtime_no_dispatch(
@@ -549,8 +591,10 @@ impl HostBudgetPermit {
     /// Record terminal reconciliation by the trusted original lifecycle owner.
     ///
     /// The caller must have confirmed death and host-resource cleanup and
-    /// durably committed this terminal result. Missing PID files, failed starts,
-    /// and best-effort audit writes are not that evidence.
+    /// durably committed this terminal result. For a coordinated hold, missing
+    /// PID files, failed starts and best-effort audit writes are not that
+    /// evidence; an ordinary failed launch is settled instead by
+    /// [`Self::settle_failed_launch`].
     pub fn reconcile_terminal(&self, result_digest: &str) -> Result<()> {
         ensure!(
             matches!(self.mode, PermitMode::Tracked),

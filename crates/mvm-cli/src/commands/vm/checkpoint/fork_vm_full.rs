@@ -402,7 +402,24 @@ fn audit_fork_failure(
     {
         mvm_client::admission::record_uncertain_restore_stop(admission, name, error);
     } else {
-        crate::commands::vm::up::emit_failed(admission, stage, error);
+        crate::commands::vm::up::emit_failed(admission, fork_failure_stage(stage, error), error);
+    }
+    // The child is stopped (or its stop is uncertain) by now; release the
+    // host hold only on the same liveness evidence the budget counts with.
+    if let Err(settle) = admission.admitted.settle_failed_host_budget_launch(name) {
+        tracing::warn!(error = %settle, "fork host hold not settled; retaining its capacity");
+    }
+}
+
+/// A host-budget refusal is audited under the launch tail's stage label.
+fn fork_failure_stage<'a>(stage: &'a str, error: &anyhow::Error) -> &'a str {
+    if error
+        .downcast_ref::<mvm_client::admission::HostBudgetRefused>()
+        .is_some()
+    {
+        "host-budget"
+    } else {
+        stage
     }
 }
 
@@ -1233,6 +1250,21 @@ mod tests {
     /// Passing --cpus to a vm_full fork is refused with a clear error message
     /// that explains the memory-restore constraint and names the fs_quick
     /// alternative.
+    #[test]
+    fn a_host_budget_refusal_is_audited_under_the_tail_stage() {
+        let refused = anyhow::anyhow!("boot would exceed this host's budget")
+            .context(mvm_client::admission::HostBudgetRefused);
+        assert_eq!(
+            fork_failure_stage("fork-vm-full-hvf", &refused),
+            "host-budget"
+        );
+        let other = anyhow::anyhow!("restore failed");
+        assert_eq!(
+            fork_failure_stage("fork-vm-full-hvf", &other),
+            "fork-vm-full-hvf"
+        );
+    }
+
     #[test]
     fn vm_full_fork_refuses_cpus_override() {
         let tmp = tempfile::tempdir().unwrap();

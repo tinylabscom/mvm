@@ -109,7 +109,7 @@ pub use restore::{
     RetainedVmFullFork, VerifiedVmFullForkSource, VmFullForkDispatch, verify_vm_full_fork_source,
 };
 pub use rollback::{
-    UndoLaunchFailure, apply_admitted_grants_or_undo_launch,
+    HostBudgetRefused, UndoLaunchFailure, apply_admitted_grants_or_undo_launch,
     apply_persistent_grants_or_undo_launch, record_charge_or_undo_launch,
     record_charge_with_owned_rollback, record_persistent_charge_or_undo_launch,
 };
@@ -170,6 +170,11 @@ impl AdmittedPlan {
     /// Spend the host hold before invoking any backend start.
     pub fn mark_host_budget_dispatching(&self, vm_name: &str) -> Result<()> {
         self.host_budget.mark_dispatching_for(&self.plan, vm_name)
+    }
+
+    /// Settle the host hold after this admission's launch of `vm_name` failed.
+    pub fn settle_failed_host_budget_launch(&self, vm_name: &str) -> Result<()> {
+        self.host_budget.settle_failed_launch(vm_name)
     }
 
     /// Host reservation identity bound by a coordinating lifecycle owner.

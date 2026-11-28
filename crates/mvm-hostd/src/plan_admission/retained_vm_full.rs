@@ -136,6 +136,48 @@ impl ForkRestorer for VmFullForkRestorer<'_> {
     }
 }
 
+/// Spend the child's host hold at the effect boundary, immediately before the
+/// backend restore can start a VMM, so every earlier refusal holds nothing.
+struct BudgetedRestorer<'a> {
+    inner: VmFullForkRestorer<'a>,
+    admitted: &'a AdmittedPlan,
+}
+
+impl ForkRestorer for BudgetedRestorer<'_> {
+    fn verifies_on_load(&self) -> &'static [&'static str] {
+        self.inner.verifies_on_load()
+    }
+
+    fn restore(&self, child: &mvm_runtime::checkpoint::RestoredChild<'_>) -> Result<()> {
+        self.admitted
+            .mark_host_budget_dispatching(child.vm_name)
+            .context(super::HostBudgetRefused)?;
+        self.inner.restore(child)
+    }
+}
+
+/// Persist the restored child's charge so later admissions count it; a child
+/// that cannot be counted is stopped rather than left running invisibly.
+fn record_child_charge(
+    admitted: &AdmittedPlan,
+    child_name: &str,
+    stop_child: &dyn Fn(&str) -> Result<()>,
+) -> Result<()> {
+    let Err(error) = admitted.host_budget.record_started(child_name) else {
+        return Ok(());
+    };
+    let error = error.context("recording the fork child's host charge");
+    Err(match stop_child(child_name) {
+        Ok(()) => error,
+        Err(stop) => mvm_runtime::checkpoint::ForkStopUncertain {
+            name: child_name.to_string(),
+            primary: error,
+            stop,
+        }
+        .into(),
+    })
+}
+
 /// One-use retained source bound to a fresh child admission.
 pub struct RetainedVmFullFork {
     source: VerifiedVmFullForkSource,
@@ -203,6 +245,7 @@ impl RetainedVmFullFork {
         anchor: &dyn CheckpointChainAnchor,
         stop_child: &dyn Fn(&str) -> Result<()>,
     ) -> VmFullForkDispatch {
+        let child_name = self.params.child_vm_name.clone();
         let result = (|| {
             bind_fork_dispatch(
                 &mut self.admitted,
@@ -256,7 +299,10 @@ impl RetainedVmFullFork {
                 restorer.matches(self.source.origin()),
                 "full-VM fork selected a restorer for the wrong backend"
             );
-            let child_name = self.params.child_vm_name.clone();
+            let restorer = BudgetedRestorer {
+                inner: restorer,
+                admitted: &self.admitted,
+            };
             let meta = mvm_runtime::checkpoint::fork_vm_full_verified_with_rollback(
                 store,
                 self.params,
@@ -273,8 +319,14 @@ impl RetainedVmFullFork {
                 &child_name,
                 stop_child,
             )?;
+            record_child_charge(&self.admitted, &child_name, stop_child)?;
             Ok(meta)
         })();
+        if result.is_err()
+            && let Err(error) = self.admitted.settle_failed_host_budget_launch(&child_name)
+        {
+            tracing::warn!(%error, "fork host hold not settled; retaining its capacity");
+        }
         VmFullForkDispatch {
             result,
             admitted: self.admitted,

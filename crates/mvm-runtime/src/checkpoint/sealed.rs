@@ -297,6 +297,14 @@ pub(super) fn materialized_sha256(
         .context("sealed index does not record the materialized blob digest")
 }
 
+pub(super) fn materialized_len(
+    keys: &DomainKeys,
+    content_dir: &Path,
+    blob: &ContentBlob,
+) -> Result<u64> {
+    Ok(open_index(keys, content_dir, blob)?.length_bytes)
+}
+
 /// Open `blob` into `destination`, which must not exist, returning the
 /// SHA-256 of the plaintext written.
 ///
