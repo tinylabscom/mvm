@@ -370,21 +370,24 @@ if args[:3] == ["pool", "status", "--json"]:
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("standby_form\tresident_process\n", (base / "out/summary.tsv").read_text())
 
+    # Warm mode warms a standby before every claim, so it needs the same short path.
     def test_a_too_long_data_dir_refuses_a_firecracker_standby_before_anything_runs(self) -> None:
-        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
-            base = Path(tmp)
-            long_dir = base / ("d" * 60) / "mvm-data"
-            meminfo = base / "meminfo"
-            meminfo.write_text("MemTotal:       16777216 kB\n")
-            result = self.run_standby(base, {
-                "MVM_HVF_DENSITY_BACKEND": "firecracker",
-                "MVM_HVF_DENSITY_MEMINFO": str(meminfo),
-                "MVM_HVF_DENSITY_DATA_DIR": str(long_dir),
-            })
-            self.assertEqual(result.returncode, 65, result.stderr)
-            self.assertIn("MVM_HVF_DENSITY_DATA_DIR", result.stderr)
-            self.assertFalse(long_dir.exists())
-            self.assertFalse((base / "out/commands.jsonl").exists())
+        for mode in ("warm", "standby"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+                base = Path(tmp)
+                long_dir = base / ("d" * 60) / "mvm-data"
+                meminfo = base / "meminfo"
+                meminfo.write_text("MemTotal:       16777216 kB\n")
+                result = self.run_standby(base, {
+                    "MVM_HVF_DENSITY_MODE": mode,
+                    "MVM_HVF_DENSITY_BACKEND": "firecracker",
+                    "MVM_HVF_DENSITY_MEMINFO": str(meminfo),
+                    "MVM_HVF_DENSITY_DATA_DIR": str(long_dir),
+                })
+                self.assertEqual(result.returncode, 65, result.stderr)
+                self.assertIn("MVM_HVF_DENSITY_DATA_DIR", result.stderr)
+                self.assertFalse(long_dir.exists())
+                self.assertFalse((base / "out/commands.jsonl").exists())
 
     def test_the_resource_report_is_written_and_its_failure_fails_the_run(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
