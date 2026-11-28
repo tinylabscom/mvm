@@ -708,6 +708,11 @@ mod tests {
             "[::1%lo0]:443",
             "a..com:443",
             "-a.com:443",
+            // The cleartext opt-in is a user allow-host spelling, not a
+            // signed authority.
+            "http://example.com:80",
+            "http://[::1]:80",
+            "http://127.0.0.1:80",
         ] {
             assert!(EnvironmentPolicy::parse_authority(host).is_err(), "{host}");
         }

@@ -248,6 +248,41 @@ fn a_failed_denial_marks_incomplete_before_the_refusal_arrives() {
     host.join().unwrap().unwrap();
 }
 
+/// Production refuses a port-80 connect the allow-list admits but the
+/// operator never opted into cleartext, and records the refusal under its own
+/// reason so the chain says it was the cleartext rule, not the allow-list.
+#[test]
+fn a_production_port_80_connect_is_refused_and_audited_as_cleartext() {
+    let sink = Arc::new(CapturingSink::default());
+    let supplied = Arc::clone(&sink);
+    let gate = gate_allowing_addr(UNDIALED_TEST_IP, 80, None).refusing_cleartext();
+    let (mut guest, mut session, host) =
+        run_session_from(RegistryLimits::default(), move |id, key, anchor, limits| {
+            FlowMuxAccept::new(id, key, anchor, limits, gate).with_audit_sink(supplied)
+        });
+    let target = format!("{UNDIALED_TEST_IP}:80");
+    write_frame(
+        &mut guest,
+        &mut session,
+        Opcode::OpenTcp,
+        1,
+        target.as_bytes(),
+    );
+    assert_eq!(
+        read_flowmux_frame(&mut guest, &mut session).0,
+        Opcode::Refused
+    );
+    let records = sink.records.lock().unwrap().clone();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].0, "host.flow.denied");
+    assert_eq!(
+        records[0].1.get("reason").map(String::as_str),
+        Some("cleartext_denied")
+    );
+    drop(guest);
+    host.join().unwrap().unwrap();
+}
+
 #[test]
 fn a_failed_udp_send_write_never_sends_a_datagram() {
     let peer = std::net::UdpSocket::bind((local_test_ip(), 0)).unwrap();

@@ -337,6 +337,18 @@ impl std::fmt::Debug for EndpointConfig {
     }
 }
 
+/// Whether this endpoint serves a production workload: its admitted plan
+/// carries the attenuated agent-verb grant, the signed fact the guest agent
+/// refuses DevOnly verbs on. Host admission sets it for every sealed
+/// production run. No plan, or a plan without the grant, is not production.
+#[must_use]
+pub fn production_posture(cfg: &EndpointConfig) -> bool {
+    cfg.audit
+        .as_ref()
+        .and_then(mvm_core::audit_sink::AuditContext::plan)
+        .is_some_and(|plan| plan.agent_verbs.is_some())
+}
+
 /// Parse an [`EndpointConfig`] from the JSON the backend writes on stdin.
 pub fn parse(bytes: &[u8]) -> Result<EndpointConfig, serde_json::Error> {
     serde_json::from_slice(bytes)
@@ -391,6 +403,11 @@ impl EndpointNetworkProjection {
         let gate = match &cfg.network_policy {
             Some(policy) => build_egress_gate(policy),
             None => mvm_runtime::vmm::egress_gate::EgressGate::default_deny(),
+        };
+        let gate = if production_posture(cfg) {
+            gate.refusing_cleartext()
+        } else {
+            gate
         };
         // Every decision asks the epoch gate first. A plan whose gate cannot
         // be built is refused at start; should one get here, nothing passes.
@@ -581,6 +598,8 @@ pub fn assemble_projected(
         },
     )?;
 
+    refuse_credentials_over_cleartext(cfg, &service, &projection.gate())?;
+
     // `from_plan` just minted this Arc with no other holders. Attach the
     // endpoint-wide audit sink before exposing the service to connector, typed
     // HTTP, terminator, or ingress tasks.
@@ -593,6 +612,37 @@ pub fn assemble_projected(
     service = service.with_approver(approver);
 
     Ok((Arc::new(service), handed, oauth_refresh))
+}
+
+/// Refuse a production endpoint whose bound credential could cross plain
+/// HTTP: a plan secret whose stored allowed hosts cover any spelling the gate
+/// admits plain HTTP to — an opted name, the addresses it pinned to, or an
+/// opted address literal. Any overlap refuses, before the endpoint serves.
+fn refuse_credentials_over_cleartext(
+    cfg: &EndpointConfig,
+    service: &SubstitutionService,
+    gate: &mvm_runtime::vmm::egress_gate::EgressGate,
+) -> anyhow::Result<()> {
+    if !production_posture(cfg) {
+        return Ok(());
+    }
+    let hosts = gate.cleartext_hosts();
+    for host in &hosts {
+        if let Some(secret) = cfg.secrets.iter().find(|secret| match &secret.source {
+            mvm_core::plan::SecretSource::Keystore { address } => {
+                service.secret_reaches(address, host)
+            }
+            _ => false,
+        }) {
+            anyhow::bail!(
+                "secret {} may be sent to {host}, which this production workload opted into \
+                 plain HTTP; a credential is never sent in cleartext — drop the http:// \
+                 opt-in or the binding",
+                secret.name,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The runtime approver for this endpoint: every `ask` recorded in the
@@ -1081,6 +1131,164 @@ mod tests {
         };
         assert!(err.contains("oauth-secret"), "{err}");
         assert!(err.contains("https"), "{err}");
+    }
+
+    /// A production endpoint whose policy opts `opted` into cleartext, the
+    /// opted names pinned as `pins`, with one secret bound to `bound`.
+    fn cleartext_secret_cfg(
+        dir: &std::path::Path,
+        opted: &[&str],
+        pins: &[(&str, &str)],
+        bound: &str,
+    ) -> (EndpointConfig, EndpointNetworkProjection) {
+        use mvm_core::network_policy::{HostPort, NetworkPolicy};
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        std::fs::create_dir_all(dir.join("secrets")).unwrap();
+        FileBindingStore::with_dir(dir.join("bindings"))
+            .put(
+                "local",
+                "mirror-token",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec![bound.into()],
+                    sigv4: None,
+                    inject: Default::default(),
+                    provider: None,
+                    approve: Default::default(),
+                    oauth: None,
+                },
+            )
+            .unwrap();
+        let mut cfg = vsock_cfg(
+            vec![SecretBinding {
+                name: "MIRROR_TOKEN".into(),
+                source: SecretSource::Keystore {
+                    address: "mirror-token".into(),
+                },
+                destinations: Vec::new(),
+                approval_required: false,
+            }],
+            dir,
+        );
+        let policy = NetworkPolicy::allow_list(
+            opted
+                .iter()
+                .map(|host| HostPort::new(*host, 80).with_cleartext())
+                .collect(),
+        );
+        let mut registry = DnsPinRegistry::new();
+        for (host, ip) in pins {
+            registry.add(DnsPin::at(
+                *host,
+                vec![ip.parse().unwrap()],
+                "2025-01-01T00:00:00Z",
+                "2030-01-01T00:00:00Z",
+            ));
+        }
+        let gate = mvm_runtime::vmm::egress_gate::EgressGate::from_network_policy(
+            &policy,
+            &registry,
+            "2026-01-01T00:00:00Z",
+        )
+        .refusing_cleartext();
+        cfg.network_policy = Some(policy);
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.agent_verbs = Some(Vec::new());
+        cfg.audit = Some(mvm_core::audit_sink::AuditContext::Workload {
+            plan: Box::new(plan),
+        });
+        let projection = EndpointNetworkProjection {
+            gate: Arc::new(gate),
+            recorder: None,
+            audit_sink: None,
+        };
+        (cfg, projection)
+    }
+
+    /// Production never sends a bound credential over plain HTTP: a secret
+    /// that may reach any spelling the gate admits plain HTTP to — the opted
+    /// name, the address it pinned to, an opted address literal, IPv4 or
+    /// IPv6 — refuses the endpoint's assembly, naming the secret. Outside
+    /// production the same pairing assembles as it always has.
+    #[test]
+    fn production_refuses_a_secret_bound_to_a_cleartext_destination() {
+        let pinned = [("mirror.example.com", "93.184.216.34")];
+        for (opted, bound) in [
+            (&["mirror.example.com"][..], "mirror.example.com"),
+            (&["mirror.example.com"][..], "93.184.216.34"),
+            (&["93.184.216.34"][..], "93.184.216.34"),
+            (&["2606:4700:4700::1111"][..], "2606:4700:4700::1111"),
+        ] {
+            let dir = tempdir().unwrap();
+            let pins: Vec<(&str, &str)> = pinned
+                .iter()
+                .copied()
+                .chain(
+                    opted
+                        .iter()
+                        .filter(|h| h.parse::<std::net::IpAddr>().is_ok())
+                        .map(|h| (*h, *h)),
+                )
+                .collect();
+            let (mut cfg, projection) = cleartext_secret_cfg(dir.path(), opted, &pins, bound);
+            let err = match assemble_projected(&cfg, &projection) {
+                Ok(_) => panic!("{bound}: production must refuse a credential over cleartext"),
+                Err(err) => format!("{err:#}"),
+            };
+            assert!(err.contains("MIRROR_TOKEN"), "{bound}: {err}");
+            if let Some(mvm_core::audit_sink::AuditContext::Workload { plan }) = cfg.audit.as_mut()
+            {
+                plan.agent_verbs = None;
+            }
+            assert!(assemble_projected(&cfg, &projection).is_ok(), "{bound}");
+        }
+    }
+
+    /// The refusal compares identities, not spellings: an address bound in
+    /// another textual form — bracketed, uncompressed IPv6, IPv4-mapped — or a
+    /// name in another case or with a trailing dot is the same destination.
+    #[test]
+    fn production_refuses_a_secret_bound_to_another_spelling_of_the_destination() {
+        let pins = [("mirror.example.com", "93.184.216.34")];
+        for (opted, bound) in [
+            ("2606:4700:4700::1111", "[2606:4700:4700::1111]"),
+            ("2606:4700:4700::1111", "2606:4700:4700:0:0:0:0:1111"),
+            ("93.184.216.34", "::ffff:93.184.216.34"),
+            ("mirror.example.com", "::ffff:93.184.216.34"),
+            ("mirror.example.com", "MIRROR.Example.com."),
+            // The opted side is canonicalised too, not only the binding.
+            ("mirror.example.com.", "mirror.example.com"),
+        ] {
+            let dir = tempdir().unwrap();
+            let mut all: Vec<(&str, &str)> = pins.to_vec();
+            if opted.parse::<std::net::IpAddr>().is_ok() {
+                all.push((opted, opted));
+            } else if opted.ends_with('.') {
+                all.push((opted, "93.184.216.34"));
+            }
+            let (cfg, projection) = cleartext_secret_cfg(dir.path(), &[opted], &all, bound);
+            assert!(
+                assemble_projected(&cfg, &projection).is_err(),
+                "{opted} bound as {bound} must refuse"
+            );
+        }
+        let dir = tempdir().unwrap();
+        let (cfg, projection) =
+            cleartext_secret_cfg(dir.path(), &["mirror.example.com"], &pins, "93.184.216.35");
+        assert!(assemble_projected(&cfg, &projection).is_ok());
+    }
+
+    /// A secret bound only to a destination that was not opted in starts.
+    #[test]
+    fn production_admits_a_secret_bound_elsewhere_than_the_cleartext_destination() {
+        let dir = tempdir().unwrap();
+        let (cfg, projection) = cleartext_secret_cfg(
+            dir.path(),
+            &["mirror.example.com"],
+            &[("mirror.example.com", "93.184.216.34")],
+            "api.example.com",
+        );
+        assert!(assemble_projected(&cfg, &projection).is_ok());
     }
 
     #[test]

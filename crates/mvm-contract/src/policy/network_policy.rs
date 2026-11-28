@@ -48,19 +48,40 @@ pub enum NetworkPolicyParseError {
 pub struct HostPort {
     pub host: String,
     pub port: u16,
+    /// The operator admitted plain HTTP to this destination, spelled
+    /// `http://host[:port]`. A production workload is refused cleartext
+    /// egress to any destination without it. Omitted from the wire when
+    /// unset, so an entry without it keeps the bytes, and the policy digest,
+    /// it had before the field existed.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub cleartext: bool,
 }
+
+/// The scheme that marks an allow-list entry as admitting plain HTTP.
+pub const CLEARTEXT_SCHEME_PREFIX: &str = "http://";
 
 impl HostPort {
     pub fn new(host: impl Into<String>, port: u16) -> Self {
         Self {
             host: host.into(),
             port,
+            cleartext: false,
         }
+    }
+
+    /// This entry, admitting plain HTTP.
+    #[must_use]
+    pub fn with_cleartext(mut self) -> Self {
+        self.cleartext = true;
+        self
     }
 }
 
 impl fmt::Display for HostPort {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.cleartext {
+            f.write_str(CLEARTEXT_SCHEME_PREFIX)?;
+        }
         write!(f, "{}:{}", self.host, self.port)
     }
 }
@@ -596,6 +617,15 @@ impl NetworkPolicy {
         }
     }
 
+    /// The allow-list entries the operator admitted plain HTTP to.
+    pub fn cleartext_destinations(&self) -> Vec<HostPort> {
+        self.resolve_rules()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|rule| rule.cleartext)
+            .collect()
+    }
+
     /// Whether this policy grants any outbound egress at all.
     ///
     /// `unrestricted` obviously does; allow-lists and named presets do iff
@@ -805,6 +835,23 @@ pub fn is_mandatory_deny(ip: IpAddr) -> bool {
             .any(|net| net.contains(&unmap_v4_mapped(ip)))
 }
 
+/// The one comparable identity of a destination host, whatever its spelling.
+///
+/// An address literal, bracketed or not, becomes its canonical text, with an
+/// IPv4-mapped IPv6 address reduced to the IPv4 address it reaches; a name is
+/// lowercased with one trailing dot dropped. Compare two hosts by comparing
+/// their identities, never their spellings.
+pub fn canonical_host(host: &str) -> String {
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host);
+    match bare.parse::<IpAddr>() {
+        Ok(ip) => unmap_v4_mapped(ip).to_string(),
+        Err(_) => bare.strip_suffix('.').unwrap_or(bare).to_ascii_lowercase(),
+    }
+}
+
 /// Collapse an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its embedded
 /// IPv4 address, leaving every other address unchanged.
 ///
@@ -993,10 +1040,56 @@ mod tests {
         assert!("github.com:abc".parse::<HostPort>().is_err());
     }
 
+    /// One identity per destination, whatever its spelling.
+    #[test]
+    fn canonical_host_gives_one_identity_per_destination() {
+        for (spelling, identity) in [
+            ("[2001:db8::1]", "2001:db8::1"),
+            ("2001:0db8:0:0:0:0:0:1", "2001:db8::1"),
+            ("::ffff:10.0.0.5", "10.0.0.5"),
+            ("[::ffff:10.0.0.5]", "10.0.0.5"),
+            ("10.0.0.5", "10.0.0.5"),
+            ("API.Example.com.", "api.example.com"),
+            ("*.Example.com", "*.example.com"),
+        ] {
+            assert_eq!(canonical_host(spelling), identity, "{spelling}");
+        }
+    }
+
     #[test]
     fn host_port_display() {
         let hp = HostPort::new("github.com", 443);
         assert_eq!(hp.to_string(), "github.com:443");
+    }
+
+    /// The cleartext opt-in renders with the scheme it admits, but the
+    /// canonical `host:port` parser stays scheme-free: only the user-facing
+    /// allow-host parser reads `http://`, so a signed descriptor that spells
+    /// it is still refused.
+    #[test]
+    fn a_cleartext_entry_renders_its_scheme_and_the_canonical_parser_refuses_it() {
+        let hp = HostPort::new("example.com", 80).with_cleartext();
+        assert_eq!(hp.to_string(), "http://example.com:80");
+        assert_ne!(hp.to_string().parse::<HostPort>().ok(), Some(hp));
+        assert!(!"example.com:80".parse::<HostPort>().unwrap().cleartext);
+    }
+
+    /// An entry without the opt-in serializes exactly as before the field
+    /// existed, so every policy digest already recorded in a signed plan is
+    /// unchanged; one with it serializes differently, so the opt-in moves the
+    /// digest the plan binds.
+    #[test]
+    fn the_cleartext_opt_in_is_absent_from_the_wire_unless_set() {
+        let plain = serde_json::to_string(&HostPort::new("example.com", 80)).unwrap();
+        assert_eq!(plain, r#"{"host":"example.com","port":80}"#);
+        let opted =
+            serde_json::to_string(&HostPort::new("example.com", 80).with_cleartext()).unwrap();
+        assert_eq!(
+            opted,
+            r#"{"host":"example.com","port":80,"cleartext":true}"#
+        );
+        let back: HostPort = serde_json::from_str(&opted).unwrap();
+        assert!(back.cleartext);
     }
 
     #[test]

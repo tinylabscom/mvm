@@ -239,12 +239,29 @@ A run that succeeds prints nothing extra, and `--json` reports `"network":
 mvmctl run --allow-host api.example.com:443 -- curl -sS https://api.example.com/
 ```
 
+### Plain HTTP under production
+
+A production workload (one whose signed plan carries an agent-verb grant:
+every sealed production run, and a run given `--agent-verb`) is refused a
+port-80 connection and an `http://` request to any destination it did not
+opt into cleartext. Opt one in by spelling it with the scheme:
+`--allow-host http://mirror.example.com` (port 80) or
+`--allow-host http://mirror.example.com:8080`; a workload file takes the same
+spelling in `allow_hosts`. The opt-in is part of the signed plan's network
+policy. A production endpoint refuses to start when a bound secret may reach
+an opted destination, by name or by the address it resolved to; outside
+production a bound credential can still go to an opted destination. Plain HTTP on
+a port other than 80 inside a connection the host does not terminate is not
+detected; TLS on port 80 is refused without the opt-in too. Other runs are
+unaffected.
+
 The reason comes from the host's own decision, and so does the remedy. Some
 refusals have none, and the notice says so rather than offering a flag:
 
 | Recorded reason | What the notice says | Remedy |
 | --- | --- | --- |
 | `policy_denied` | not in the allow-list | `--allow-host HOST:PORT` |
+| `cleartext_denied` | plain HTTP from a production workload | `--allow-host http://HOST:PORT` |
 | `cloud_metadata`, `loopback`, `link_local`, `unspecified`, `shared_address_space`, `embedded_restricted` | the address class | none — never reachable from a workload |
 | TCP/22 | SSH port | none — SSH never reaches a workload |
 | `private_range`, `unique_local`, `multicast`, `reserved` | the address class | denied by default; admitted only by naming the exact address (`--allow-host 10.0.0.5:5432`). Listed apart from the allow flags in the summary |

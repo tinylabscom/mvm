@@ -10,7 +10,7 @@ use mvm_contract::policy::restricted_address::{RestrictedClass, classify};
 use mvm_contract::policy::routes::{RouteOutcome, RouteSet};
 use serde::Serialize;
 
-use super::merge::{ResolvedPolicy, canonical_allow, deny_covers, split_host_port};
+use super::merge::{ResolvedPolicy, allow_destination, deny_covers};
 
 /// The policy subject being queried.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,8 +118,9 @@ fn answer_host_request(
             Some("runtime absolute deny".to_string()),
         ));
     }
-    let canonical = canonical_allow(raw)?;
-    let (host, port) = split_host_port(&canonical);
+    let destination = allow_destination(raw)?;
+    let canonical = destination.to_string();
+    let (host, port) = (destination.host.as_str(), destination.port);
     let network = &resolved.policy.network;
     if network.block == Some(true) {
         return Ok(PolicyAnswer::deny(

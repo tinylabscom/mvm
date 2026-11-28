@@ -711,3 +711,52 @@ fn the_published_schema_page_carries_the_generated_schema() {
         .expect("the page has a json block");
     assert_eq!(block, crate::policy::authored::model::json_schema_pretty());
 }
+
+/// A higher layer's deny on a host drops a lower layer's cleartext allow of
+/// the same host, by name and by address.
+#[test]
+fn a_layer_deny_drops_the_http_spelling_of_its_destination() {
+    for (allow, deny) in [
+        ("http://b.test", "b.test"),
+        ("http://10.0.0.5", "10.0.0.5"),
+        ("http://x.corp.test", "*.corp.test"),
+    ] {
+        let resolved = merged(&[
+            user(
+                "low",
+                &format!("[network]\nallow = [\"a.test\", \"{allow}\"]\n"),
+            ),
+            user("high", &format!("[network]\ndeny = [\"{deny}\"]\n")),
+        ]);
+        assert_eq!(resolved.policy.network.allow, ["a.test:443"], "{allow}");
+    }
+}
+
+/// The cleartext opt-in is a widening the owner must grant: an owner grant
+/// for the plain destination does not cover its `http://` spelling.
+#[test]
+fn an_owner_grant_without_the_opt_in_does_not_cover_cleartext() {
+    let resolved = merged(&[user("a", "[network]\nallow = [\"http://b.test\"]\n")]);
+    let plain = EgressGrant {
+        allow: vec![HostPort::new("b.test", 80)],
+    };
+    assert!(resolved.requested_egress_with_owner_grant(&plain).is_err());
+    let opted = EgressGrant {
+        allow: vec![HostPort::new("b.test", 80).with_cleartext()],
+    };
+    assert_eq!(
+        resolved.requested_egress_with_owner_grant(&opted).unwrap(),
+        opted
+    );
+}
+
+/// A bad policy-file allow entry is reported against the file's own field,
+/// not as a command-line flag the author never typed.
+#[test]
+fn a_bad_policy_allow_entry_names_the_field_not_the_flag() {
+    let err = refused(&[user("a", "[network]\nallow = [\"x.test:22\"]\n")]);
+    let text = err.to_string();
+    assert!(text.contains("network.allow"), "{text}");
+    assert!(text.contains("SSH sessions are banned"), "{text}");
+    assert!(!text.contains("--allow-host"), "{text}");
+}

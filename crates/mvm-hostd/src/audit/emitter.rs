@@ -434,12 +434,13 @@ impl AuditEmitter {
     }
 
     /// Emit `plan.egress_destinations` — records the (host, port) allowlist
-    /// admitted for this workload so a receipt can name the network boundary
-    /// without resolving policy refs again. No-op when the list is empty.
+    /// admitted for this workload, and which entries admit plain HTTP, so a
+    /// receipt can name the network boundary without resolving policy refs
+    /// again. No-op when the list is empty.
     pub fn emit_egress_destinations(
         &self,
         plan: &ExecutionPlan,
-        destinations: &[(String, u16)],
+        destinations: &[mvm_core::network_policy::HostPort],
     ) -> Result<()> {
         if destinations.is_empty() {
             return Ok(());
@@ -448,9 +449,15 @@ impl AuditEmitter {
             "destination_count".to_string(),
             destinations.len().to_string(),
         )];
-        for (i, (host, port)) in destinations.iter().enumerate() {
-            labels.push((format!("destination_{i}_host"), host.clone()));
-            labels.push((format!("destination_{i}_port"), port.to_string()));
+        for (i, destination) in destinations.iter().enumerate() {
+            labels.push((format!("destination_{i}_host"), destination.host.clone()));
+            labels.push((
+                format!("destination_{i}_port"),
+                destination.port.to_string(),
+            ));
+            if destination.cleartext {
+                labels.push((format!("destination_{i}_cleartext"), "true".to_string()));
+            }
         }
         self.emit(plan, "plan.egress_destinations", labels)
     }
@@ -2427,8 +2434,8 @@ mod tests {
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-EG");
         let destinations = vec![
-            ("example.com".to_string(), 443),
-            ("api.example.com".to_string(), 8443),
+            mvm_core::network_policy::HostPort::new("example.com", 443),
+            mvm_core::network_policy::HostPort::new("api.example.com", 8443),
         ];
         emitter
             .emit_egress_destinations(&plan, &destinations)

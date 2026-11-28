@@ -73,6 +73,9 @@ pub enum DenialKind {
     RulesUnenforceable,
     /// An `ask` rule nobody was able to answer.
     ApprovalUnavailable,
+    /// Plain HTTP from a production workload to a destination not opted
+    /// into cleartext.
+    CleartextNotAllowed,
     /// A refused ICMP echo, with the gate's own wording.
     EchoRefused { detail: String },
     /// A label this build does not know. Shown verbatim, with no remedy.
@@ -128,6 +131,7 @@ impl DenialKind {
             "ambiguous_path" => Self::AmbiguousPath,
             "endpoint_rules_unenforceable" => Self::RulesUnenforceable,
             "approval_unavailable" => Self::ApprovalUnavailable,
+            "cleartext_denied" => Self::CleartextNotAllowed,
             "echo_refused" => Self::EchoRefused {
                 detail: inputs.detail.unwrap_or_default().to_string(),
             },
@@ -158,6 +162,7 @@ impl DenialKind {
             Self::AmbiguousPath => "ambiguous request path".into(),
             Self::RulesUnenforceable => "endpoint rules need interception".into(),
             Self::ApprovalUnavailable => "needs approval, no approver".into(),
+            Self::CleartextNotAllowed => "plain HTTP from a production workload".into(),
             Self::EchoRefused { .. } => "echo not admitted".into(),
             Self::Unrecognised { label } => format!("refused: {label}"),
         }
@@ -185,6 +190,16 @@ impl DenialKind {
             },
             Self::SshPort => Remedy::Never {
                 why: "SSH (TCP/22) never reaches a workload; no grant admits it".into(),
+            },
+            Self::CleartextNotAllowed => match allow_target {
+                Some(target) => Remedy::AllowHost {
+                    flag: flag(&format!("http://{target}")),
+                },
+                None => Remedy::Advice {
+                    text: "a production workload sends plain HTTP only to a destination opted \
+                           in with --allow-host http://HOST[:PORT]"
+                        .into(),
+                },
             },
             Self::RouteDenied { route } => Remedy::EditRoute {
                 route: route.clone(),
@@ -338,6 +353,7 @@ mod tests {
         "endpoint_rules_unenforceable",
         "approval_unavailable",
         "echo_refused",
+        "cleartext_denied",
     ];
 
     #[test]
@@ -369,6 +385,20 @@ mod tests {
             kind.remedy(Some("api.example.com:443")).render(true),
             "allow with --allow-host api.example.com:443"
         );
+    }
+
+    /// A production cleartext refusal is remedied by the opt-in spelling the
+    /// docs name, never by the plain allow the destination already has.
+    #[test]
+    fn a_cleartext_refusal_is_remedied_by_the_http_allow_host_flag() {
+        let kind = classify("cleartext_denied", Some(80));
+        assert_eq!(kind, DenialKind::CleartextNotAllowed);
+        assert_eq!(kind.describe(), "plain HTTP from a production workload");
+        assert_eq!(
+            kind.remedy(Some("mirror.example.com:80")).render(true),
+            "allow with --allow-host http://mirror.example.com:80"
+        );
+        assert!(!kind.is_plain_allow());
     }
 
     #[test]

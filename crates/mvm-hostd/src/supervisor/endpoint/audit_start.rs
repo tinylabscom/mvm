@@ -10,6 +10,7 @@ use crate::supervisor::audit::bound_sink::BoundRecorder;
 
 /// Refuse missing or mismatched audit identity before binding listeners.
 pub fn validate(cfg: &EndpointConfig) -> Result<()> {
+    require_signed_cleartext(cfg)?;
     if !matches!(cfg.egress_mode, EgressMode::FlowMux) {
         return Ok(());
     }
@@ -26,6 +27,36 @@ pub fn validate(cfg: &EndpointConfig) -> Result<()> {
             context.validate_for(&cfg.tenant_id, &cfg.instance_id)?;
         }
     }
+    Ok(())
+}
+
+/// Refuse a cleartext opt-in the admitted plan does not record. Admission
+/// signs the policy's digest into the plan; this compares that recorded
+/// digest with the policy in the same launcher-written config, so it catches
+/// a launch path that adds a marker after admission. It is a consistency
+/// check, not a signature check. A policy without an opt-in is not checked.
+fn require_signed_cleartext(cfg: &EndpointConfig) -> Result<()> {
+    let Some(policy) = cfg.network_policy.as_ref() else {
+        return Ok(());
+    };
+    if policy.cleartext_destinations().is_empty() {
+        return Ok(());
+    }
+    let signed = cfg
+        .audit
+        .as_ref()
+        .and_then(AuditContext::plan)
+        .is_some_and(|plan| {
+            mvm_runtime::workload_runner::claim::bind_claim_policy_to_plan(
+                &plan.asset_identities,
+                policy,
+            )
+            .is_ok()
+        });
+    anyhow::ensure!(
+        signed,
+        "the endpoint's cleartext egress opt-in is not the network policy the plan admitted"
+    );
     Ok(())
 }
 

@@ -478,6 +478,10 @@ destinations: HostPort[]
  * A host:port pair for network allowlist rules.
  */
 export interface HostPort {
+/**
+ * The operator admitted plain HTTP to this destination, spelled `http://host[:port]`. A production workload is refused cleartext egress to any destination without it. Omitted from the wire when unset, so an entry without it keeps the bytes, and the policy digest, it had before the field existed.
+ */
+cleartext?: boolean
 host: string
 port: number
 }

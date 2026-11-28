@@ -1,37 +1,58 @@
 //! The common parser for workload egress allow-host requests.
 
 use crate::network_policy::{HostPort, is_banned_ssh_port};
-use anyhow::{Context, Result};
+use anyhow::Result;
+use mvm_contract::policy::network_policy::CLEARTEXT_SCHEME_PREFIX;
 
-/// Parse one `--allow-host` entry, defaulting a bare host to HTTPS.
+/// Parse one `--allow-host` entry, defaulting a bare host to HTTPS. The
+/// refusal names the flag; see [`parse_destination`] for the rules.
+///
+/// # Errors
+///
+/// Whatever [`parse_destination`] refuses.
+pub fn parse_allow_host(entry: &str) -> Result<HostPort> {
+    // One message, not a chain, so every caller shows the whole reason.
+    parse_destination(entry)
+        .map_err(|error| anyhow::anyhow!("invalid --allow-host {entry:?}: {error:#}"))
+}
+
+/// Parse one user-authored egress destination — a `--allow-host` value or a
+/// workload file's `allow_hosts` entry — defaulting a bare host to HTTPS.
+///
+/// `http://HOST[:PORT]` admits plain HTTP to that destination, defaulting
+/// the port to 80; it is the only way a production workload may send
+/// cleartext to it. This is the one parser that reads the scheme; the
+/// canonical `HOST:PORT` parser does not.
 ///
 /// # Errors
 ///
 /// Empty hosts, malformed explicit ports, hosts that
 /// [`check_destination_host`] refuses, and SSH destinations are refused.
-pub fn parse_allow_host(entry: &str) -> Result<HostPort> {
-    let parsed = match bracketed_ipv6(entry) {
+pub fn parse_destination(entry: &str) -> Result<HostPort> {
+    let (rest, cleartext) = match entry.strip_prefix(CLEARTEXT_SCHEME_PREFIX) {
+        Some(rest) => (rest, true),
+        None => (entry, false),
+    };
+    let default_port = if cleartext { 80 } else { 443 };
+    let mut parsed = match bracketed_ipv6(rest, default_port) {
         Some(parsed) => parsed,
-        None => parse_unbracketed(entry),
-    }
-    .with_context(|| format!("invalid --allow-host {entry:?}"))?;
-    check_destination_host(&parsed.host)
-        .with_context(|| format!("invalid --allow-host {entry:?}"))?;
+        None => parse_unbracketed(rest, default_port),
+    }?;
+    parsed.cleartext = cleartext;
+    check_destination_host(&parsed.host)?;
     if is_banned_ssh_port(parsed.port) {
-        anyhow::bail!(
-            "--allow-host {entry:?} requests TCP/22, but SSH sessions are banned in microVMs"
-        );
+        anyhow::bail!("{entry:?} requests TCP/22, but SSH sessions are banned in microVMs");
     }
     Ok(parsed)
 }
 
 /// `[v6]` or `[v6]:port`, the bracketed spelling of an IPv6 literal. `None`
 /// when `entry` is not brackets around an IPv6 address.
-fn bracketed_ipv6(entry: &str) -> Option<Result<HostPort>> {
+fn bracketed_ipv6(entry: &str, default_port: u16) -> Option<Result<HostPort>> {
     let (inner, tail) = entry.strip_prefix('[')?.split_once(']')?;
     let addr = inner.parse::<std::net::Ipv6Addr>().ok()?;
     let port = match tail.strip_prefix(':') {
-        _ if tail.is_empty() => Ok(443),
+        _ if tail.is_empty() => Ok(default_port),
         Some(port) => port
             .parse::<u16>()
             .map_err(|_| anyhow::anyhow!("invalid port {port:?}")),
@@ -40,11 +61,11 @@ fn bracketed_ipv6(entry: &str) -> Option<Result<HostPort>> {
     Some(port.map(|port| HostPort::new(addr.to_string(), port)))
 }
 
-fn parse_unbracketed(entry: &str) -> Result<HostPort> {
+fn parse_unbracketed(entry: &str, default_port: u16) -> Result<HostPort> {
     match entry.rsplit_once(':') {
         Some(_) => Ok(entry.parse()?),
-        None if entry.is_empty() => anyhow::bail!("--allow-host cannot be empty"),
-        None => Ok(HostPort::new(entry, 443)),
+        None if entry.is_empty() => anyhow::bail!("a destination cannot be empty"),
+        None => Ok(HostPort::new(entry, default_port)),
     }
 }
 
@@ -134,6 +155,34 @@ mod tests {
             let err = format!("{:#}", parse_allow_host(entry).unwrap_err());
             assert!(err.contains(entry), "{entry}: {err}");
             assert!(err.contains(hint), "{entry}: {err}");
+        }
+    }
+
+    /// `http://` is the opt-in: it marks the entry cleartext and moves the
+    /// default port to 80. Without it nothing is marked, whatever the port.
+    #[test]
+    fn an_http_entry_opts_its_destination_into_cleartext() {
+        let opted = parse_allow_host("http://example.com").unwrap();
+        assert_eq!(opted, HostPort::new("example.com", 80).with_cleartext());
+        let on_port = parse_allow_host("http://example.com:8080").unwrap();
+        assert_eq!(on_port, HostPort::new("example.com", 8080).with_cleartext());
+        let v6 = parse_allow_host("http://[2001:db8::1]").unwrap();
+        assert_eq!(v6, HostPort::new("2001:db8::1", 80).with_cleartext());
+        assert!(!parse_allow_host("example.com:80").unwrap().cleartext);
+        assert!(!parse_allow_host("example.com").unwrap().cleartext);
+    }
+
+    /// The opt-in is a scheme, not a free-form prefix: anything else that
+    /// looks like a URL is refused rather than read as a host name.
+    #[test]
+    fn other_schemes_and_paths_are_refused() {
+        for entry in [
+            "https://example.com",
+            "http://",
+            "http://example.com/path",
+            "http://example.com:22",
+        ] {
+            assert!(parse_allow_host(entry).is_err(), "{entry}");
         }
     }
 

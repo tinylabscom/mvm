@@ -113,6 +113,22 @@ impl SubstitutionService {
         }
     }
 
+    /// Whether the secret stored at keystore `address` may be sent to the
+    /// destination whose canonical identity is `identity`. Its allowed hosts
+    /// are compared as identities too, so no spelling of the same address or
+    /// name slips past.
+    pub(crate) fn secret_reaches(&self, address: &str, identity: &str) -> bool {
+        use mvm_contract::policy::network_policy::canonical_host;
+        self.registry.resolve_name(address).is_some_and(|secret| {
+            let allowed: Vec<String> = secret
+                .allowed_hosts
+                .iter()
+                .map(|host| canonical_host(host))
+                .collect();
+            mvm_contract::ir::host_is_bound(&allowed, identity)
+        })
+    }
+
     /// The per-VM egress intermediate a terminated flow mints its per-SNI leaf
     /// under. `None` on an endpoint that was never given one, which is what
     /// makes [`Self::terminable`] refuse rather than terminate.

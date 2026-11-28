@@ -1683,6 +1683,47 @@ read nowhere (its only mention is a doc comment in `mvm-contract::stream::edge`
 saying another mechanism is shaped after it). Building one is tracked in the
 issues.
 
+**Cleartext under production (limit, not a numbered claim).** A workload
+whose signed plan carries an agent-verb grant — every sealed production run,
+and also a dev run given `--agent-verb` and an operator-admitted trial boot,
+which become stricter — is read as production by the endpoint
+(`production_posture`). Such a workload does not originate plain HTTP the
+endpoint can identify as such unless the allow-list entry for that
+destination opted in with `--allow-host http://HOST[:PORT]`. The
+`EgressGate` refuses an admitted TCP flow to port 80 without the opt-in
+(`production_refuses_a_port_80_flow_that_was_not_opted_in`,
+`a_production_port_80_connect_is_refused_and_audited_as_cleartext`), and the
+request leg refuses an `http://` upstream on any port without it
+(`production_refuses_an_http_upstream_before_forward`); both record the
+refusal with the reason "cleartext_denied". The opt-in is a field of the
+policy entry, so it is inside the policy digest admission records in the
+signed plan; that digest is the binding. The endpoint's start-up comparison
+of its policy with that digest
+(`a_cleartext_opt_in_the_plan_did_not_sign_is_refused`) is a consistency
+check between two fields of one launcher-written config, not a signature
+check. A production endpoint refuses to start when the hosts the plan lets
+a bound secret reach — its stored allowed hosts narrowed by the plan's
+destinations for it, so a stored host the plan does not admit for that
+secret does not count — cover any host plain HTTP is admitted to: an opted
+name, an
+address that name pinned to at endpoint start, or an opted address literal,
+compared as canonical identities so another spelling of the same address or
+name is the same destination
+(`production_refuses_a_secret_bound_to_a_cleartext_destination`,
+`production_refuses_a_secret_bound_to_another_spelling_of_the_destination`). Outside
+production nothing is refused: a bound credential can still be sent to a
+destination opted into cleartext.
+
+Limits. Port 80 is the only plain-HTTP signal a spliced flow carries: plain
+HTTP on any other port, spliced without termination, is not detected, so this
+is not a promise that a production workload never sends unencrypted bytes.
+The signal is the port, so TLS on port 80 and an `https://host:80` request are
+refused without the opt-in too, and a production workload under an
+unrestricted policy is refused all port 80 with no opt-in short of an
+allow-list. An endpoint already running when a host upgrades keeps the old
+behaviour until its VM restarts. A fleet-signed production plan that relies on
+port 80 is refused until the fleet side can set the opt-in.
+
 <!-- absent:begin -->
 
 `MVM_ACK_UNRESTRICTED_NETWORK`.

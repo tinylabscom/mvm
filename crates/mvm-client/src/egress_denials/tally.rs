@@ -169,7 +169,9 @@ impl DenialTally {
         for seen in &rows {
             let remedy = seen.denial.remedy();
             let tail = match &remedy {
-                Remedy::AllowHost { .. } => String::new(),
+                // Plain allows are collected into one command below; any
+                // other flag (the cleartext opt-in) stays on its own row.
+                Remedy::AllowHost { .. } if seen.denial.kind.is_plain_allow() => String::new(),
                 other => format!(" — {}", other.render(seen.denial.subject.has_port())),
             };
             lines.push(format!(
@@ -332,6 +334,27 @@ mod tests {
         assert!(!text.contains("\"10.0.0.5:5432\""), "{text}");
         assert!(text.contains("naming each exactly"), "{text}");
         assert!(text.contains("  --allow-host 10.0.0.5:5432"), "{text}");
+    }
+
+    /// A production cleartext refusal names its own fix on its row — the
+    /// opt-in spelling — and stays out of the plain allow command, which would
+    /// not admit it.
+    #[test]
+    fn a_cleartext_row_names_the_http_opt_in_and_not_the_plain_allow() {
+        let mut tally = DenialTally::default();
+        for _ in 0..5 {
+            tally.observe(flow("mirror.example.com:80", "cleartext_denied"));
+        }
+        let text = tally.summary_lines().join("\n");
+        assert!(
+            text.contains(
+                " 5×  plain HTTP from a production workload — allow with \
+                 --allow-host http://mirror.example.com:80"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("re-run"), "{text}");
+        assert!(!text.contains("allow_hosts"), "{text}");
     }
 
     #[test]

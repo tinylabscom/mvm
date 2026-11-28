@@ -178,19 +178,16 @@ pub(crate) fn generated_policy_ref(
     Ok(Some(format!("{tenant}:{vm_name}")))
 }
 
-/// The `(host, port)` destinations a launch's network policy admits, sorted
-/// and de-duplicated, for the `plan.egress_destinations` audit record.
-/// Empty for deny-all and for unrestricted egress, which names no list.
+/// The destinations a launch's network policy admits, sorted and
+/// de-duplicated, for the `plan.egress_destinations` audit record. Each keeps
+/// its cleartext opt-in so the chain names it. Empty for deny-all and for
+/// unrestricted egress, which names no list.
 pub(crate) fn egress_destinations(
     policy: &mvm_core::network_policy::NetworkPolicy,
-) -> Vec<(String, u16)> {
-    let mut destinations: Vec<(String, u16)> = policy
-        .resolve_rules()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|rule| (rule.host, rule.port))
-        .collect();
-    destinations.sort();
+) -> Vec<mvm_core::network_policy::HostPort> {
+    let mut destinations = policy.resolve_rules().unwrap_or_default();
+    destinations
+        .sort_by(|a, b| (&a.host, a.port, a.cleartext).cmp(&(&b.host, b.port, b.cleartext)));
     destinations.dedup();
     destinations
 }

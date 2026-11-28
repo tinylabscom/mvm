@@ -25,7 +25,7 @@
 /// Helpers compiled from the same tree answer the
 /// [`CONTRACT_PROBE_FLAG`] probe with this value; `mvmctl` refuses to spawn
 /// a helper that answers differently.
-pub const HOST_HELPER_CONTRACT_VERSION: u32 = 7;
+pub const HOST_HELPER_CONTRACT_VERSION: u32 = 8;
 
 /// CLI flag every host helper answers by printing its contract version and
 /// exiting 0. Binaries built before the probe existed exit non-zero instead,

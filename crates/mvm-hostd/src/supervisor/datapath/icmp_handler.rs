@@ -247,10 +247,7 @@ mod tests {
             "2025-01-01T00:00:00Z",
             "2030-01-01T00:00:00Z",
         ));
-        let policy = NetworkPolicy::allow_list(vec![HostPort {
-            host: "example.com".into(),
-            port: 443,
-        }]);
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)]);
         EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z")
     }
 
