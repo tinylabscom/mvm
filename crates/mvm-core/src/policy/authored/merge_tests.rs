@@ -749,3 +749,14 @@ fn an_owner_grant_without_the_opt_in_does_not_cover_cleartext() {
         opted
     );
 }
+
+/// A bad policy-file allow entry is reported against the file's own field,
+/// not as a command-line flag the author never typed.
+#[test]
+fn a_bad_policy_allow_entry_names_the_field_not_the_flag() {
+    let err = refused(&[user("a", "[network]\nallow = [\"x.test:22\"]\n")]);
+    let text = err.to_string();
+    assert!(text.contains("network.allow"), "{text}");
+    assert!(text.contains("SSH sessions are banned"), "{text}");
+    assert!(!text.contains("--allow-host"), "{text}");
+}

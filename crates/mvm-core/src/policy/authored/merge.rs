@@ -235,7 +235,7 @@ fn push_unique(items: &mut Vec<Sourced<String>>, value: String, from: &str) {
 ///
 /// The parser's refusal, as text.
 pub fn allow_destination(entry: &str) -> Result<HostPort, String> {
-    super::allow_host::parse_allow_host(entry).map_err(|error| format!("{error:#}"))
+    super::allow_host::parse_destination(entry).map_err(|error| format!("{entry:?}: {error:#}"))
 }
 
 /// Canonical spelling of an allow entry: its [`allow_destination`] rendered,

@@ -417,6 +417,31 @@ impl EgressGate {
             })
     }
 
+    /// Every host spelling plain HTTP may be sent to: each opted entry's host
+    /// and, for a name, the addresses it pinned to. An IPv6 address is listed
+    /// bare and bracketed, so a caller matching host strings misses neither.
+    #[must_use]
+    pub fn cleartext_hosts(&self) -> Vec<String> {
+        let mut hosts = Vec::new();
+        for rule in &self.cleartext {
+            hosts.push(rule.host.clone());
+            let pinned = self.pins.lookup(&rule.host).map(|pin| pin.ips.clone());
+            for ip in pinned
+                .into_iter()
+                .flatten()
+                .chain(rule.host.parse::<IpAddr>().ok())
+            {
+                hosts.push(ip.to_string());
+                if ip.is_ipv6() {
+                    hosts.push(format!("[{ip}]"));
+                }
+            }
+        }
+        hosts.sort();
+        hosts.dedup();
+        hosts
+    }
+
     /// Attach admitted peer routes. Separate from construction because every
     /// existing call site builds a gate with no peers, and a workload with no
     /// peer bindings must keep behaving exactly as it does today.
@@ -913,6 +938,37 @@ mod tests {
             port_lo: port,
             port_hi: port,
         }
+    }
+
+    /// Every spelling plain HTTP is admitted to: each opted entry's host and
+    /// the addresses an opted name pinned to, an IPv6 one in both spellings.
+    /// An allow-listed host that was not opted in contributes nothing.
+    #[test]
+    fn cleartext_hosts_include_the_addresses_an_opted_name_pinned_to() {
+        use mvm_core::policy::network_policy::HostPort;
+        let gate = cleartext_gate(
+            vec![
+                HostPort::new("example.com", 80).with_cleartext(),
+                HostPort::new("2606:4700:4700::1111", 80).with_cleartext(),
+                HostPort::new("other.test", 80),
+            ],
+            true,
+        );
+        let hosts = gate.cleartext_hosts();
+        for host in [
+            "example.com",
+            "93.184.216.34",
+            "2606:4700:4700::1111",
+            "[2606:4700:4700::1111]",
+        ] {
+            assert!(hosts.iter().any(|h| h == host), "{host}: {hosts:?}");
+        }
+        assert!(
+            !hosts
+                .iter()
+                .any(|h| h == "other.test" || h == "93.184.216.35"),
+            "{hosts:?}"
+        );
     }
 
     /// An IPv6 destination is matched however the caller spells it — a URL

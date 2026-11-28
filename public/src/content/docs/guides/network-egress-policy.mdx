@@ -249,7 +249,8 @@ opt into cleartext. Opt one in by spelling it with the scheme:
 `--allow-host http://mirror.example.com:8080`; a workload file takes the same
 spelling in `allow_hosts`. The opt-in is part of the signed plan's network
 policy. A production endpoint refuses to start when a bound secret may reach
-an opted destination, so a credential never crosses plain HTTP. Plain HTTP on
+an opted destination, by name or by the address it resolved to; outside
+production a bound credential can still go to an opted destination. Plain HTTP on
 a port other than 80 inside a connection the host does not terminate is not
 detected; TLS on port 80 is refused without the opt-in too. Other runs are
 unaffected.

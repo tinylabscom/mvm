@@ -598,7 +598,7 @@ pub fn assemble_projected(
         },
     )?;
 
-    refuse_credentials_over_cleartext(cfg, &service)?;
+    refuse_credentials_over_cleartext(cfg, &service, &projection.gate())?;
 
     // `from_plan` just minted this Arc with no other holders. Attach the
     // endpoint-wide audit sink before exposing the service to connector, typed
@@ -615,35 +615,30 @@ pub fn assemble_projected(
 }
 
 /// Refuse a production endpoint whose bound credential could cross plain
-/// HTTP: a plan secret that may reach a destination the policy opted into
-/// cleartext. The opt-in admits unencrypted traffic, never an unencrypted
-/// credential, so this pairing is refused before the endpoint serves.
+/// HTTP: a plan secret whose stored allowed hosts cover any spelling the gate
+/// admits plain HTTP to — an opted name, the addresses it pinned to, or an
+/// opted address literal. Any overlap refuses, before the endpoint serves.
 fn refuse_credentials_over_cleartext(
     cfg: &EndpointConfig,
     service: &SubstitutionService,
+    gate: &mvm_runtime::vmm::egress_gate::EgressGate,
 ) -> anyhow::Result<()> {
     if !production_posture(cfg) {
         return Ok(());
     }
-    let opted = cfg
-        .network_policy
-        .as_ref()
-        .map(mvm_core::network_policy::NetworkPolicy::cleartext_destinations)
-        .unwrap_or_default();
-    for destination in &opted {
+    let hosts = gate.cleartext_hosts();
+    for host in &hosts {
         if let Some(secret) = cfg.secrets.iter().find(|secret| match &secret.source {
             mvm_core::plan::SecretSource::Keystore { address } => {
-                service.secret_reaches(address, &destination.host)
+                service.secret_reaches(address, host)
             }
             _ => false,
         }) {
             anyhow::bail!(
-                "secret {} is bound to {}:{}, which this production workload opted into \
+                "secret {} may be sent to {host}, which this production workload opted into \
                  plain HTTP; a credential is never sent in cleartext — drop the http:// \
                  opt-in or the binding",
                 secret.name,
-                destination.host,
-                destination.port
             );
         }
     }
@@ -1138,22 +1133,24 @@ mod tests {
         assert!(err.contains("https"), "{err}");
     }
 
-    /// Production never sends a bound credential over plain HTTP: a secret
-    /// bound to a destination the policy opted into cleartext refuses the
-    /// endpoint's assembly, naming the secret and the destination. The same
-    /// pairing outside production assembles as it always has.
-    #[test]
-    fn production_refuses_a_secret_bound_to_a_cleartext_destination() {
+    /// A production endpoint whose policy opts `opted` into cleartext, the
+    /// opted names pinned as `pins`, with one secret bound to `bound`.
+    fn cleartext_secret_cfg(
+        dir: &std::path::Path,
+        opted: &[&str],
+        pins: &[(&str, &str)],
+        bound: &str,
+    ) -> (EndpointConfig, EndpointNetworkProjection) {
         use mvm_core::network_policy::{HostPort, NetworkPolicy};
-        let dir = tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
-        FileBindingStore::with_dir(dir.path().join("bindings"))
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        std::fs::create_dir_all(dir.join("secrets")).unwrap();
+        FileBindingStore::with_dir(dir.join("bindings"))
             .put(
                 "local",
                 "mirror-token",
                 &SecretBindingMeta {
                     auth_type: AuthType::Bearer,
-                    allowed_hosts: vec!["mirror.example.com".into()],
+                    allowed_hosts: vec![bound.into()],
                     sigv4: None,
                     inject: Default::default(),
                     provider: None,
@@ -1171,32 +1168,93 @@ mod tests {
                 destinations: Vec::new(),
                 approval_required: false,
             }],
-            dir.path(),
+            dir,
         );
-        cfg.network_policy = Some(NetworkPolicy::allow_list(vec![
-            HostPort::new("mirror.example.com", 80).with_cleartext(),
-        ]));
+        let policy = NetworkPolicy::allow_list(
+            opted
+                .iter()
+                .map(|host| HostPort::new(*host, 80).with_cleartext())
+                .collect(),
+        );
+        let mut registry = DnsPinRegistry::new();
+        for (host, ip) in pins {
+            registry.add(DnsPin::at(
+                *host,
+                vec![ip.parse().unwrap()],
+                "2025-01-01T00:00:00Z",
+                "2030-01-01T00:00:00Z",
+            ));
+        }
+        let gate = mvm_runtime::vmm::egress_gate::EgressGate::from_network_policy(
+            &policy,
+            &registry,
+            "2026-01-01T00:00:00Z",
+        )
+        .refusing_cleartext();
+        cfg.network_policy = Some(policy);
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
         plan.agent_verbs = Some(Vec::new());
         cfg.audit = Some(mvm_core::audit_sink::AuditContext::Workload {
             plan: Box::new(plan),
         });
-        let projection = || EndpointNetworkProjection {
-            gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
+        let projection = EndpointNetworkProjection {
+            gate: Arc::new(gate),
             recorder: None,
             audit_sink: None,
         };
-        let err = match assemble_projected(&cfg, &projection()) {
-            Ok(_) => panic!("production must refuse a credential over cleartext"),
-            Err(err) => format!("{err:#}"),
-        };
-        assert!(err.contains("MIRROR_TOKEN"), "{err}");
-        assert!(err.contains("mirror.example.com:80"), "{err}");
+        (cfg, projection)
+    }
 
-        if let Some(mvm_core::audit_sink::AuditContext::Workload { plan }) = cfg.audit.as_mut() {
-            plan.agent_verbs = None;
+    /// Production never sends a bound credential over plain HTTP: a secret
+    /// that may reach any spelling the gate admits plain HTTP to — the opted
+    /// name, the address it pinned to, an opted address literal, IPv4 or
+    /// IPv6 — refuses the endpoint's assembly, naming the secret. Outside
+    /// production the same pairing assembles as it always has.
+    #[test]
+    fn production_refuses_a_secret_bound_to_a_cleartext_destination() {
+        let pinned = [("mirror.example.com", "93.184.216.34")];
+        for (opted, bound) in [
+            (&["mirror.example.com"][..], "mirror.example.com"),
+            (&["mirror.example.com"][..], "93.184.216.34"),
+            (&["93.184.216.34"][..], "93.184.216.34"),
+            (&["2606:4700:4700::1111"][..], "2606:4700:4700::1111"),
+        ] {
+            let dir = tempdir().unwrap();
+            let pins: Vec<(&str, &str)> = pinned
+                .iter()
+                .copied()
+                .chain(
+                    opted
+                        .iter()
+                        .filter(|h| h.parse::<std::net::IpAddr>().is_ok())
+                        .map(|h| (*h, *h)),
+                )
+                .collect();
+            let (mut cfg, projection) = cleartext_secret_cfg(dir.path(), opted, &pins, bound);
+            let err = match assemble_projected(&cfg, &projection) {
+                Ok(_) => panic!("{bound}: production must refuse a credential over cleartext"),
+                Err(err) => format!("{err:#}"),
+            };
+            assert!(err.contains("MIRROR_TOKEN"), "{bound}: {err}");
+            if let Some(mvm_core::audit_sink::AuditContext::Workload { plan }) = cfg.audit.as_mut()
+            {
+                plan.agent_verbs = None;
+            }
+            assert!(assemble_projected(&cfg, &projection).is_ok(), "{bound}");
         }
-        assert!(assemble_projected(&cfg, &projection()).is_ok());
+    }
+
+    /// A secret bound only to a destination that was not opted in starts.
+    #[test]
+    fn production_admits_a_secret_bound_elsewhere_than_the_cleartext_destination() {
+        let dir = tempdir().unwrap();
+        let (cfg, projection) = cleartext_secret_cfg(
+            dir.path(),
+            &["mirror.example.com"],
+            &[("mirror.example.com", "93.184.216.34")],
+            "api.example.com",
+        );
+        assert!(assemble_projected(&cfg, &projection).is_ok());
     }
 
     #[test]
