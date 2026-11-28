@@ -8,7 +8,7 @@ Validation: none
 **Supersedes:** ADR-024 only where it rejects emulating Linux in WebAssembly and
 where it limits browser execution to a throwaway/direct-WASI demo. ADR-024
 continues to govern the direct-WASI tier and its claim-free security posture.  
-**Amends:** ADR-006 only where it forbids an `mvm` deployment verb. `mvm` may
+**Amends:** the single-host boundary (now ADR-058 decision 5) only where it forbids an `mvm` deployment verb. `mvm` may
 contain one open-source `mvmd` deployment client, but it still does not become a
 tenant scheduler, provider registry, or fleet control plane.  
 **Complements:** ADR-007 (`VmBackend`), ADR-014 (signed/audited execution
@@ -332,7 +332,7 @@ The client submits:
 The client does not choose a production host or hypervisor. `mvmd` owns
 production admission, placement, backend selection, reconciliation, and launch.
 
-This amends ADR-006 narrowly: `mvmctl deploy` is allowed as a client operation,
+This amends that boundary narrowly: `mvmctl deploy` is allowed as a client operation,
 but `mvm` still has no provider registry, fleet scheduler, tenant reconciler, or
 cloud control-plane implementation.
 
@@ -459,5 +459,3 @@ unrelated backends and make the browser engine part of the production ABI.
   split is introduced through a versioned schema.
 - ADR-024 should be updated in the implementation change to remove its stale
   “nothing has landed” text and reference this ADR for browser Linux.
-- ADR-006 should link to this ADR and distinguish `deploy` from provider/fleet
-  orchestration.

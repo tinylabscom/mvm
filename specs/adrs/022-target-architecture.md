@@ -144,7 +144,7 @@ workload.
 ### 6. Encryption and key lifecycle are a separate, standing decision
 
 The boundary-by-boundary encryption layering (which hop gets which
-primitive, where key material lives) is ADR-008's decision, not
+primitive, where key material lives) is ADR-023's decision, not
 re-derived here; this ADR's job is the crate and process shape those
 primitives live inside, not the primitives themselves.
 
