@@ -315,6 +315,26 @@ fn fork_restore_error(e: anyhow::Error) -> StandbyError {
     }
 }
 
+/// Stop an unusable preloaded child through the teardown that signals only a
+/// process it confirms is the Firecracker serving this child's socket, then
+/// report it. A recorded pid that now names another process is never reached.
+/// A stop that cannot be confirmed is reported as such, so the claim keeps the
+/// child's reservation.
+fn unusable_preloaded_child(
+    child_vm_name: &str,
+    child_dir: &Path,
+    detail: String,
+) -> PreloadedResumeError {
+    use crate::snapshot::SnapshotIO as _;
+    let detail = format!("preloaded child '{child_vm_name}': {detail}");
+    match crate::fc::io::FirecrackerIO::new(child_dir.join("fc.socket")).teardown_paused() {
+        Ok(()) => PreloadedResumeError::BeforeActivation(StandbyError::ClaimFailed(detail)),
+        Err(stop) => PreloadedResumeError::Refused(StandbyError::StopUnconfirmed(format!(
+            "{detail}; stopping it failed: {stop:#}"
+        ))),
+    }
+}
+
 /// How long a preloaded child's paused Firecracker gets to answer before a
 /// claim gives up on it. It has been running since refill and answers in well
 /// under a millisecond, so a stopped or wedged one fails the claim at once,
@@ -1122,43 +1142,63 @@ impl VmmDriver for FcDriver {
         })
     }
 
+    fn check_preloaded_child(
+        &self,
+        child_vm_name: &str,
+        child_dir: &Path,
+    ) -> std::result::Result<(), PreloadedResumeError> {
+        if !child_dir.is_dir() {
+            return Err(unusable_preloaded_child(
+                child_vm_name,
+                child_dir,
+                format!("state dir {} is missing", child_dir.display()),
+            ));
+        }
+        crate::fc::fc_api::answers_within(
+            &child_dir.join("fc.socket"),
+            PRELOADED_CHILD_PROBE_TIMEOUT,
+        )
+        .map_err(|error| {
+            unusable_preloaded_child(
+                child_vm_name,
+                child_dir,
+                format!("its Firecracker does not answer: {error:#}"),
+            )
+        })
+    }
+
     fn resume_preloaded_child(
         &self,
         req: &ChildForkRequest<'_>,
     ) -> std::result::Result<(), PreloadedResumeError> {
         let started = std::time::Instant::now();
-        let unusable = |detail: String| {
-            PreloadedResumeError::BeforeActivation(StandbyError::ClaimFailed(format!(
-                "resume preloaded child '{}': {detail}",
-                req.child_vm_name
-            )))
-        };
-        if !req.child_dir.is_dir() {
-            return Err(unusable(format!(
-                "state dir {} is missing",
-                req.child_dir.display()
-            )));
-        }
-        let socket = req.child_dir.join("fc.socket");
-        crate::fc::fc_api::answers_within(&socket, PRELOADED_CHILD_PROBE_TIMEOUT)
-            .map_err(|error| unusable(format!("its Firecracker does not answer: {error:#}")))?;
         let runtime_dir = req.child_dir.join("runtime");
         std::fs::create_dir_all(&runtime_dir)
-            .map_err(|e| unusable(format!("create runtime dir {}: {e}", runtime_dir.display())))?;
-        arm_host_channels(req.channels, req.child_dir, &runtime_dir)
-            .map_err(|e| unusable(format!("wiring host channels: {e}")))?;
+            .map_err(anyhow::Error::from)
+            .and_then(|()| arm_host_channels(req.channels, req.child_dir, &runtime_dir))
+            .map_err(|error| {
+                unusable_preloaded_child(
+                    req.child_vm_name,
+                    req.child_dir,
+                    format!("setting up host channels: {error:#}"),
+                )
+            })?;
         crate::agent_debug::phase("fc-resume", started, "phase=channels_armed");
-        let devices = crate::fc::host::fork_devices_for(req.child_vm_name, req.child_dir)
-            .map_err(|error| unusable(format!("{error:#}")))?;
-        let io = crate::fc::io::FirecrackerIO::new(socket).forking_onto(devices);
-        crate::agent_debug::phase("fc-resume", started, "phase=devices_built");
-        crate::fc::host::resume_preloaded_fork_child(
-            &io,
-            req.child_dir,
-            req.runtime_artifacts_sha256,
-            req.device_anchors_sha256,
-            req.late_volumes,
-        )
+        // From here the child's evidence is read and checked, and then it is
+        // resumed: every failure is refused, never an unusable child.
+        (|| {
+            let devices = crate::fc::host::fork_devices_for(req.child_vm_name, req.child_dir)?;
+            let io = crate::fc::io::FirecrackerIO::new(req.child_dir.join("fc.socket"))
+                .forking_onto(devices);
+            crate::agent_debug::phase("fc-resume", started, "phase=devices_built");
+            crate::fc::host::resume_preloaded_fork_child(
+                &io,
+                req.child_dir,
+                req.runtime_artifacts_sha256,
+                req.device_anchors_sha256,
+                req.late_volumes,
+            )
+        })()
         .map_err(|error| {
             PreloadedResumeError::Refused(StandbyError::ClaimFailed(format!("{error:#}")))
         })
@@ -2796,8 +2836,8 @@ mod tests {
 
     /// The real driver's wiring of the liveness probe: a paused child whose
     /// Firecracker accepts the connection and never answers is refused as
-    /// unusable, before its integrity is checked or a resume is requested,
-    /// and within the probe's timeout rather than the 30-second API budget.
+    /// unusable, before anything about it is checked or resumed, and within
+    /// the probe's timeout rather than the 30-second API budget.
     #[test]
     fn a_silent_paused_child_is_unusable_before_activation() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2805,21 +2845,11 @@ mod tests {
         std::fs::create_dir_all(&child_dir).unwrap();
         let listener = std::os::unix::net::UnixListener::bind(child_dir.join("fc.socket")).unwrap();
         let held = std::thread::spawn(move || listener.accept().map(|(stream, _)| stream));
-        let req = ChildForkRequest {
-            child_vm_name: "child-vm-1",
-            child_dir: &child_dir,
-            runtime_artifacts_sha256: None,
-            device_anchors_sha256: None,
-            parent_vm_name: None,
-            genid: sample_generation_token(),
-            channels: &workload_channels(),
-            cpu_grant: None,
-            admitted_plan: None,
-            late_volumes: &[],
-        };
         let started = std::time::Instant::now();
 
-        let error = FcDriver::new().resume_preloaded_child(&req).unwrap_err();
+        let error = FcDriver::new()
+            .check_preloaded_child("child-vm-1", &child_dir)
+            .unwrap_err();
 
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
         match error {
@@ -2829,6 +2859,74 @@ mod tests {
             other => panic!("expected an unusable child, got {other:?}"),
         }
         drop(held.join());
+    }
+
+    /// The child's Firecracker died and its recorded pid now names another
+    /// process. The failed probe stops the child only through the teardown
+    /// that confirms the pid is the Firecracker serving this child's socket,
+    /// so the other process is never signalled.
+    #[test]
+    fn a_failed_probe_never_signals_a_process_that_is_not_the_childs_firecracker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let child_dir = tmp.path().join("c");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let mut other = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        std::fs::write(child_dir.join("fc.pid"), other.id().to_string()).unwrap();
+
+        let error = FcDriver::new()
+            .check_preloaded_child("child-vm-1", &child_dir)
+            .unwrap_err();
+
+        assert!(
+            other.try_wait().unwrap().is_none(),
+            "the process the stale marker names is not signalled: {error:?}"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            assert!(
+                matches!(error, PreloadedResumeError::BeforeActivation(_)),
+                "{error:?}"
+            );
+            assert!(
+                !child_dir.join("fc.pid").exists(),
+                "the stale marker is removed"
+            );
+        }
+        let _ = other.kill();
+        let _ = other.wait();
+    }
+
+    /// Everything after the probe and the host channels belongs to the
+    /// refused class: the device anchors are read here, and the capture and
+    /// layout are checked after, so a failure is evidence, not an unusable
+    /// child, and the launch's admission stays spent.
+    #[test]
+    fn a_child_whose_devices_cannot_be_built_is_refused_not_unusable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let child_dir = tmp.path().join("c");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let req = ChildForkRequest {
+            child_vm_name: "child-vm-1",
+            child_dir: &child_dir,
+            runtime_artifacts_sha256: None,
+            device_anchors_sha256: None,
+            parent_vm_name: None,
+            genid: sample_generation_token(),
+            channels: &[],
+            cpu_grant: None,
+            admitted_plan: None,
+            late_volumes: &[],
+        };
+
+        let error = FcDriver::new().resume_preloaded_child(&req).unwrap_err();
+
+        assert!(
+            matches!(error, PreloadedResumeError::Refused(_)),
+            "{error:?}"
+        );
     }
 
     #[test]

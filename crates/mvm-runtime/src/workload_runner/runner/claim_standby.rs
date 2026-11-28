@@ -218,6 +218,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         cleanup.track_child_dir(child_dir.clone());
         if preloaded_child_name.is_some() {
             cleanup.track_preloaded_child(child.0.clone());
+            // Before any endpoint, broker or plan material: an unusable child
+            // costs the probe and nothing else.
+            if let Err(error) = self.driver.check_preloaded_child(&child.0, &child_dir) {
+                return Err(settle_unusable_preloaded_child(&mut cleanup, &child, error));
+            }
         }
         mvm_core::launch_trace::lap("warm_claim.child_identity_and_lock");
 
@@ -478,29 +483,27 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             cleanup.quarantine();
         }
         if let Err(error) = forked {
+            if let crate::driver::PreloadedResumeError::BeforeActivation(_)
+            | crate::driver::PreloadedResumeError::Refused(StandbyError::StopUnconfirmed(_)) =
+                error
+            {
+                // The driver already stopped the child, identity-checked, or
+                // reports that it could not.
+                return Err(settle_unusable_preloaded_child(&mut cleanup, &child, error));
+            }
+            let error = error.into_standby_error();
             // A driver can fail after it has created a child VMM. Do not
             // release its parent's reservation and remove its state dir while
             // that child might still be running.
             if let Err(stop) = self.driver.attach(&child).and_then(|vm| vm.kill()) {
                 cleanup.retain_uncertain_child();
                 return Err(StandbyError::StopUnconfirmed(format!(
-                    "fork failed ({}); stopping child {} failed: {stop:#}",
-                    error.into_standby_error(),
+                    "fork failed ({error}); stopping child {} failed: {stop:#}",
                     child.0
                 )));
             }
             cleanup.confirm_child_stopped();
-            return Err(match error {
-                // Nothing about the paused child was checked and no resume was
-                // requested, so its guest never ran: the launch keeps its
-                // admission, as for a lost reservation, and boots cold. Its
-                // standby goes with it.
-                crate::driver::PreloadedResumeError::BeforeActivation(error) => {
-                    tracing::warn!(child = %child.0, %error, "preloaded child was unusable");
-                    StandbyError::ReservationLost
-                }
-                crate::driver::PreloadedResumeError::Refused(error) => error,
-            });
+            return Err(error);
         }
         if preloaded_child_name.is_some() {
             claim_phase!("preloaded_resumed");
@@ -660,6 +663,30 @@ fn fresh_child_id(ctx: &ClaimContext<'_>) -> std::result::Result<VmId, StandbyEr
     Err(StandbyError::ClaimFailed(
         "could not mint a registry-unique child name".into(),
     ))
+}
+
+/// The claim's answer to a preloaded child the driver found unusable and
+/// stopped. Only [`BeforeActivation`](crate::driver::PreloadedResumeError::BeforeActivation)
+/// becomes a lost reservation: nothing about the child was checked and no
+/// resume was requested, so its guest never ran and the launch keeps its
+/// admission. A stop the driver could not confirm keeps the reservation.
+fn settle_unusable_preloaded_child(
+    cleanup: &mut WarmClaimLease<'_>,
+    child: &VmId,
+    error: crate::driver::PreloadedResumeError,
+) -> StandbyError {
+    match error {
+        crate::driver::PreloadedResumeError::BeforeActivation(error) => {
+            tracing::warn!(child = %child.0, %error, "preloaded child was unusable");
+            cleanup.confirm_child_stopped();
+            StandbyError::ReservationLost
+        }
+        crate::driver::PreloadedResumeError::Refused(StandbyError::StopUnconfirmed(detail)) => {
+            cleanup.retain_uncertain_child();
+            StandbyError::StopUnconfirmed(detail)
+        }
+        crate::driver::PreloadedResumeError::Refused(error) => error,
+    }
 }
 
 fn release_preload_marker(child_dir: &Path) -> std::result::Result<(), StandbyError> {

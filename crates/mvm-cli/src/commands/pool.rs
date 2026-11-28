@@ -688,6 +688,28 @@ mod tests {
     }
 
     #[test]
+    fn an_unusable_preloaded_child_boots_cold_unless_a_claim_is_required() {
+        assert!(matches!(
+            map_client_claim_outcome(
+                mvm_client::standby::CliWarmClaimOutcome::PreloadedChildUnusable,
+                false,
+            ),
+            Ok(WarmClaimOutcome::Cold(
+                ColdStartReason::PreloadedChildUnusable
+            ))
+        ));
+        let error = map_client_claim_outcome(
+            mvm_client::standby::CliWarmClaimOutcome::PreloadedChildUnusable,
+            true,
+        )
+        .expect_err("a required claim fails");
+        assert!(
+            format!("{error:#}").contains("could not be resumed"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn a_placed_launch_boots_cold_unless_a_claim_is_required() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.remove("MVM_HVF_WARM_REQUIRE_CLAIM");

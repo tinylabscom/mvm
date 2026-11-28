@@ -532,20 +532,28 @@ are limits, not guarantees:
    using the owner marker written before the VMM starts
    (`fn:a_preloaded_child_whose_standby_record_is_gone_is_stopped_and_reaped`).
    A paused child found unusable before anything about it is checked or its
-   resume is requested (a missing state dir, host channels or devices that
-   cannot be set up, or a Firecracker that does not answer its API socket
-   within 2 s) is stopped and its standby dropped; its guest never ran, so the
-   launch keeps its admission and boots cold (`cold_reason=preloaded_child_unusable`),
-   or fails when it requires a warm claim. Any later failure (a failed
-   integrity check of the capture or the restored layout, a late volume that
-   cannot be attached, or the resume request itself, which can take effect even
-   when it reports failure) fails the launch with its admission spent; the
-   child is stopped and its standby dropped. The split is a type
-   (`PreloadedResumeError`), so only the first kind can return an admission.
+   resume is requested (a missing state dir, a Firecracker that does not
+   answer its API socket within 2 s, or host channels that cannot be set up)
+   is stopped through the identity-checked Firecracker teardown and its
+   standby dropped; its guest never ran, so the launch keeps its admission and
+   boots cold (`cold_reason=preloaded_child_unusable`), or fails when it
+   requires a warm claim. The probe runs before the claim spawns the child's
+   endpoint or registers its broker, so an unusable child costs the probe (at
+   most 2 s) and no plan material reaches an endpoint for it. Any later failure (reading the
+   device anchors, a failed integrity check of the capture or the restored
+   layout, a late volume that cannot be attached, or the resume request itself,
+   which can take effect even when it reports failure) fails the launch with
+   its admission spent; the child is stopped and its standby dropped. The split
+   is a type (`PreloadedResumeError`), so only the first kind can return an
+   admission.
    A child whose stop cannot be confirmed keeps its standby record `Claimed`
    and its state dir, so nothing else boots under its name, until the TTL drops
-   the record and the orphan sweep removes the dir once its process is gone;
-   until then its VMM holds guest memory no budget counts.
+   the record and the orphan sweep removes the dir once its process is gone.
+   Until then its VMM holds guest memory no budget counts, and the claim's
+   endpoint (holding the plan's substitution secrets) and broker registration
+   are kept alive with it, even when the guest never ran. A failed claim after
+   host channels were armed may also leave their exit-capture thread and
+   descriptor until the launcher exits.
    A child the teardown cannot stop keeps its dir until the sweep finds its
    process gone. Its standby record is dropped all the same, so the paused
    VMM holds guest memory no budget counts, and a cold boot under its name is

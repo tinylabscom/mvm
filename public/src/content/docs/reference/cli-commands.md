@@ -1823,9 +1823,12 @@ scope carrying the grant and leaves the paused child for the next launch; if
 that restore is refused, the run fails and the paused child is discarded. In
 every other case (no other standby ready, a launch placed on host cores, or a
 launch no standby can serve) the paused child is discarded and the launch boots
-cold. A paused child that cannot be resumed is discarded before it runs, and
-the launch boots cold with `cold_reason=preloaded_child_unusable`; a launch
-that requires a warm claim fails instead. When
+cold. A paused child found gone or unresponsive before the claim checks or
+resumes it is discarded, and the launch boots cold with
+`cold_reason=preloaded_child_unusable` (a launch that requires a warm claim
+fails instead). A failed integrity check of the child, a read-only volume that
+cannot be attached to it, or a failed resume fails the run; the paused child is
+discarded. When
 `default_cpu_millicores` is set, every plan carries a CPU grant, so no paused
 children are prepared. Separately, `default_cpu_millicores`
 and `default_wall_clock_secs` supply defaults for dimensions nothing else named.

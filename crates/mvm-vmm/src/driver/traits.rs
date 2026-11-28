@@ -305,6 +305,19 @@ pub trait VmmDriver: Send + Sync {
         })
     }
 
+    /// Check, before a claim spends anything on it, that a child returned
+    /// earlier by [`preload_standby_child`](Self::preload_standby_child) is
+    /// still there and answering. A child that is not is stopped through an
+    /// identity-checked teardown and reported as
+    /// [`PreloadedResumeError::BeforeActivation`].
+    fn check_preloaded_child(
+        &self,
+        _child_vm_name: &str,
+        _child_dir: &Path,
+    ) -> std::result::Result<(), PreloadedResumeError> {
+        Ok(())
+    }
+
     /// Resume a child returned earlier by [`preload_standby_child`](Self::preload_standby_child).
     /// The caller wires all claim-specific channels before invoking this method.
     fn resume_preloaded_child(

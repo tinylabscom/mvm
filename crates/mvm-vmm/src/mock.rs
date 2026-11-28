@@ -372,6 +372,31 @@ impl VmmDriver for MockDriver {
             control_socket: req.child_dir.join("mock.sock").display().to_string(),
         })
     }
+    fn check_preloaded_child(
+        &self,
+        child_vm_name: &str,
+        _child_dir: &Path,
+    ) -> std::result::Result<(), PreloadedResumeError> {
+        if !self.unresponsive_preloaded_child {
+            return Ok(());
+        }
+        // The real driver stops an unusable child through its identity-checked
+        // teardown; this records the same stop, or the same failure to stop.
+        let detail = format!(
+            "preloaded child '{child_vm_name}': its Firecracker does not answer: Resource \
+             temporarily unavailable"
+        );
+        if self.fail_kill {
+            return Err(PreloadedResumeError::Refused(
+                StandbyError::StopUnconfirmed(detail),
+            ));
+        }
+        self.killed.lock().unwrap().push(child_vm_name.to_string());
+        Err(PreloadedResumeError::BeforeActivation(
+            StandbyError::ClaimFailed(detail),
+        ))
+    }
+
     fn resume_preloaded_child(
         &self,
         req: &ChildForkRequest<'_>,
@@ -380,15 +405,6 @@ impl VmmDriver for MockDriver {
             return Err(PreloadedResumeError::Refused(StandbyError::Unsupported {
                 backend: self.name().to_string(),
             }));
-        }
-        if self.unresponsive_preloaded_child {
-            return Err(PreloadedResumeError::BeforeActivation(
-                StandbyError::ClaimFailed(
-                    "the paused child's Firecracker does not answer: Resource temporarily \
-                     unavailable"
-                        .into(),
-                ),
-            ));
         }
         if let Some(reason) = &self.refused_preloaded_resume {
             return Err(PreloadedResumeError::Refused(StandbyError::ClaimFailed(
