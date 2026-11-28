@@ -509,7 +509,7 @@ pub type StopVmm = fn(&Path) -> anyhow::Result<()>;
 
 /// The production [`StopVmm`]: the restore teardown, which stops the process
 /// only if it is the Firecracker serving this state directory's API socket.
-fn stop_firecracker_in(state_dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn stop_firecracker_in(state_dir: &Path) -> anyhow::Result<()> {
     use crate::vm::instance_snapshot::{FirecrackerIO, SnapshotIO};
     FirecrackerIO::new(state_dir.join("fc.socket")).teardown_paused()
 }

@@ -510,17 +510,20 @@ are limits, not guarantees:
    released. Until then a saved-state standby keeps only sealed chunks. The
    parent is a planless factory boot: no plan, tenant, secrets or volumes, so
    the image holds no workload's data. Expiry, budget eviction and a released
-   reservation stop the child, signalling it only while its own pid marker
-   names it, and remove that dir
+   reservation stop the child through the identity-checked Firecracker teardown
+   the orphan sweep uses, which signals a pid only after confirming it is the
+   Firecracker serving the child's API socket, and remove that dir
    (`fn:expiry_stops_a_preloaded_child_and_removes_its_memory_image`,
    `fn:budget_eviction_removes_a_preloaded_childs_memory_image`). A refill that
    dies after starting the paused VMM and before publishing its record leaves
    a child no record names. The orphan sweep stops it and removes its dir,
    using the owner marker written before the VMM starts
    (`fn:a_preloaded_child_whose_standby_record_is_gone_is_stopped_and_reaped`).
-   A child that outlives the bounded wait after it is signalled keeps its dir
-   until the sweep finds its process gone. `machine stop --all` does not drain
-   standbys of either kind.
+   A child the teardown cannot stop keeps its dir until the sweep finds its
+   process gone. A host with `default_cpu_millicores` set prepares no paused
+   children, because every plan there carries a CPU grant. With no idle watcher
+   running and no `mvmctl` invocation, nothing applies the TTL. `machine stop
+   --all` does not drain standbys of either kind.
 2. **Content is verified when the child is preloaded, not when it is claimed.**
    Preload authenticates the sealed checkpoint and its lineage before it
    decrypts it. The claim re-checks the capture manifest, the paused device
@@ -536,6 +539,11 @@ are limits, not guarantees:
    moment a child is preloaded. Admission does not count paused children,
    which carry no admitted charge, so guest RAM on the host can reach
    `host_budget_memory_mib` plus `standby_memory_mib`.
+   Expiry never signals the process of a `Claimed` standby record; it only
+   drops the record, since that process may already be a claimed VM. On the
+   HVF resident handoff this means a launcher that dies after reserving a
+   parent and before handing it off leaves the parent's supervisor running,
+   outside both budgets, until reboot or `mvmctl cache prune`.
 4. **Its signed identity is chosen before admission.** The launch reserves the
    child by taking its lifecycle gate, then admits its plan under the child's
    name, so the plan, the dispatch charge, the endpoint, the broker

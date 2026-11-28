@@ -1819,8 +1819,8 @@ unclaimed child's files are removed when it is released or reaped. Set
 `standby_memory_mib` to `0` to keep no paused children. A launch whose plan
 grants a CPU share does not resume a paused child: the child is released, and
 the launch restores from the standby inside a scope carrying the grant. When
-`default_cpu_millicores` is set, every plan carries a CPU grant, so launches
-leave paused children alone. Separately, `default_cpu_millicores`
+`default_cpu_millicores` is set, every plan carries a CPU grant, so no paused
+children are prepared. Separately, `default_cpu_millicores`
 and `default_wall_clock_secs` supply defaults for dimensions nothing else named.
 There is no host-wide egress default: one would open outbound access for every
 workload that never asked for any. Relative manifest volume host paths

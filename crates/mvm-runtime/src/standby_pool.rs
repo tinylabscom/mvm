@@ -20,10 +20,6 @@ const HANDLE_FILE: &str = "standby.json";
 /// A cold launch refuses a name whose state carries it.
 pub const PRELOADED_CHILD_RESERVATION_FILE: &str = ".preloaded-child-reservation";
 
-/// Polls, with doubling delay from 10 ms, for a released standby's process to
-/// exit before its child state is removed.
-const RELEASE_EXIT_POLLS: u32 = 5;
-
 /// A parked standby is a low-cost saved-state snapshot; it may outlive the warm
 /// TTL by this factor before the reaper finally removes it.
 const PARKED_TTL_MULTIPLIER: u64 = 6;
@@ -39,6 +35,7 @@ pub const STANDBY_POOL_TTL: std::time::Duration = std::time::Duration::from_secs
 /// A view over `~/.mvm/pool/` (or a test root). Cheap to construct; all state is on disk.
 pub struct SupervisorStandbyPool {
     root: PathBuf,
+    stop_child: crate::vm::reconcile::StopVmm,
 }
 
 impl SupervisorStandbyPool {
@@ -49,7 +46,18 @@ impl SupervisorStandbyPool {
 
     /// Open at an explicit root (test seam).
     pub fn at(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            stop_child: crate::vm::reconcile::stop_firecracker_in,
+        }
+    }
+
+    /// Stop preloaded children with `stop_child` instead of the
+    /// identity-checked Firecracker teardown (test seam).
+    #[must_use]
+    pub fn with_stop_child(mut self, stop_child: crate::vm::reconcile::StopVmm) -> Self {
+        self.stop_child = stop_child;
+        self
     }
 
     /// The pool's root directory. Callers that need to serialize across the
@@ -456,23 +464,26 @@ impl SupervisorStandbyPool {
         if h.state == StandbyState::Claimed {
             return Ok(false);
         }
-        let alive = pid_alive(h.pid);
-        // A preloaded child's pid is signalled only while the child's own
-        // state still names it, so a recycled pid is never reached.
-        let verified = child_gate.is_none_or(|gate| child_state_names_pid(gate.name(), h.pid));
-        if alive && verified {
-            terminate_standby_process(h.pid);
-        }
         let Some(gate) = child_gate else {
+            let alive = pid_alive(h.pid);
+            if alive {
+                terminate_standby_process(h.pid);
+            }
             self.remove(&h.id)?;
             if !alive {
                 reap_dead_standby_runtime(&h.id);
             }
             return Ok(true);
         };
-        wait_for_exit(h.pid);
+        // The sweep's teardown: it signals only a process it confirms is the
+        // Firecracker serving this child's socket, and waits for it to exit.
+        let stopped = (self.stop_child)(&mvm_core::config::vm_state_dir(gate.name()))
+            .inspect_err(|error| {
+                tracing::warn!(child = gate.name(), error = %format!("{error:#}"), "stopping a released preloaded child failed");
+            })
+            .is_ok();
         // A child that did not go away keeps its parent out of rotation.
-        if remove_preloaded_child_state(gate.name()) && release == Release::KeepParent {
+        if stopped && remove_preloaded_child_state(gate.name()) && release == Release::KeepParent {
             self.demote_to_saved_state(&h.id)?;
         } else {
             self.remove(&h.id)?;
@@ -488,30 +499,6 @@ enum Release {
     Remove,
     /// Drop only its preloaded child; the parent stays claimable saved-state.
     KeepParent,
-}
-
-/// Wait, bounded, for a signalled standby process to exit. An earlier
-/// invocation started it, so this one holds no child handle or pidfd to wait
-/// on; a process still alive after the last poll keeps its state dir, which the
-/// orphan sweep removes once the process is gone.
-fn wait_for_exit(pid: u32) {
-    let mut delay = std::time::Duration::from_millis(10);
-    for _ in 0..RELEASE_EXIT_POLLS {
-        if !pid_alive(pid) {
-            return;
-        }
-        std::thread::sleep(delay);
-        delay = delay.saturating_mul(2);
-    }
-}
-
-/// Whether the child's state dir carries a live pid marker naming `pid`; a
-/// marker that records the process start time must also match it.
-fn child_state_names_pid(child: &str, pid: u32) -> bool {
-    use mvm_vmm::host::process_liveness::{live_process_pid_file, read_pid_file};
-    live_process_pid_file(&mvm_core::config::vm_state_dir(child))
-        .and_then(|marker| read_pid_file(&marker))
-        .is_some_and(|recorded| i32::try_from(pid) == Ok(recorded))
 }
 
 /// Remove a released preloaded child's state dir, plaintext memory image
@@ -1319,6 +1306,16 @@ mod tests {
         h
     }
 
+    /// Stops a stand-in the way the Firecracker teardown stops a paused child:
+    /// signal the pid its marker names, then drop the marker.
+    fn stop_stand_in(state_dir: &Path) -> anyhow::Result<()> {
+        let marker = state_dir.join("fc.pid");
+        let pid: u32 = std::fs::read_to_string(&marker)?.trim().parse()?;
+        terminate_standby_process(pid);
+        std::fs::remove_file(marker)?;
+        Ok(())
+    }
+
     /// A stand-in paused VMM that ignores SIGTERM, so a release cannot see it
     /// exit inside its bounded wait.
     fn stubborn() -> std::process::Child {
@@ -1400,7 +1397,7 @@ mod tests {
     fn expiry_stops_a_preloaded_child_and_removes_its_memory_image() {
         let (_env, _home) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let pool = SupervisorStandbyPool::at(tmp.path());
+        let pool = SupervisorStandbyPool::at(tmp.path()).with_stop_child(stop_stand_in);
         let mut process = sleeper();
         pool.record(&preloaded_handle("pre", "child-pre-c", &process, 1))
             .unwrap();
@@ -1470,6 +1467,58 @@ mod tests {
         let _ = process.wait();
     }
 
+    /// The resident-handoff shape: a claimed live standby's process is the
+    /// claimed VM itself. A record its launcher never removed is dropped, the
+    /// VM is left alone. The cost, when the launcher died before the handoff,
+    /// is an idle parent nothing stops until reboot or `cache prune`.
+    #[test]
+    fn expiry_never_stops_the_process_of_a_claimed_resident_standby() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut process = sleeper();
+        let mut claimed = live_handle("resident", &process, 1);
+        claimed.state = StandbyState::Claimed;
+        pool.record(&claimed).unwrap();
+
+        let reaped = pool
+            .reap_stale(std::time::Duration::from_secs(60), 10_000)
+            .unwrap();
+
+        assert_eq!(reaped, vec!["resident".to_string()]);
+        assert!(pool.load("resident").is_err());
+        assert!(
+            process.try_wait().unwrap().is_none(),
+            "the VM is not signalled"
+        );
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+
+    /// A paused child whose VMM died and whose pid was taken by an unrelated
+    /// process: the marker still names the record's pid, but the teardown
+    /// confirms the process is the Firecracker serving the child's socket
+    /// before it signals, so the unrelated process survives.
+    #[test]
+    fn a_recycled_pid_is_never_signalled_by_the_release() {
+        let (_env, _home) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut unrelated = sleeper();
+        pool.record(&preloaded_handle("pre", "child-pre-j", &unrelated, 1))
+            .unwrap();
+
+        pool.reap_stale(std::time::Duration::from_secs(60), 10_000)
+            .unwrap();
+
+        assert!(
+            unrelated.try_wait().unwrap().is_none(),
+            "not a Firecracker: not signalled"
+        );
+        assert!(pool.load("pre").is_err());
+        let _ = unrelated.kill();
+        let _ = unrelated.wait();
+    }
+
     /// The record's pid is trusted only when the child's own state names it:
     /// a recycled or mismatched pid is never signalled.
     #[test]
@@ -1508,7 +1557,8 @@ mod tests {
     fn a_child_still_alive_after_release_keeps_its_state_and_drops_its_parent() {
         let (_env, _home) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let pool = SupervisorStandbyPool::at(tmp.path());
+        let pool = SupervisorStandbyPool::at(tmp.path())
+            .with_stop_child(|_| anyhow::bail!("the stand-in VMM did not stop"));
         let mut process = stubborn();
         pool.record(&preloaded_handle("pre", "child-pre-i", &process, 1))
             .unwrap();
@@ -1536,7 +1586,7 @@ mod tests {
     fn budget_eviction_removes_a_preloaded_childs_memory_image() {
         let (_env, _home) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let pool = SupervisorStandbyPool::at(tmp.path());
+        let pool = SupervisorStandbyPool::at(tmp.path()).with_stop_child(stop_stand_in);
         let mut process = sleeper();
         pool.record(&preloaded_handle("pre", "child-pre-e", &process, 1))
             .unwrap();
@@ -1551,7 +1601,7 @@ mod tests {
     fn a_released_reservation_keeps_its_parent_as_saved_state() {
         let (_env, _home) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let pool = SupervisorStandbyPool::at(tmp.path());
+        let pool = SupervisorStandbyPool::at(tmp.path()).with_stop_child(stop_stand_in);
         let mut process = sleeper();
         pool.record(&preloaded_handle("pre", "child-pre-f", &process, 1))
             .unwrap();

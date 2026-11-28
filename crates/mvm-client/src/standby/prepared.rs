@@ -248,7 +248,13 @@ fn preload_within_budget(
     if !backend.supports_preloaded_standby() {
         return None;
     }
-    match preload_fits(pool, handle.mem_mib) {
+    let config = mvm_core::user_config::load(None);
+    // Every plan on such a host carries a CPU grant, which no paused child
+    // can serve, so one would only hold plaintext and RAM until it expired.
+    if config.default_cpu_millicores.is_some() {
+        return None;
+    }
+    match preload_fits(pool, &config, handle.mem_mib) {
         Ok(true) => {}
         Ok(false) => {
             tracing::info!(
@@ -293,8 +299,11 @@ fn preload_within_budget(
 /// Whether one more paused child of `mem_mib` fits beside the standbys that
 /// already hold guest memory, under the same bound `make_room` applies: the
 /// standby budget, and the host budget's headroom when one is configured.
-fn preload_fits(pool: &SupervisorStandbyPool, mem_mib: u32) -> Result<bool> {
-    let config = mvm_core::user_config::load(None);
+fn preload_fits(
+    pool: &SupervisorStandbyPool,
+    config: &mvm_core::user_config::MvmConfig,
+    mem_mib: u32,
+) -> Result<bool> {
     let host = config
         .host_budget_memory_mib
         .map(|budget_mib| super::HostRoom {
@@ -612,11 +621,16 @@ mod tests {
         env.isolate_mvm_home(home.path());
         let pool_root = tempfile::tempdir().expect("pool");
         let pool = SupervisorStandbyPool::at(pool_root.path());
-        assert!(preload_fits(&pool, 512).expect("empty pool"));
-        let budget = mvm_core::user_config::load(None).standby_memory_budget_mib();
+        let config = mvm_core::user_config::load(None);
+        assert!(preload_fits(&pool, &config, 512).expect("empty pool"));
+        let budget = config.standby_memory_budget_mib();
         assert!(
-            !preload_fits(&pool, u32::try_from(budget + 1).expect("budget fits u32"))
-                .expect("budget read"),
+            !preload_fits(
+                &pool,
+                &config,
+                u32::try_from(budget + 1).expect("budget fits u32")
+            )
+            .expect("budget read"),
             "a child larger than the whole standby budget is never prepared"
         );
     }
@@ -786,6 +800,48 @@ mod tests {
             Some(lifecycle.name())
         );
         drop(lifecycle);
+        let _ = paused.kill();
+        let _ = paused.wait();
+    }
+
+    /// With a host default CPU share every plan carries a CPU grant, so refill
+    /// prepares no paused child that no launch could use.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn refill_preloads_nothing_on_a_host_with_a_default_cpu_share() {
+        let _lock = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let mut host = mvm_core::user_config::load(None);
+        host.default_cpu_millicores = Some(500);
+        mvm_core::user_config::save(&host, None).unwrap();
+        let mut paused =
+            mvm_runtime::mock::MockBackend::spawn_stand_in_vmm().expect("stand-in paused VMM");
+        let prepared = PreparedWarmParent::from_resolved(
+            AnyBackend::Mock(
+                mvm_runtime::mock::MockBackend::new().with_preloaded_standby(paused.id()),
+            ),
+            planless_config(home.path()),
+            None,
+            None,
+        )
+        .unwrap();
+        let compat = prepared.compat().clone();
+        let pool = SupervisorStandbyPool::at(home.path().join("pool"));
+
+        let result = prepared.refill_to(&pool, 1).unwrap();
+
+        assert_eq!(result.spawned, 1, "{:?}", result.failures);
+        assert_eq!(pool.idle_count_compatible(&compat).unwrap(), 1);
+        assert!(
+            pool.reserve_preloaded_compatible(&compat)
+                .unwrap()
+                .is_none(),
+            "the standby stays saved-state"
+        );
         let _ = paused.kill();
         let _ = paused.wait();
     }

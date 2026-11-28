@@ -435,6 +435,40 @@ mod tests {
     }
 
     #[test]
+    fn a_preloaded_child_serves_only_its_own_grant_free_compatible_launch() {
+        let mut handle = idle_handle("standby-pre", 4242);
+        handle.preloaded_child_vm_name = Some("calm-otter-01".into());
+        let want = handle.compat();
+        let cfg = mvm_core::vm_backend::VmStartConfig {
+            name: "calm-otter-01".into(),
+            ..Default::default()
+        };
+        assert!(preloaded_child_serves(&handle, &cfg, &want));
+
+        let granted = mvm_core::vm_backend::VmStartConfig {
+            cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
+            ..cfg.clone()
+        };
+        assert!(
+            !preloaded_child_serves(&handle, &granted, &want),
+            "a CPU grant takes the fork path"
+        );
+
+        let renamed = mvm_core::vm_backend::VmStartConfig {
+            name: "another-run".into(),
+            ..cfg.clone()
+        };
+        assert!(!preloaded_child_serves(&handle, &renamed, &want));
+
+        let mut clamped = want.clone();
+        clamped.vcpus = 1;
+        assert!(
+            !preloaded_child_serves(&handle, &cfg, &clamped),
+            "a shape admission changed no longer matches"
+        );
+    }
+
+    #[test]
     fn pool_status_reports_dead_standbys_separately() {
         let live = idle_handle("live", std::process::id());
         let dead = idle_handle("dead", 999_999_999);
