@@ -165,8 +165,12 @@ struct Summary {
 /// Directories whose Rust files never carry a production subscriber install.
 const EXEMPT_RUST_DIRS: [&str; 4] = ["tests", "fuzz", "benches", "examples"];
 
-/// A file's pre-`#[cfg(test)]` region installing global diagnostic state.
+/// A file's pre-`#[cfg(test)]` region installing global diagnostic state. A
+/// file that is itself test-only (`#![cfg(test)]`) has no such region.
 fn installs_diagnostics(text: &str) -> bool {
+    if text.lines().any(|line| line.trim() == "#![cfg(test)]") {
+        return false;
+    }
     let region = text.split("#[cfg(test)]").next().unwrap_or(text);
     if [
         "set_global_default",
@@ -656,6 +660,11 @@ note = "standing endpoint"
             fx.root.path(),
             "crates/app/tests/integration.rs",
             "fn t() { tracing_subscriber::fmt().init(); }\n",
+        );
+        write(
+            fx.root.path(),
+            "crates/app/src/test_fixtures.rs",
+            "//! Shared fixtures.\n#![cfg(test)]\nfn t() { let _ = tracing::subscriber::set_global_default(s); }\n",
         );
         check(&fx).unwrap();
     }

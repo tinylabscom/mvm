@@ -1,4 +1,5 @@
 //! Fixtures shared by this crate's tests.
+#![cfg(test)]
 
 use std::path::Path;
 
@@ -51,24 +52,32 @@ pub(crate) fn install_runtime_overlay(mvm_home: &Path) {
     .expect("assemble fixture initramfs");
 }
 
-/// Run `f` with a subscriber installed, returning its value and everything
-/// that was logged.
+/// Run `f`, returning its value and every warning it logged on this thread.
 ///
 /// A test that only asserts "admitted" cannot tell a warned admission from
 /// a silent one, and the difference is the whole dev half of the rule.
+///
+/// One process-wide subscriber, installed on first use, writes each event to
+/// a buffer owned by the emitting thread. A per-thread subscriber is not
+/// enough under a single-process `cargo test`: callsite interest and the
+/// maximum level are global, and another thread can leave a callsite cached
+/// as uninteresting, so the capture saw nothing.
 pub(crate) fn capturing_warnings<T>(f: impl FnOnce() -> T) -> (T, String) {
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
+    use std::cell::RefCell;
 
-    #[derive(Clone)]
-    struct Sink(Arc<Mutex<Vec<u8>>>);
+    thread_local! {
+        static SINK: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+    }
 
-    impl Write for Sink {
+    struct ThreadSink;
+
+    impl std::io::Write for ThreadSink {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .expect("log sink poisoned")
-                .extend_from_slice(buf);
+            SINK.with_borrow_mut(|sink| {
+                if let Some(sink) = sink {
+                    sink.extend_from_slice(buf);
+                }
+            });
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -76,26 +85,21 @@ pub(crate) fn capturing_warnings<T>(f: impl FnOnce() -> T) -> (T, String) {
         }
     }
 
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
-        type Writer = Self;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    let sink = Sink(Arc::new(Mutex::new(Vec::new())));
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(sink.clone())
-        .with_max_level(tracing::Level::WARN)
-        .with_ansi(false)
-        .finish();
-    // Another thread may have cached a callsite as uninteresting before
-    // this per-thread subscriber existed; recompute before running `f`.
-    let value = tracing::subscriber::with_default(subscriber, || {
-        tracing::callsite::rebuild_interest_cache();
-        f()
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(|| ThreadSink)
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other library test installs a global subscriber");
     });
-    let logged = String::from_utf8(sink.0.lock().expect("log sink poisoned").clone())
-        .expect("log output is utf-8");
-    (value, logged)
+    SINK.set(Some(Vec::new()));
+    let value = f();
+    let logged = SINK.with_borrow_mut(Option::take).unwrap_or_default();
+    (
+        value,
+        String::from_utf8(logged).expect("log output is utf-8"),
+    )
 }
