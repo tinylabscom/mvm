@@ -644,6 +644,42 @@ fn a_refused_preloaded_claim_leaves_the_child_for_the_next_launch() {
     assert_eq!(resumed.into_parts().0.0, parent.child_name());
 }
 
+/// The live witness: a paused child whose Firecracker stopped answering. The
+/// guest never ran, so the claim gives the launch back its admission (as a
+/// lost reservation), stops the child, and drops its standby; the launch then
+/// takes the ordinary path.
+#[test]
+fn an_unresponsive_preloaded_child_returns_the_launch_to_the_ordinary_path() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let runner = WorkloadRunner::new(
+        MockDriver::default()
+            .with_preloaded_standby()
+            .with_unresponsive_preloaded_child(),
+        KeyingSpawner::default(),
+        RecordingBrokerRegistrar::new(),
+    );
+    let parent = ProtectedPreloadedParent::seed(&runner);
+    let held =
+        crate::vm::instance_snapshot::MachineLifecycleLock::acquire(parent.child_name()).unwrap();
+
+    let error = parent
+        .claim_as(&runner, parent.child_name(), None, Some(&held))
+        .expect_err("an unresponsive child cannot be resumed");
+
+    assert!(matches!(error, StandbyError::ReservationLost), "{error}");
+    assert_eq!(runner.driver.killed_vms(), [parent.child_name()]);
+    assert!(
+        parent.pool.load(&parent.handle.id).is_err(),
+        "no record left to pick again"
+    );
+    assert!(
+        !vm_state_dir(parent.child_name()).exists(),
+        "the child's state is gone"
+    );
+}
+
 #[test]
 fn preload_marks_the_child_state_with_its_owning_standby() {
     let _guard = crate::base::runtime_meta::HOME_TEST_LOCK

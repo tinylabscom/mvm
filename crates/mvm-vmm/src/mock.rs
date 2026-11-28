@@ -134,6 +134,7 @@ pub struct MockDriver {
     /// When set, `fork_standby_child` answers `Unrestorable` with this reason,
     /// as a real driver does for a snapshot another VMM version wrote.
     unrestorable_fork: Option<String>,
+    unresponsive_preloaded_child: bool,
     /// Late-volume slots this driver's parents boot.
     late_volume_slots: u8,
 }
@@ -168,6 +169,7 @@ impl MockDriver {
             resident_handoff: false,
             preloaded_standby: false,
             unrestorable_fork: None,
+            unresponsive_preloaded_child: false,
             late_volume_slots: 0,
         }
     }
@@ -177,6 +179,14 @@ impl MockDriver {
     #[must_use]
     pub fn refusing_fork_as_unrestorable(mut self, reason: impl Into<String>) -> Self {
         self.unrestorable_fork = Some(reason.into());
+        self
+    }
+
+    /// Make `resume_preloaded_child` fail as the Firecracker driver does when
+    /// the paused child's VMM no longer answers its API socket.
+    #[must_use]
+    pub fn with_unresponsive_preloaded_child(mut self) -> Self {
+        self.unresponsive_preloaded_child = true;
         self
     }
 
@@ -360,6 +370,12 @@ impl VmmDriver for MockDriver {
             return Err(StandbyError::Unsupported {
                 backend: self.name().to_string(),
             });
+        }
+        if self.unresponsive_preloaded_child {
+            return Err(StandbyError::ClaimFailed(
+                "the paused child's Firecracker does not answer: Resource temporarily unavailable"
+                    .into(),
+            ));
         }
         // The paused child already holds its parent's content; resuming wires
         // the same channels and token a fork does.

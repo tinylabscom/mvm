@@ -480,6 +480,15 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                     child.0
                 )));
             }
+            if preloaded_child_name.is_some() {
+                // A paused child that could not be resumed never ran the
+                // guest, so the launch keeps its admission, as for a lost
+                // reservation, and takes the ordinary path. Its standby goes
+                // with it.
+                tracing::warn!(child = %child.0, %error, "preloaded child could not be resumed");
+                cleanup.confirm_child_stopped();
+                return Err(StandbyError::ReservationLost);
+            }
             return Err(error);
         }
         if preloaded_child_name.is_some() {

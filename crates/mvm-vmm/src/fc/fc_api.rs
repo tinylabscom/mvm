@@ -163,11 +163,21 @@ fn read_response<R: BufRead>(reader: &mut R) -> Result<FcResponse> {
 
 /// Send one request to the Firecracker API socket and read the response.
 fn round_trip(socket: &Path, method: &str, path: &str, body: Option<&str>) -> Result<FcResponse> {
+    round_trip_within(socket, method, path, body, IO_TIMEOUT)
+}
+
+fn round_trip_within(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    timeout: Duration,
+) -> Result<FcResponse> {
     let mut stream = UnixStream::connect(socket)
         .with_context(|| format!("connecting to Firecracker API socket {}", socket.display()))?;
     stream
-        .set_read_timeout(Some(IO_TIMEOUT))
-        .and_then(|()| stream.set_write_timeout(Some(IO_TIMEOUT)))
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
         .with_context(|| "setting Firecracker API socket timeouts")?;
 
     stream
@@ -180,6 +190,18 @@ fn round_trip(socket: &Path, method: &str, path: &str, body: Option<&str>) -> Re
     let mut reader = BufReader::new(&stream);
     read_response(&mut reader)
         .with_context(|| format!("reading Firecracker response to {method} {path}"))
+}
+
+/// Ask a Firecracker that should already be running whether it answers, giving
+/// it `timeout` rather than the long budget a snapshot load needs. A stopped
+/// or wedged VMM then fails fast instead of holding a launch for
+/// [`IO_TIMEOUT`].
+pub fn answers_within(socket: &Path, timeout: Duration) -> Result<()> {
+    let resp = round_trip_within(socket, "GET", "/", None, timeout)?;
+    if !resp.is_success() {
+        bail!("GET / failed: HTTP {} {}", resp.status, resp.body);
+    }
+    Ok(())
 }
 
 /// Call the Firecracker API, failing on any non-2xx status.
@@ -246,6 +268,24 @@ mod tests {
     use std::io::{Cursor, Read};
     use std::os::unix::net::UnixListener;
     use std::sync::mpsc;
+
+    /// A VMM that accepts the connection and never answers, as a stopped
+    /// Firecracker does, fails the probe within its short timeout rather than
+    /// the 30-second API budget.
+    #[test]
+    fn a_silent_vmm_fails_the_liveness_probe_within_its_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("fc.socket");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let held = std::thread::spawn(move || listener.accept().map(|(stream, _)| stream));
+        let started = std::time::Instant::now();
+
+        let error = answers_within(&socket, Duration::from_millis(200))
+            .expect_err("a VMM that never answers fails the probe");
+
+        assert!(started.elapsed() < Duration::from_secs(5), "{error:#}");
+        drop(held.join());
+    }
 
     #[test]
     fn build_request_without_body_sends_no_content_length() {

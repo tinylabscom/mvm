@@ -531,6 +531,11 @@ are limits, not guarantees:
    a child no record names. The orphan sweep stops it and removes its dir,
    using the owner marker written before the VMM starts
    (`fn:a_preloaded_child_whose_standby_record_is_gone_is_stopped_and_reaped`).
+   A claim that cannot resume its paused child (one whose Firecracker does not
+   answer its API socket within 2 s, say) stops it and drops its standby; the
+   guest never ran, so the launch keeps its admission and takes the ordinary
+   path. A claim that fails after resume also drops the standby rather than
+   returning it to the pool.
    A child the teardown cannot stop keeps its dir until the sweep finds its
    process gone. Its standby record is dropped all the same, so the paused
    VMM holds guest memory no budget counts, and a cold boot under its name is
