@@ -488,6 +488,17 @@ pub struct MasterKeyRef {
 mod tests {
     use super::*;
 
+    /// Persisted key and volume records read and re-write the bytes chrono wrote.
+    #[test]
+    fn persisted_timestamps_keep_their_bytes() {
+        let key = r#"{"org_id":"acme","version":3,"created_at":"2026-05-06T20:00:00.123456789Z","state":"active"}"#;
+        let parsed: MasterKeyRef = serde_json::from_str(key).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), key);
+        let volume = r#"{"org_id":"acme","workspace_id":"dev","name":"data","created_at":"2026-05-06T20:00:00.120Z","backend":{"kind":"local","root":"/tmp/v"}}"#;
+        let parsed: Volume = serde_json::from_str(volume).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), volume);
+    }
+
     fn ts() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-05-06T20:00:00Z")
             .unwrap()

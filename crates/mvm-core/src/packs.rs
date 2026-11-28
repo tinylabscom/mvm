@@ -1238,6 +1238,17 @@ mod tests {
 
     use super::*;
 
+    /// Signed manifest times read and re-write the bytes chrono wrote.
+    #[test]
+    fn signed_manifest_times_keep_their_bytes() {
+        let signature = r#"{"key_id":"k","signature_base64":"AA==","signed_at":"2026-08-19T00:00:00.123456789Z","expires_at":"2100-01-01T00:00:00Z"}"#;
+        let parsed: PackSignature = serde_json::from_str(signature).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), signature);
+        let trust = r#"{"signing_key_id":"k","expires_at":"2100-01-01T00:00:00.500Z","revocation_channel":"c","channel_identity":"i"}"#;
+        let parsed: TrustMetadata = serde_json::from_str(trust).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), trust);
+    }
+
     #[test]
     fn signature_format_sigstore_serde_snake_case() {
         assert_eq!(

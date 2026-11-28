@@ -2870,3 +2870,16 @@ mod verification {
 }
 
 mod local;
+
+#[test]
+fn issued_at_keeps_the_bytes_chrono_wrote() {
+    let mut manifest = manifest_at("1.0.0");
+    manifest.issued_at = "2026-09-16T00:00:00.5Z".parse().unwrap();
+    let json = serde_json::to_string(&manifest).unwrap();
+    assert!(
+        json.contains(r#""issued_at":"2026-09-16T00:00:00.500Z""#),
+        "{json}"
+    );
+    let back: ImageSetManifest = serde_json::from_str(&json).unwrap();
+    assert_eq!(serde_json::to_string(&back).unwrap(), json);
+}

@@ -156,6 +156,14 @@ mod tests {
         assert_eq!(rfc3339_offset(whole), "2026-10-01T00:00:00+00:00");
         let frac = UtcTimestamp::from_unix(1_790_812_800, 123_000_000).unwrap();
         assert_eq!(rfc3339_offset(frac), "2026-10-01T00:00:00.123+00:00");
+        let micros = UtcTimestamp::from_unix(1_790_812_800, 123_456_000).unwrap();
+        assert_eq!(rfc3339_offset(micros), "2026-10-01T00:00:00.123456+00:00");
+        let nanos = UtcTimestamp::from_unix(-1, 999_999_999).unwrap();
+        assert_eq!(rfc3339_offset(nanos), "1969-12-31T23:59:59.999999999+00:00");
+        let first = UtcTimestamp::from_unix(-62_167_219_200, 0).unwrap();
+        assert_eq!(rfc3339_offset(first), "0000-01-01T00:00:00+00:00");
+        let last = UtcTimestamp::from_unix(253_402_300_799, 1_000).unwrap();
+        assert_eq!(rfc3339_offset(last), "9999-12-31T23:59:59.000001+00:00");
     }
 
     #[test]
