@@ -393,3 +393,28 @@ fn legacy_tool_rules_in_a_resolved_manifest_are_refused() {
     .unwrap_err();
     assert!(err.message.contains("tools"), "{err}");
 }
+
+/// The cleartext spelling names the same destination, so a deny on the host
+/// refuses it: by exact name, by address and by wildcard.
+#[test]
+fn a_deny_refuses_the_http_spelling_of_its_destination() {
+    for (deny, entry) in [
+        ("evil.example.com", "http://evil.example.com"),
+        ("evil.example.com:80", "http://evil.example.com"),
+        ("10.0.0.5", "http://10.0.0.5"),
+        ("*.example.com", "http://evil.example.com:8080"),
+    ] {
+        let err = fold(
+            &network(&[], &[deny], None),
+            &LaunchFlags {
+                allow_host: vec![entry.into()],
+                ..flags()
+            },
+        )
+        .expect_err(entry);
+        assert!(
+            err.to_string().contains("denied by the policy"),
+            "{entry}: {err}"
+        );
+    }
+}

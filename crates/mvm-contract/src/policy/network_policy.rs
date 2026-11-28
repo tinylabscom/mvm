@@ -90,11 +90,7 @@ impl FromStr for HostPort {
     type Err = NetworkPolicyParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (rest, cleartext) = match s.strip_prefix(CLEARTEXT_SCHEME_PREFIX) {
-            Some(rest) => (rest, true),
-            None => (s, false),
-        };
-        let (host, port) = rest
+        let (host, port) = s
             .rsplit_once(':')
             .ok_or_else(|| NetworkPolicyParseError::MissingPort(s.to_string()))?;
         if host.is_empty() {
@@ -103,10 +99,7 @@ impl FromStr for HostPort {
         let port: u16 = port
             .parse()
             .map_err(|_| NetworkPolicyParseError::InvalidPort(s.to_string()))?;
-        Ok(Self {
-            cleartext,
-            ..Self::new(host, port)
-        })
+        Ok(Self::new(host, port))
     }
 }
 
@@ -1036,14 +1029,15 @@ mod tests {
         assert_eq!(hp.to_string(), "github.com:443");
     }
 
-    /// The cleartext opt-in is spelled with the scheme it admits, renders the
-    /// same way, and parses back, so a stored or displayed entry keeps it.
+    /// The cleartext opt-in renders with the scheme it admits, but the
+    /// canonical `host:port` parser stays scheme-free: only the user-facing
+    /// allow-host parser reads `http://`, so a signed descriptor that spells
+    /// it is still refused.
     #[test]
-    fn a_cleartext_entry_round_trips_through_its_http_spelling() {
-        let hp: HostPort = "http://example.com:80".parse().unwrap();
-        assert_eq!(hp, HostPort::new("example.com", 80).with_cleartext());
+    fn a_cleartext_entry_renders_its_scheme_and_the_canonical_parser_refuses_it() {
+        let hp = HostPort::new("example.com", 80).with_cleartext();
         assert_eq!(hp.to_string(), "http://example.com:80");
-        assert_eq!(hp.to_string().parse::<HostPort>().unwrap(), hp);
+        assert_ne!(hp.to_string().parse::<HostPort>().ok(), Some(hp));
         assert!(!"example.com:80".parse::<HostPort>().unwrap().cleartext);
     }
 

@@ -113,6 +113,13 @@ impl SubstitutionService {
         }
     }
 
+    /// Whether the secret stored at keystore `address` may be sent to `host`.
+    pub(crate) fn secret_reaches(&self, address: &str, host: &str) -> bool {
+        self.registry
+            .resolve_name(address)
+            .is_some_and(|secret| mvm_contract::ir::host_is_bound(&secret.allowed_hosts, host))
+    }
+
     /// The per-VM egress intermediate a terminated flow mints its per-SNI leaf
     /// under. `None` on an endpoint that was never given one, which is what
     /// makes [`Self::terminable`] refuse rather than terminate.

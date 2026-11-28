@@ -263,11 +263,17 @@ impl std::fmt::Display for DenyReason {
             Self::ExecutionNotAdmitted => {
                 write!(f, "this workload's execution epoch is no longer admitted")
             }
-            Self::CleartextNotAdmitted { host, port } => write!(
-                f,
-                "{host}:{port} is plain HTTP, which a production workload may not send; \
-                 admit it with --allow-host http://{host}:{port}"
-            ),
+            Self::CleartextNotAdmitted { host, port } => {
+                let host = match host.parse::<std::net::Ipv6Addr>() {
+                    Ok(v6) => format!("[{v6}]"),
+                    Err(_) => host.clone(),
+                };
+                write!(
+                    f,
+                    "{host}:{port} is plain HTTP, which a production workload may not send; \
+                     admit it with --allow-host http://{host}:{port}"
+                )
+            }
         }
     }
 }
@@ -391,6 +397,11 @@ impl EgressGate {
     /// an `http://` URL on any port; the gate asks it itself for port 80.
     #[must_use]
     pub fn refuses_cleartext(&self, host: &str, port: u16) -> bool {
+        // A URL host carries an IPv6 literal in brackets; the rule does not.
+        let host = host
+            .strip_prefix('[')
+            .and_then(|inner| inner.strip_suffix(']'))
+            .unwrap_or(host);
         let addr = host.parse::<IpAddr>().ok();
         self.refuse_cleartext
             && !self.cleartext.iter().any(|rule| {
@@ -904,6 +915,29 @@ mod tests {
         }
     }
 
+    /// An IPv6 destination is matched however the caller spells it — a URL
+    /// host arrives bracketed — and the hint brackets it so the flag parses.
+    #[test]
+    fn an_opted_ipv6_destination_matches_bracketed_and_the_hint_brackets_it() {
+        use mvm_core::policy::network_policy::HostPort;
+        let gate = cleartext_gate(
+            vec![HostPort::new("2606:4700:4700::1111", 80).with_cleartext()],
+            true,
+        );
+        assert!(!gate.refuses_cleartext("[2606:4700:4700::1111]", 80));
+        assert!(!gate.refuses_cleartext("2606:4700:4700::1111", 80));
+        assert!(gate.refuses_cleartext("[2606:4700:4700::1111]", 8080));
+        let hint = DenyReason::CleartextNotAdmitted {
+            host: "2606:4700:4700::1111".to_string(),
+            port: 80,
+        }
+        .to_string();
+        assert!(
+            hint.contains("--allow-host http://[2606:4700:4700::1111]:80"),
+            "{hint}"
+        );
+    }
+
     /// The refusal a caller most often meets, and the one that reads as a
     /// broken network rather than a policy answer: a bare `--allow-host <host>`
     /// means `<host>:443`, so an `http://` URL asks for port 80 and is correctly
@@ -951,6 +985,7 @@ mod tests {
         for (host, ip) in [
             ("example.com", "93.184.216.34"),
             ("other.test", "93.184.216.35"),
+            ("2606:4700:4700::1111", "2606:4700:4700::1111"),
         ] {
             pins.add(DnsPin::at(
                 host,

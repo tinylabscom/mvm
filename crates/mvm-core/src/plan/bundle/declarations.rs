@@ -1113,6 +1113,29 @@ mod tests {
         }
     }
 
+    /// A signed environment ceiling names authorities, never the cleartext
+    /// opt-in, so a launch that opts a ceiling destination into plain HTTP
+    /// exceeds it and is refused.
+    #[test]
+    fn a_cleartext_opt_in_exceeds_a_signed_environment_ceiling() {
+        use crate::network_policy::{HostPort, NetworkPolicy};
+        let mut descriptor = environment(&["egress"]);
+        descriptor.policy = Some(mvm_contract::plan::EnvironmentPolicy {
+            allow_hosts: vec!["mirror.example.com:80".into()],
+            request_budget: None,
+        });
+        assert!(environment_network_permitted(
+            &descriptor,
+            &NetworkPolicy::allow_list(vec![HostPort::new("mirror.example.com", 80)])
+        ));
+        assert!(!environment_network_permitted(
+            &descriptor,
+            &NetworkPolicy::allow_list(vec![
+                HostPort::new("mirror.example.com", 80).with_cleartext()
+            ])
+        ));
+    }
+
     #[test]
     fn signed_policy_is_an_exact_network_ceiling_not_authority() {
         use crate::network_policy::{HostPort, NetworkPolicy, NetworkPreset};

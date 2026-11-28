@@ -515,6 +515,38 @@ mod tests {
         );
     }
 
+    /// The cleartext opt-in is part of the destination: a child adding it is a
+    /// widening, and a child dropping it from a parent that has it is refused
+    /// too. The second is narrower in effect; refusing it fails closed and the
+    /// child can keep the parent's spelling.
+    #[test]
+    fn a_change_to_the_cleartext_opt_in_is_not_a_subset_either_way() {
+        let plain = Grants {
+            egress: egress(&[("mirror.example.com", 80)]),
+            ..Default::default()
+        };
+        let opted = Grants {
+            egress: Some(EgressGrant {
+                allow: vec![HostPort::new("mirror.example.com", 80).with_cleartext()],
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            grants_are_subset(&opted, &plain),
+            Err(GrantWidening::EgressNotAdmitted(
+                HostPort::new("mirror.example.com", 80).with_cleartext()
+            ))
+        );
+        assert_eq!(
+            grants_are_subset(&plain, &opted),
+            Err(GrantWidening::EgressNotAdmitted(HostPort::new(
+                "mirror.example.com",
+                80
+            )))
+        );
+        assert_eq!(grants_are_subset(&opted, &opted), Ok(()));
+    }
+
     #[test]
     fn dropping_egress_narrows_because_absent_egress_is_deny_all() {
         // The inverse of the CPU rule, and the reason the two dimensions

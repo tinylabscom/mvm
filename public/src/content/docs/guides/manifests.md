@@ -47,7 +47,7 @@ gpu = false                   # opt in to the CUDA/NVML remoting plane
 # gpu_device = 1              # optional host ordinal; implies gpu = true
 
 [network]
-allow_hosts = ["api.example.com:443"]
+allow_hosts = ["api.example.com:443"]   # "http://HOST[:PORT]" also admits plain HTTP under production
 
 [policy]                      # authored policy for runs that name this project
 profile = "agent-apis"        # a profile name or a path relative to this file

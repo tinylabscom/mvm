@@ -1,20 +1,34 @@
 //! The common parser for workload egress allow-host requests.
 
 use crate::network_policy::{HostPort, is_banned_ssh_port};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use mvm_contract::policy::network_policy::CLEARTEXT_SCHEME_PREFIX;
 
-/// Parse one `--allow-host` entry, defaulting a bare host to HTTPS.
+/// Parse one `--allow-host` entry, defaulting a bare host to HTTPS. The
+/// refusal names the flag; see [`parse_destination`] for the rules.
+///
+/// # Errors
+///
+/// Whatever [`parse_destination`] refuses.
+pub fn parse_allow_host(entry: &str) -> Result<HostPort> {
+    // One message, not a chain, so every caller shows the whole reason.
+    parse_destination(entry)
+        .map_err(|error| anyhow::anyhow!("invalid --allow-host {entry:?}: {error:#}"))
+}
+
+/// Parse one user-authored egress destination — a `--allow-host` value or a
+/// workload file's `allow_hosts` entry — defaulting a bare host to HTTPS.
 ///
 /// `http://HOST[:PORT]` admits plain HTTP to that destination, defaulting
 /// the port to 80; it is the only way a production workload may send
-/// cleartext to it.
+/// cleartext to it. This is the one parser that reads the scheme; the
+/// canonical `HOST:PORT` parser does not.
 ///
 /// # Errors
 ///
 /// Empty hosts, malformed explicit ports, hosts that
 /// [`check_destination_host`] refuses, and SSH destinations are refused.
-pub fn parse_allow_host(entry: &str) -> Result<HostPort> {
+pub fn parse_destination(entry: &str) -> Result<HostPort> {
     let (rest, cleartext) = match entry.strip_prefix(CLEARTEXT_SCHEME_PREFIX) {
         Some(rest) => (rest, true),
         None => (entry, false),
@@ -23,15 +37,11 @@ pub fn parse_allow_host(entry: &str) -> Result<HostPort> {
     let mut parsed = match bracketed_ipv6(rest, default_port) {
         Some(parsed) => parsed,
         None => parse_unbracketed(rest, default_port),
-    }
-    .with_context(|| format!("invalid --allow-host {entry:?}"))?;
+    }?;
     parsed.cleartext = cleartext;
-    check_destination_host(&parsed.host)
-        .with_context(|| format!("invalid --allow-host {entry:?}"))?;
+    check_destination_host(&parsed.host)?;
     if is_banned_ssh_port(parsed.port) {
-        anyhow::bail!(
-            "--allow-host {entry:?} requests TCP/22, but SSH sessions are banned in microVMs"
-        );
+        anyhow::bail!("{entry:?} requests TCP/22, but SSH sessions are banned in microVMs");
     }
     Ok(parsed)
 }
@@ -54,7 +64,7 @@ fn bracketed_ipv6(entry: &str, default_port: u16) -> Option<Result<HostPort>> {
 fn parse_unbracketed(entry: &str, default_port: u16) -> Result<HostPort> {
     match entry.rsplit_once(':') {
         Some(_) => Ok(entry.parse()?),
-        None if entry.is_empty() => anyhow::bail!("--allow-host cannot be empty"),
+        None if entry.is_empty() => anyhow::bail!("a destination cannot be empty"),
         None => Ok(HostPort::new(entry, default_port)),
     }
 }

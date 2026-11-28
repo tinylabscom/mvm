@@ -30,10 +30,11 @@ pub fn validate(cfg: &EndpointConfig) -> Result<()> {
     Ok(())
 }
 
-/// Refuse a cleartext opt-in the admitted plan did not sign: the endpoint's
-/// policy must be the one whose digest admission recorded, so a marker added
-/// after admission is refused here rather than honoured by the gate. A policy
-/// without an opt-in is not checked, exactly as before.
+/// Refuse a cleartext opt-in the admitted plan does not record. Admission
+/// signs the policy's digest into the plan; this compares that recorded
+/// digest with the policy in the same launcher-written config, so it catches
+/// a launch path that adds a marker after admission. It is a consistency
+/// check, not a signature check. A policy without an opt-in is not checked.
 fn require_signed_cleartext(cfg: &EndpointConfig) -> Result<()> {
     let Some(policy) = cfg.network_policy.as_ref() else {
         return Ok(());

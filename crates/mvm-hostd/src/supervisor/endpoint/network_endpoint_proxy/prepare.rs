@@ -966,21 +966,27 @@ mod server_tests {
         );
     }
 
-    /// A production gate over `rules`, with `93.184.216.34` admitted.
+    /// A production gate over `rules`, each address-literal host pinned.
     fn production_gate(
         rules: Vec<mvm_core::network_policy::HostPort>,
     ) -> Arc<mvm_runtime::vmm::egress_gate::EgressGate> {
-        let policy = mvm_core::network_policy::NetworkPolicy::allow_list(rules);
         let now = chrono::Utc::now();
         let expires = (now + chrono::Duration::hours(1)).to_rfc3339();
         let now = now.to_rfc3339();
         let mut pins = mvm_core::policy::dns_pin::DnsPinRegistry::new();
-        pins.add(mvm_core::policy::dns_pin::DnsPin::at(
-            "93.184.216.34",
-            vec!["93.184.216.34".parse().unwrap()],
-            now.as_str(),
-            expires.as_str(),
-        ));
+        for rule in &rules {
+            if let Ok(ip) = rule.host.parse::<std::net::IpAddr>()
+                && pins.lookup(&rule.host).is_none()
+            {
+                pins.add(mvm_core::policy::dns_pin::DnsPin::at(
+                    rule.host.as_str(),
+                    vec![ip],
+                    now.as_str(),
+                    expires.as_str(),
+                ));
+            }
+        }
+        let policy = mvm_core::network_policy::NetworkPolicy::allow_list(rules);
         Arc::new(
             mvm_runtime::vmm::egress_gate::EgressGate::from_network_policy(&policy, &pins, &now)
                 .refusing_cleartext(),
@@ -1035,6 +1041,11 @@ mod server_tests {
             (
                 HostPort::new("93.184.216.34", 8080),
                 "https://93.184.216.34:8080/v1",
+            ),
+            // A URL carries an IPv6 host in brackets; the opt-in still matches.
+            (
+                HostPort::new("2606:4700:4700::1111", 80).with_cleartext(),
+                "http://[2606:4700:4700::1111]/v1",
             ),
         ] {
             let (service, _ph, forwarder, _dir) = service_with_gate(

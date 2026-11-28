@@ -164,13 +164,24 @@ fn a_cleartext_opt_in_without_a_plan_is_refused() {
         tenant: TenantId("builder".into()),
         name: "build-one".into(),
     });
+    let refusal = |cfg: &EndpointConfig| format!("{:#}", validate(cfg).unwrap_err());
+    // The builder identity is valid on its own; only the opt-in refuses it.
+    assert!(validate(&cfg).is_ok());
     cfg.network_policy = Some(NetworkPolicy::allow_list(vec![
         HostPort::new("example.com", 80).with_cleartext(),
     ]));
-    assert!(validate(&cfg).is_err());
+    assert!(
+        refusal(&cfg).contains("cleartext egress opt-in"),
+        "{}",
+        refusal(&cfg)
+    );
     cfg.egress_mode = EgressMode::Wire;
     cfg.audit = None;
-    assert!(validate(&cfg).is_err());
+    assert!(
+        refusal(&cfg).contains("cleartext egress opt-in"),
+        "{}",
+        refusal(&cfg)
+    );
 }
 
 /// Production is the signed plan's attenuated agent grant, the same fact the

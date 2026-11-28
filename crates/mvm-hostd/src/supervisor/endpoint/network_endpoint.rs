@@ -598,6 +598,8 @@ pub fn assemble_projected(
         },
     )?;
 
+    refuse_credentials_over_cleartext(cfg, &service)?;
+
     // `from_plan` just minted this Arc with no other holders. Attach the
     // endpoint-wide audit sink before exposing the service to connector, typed
     // HTTP, terminator, or ingress tasks.
@@ -610,6 +612,42 @@ pub fn assemble_projected(
     service = service.with_approver(approver);
 
     Ok((Arc::new(service), handed, oauth_refresh))
+}
+
+/// Refuse a production endpoint whose bound credential could cross plain
+/// HTTP: a plan secret that may reach a destination the policy opted into
+/// cleartext. The opt-in admits unencrypted traffic, never an unencrypted
+/// credential, so this pairing is refused before the endpoint serves.
+fn refuse_credentials_over_cleartext(
+    cfg: &EndpointConfig,
+    service: &SubstitutionService,
+) -> anyhow::Result<()> {
+    if !production_posture(cfg) {
+        return Ok(());
+    }
+    let opted = cfg
+        .network_policy
+        .as_ref()
+        .map(mvm_core::network_policy::NetworkPolicy::cleartext_destinations)
+        .unwrap_or_default();
+    for destination in &opted {
+        if let Some(secret) = cfg.secrets.iter().find(|secret| match &secret.source {
+            mvm_core::plan::SecretSource::Keystore { address } => {
+                service.secret_reaches(address, &destination.host)
+            }
+            _ => false,
+        }) {
+            anyhow::bail!(
+                "secret {} is bound to {}:{}, which this production workload opted into \
+                 plain HTTP; a credential is never sent in cleartext — drop the http:// \
+                 opt-in or the binding",
+                secret.name,
+                destination.host,
+                destination.port
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The runtime approver for this endpoint: every `ask` recorded in the
@@ -1098,6 +1136,67 @@ mod tests {
         };
         assert!(err.contains("oauth-secret"), "{err}");
         assert!(err.contains("https"), "{err}");
+    }
+
+    /// Production never sends a bound credential over plain HTTP: a secret
+    /// bound to a destination the policy opted into cleartext refuses the
+    /// endpoint's assembly, naming the secret and the destination. The same
+    /// pairing outside production assembles as it always has.
+    #[test]
+    fn production_refuses_a_secret_bound_to_a_cleartext_destination() {
+        use mvm_core::network_policy::{HostPort, NetworkPolicy};
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
+        FileBindingStore::with_dir(dir.path().join("bindings"))
+            .put(
+                "local",
+                "mirror-token",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["mirror.example.com".into()],
+                    sigv4: None,
+                    inject: Default::default(),
+                    provider: None,
+                    approve: Default::default(),
+                    oauth: None,
+                },
+            )
+            .unwrap();
+        let mut cfg = vsock_cfg(
+            vec![SecretBinding {
+                name: "MIRROR_TOKEN".into(),
+                source: SecretSource::Keystore {
+                    address: "mirror-token".into(),
+                },
+                destinations: Vec::new(),
+                approval_required: false,
+            }],
+            dir.path(),
+        );
+        cfg.network_policy = Some(NetworkPolicy::allow_list(vec![
+            HostPort::new("mirror.example.com", 80).with_cleartext(),
+        ]));
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.agent_verbs = Some(Vec::new());
+        cfg.audit = Some(mvm_core::audit_sink::AuditContext::Workload {
+            plan: Box::new(plan),
+        });
+        let projection = || EndpointNetworkProjection {
+            gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
+            recorder: None,
+            audit_sink: None,
+        };
+        let err = match assemble_projected(&cfg, &projection()) {
+            Ok(_) => panic!("production must refuse a credential over cleartext"),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(err.contains("MIRROR_TOKEN"), "{err}");
+        assert!(err.contains("mirror.example.com:80"), "{err}");
+
+        if let Some(mvm_core::audit_sink::AuditContext::Workload { plan }) = cfg.audit.as_mut() {
+            plan.agent_verbs = None;
+        }
+        assert!(assemble_projected(&cfg, &projection()).is_ok());
     }
 
     #[test]

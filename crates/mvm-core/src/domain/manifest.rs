@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use crate::naming::{validate_flake_ref, validate_template_name};
-use crate::policy::authored::allow_host::parse_allow_host;
+use crate::policy::authored::allow_host::parse_destination;
 use crate::util::parse_human_size;
 
 /// Filenames recognised as manifests, in discovery preference order.
@@ -497,7 +497,7 @@ impl Manifest {
         let _ = parse_human_size(&self.data_disk)
             .with_context(|| format!("invalid `data_disk` field: {:?}", self.data_disk))?;
         for entry in &self.network.allow_hosts {
-            parse_allow_host(entry)
+            parse_destination(entry)
                 .with_context(|| format!("invalid allow_hosts entry: {entry:?}"))?;
         }
         mvm_contract::policy::routes::RouteSet::new(self.network.routes.clone())
@@ -868,7 +868,7 @@ impl ManifestGrants {
                     .allow_hosts
                     .iter()
                     .map(|entry| {
-                        parse_allow_host(entry).with_context(|| {
+                        parse_destination(entry).with_context(|| {
                             format!("invalid `grants.allow_hosts` entry: {entry:?}")
                         })
                     })
@@ -1778,6 +1778,23 @@ mod tests {
             workflow.grants.egress.expect("egress granted").allow,
             vec![crate::network_policy::HostPort::new("mirror.example.com", 80).with_cleartext()]
         );
+    }
+
+    /// A bad workload-file entry is reported as the manifest field it is,
+    /// not as a command-line flag the author never typed.
+    #[test]
+    fn a_bad_allow_hosts_entry_names_the_manifest_field_not_the_flag() {
+        let toml = r#"
+            image = "alpine:3.20"
+
+            [grants]
+            allow_hosts = ["http://mirror.example.com:22"]
+        "#;
+        let err = Manifest::from_toml_str(toml).expect_err("the SSH port is refused");
+        let text = format!("{err:#}");
+        assert!(text.contains("grants.allow_hosts"), "{text}");
+        assert!(text.contains("SSH sessions are banned"), "{text}");
+        assert!(!text.contains("--allow-host"), "{text}");
     }
 
     #[test]

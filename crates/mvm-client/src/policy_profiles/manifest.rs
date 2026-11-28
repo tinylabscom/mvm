@@ -22,7 +22,7 @@ use std::path::Path;
 use mvm_contract::policy::routes::{EgressRoute, parse_endpoint_spec};
 pub use mvm_core::policy::authored::manifest::ResolvedManifest;
 
-use super::merge::{canonical_allow, deny_covers, split_host_port};
+use super::merge::{allow_destination, deny_covers};
 use super::model::PolicyBody;
 use super::source::PolicyError;
 use crate::admission::run_secrets::RunSecretSpec;
@@ -133,9 +133,14 @@ fn fold_network(policy: &PolicyBody, flags: &LaunchFlags) -> Result<Vec<String>,
     }
     let mut allow = net.allow.clone();
     for entry in &flags.allow_host {
-        let canonical = canonical_allow(entry).map_err(|reason| refuse("--allow-host", reason))?;
-        let (host, port) = split_host_port(&canonical);
-        if let Some(deny) = net.deny.iter().find(|d| deny_covers(d, host, port)) {
+        let destination =
+            allow_destination(entry).map_err(|reason| refuse("--allow-host", reason))?;
+        let canonical = destination.to_string();
+        if let Some(deny) = net
+            .deny
+            .iter()
+            .find(|d| deny_covers(d, &destination.host, destination.port))
+        {
             return Err(refuse(
                 "--allow-host",
                 format!("{canonical} is denied by the policy ({deny})"),

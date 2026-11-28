@@ -138,15 +138,16 @@ impl ResolvedPolicy {
         }
         let mut allow = Vec::with_capacity(self.policy.network.allow.len());
         for requested in &self.policy.network.allow {
-            let (host, port) = split_host_port(requested);
-            let destination = HostPort::new(host, port);
-            if !owner.allow.contains(&destination) {
-                let source = self
-                    .provenance
+            let source_of = || {
+                self.provenance
                     .get(&format!("network.allow.{requested}"))
-                    .map_or("resolved policy", String::as_str);
+                    .map_or("resolved policy", String::as_str)
+            };
+            let destination = allow_destination(requested)
+                .map_err(|reason| refusal(source_of(), "network.allow", reason))?;
+            if !owner.allow.contains(&destination) {
                 return Err(refusal(
-                    source,
+                    source_of(),
                     "network.allow",
                     format!("{requested} was requested without an owner grant"),
                 ));
@@ -226,12 +227,25 @@ fn push_unique(items: &mut Vec<Sourced<String>>, value: String, from: &str) {
     }
 }
 
-/// Canonical `host:port` for an allow entry, through the one `--allow-host`
-/// parser so a policy and the flag agree on what an entry means.
+/// The typed destination of an allow entry, through the one `--allow-host`
+/// parser. Every allow and deny comparison works on this value, never on a
+/// re-rendered string, so an `http://` scheme is parsed exactly once.
+///
+/// # Errors
+///
+/// The parser's refusal, as text.
+pub fn allow_destination(entry: &str) -> Result<HostPort, String> {
+    super::allow_host::parse_allow_host(entry).map_err(|error| format!("{error:#}"))
+}
+
+/// Canonical spelling of an allow entry: its [`allow_destination`] rendered,
+/// `http://` included when it opts into cleartext.
+///
+/// # Errors
+///
+/// The parser's refusal, as text.
 pub fn canonical_allow(entry: &str) -> Result<String, String> {
-    super::allow_host::parse_allow_host(entry)
-        .map(|rule| rule.to_string())
-        .map_err(|error| format!("{error:#}"))
+    allow_destination(entry).map(|rule| rule.to_string())
 }
 
 /// A deny pattern: `HOST[:PORT]` or `*.suffix[:PORT]`; no port means every
@@ -293,14 +307,6 @@ pub fn deny_covers(deny: &str, host: &str, port: u16) -> bool {
     match pattern.strip_prefix("*.") {
         Some(suffix) => host.len() > suffix.len() && host.ends_with(&format!(".{suffix}")),
         None => host == pattern,
-    }
-}
-
-/// Split a canonical `host:port`.
-pub fn split_host_port(entry: &str) -> (&str, u16) {
-    match entry.rsplit_once(':') {
-        Some((host, port)) => (host, port.parse().unwrap_or(443)),
-        None => (entry, 443),
     }
 }
 
@@ -657,23 +663,28 @@ impl Accumulator {
                 provenance.insert("network.block".to_string(), by.clone());
                 (Vec::new(), Vec::new())
             } else {
-                let allow: Vec<Sourced<String>> = self
-                    .allow
-                    .into_iter()
-                    .filter(|entry| {
-                        let (host, port) = split_host_port(&entry.value);
-                        match self.deny.iter().find(|d| deny_covers(&d.value, host, port)) {
-                            Some(deny) => {
-                                notes.push(format!(
-                                    "{} (allowed by {}) is denied by {}",
-                                    entry.value, entry.from, deny.from
-                                ));
-                                false
+                let allow: Vec<Sourced<String>> =
+                    self.allow
+                        .into_iter()
+                        .filter(|entry| {
+                            // An entry that no longer parses is dropped, not admitted.
+                            let Ok(destination) = allow_destination(&entry.value) else {
+                                return false;
+                            };
+                            match self.deny.iter().find(|d| {
+                                deny_covers(&d.value, &destination.host, destination.port)
+                            }) {
+                                Some(deny) => {
+                                    notes.push(format!(
+                                        "{} (allowed by {}) is denied by {}",
+                                        entry.value, entry.from, deny.from
+                                    ));
+                                    false
+                                }
+                                None => true,
                             }
-                            None => true,
-                        }
-                    })
-                    .collect();
+                        })
+                        .collect();
                 let routes: Vec<Sourced<EgressRoute>> =
                     self.routes
                         .into_iter()
