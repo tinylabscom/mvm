@@ -290,8 +290,8 @@ fn preflight_missing_required_check_is_a_denial() {
     );
 }
 
-/// Resources and secrets are enforced by hostd admission, not here; every
-/// kind that remains must still deny when it is missing or fails.
+/// Resources and secrets are enforced outside this preflight; every kind that
+/// remains must still deny when it is missing or fails.
 #[test]
 fn every_required_check_denies_when_missing_or_failing() {
     let names = [
@@ -319,6 +319,30 @@ fn every_required_check_denies_when_missing_or_failing() {
             run_preflight(&failing).into_result().unwrap_err(),
             Denial::EnforcementUnavailable
         );
+    }
+}
+
+/// A new kind must be listed in `REQUIRED`: the match has no wildcard arm, so
+/// adding a variant fails to compile until this test decides its membership.
+#[test]
+fn every_check_kind_is_required() {
+    let all = [
+        CheckKind::Policy,
+        CheckKind::Image,
+        CheckKind::Enforcement,
+        CheckKind::NodeAdmission,
+        CheckKind::Volumes,
+        CheckKind::Attestation,
+    ];
+    for kind in all {
+        match kind {
+            CheckKind::Policy
+            | CheckKind::Image
+            | CheckKind::Enforcement
+            | CheckKind::NodeAdmission
+            | CheckKind::Volumes
+            | CheckKind::Attestation => assert!(CheckKind::REQUIRED.contains(&kind), "{kind:?}"),
+        }
     }
 }
 

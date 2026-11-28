@@ -5,9 +5,9 @@ use super::error::Denial;
 pub mod audit;
 
 /// The checks the launch invariant requires. Every kind in `REQUIRED` must
-/// report a result; a missing one is a denial. Resource reservations and
-/// secret bindings are not kinds here: hostd plan admission enforces them
-/// (host budget, grant ceiling, secret binding) before this preflight runs.
+/// report a result; a missing one is a denial. Resources and secret bindings
+/// are not kinds here: hostd plan admission bounds resources, and secret
+/// bindings are checked by the launch paths before admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CheckKind {
     Policy,

@@ -28,10 +28,6 @@ pub enum Denial {
     EpochExhausted(u64),
     #[error("invalid volume grant: {0}")]
     VolumeGrant(String),
-    #[error("resource reservation failed")]
-    Resources,
-    #[error("required secret provider unavailable")]
-    SecretProvider,
     #[error("required bound audit sink cannot append to its journal")]
     AuditUnavailable,
     #[error("required hardware attestation unavailable (assurance: {0:?})")]

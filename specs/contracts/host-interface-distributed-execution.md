@@ -191,14 +191,14 @@ The microVM must not start unless all required checks pass:
 
 The local host-interface preflight checks policy, image, enforcement
 readiness, node admission and epoch, volumes and attestation. It does not
-check resources or secrets. Hostd plan admission enforces those on the same
-admission path, before the plan is signed: the durable host-budget
-reservation (`reserve_plan_budget`, `verify_plan_resources`) and the
-per-workload grant ceiling (`admit_grants`) bound resource reservations, and
-a missing or unbound secret is refused by `bind_approval` (host-signed plans)
-or by the bundle's required secret slots (bundle-pinned plans). On the
-fleet-signed path no admission step yet checks that referenced keystore
-secrets exist; that gap is tracked in issue #6031.
+check resources or secrets. Resources are bounded by hostd plan admission:
+the grant ceiling (`admit_grants`) per workload, and the host-budget
+reservation (`reserve_plan_budget`, `verify_plan_resources`) host-wide when a
+host budget is configured. On the host-signed path these run before the plan
+is signed; on the fleet-signed path they run after its signature is
+verified. Secret bindings are checked before admission by the client launch
+paths (`bind_approval`, and the fork paths' own binding checks), and inside
+hostd only for a bundle's required secret slots.
 
 Independent checks should run concurrently. Cached warm-path results must be
 bound to node identity, policy version, image digest, epoch, and validity
@@ -343,10 +343,7 @@ response, and provider-host assurance claims.
   required but unavailable or invalid.
 - Tampered/expired/revoked policy cannot launch a microVM.
 - Missing enforcement, invalid volume grants, unavailable required secrets,
-  or failed required preflight blocks launch. Unavailable required secrets
-  are refused by plan admission, not by the host-interface preflight (see
-  "Launch fail-closed invariant"); the fleet-signed path does not meet this
-  yet (#6031).
+  or failed required preflight blocks launch.
 - Local and remote host-interface implementations share the same contract.
 - Node-local volumes remain supported in read-only and explicitly authorized
   read-write modes.
