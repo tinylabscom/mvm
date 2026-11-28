@@ -160,13 +160,15 @@ impl FlowMuxSession {
         };
 
         let (host, requested_port) = match parse_host_port(&target) {
-            Ok((host, port)) => (host.to_string(), port),
+            Ok((host, port)) => (super::super::canonical_target_host(host), port),
             Err(e) => {
                 self.deny_unrouted_flow(stream_id, registry::FlowClass::Tcp, "", "malformed");
                 self.send_refused(stream_id, &format!("invalid OpenTcp target: {e}"))?;
                 return Ok(None);
             }
         };
+
+        let target = format!("{host}:{requested_port}");
 
         if !self.check_connection_rate(registry::FlowClass::Tcp) {
             self.deny_unrouted_flow(stream_id, registry::FlowClass::Tcp, &target, "rate_limited");
@@ -1361,6 +1363,149 @@ mod tests {
         assert!(chain.contains("\"endpoint_route\":\"local\""), "{chain}");
         assert!(chain.contains("\"rule\":\"not_evaluated\""), "{chain}");
         assert!(!chain.contains("host.flow.allowed"), "{chain}");
+    }
+
+    /// One `OpenTcp` to `target` through a session with `gate` and `service`:
+    /// the answer's opcode and payload, and the verified audit chain.
+    fn open_tcp_through(
+        gate: EgressGate,
+        service: Arc<crate::supervisor::endpoint::network_endpoint_proxy::SubstitutionService>,
+        target: &str,
+    ) -> (Opcode, String, String) {
+        let _env = mvm_core::util::test_env::TestEnv::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let (recorder, audit_key) = recorder_at(&audit_path);
+        let (mut guest, mut guest_session, host) =
+            run_owned_session_on_runtime(move |id, key, anchor, limits| {
+                FlowMuxAccept::new(id, key, anchor, limits, gate)
+                    .with_substitution(Some(service))
+                    .with_audit_sink(RecorderSink::wrap(recorder))
+            });
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::OpenTcp,
+            1,
+            target.as_bytes(),
+        );
+        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        drop(guest);
+        host.join().unwrap().unwrap();
+        crate::supervisor::audit::audit_file::verify_audit_chain(&audit_path, &audit_key)
+            .expect("audit chain verifies");
+        let chain = std::fs::read_to_string(&audit_path).expect("read audit chain");
+        (
+            opcode,
+            String::from_utf8_lossy(&payload).into_owned(),
+            chain,
+        )
+    }
+
+    /// A route with ungranted rules on `host:443`.
+    fn ungranted_route(host: &str) -> mvm_contract::policy::routes::EgressRoute {
+        mvm_contract::policy::routes::EgressRoute {
+            id: "routed".into(),
+            host: host.into(),
+            port: 443,
+            rules: vec![mvm_contract::policy::routes::EndpointRule {
+                id: None,
+                method: Some("GET".into()),
+                path: "/**".into(),
+                outcome: mvm_contract::policy::routes::RouteOutcome::Allow,
+            }],
+            otherwise: mvm_contract::policy::routes::RouteOutcome::Deny,
+            intercept: false,
+        }
+    }
+
+    /// Every spelling of a routed name the gate admits meets the route the
+    /// canonical name carries, and the chain records the canonical target:
+    /// a trailing dot or upper case is not a way past endpoint rules.
+    #[test]
+    fn every_spelling_of_a_routed_name_meets_its_route() {
+        const NAME: &str = "api.routed.test";
+        for target in [
+            "api.routed.test:443",
+            "api.routed.test.:443",
+            "API.Routed.TEST:443",
+            "API.ROUTED.TEST.:443",
+        ] {
+            let (service, _dir) =
+                substitution_binding_routed("bound.example", true, vec![ungranted_route(NAME)]);
+            let (opcode, payload, chain) = open_tcp_through(
+                gate_pinning_name(NAME, UNDIALED_TEST_IP, 443),
+                service,
+                target,
+            );
+            assert_eq!(opcode, Opcode::Refused, "{target}: {payload}");
+            assert!(
+                chain.contains("endpoint_rules_unenforceable"),
+                "{target}: {chain}"
+            );
+            assert!(
+                chain.contains("\"target\":\"api.routed.test:443\""),
+                "{target}: {chain}"
+            );
+            assert!(!chain.contains("host.flow.allowed"), "{target}: {chain}");
+        }
+    }
+
+    /// Every spelling of a name carrying a bound secret is refused as needing
+    /// typed HTTP, exactly like the canonical spelling, never spliced.
+    #[test]
+    fn every_spelling_of_a_secret_bound_name_needs_typed_http() {
+        const NAME: &str = "api.bound.test";
+        for target in [
+            "api.bound.test:443",
+            "api.bound.test.:443",
+            "API.Bound.Test.:443",
+        ] {
+            let (service, _dir) = substitution_binding(NAME, false);
+            let (opcode, payload, chain) = open_tcp_through(
+                gate_pinning_name(NAME, UNDIALED_TEST_IP, 443),
+                service,
+                target,
+            );
+            assert_eq!(opcode, Opcode::Refused, "{target}: {payload}");
+            assert_eq!(
+                payload, "destination requires secret substitution over typed HTTP",
+                "{target}"
+            );
+            assert!(
+                chain.contains("\"target\":\"api.bound.test:443\""),
+                "{target}: {chain}"
+            );
+        }
+    }
+
+    /// An IPv4-mapped IPv6 literal of a routed address is that address: it
+    /// meets the same route, and the chain records the IPv4 target.
+    #[test]
+    fn an_ipv4_mapped_literal_of_a_routed_address_meets_its_route() {
+        let ip = UNDIALED_TEST_IP.to_string();
+        for target in [
+            format!("{ip}:443"),
+            format!("[::ffff:{ip}]:443"),
+            "[::FFFF:c000:201]:443".to_string(),
+        ] {
+            let (service, _dir) =
+                substitution_binding_routed("bound.example", true, vec![ungranted_route(&ip)]);
+            let (opcode, payload, chain) = open_tcp_through(
+                gate_allowing_addr(UNDIALED_TEST_IP, 443, None),
+                service,
+                &target,
+            );
+            assert_eq!(opcode, Opcode::Refused, "{target}: {payload}");
+            assert!(
+                chain.contains("endpoint_rules_unenforceable"),
+                "{target}: {chain}"
+            );
+            assert!(
+                chain.contains(&format!("\"target\":\"{ip}:443\"")),
+                "{target}: {chain}"
+            );
+        }
     }
 
     #[test]

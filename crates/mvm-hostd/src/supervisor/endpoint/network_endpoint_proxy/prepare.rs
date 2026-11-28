@@ -127,6 +127,24 @@ impl<'a> SubstitutionDriver for NetworkEndpoint<'a> {
     }
 }
 
+/// `url` with its host in canonical form, so every check below and the
+/// forward leg see one spelling of the destination. A URL whose host is
+/// already canonical, or that does not parse, is returned untouched; the
+/// checks refuse an unparseable one.
+fn canonical_url(url: String) -> String {
+    let Ok(mut parsed) = Url::parse(&url) else {
+        return url;
+    };
+    let Some(host) = parsed.host_str() else {
+        return url;
+    };
+    let canonical = crate::supervisor::endpoint::canonical_target_host(host);
+    if canonical == host || parsed.set_host(Some(&canonical)).is_err() {
+        return url;
+    }
+    parsed.into()
+}
+
 /// The destination host (no port) from an absolute URL.
 pub(crate) fn destination_host(url: &str) -> Result<String, ProxyError> {
     Url::parse(url)
@@ -423,7 +441,7 @@ impl SubstitutionService {
         };
         let req = ProxyRequest {
             method: wire.method,
-            url: wire.url,
+            url: canonical_url(wire.url),
             headers: wire.headers,
             body,
         };

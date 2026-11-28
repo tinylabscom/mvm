@@ -24,11 +24,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::env_hygiene::classify;
-use crate::network_policy::{HostPort, canonical_host};
+use crate::network_policy::{HostPort, canonical_host, is_numeric_ipv4_spelling};
 use mvm_contract::grants::EgressGrant;
 use mvm_contract::policy::routes::{EgressRoute, RouteSet};
 use serde::Serialize;
-use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use super::model::{
     EnvSection, NetworkSection, PolicyBody, ResourcesSection, SecretGrant, SecretsSection,
@@ -265,6 +265,14 @@ fn parse_deny(entry: &str) -> Result<(String, Option<u16>), String> {
     let bare = host.strip_prefix("*.").unwrap_or(host);
     if bare.is_empty() || bare.contains(['*', '/', ' ']) {
         return Err(format!("{entry:?} must be HOST[:PORT] or *.suffix[:PORT]"));
+    }
+    if bare.parse::<IpAddr>().is_err()
+        && is_numeric_ipv4_spelling(bare.strip_suffix('.').unwrap_or(bare))
+    {
+        return Err(format!(
+            "{entry:?}: {}",
+            super::allow_host::NUMERIC_IPV4_REFUSAL
+        ));
     }
     Ok((canonical_host(host), port))
 }

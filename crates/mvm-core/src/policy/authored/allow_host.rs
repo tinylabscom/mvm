@@ -92,6 +92,11 @@ pub(crate) fn split_host_port(entry: &str) -> Result<(&str, Option<u16>)> {
     }
 }
 
+/// Why a numeric spelling such as `2130706433` or `0x7f.1` is refused as a
+/// host, by allow and deny alike.
+pub(crate) const NUMERIC_IPV4_REFUSAL: &str =
+    "the resolver reads this as an IPv4 address; write it as a.b.c.d";
+
 /// Refuse an egress destination host the endpoint's gate could never pin.
 ///
 /// The gate admits a destination only as an IP literal or a DNS name it
@@ -115,7 +120,7 @@ pub fn check_destination_host(host: &str) -> Result<()> {
     } else if host.starts_with('[') || host.ends_with(']') {
         "only an IPv6 address may be bracketed"
     } else if is_numeric_ipv4_spelling(host.strip_suffix('.').unwrap_or(host)) {
-        "the resolver reads this as an IPv4 address; write it as a.b.c.d"
+        NUMERIC_IPV4_REFUSAL
     } else if is_dns_name(host) {
         return Ok(());
     } else {

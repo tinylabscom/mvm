@@ -334,6 +334,23 @@ fn non_canonical_ipv4_spellings_are_refused_as_allows() {
     }
 }
 
+/// The same numeric spellings are refused as denies: the resolver reads each
+/// as an address the deny would never match, so it would be dead config.
+#[test]
+fn non_canonical_ipv4_spellings_are_refused_as_denies() {
+    for deny in [
+        "167772165",
+        "0xa.0.0.5",
+        "0xA000005",
+        "10.5",
+        "012.0.0.5",
+        "10.5:443",
+    ] {
+        let error = refused(&[user("a", &format!("[network]\ndeny = [{deny:?}]\n"))]);
+        assert!(error.to_string().contains("a.b.c.d"), "{deny}: {error}");
+    }
+}
+
 /// An unbracketed IPv6 deny that also reads as `ADDRESS:PORT` is refused
 /// rather than guessed; the bracketed spellings say which one is meant.
 #[test]

@@ -27,7 +27,8 @@ pub fn proxy_request_from_connect_authority(
         .clone()
         .context("request carries no Host header")?;
     let host = host_without_port(&host);
-    if !host.eq_ignore_ascii_case(authority_host) {
+    let identity = crate::supervisor::endpoint::canonical_target_host;
+    if identity(host) != identity(authority_host) {
         bail!("request Host does not match the flow authority {authority_host:?}");
     }
     Ok(parsed.into_request(scheme, authority_host))
@@ -178,6 +179,25 @@ mod tests {
     fn an_authority_request_matches_its_host_case_insensitively() {
         let raw = b"GET / HTTP/1.1\r\nHost: API.OpenAI.com\r\n\r\n";
         assert!(proxy_request_from_connect_authority(raw, "https", "api.openai.com").is_ok());
+    }
+
+    /// The Host header is compared by identity: a trailing dot or an
+    /// IPv4-mapped literal names the authority, a different host does not.
+    #[test]
+    fn an_authority_request_matches_every_spelling_of_its_host() {
+        for (header, authority) in [
+            ("api.openai.com.", "api.openai.com"),
+            ("API.OpenAI.com.:443", "api.openai.com"),
+            ("[::ffff:192.0.2.1]", "192.0.2.1"),
+        ] {
+            let raw = format!("GET / HTTP/1.1\r\nHost: {header}\r\n\r\n");
+            assert!(
+                proxy_request_from_connect_authority(raw.as_bytes(), "https", authority).is_ok(),
+                "{header}"
+            );
+        }
+        let raw = b"GET / HTTP/1.1\r\nHost: api.openai.com..\r\n\r\n";
+        assert!(proxy_request_from_connect_authority(raw, "https", "api.openai.com").is_err());
     }
 
     #[test]

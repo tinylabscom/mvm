@@ -73,13 +73,12 @@ impl GateResolver {
     }
 }
 
-/// The gate's target form of `host:port`, bracketing a bare IPv6 literal.
+/// The gate's target form of `host:port`.
 fn target_of(host: &str, port: u16) -> String {
-    let bare = host.trim_start_matches('[').trim_end_matches(']');
-    match bare.parse::<IpAddr>() {
-        Ok(IpAddr::V6(v6)) => format!("[{v6}]:{port}"),
-        _ => format!("{bare}:{port}"),
-    }
+    format!(
+        "{}:{port}",
+        crate::supervisor::endpoint::canonical_target_host(host)
+    )
 }
 
 impl mvm_http::resolve::Resolve for GateResolver {
@@ -166,6 +165,21 @@ mod tests {
         assert_eq!(target_of("[::1]", 443), "[::1]:443");
         assert_eq!(target_of("::1", 443), "[::1]:443");
         assert_eq!(target_of("api.example.com", 443), "api.example.com:443");
+        assert_eq!(target_of("API.Example.COM.", 443), "api.example.com:443");
+        assert_eq!(target_of("[::ffff:192.0.2.1]", 443), "192.0.2.1:443");
+    }
+
+    /// The cache keys an answer by the host's canonical identity, so the
+    /// forward leg finds it under any spelling the gate admitted.
+    #[test]
+    fn admitted_addresses_are_keyed_by_the_canonical_host() {
+        let admitted = AdmittedAddresses::default();
+        let ip: IpAddr = "93.184.216.34".parse().unwrap();
+        admitted.record("API.Example.com.", 443, vec![ip]);
+        for host in ["api.example.com", "api.example.com.", "Api.Example.Com"] {
+            assert_eq!(admitted.get(host, 443), Some(vec![ip]), "{host}");
+        }
+        assert_eq!(admitted.get("api.example.com", 8443), None);
     }
     #[test]
     fn admitted_address_cache_prunes_only_at_capacity_and_keeps_the_new_answer() {

@@ -128,6 +128,73 @@ mod tests {
         service_with_gate("secret", &["api.example.com"], gate).0
     }
 
+    /// The typed request path decides a destination by its canonical
+    /// identity: a dotted or upper-case host meets the route the canonical
+    /// name carries, is forwarded to the canonical URL, and is audited by it.
+    #[tokio::test]
+    async fn every_spelling_of_a_routed_host_meets_its_route_on_the_typed_path() {
+        use mvm_core::substitution_wire::{WireRequest, WireResponse};
+        let get = |url: String| WireRequest {
+            method: "GET".into(),
+            url,
+            headers: Vec::new(),
+            body_b64: String::new(),
+        };
+        for host in ["api.example.com", "api.example.com.", "API.Example.COM."] {
+            let routes = RouteSet::new(vec![EgressRoute {
+                id: "api".into(),
+                host: "api.example.com".into(),
+                port: 443,
+                rules: vec![EndpointRule {
+                    id: Some("read".into()),
+                    method: Some("GET".into()),
+                    path: "/v1/**".into(),
+                    outcome: RouteOutcome::Allow,
+                }],
+                otherwise: RouteOutcome::Deny,
+                intercept: true,
+            }])
+            .expect("valid route");
+            let gate = Arc::new(
+                (*gate_admitting(&[("api.example.com", 443)]))
+                    .clone()
+                    .with_routes(routes),
+            );
+            let (service, _ph, forwarder, _dir) =
+                service_with_gate("secret", &["api.example.com"], gate);
+            let signer = Arc::new(CapturingAuditSigner::new());
+            let service = Arc::try_unwrap(service)
+                .ok()
+                .expect("test owns service")
+                .with_shared_recorder(Arc::new(Recorder::new(
+                    signer.clone(),
+                    TenantId("local".into()),
+                )));
+
+            let denied = service.process(get(format!("https://{host}/admin"))).await;
+            assert!(
+                matches!(&denied, WireResponse::Refused { message } if message.contains("egress route refused")),
+                "{host}: {denied:?}"
+            );
+            assert!(forwarder.seen.lock().unwrap().is_none(), "{host}");
+
+            let allowed = service
+                .process(get(format!("https://{host}/v1/models")))
+                .await;
+            assert!(
+                matches!(allowed, WireResponse::Ok { .. }),
+                "{host}: {allowed:?}"
+            );
+            let sent = forwarder.seen.lock().unwrap().take().expect("forwarded");
+            assert_eq!(sent.url, "https://api.example.com/v1/models", "{host}");
+
+            let audited = format!("{:?}", signer.entries());
+            assert!(audited.contains("api.example.com:443"), "{host}: {audited}");
+            assert!(!audited.contains("api.example.com.:"), "{host}: {audited}");
+            assert!(!audited.contains("Example"), "{host}: {audited}");
+        }
+    }
+
     #[tokio::test]
     async fn an_allowed_route_refuses_without_a_chain_recorder() {
         let service = routed_service(RouteOutcome::Allow);

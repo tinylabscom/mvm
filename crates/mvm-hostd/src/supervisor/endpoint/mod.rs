@@ -21,3 +21,16 @@ pub mod runtime_approval;
 /// Termination of an admitted FlowMux flow to a host carrying a bound secret:
 /// TLS under the per-VM CA, request framing, and the hand-off to substitution.
 pub mod terminator;
+
+/// A guest-supplied destination host as every endpoint decision sees it: its
+/// canonical identity, an IPv6 address bracketed so `{host}:{port}` parses
+/// back. Applied once where a destination enters the endpoint, so the gate,
+/// routes, secret bindings, transform profiles and audit all compare one host.
+pub(crate) fn canonical_target_host(host: &str) -> String {
+    let host = mvm_core::policy::network_policy::canonical_host(host);
+    if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host
+    }
+}
