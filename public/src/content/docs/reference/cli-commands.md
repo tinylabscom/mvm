@@ -1817,9 +1817,10 @@ workload's data. A claimed child keeps running from those files until its run
 ends and its state is removed, as a child restored at claim time does. An
 unclaimed child's files are removed when it is released or reaped. Set
 `standby_memory_mib` to `0` to keep no paused children. A launch whose plan
-grants a CPU share does not resume a paused child: the child is left for the
-next launch, and this one restores another standby inside a scope carrying the
-grant, or boots cold when none is ready. When
+grants a CPU share, or is placed on host cores, does not resume a paused child.
+It restores another standby inside a scope carrying the grant and leaves the
+child for the next launch, or, when no other standby is ready, the paused
+child is discarded and the launch boots cold. When
 `default_cpu_millicores` is set, every plan carries a CPU grant, so no paused
 children are prepared. Separately, `default_cpu_millicores`
 and `default_wall_clock_secs` supply defaults for dimensions nothing else named.

@@ -209,6 +209,7 @@ mod tests {
         name: &str,
         grants: Option<mvm_contract::grants::Grants>,
     ) -> Fixture {
+        let backend_kind = backend.kind();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let home = tempfile::tempdir().expect("home");
         env.isolate_mvm_home(home.path());
@@ -253,6 +254,10 @@ mod tests {
                         audit_dir: Some(audit.path()),
                         runtime_config: Some(config),
                         grants: grants.clone(),
+                        backend_kind: grants.as_ref().map(|_| backend_kind),
+                        backend_name: if grants.is_some() { "mock" } else { "firecracker" },
+                        // A dev run records a grant the mock tier cannot meter.
+                        restrict_agent_verbs: grants.is_none(),
                         ..crate::admission::admit_plan_tests::pinning_params(&rootfs, &ledger)
                     },
                     verified_runtime,
@@ -674,14 +679,29 @@ mod tests {
         );
     }
 
-    /// A launch admitted under another name never takes the child.
+    /// The live-witness case through the real claim path: the signed plan
+    /// grants a CPU share, so the reserved child is not taken.
     #[test]
-    fn a_renamed_launch_never_takes_the_reserved_child() {
+    fn a_cpu_granted_launch_never_takes_the_reserved_child() {
         let mut process = paused_vmm();
-        let (fixture, reserved) = reserved_preload_for(&process, "another-launch", None);
-        record_ordinary_standby(&fixture);
+        let grant = Some(mvm_contract::grants::Grants {
+            cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
+            ..Default::default()
+        });
+        let (fixture, reserved) = reserved_preload_for(&process, "selected-parent-child", grant);
+        assert!(
+            fixture
+                .slot
+                .borrow()
+                .as_ref()
+                .expect("admission")
+                .plan()
+                .grants
+                .is_some(),
+            "the fixture's signed plan carries the grant"
+        );
 
-        let renamed = crate::standby::claim_for_admitted_launch(
+        let outcome = crate::standby::claim_for_admitted_launch(
             &fixture.slot,
             &fixture.backend,
             &fixture.pool,
@@ -689,12 +709,12 @@ mod tests {
             Some(&reserved),
         )
         .expect("pool readable");
-        let Some(CliWarmClaimOutcome::Claimed(claim)) = renamed else {
-            panic!("the renamed launch forks the ordinary standby");
-        };
-        assert_eq!(claim.into_parts().0.0, "ordinary-parent");
-        assert!(process.try_wait().unwrap().is_none());
 
+        assert!(
+            outcome.is_none(),
+            "not claimed: with no other standby it boots cold"
+        );
+        assert_exact_capability(&fixture);
         let _ = process.kill();
         let _ = process.wait();
     }
@@ -777,16 +797,8 @@ mod tests {
             warm_pool_size: 0,
             ..base.clone()
         };
-        let granted = mvm_core::vm_backend::VmStartConfig {
-            cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
-            ..base.clone()
-        };
         assert!(reserve(&base, true).is_none(), "host volumes");
         assert!(reserve(&disabled, false).is_none(), "standbys disabled");
-        assert!(
-            reserve(&granted, false).is_none(),
-            "a CPU grant already known"
-        );
         assert!(
             crate::standby::preload_known_unservable(&base, Some(250)),
             "a host default CPU share"

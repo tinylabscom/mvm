@@ -87,13 +87,13 @@ pub fn reserve_preloaded_for_launch(
 /// Whether a launch is known before admission to be one a preloaded child
 /// cannot serve: a host default CPU share puts a CPU grant on every plan, and a
 /// launch that terminates TLS, carries a mailbox, or pins bundle boot assets is
-/// never warm-eligible at all.
+/// never warm-eligible at all. A CPU grant from a flag or a policy layer is
+/// known only once admission resolves the plan.
 fn preload_known_unservable(
     config: &mvm_core::vm_backend::VmStartConfig,
     host_default_cpu_millicores: Option<u32>,
 ) -> bool {
     host_default_cpu_millicores.is_some()
-        || config.cpu_grant.is_some()
         || config.bundle_boot_assets.is_some()
         || mvm_vmm::host::egress_shared::launch_terminates_egress_tls(config)
         || mvm_vmm::host::egress_bridge::mailbox_cmdline_token(config).is_some()

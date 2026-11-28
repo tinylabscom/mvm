@@ -3066,18 +3066,12 @@ fn claim_releases_reserved_parent_and_removes_child_dir_on_overlay_refusal() {
     assert!(runner.driver.forked_children().is_empty());
 }
 
-/// A failed claim destroys the preloaded child, so the record must stop
-/// naming it — otherwise the standby stays `Idle` advertising a paused VMM
-/// that no longer exists, and every later claim refuses on a missing control
-/// socket while `idle_count_compatible` still counts it as capacity. That
-/// made a standby single-use against even a retryable failure.
-///
-/// The parent and its checkpoint are healthy, so it demotes to saved-state
-/// (the `pid == 0` sentinel) rather than being removed: warm capacity
-/// survives and the next claim materializes a fresh child from the
-/// checkpoint.
+/// A failed claim destroys the preloaded child, so its standby goes too.
+/// Demoting it to saved-state instead left a record every later compatible
+/// launch picked and failed on, returned to the pool after each failure and
+/// counted as capacity, so refill never replaced it.
 #[test]
-fn a_failed_claim_demotes_a_preloaded_standby_instead_of_stranding_it() {
+fn a_failed_claim_removes_a_preloaded_standby_instead_of_demoting_it() {
     check_preloaded_refusal_cleanup(MockDriver::default(), false, false);
 }
 
@@ -3220,7 +3214,7 @@ fn check_preloaded_refusal_cleanup(driver: MockDriver, retained: bool, with_over
         );
     }
 
-    let after = pool.load("warm-parent").unwrap();
+    let after = pool.load("warm-parent");
     assert!(
         crate::vm::instance_snapshot::try_lock_resume(&child_name)
             .unwrap()
@@ -3228,6 +3222,7 @@ fn check_preloaded_refusal_cleanup(driver: MockDriver, retained: bool, with_over
         "rollback releases the lifecycle gate even when termination is unknown"
     );
     if retained {
+        let after = after.expect("an uncertain stop retains the reservation");
         assert_eq!(after.state, StandbyState::Claimed);
         assert_eq!(
             after.preloaded_child_vm_name.as_deref(),
@@ -3254,23 +3249,11 @@ fn check_preloaded_refusal_cleanup(driver: MockDriver, retained: bool, with_over
         assert!(runner.driver.killed_vms().is_empty());
         return;
     }
-    assert_eq!(
-        after.state,
-        StandbyState::Idle,
-        "a non-parent-fault failure must return the parent to claimable"
-    );
     assert!(
-        after.preloaded_child_vm_name.is_none(),
-        "the record must stop naming a child the cleanup destroyed"
-    );
-    assert!(
-        after.is_saved_state(),
-        "a standby with no preloaded child is saved-only (pid == 0), so the next \
-             claim materializes a fresh child from the checkpoint"
-    );
-    assert!(
-        SupervisorStandbyPool::is_live_or_saved(&after),
-        "the demoted parent must remain usable capacity, not read as dead"
+        after.is_err() && pool.list().unwrap().is_empty(),
+        "a failed claim of a preloaded child removes its standby: no demoted, idle or \
+         parked record is left for the next launch to pick, so it forks another standby \
+         or boots cold, and refill prepares a fresh one"
     );
     assert_eq!(
         runner.driver.killed_vms(),

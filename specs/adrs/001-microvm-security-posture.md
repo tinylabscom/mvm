@@ -374,10 +374,11 @@ not paraphrase this row without them.
    process born grant-less as shared pool capacity, which binding now would
    bind the pool rather than the claim. `bind_spawn` wraps a `Command` and
    this tree has no post-spawn attach. On the preloaded path no grant reaches
-   that process: a launch whose signed plan carries a CPU grant leaves its
-   reserved child intact for the next launch and takes the saved-state fork
-   of another standby, or boots cold when none is ready, and the claim
-   refuses to resume a preloaded child under such a plan
+   that process: a launch whose signed plan carries a CPU grant does not resume
+   its reserved child. It takes the saved-state fork of another standby,
+   leaving the child intact, or, when none is ready, the reserved standby is
+   destroyed so the launch can boot cold under its admitted name. The claim
+   also refuses to resume a preloaded child under such a plan
    (`fn:a_preloaded_child_refuses_a_plan_with_a_cpu_grant`). On the HVF
    resident handoff a claimed child's CPU bound is a ledger entry and not a
    `cpu.max`. Wall clock is re-armed on an HVF
@@ -515,8 +516,8 @@ are limits, not guarantees:
    is removed at the end of the run. A saved-state claim also decrypts into the
    child's dir and runs from it, so the in-run window exists on both paths;
    preloading adds the window before the claim. That window ends when the
-   child is claimed, expires (the residency idle timeout, or the 30-minute
-   standby TTL the launch path applies), is evicted, or has its reservation
+   child is claimed, expires (the 30-minute standby TTL the launch path and
+   `mvmctl cache prune` apply), is evicted, or has its reservation
    released. Until then a saved-state standby keeps only sealed chunks. The
    parent is a planless factory boot: no plan, tenant, secrets or volumes, so
    the image holds no workload's data. Expiry, budget eviction and a released
@@ -531,7 +532,9 @@ are limits, not guarantees:
    using the owner marker written before the VMM starts
    (`fn:a_preloaded_child_whose_standby_record_is_gone_is_stopped_and_reaped`).
    A child the teardown cannot stop keeps its dir until the sweep finds its
-   process gone. A host with `default_cpu_millicores` set prepares no paused
+   process gone. Its standby record is dropped all the same, so the paused
+   VMM holds guest memory no budget counts, and a cold boot under its name is
+   refused while the dir remains. A host with `default_cpu_millicores` set prepares no paused
    children, because every plan there carries a CPU grant. With no idle watcher
    running and no `mvmctl` invocation, nothing applies the TTL. `machine stop
    --all` does not drain standbys of either kind.
@@ -547,8 +550,8 @@ are limits, not guarantees:
    child is a live standby and counts against the standby budget at its full
    guest memory; a child that does not fit is not prepared and its standby
    stays saved-state. The budget applies when a child is prepared: lowering
-   `standby_memory_mib` does not evict a child already paused, which the idle
-   timeout or the TTL then removes. The host budget's headroom is checked only at the
+   `standby_memory_mib` does not evict a child already paused, which the
+   30-minute standby TTL then removes. The host budget's headroom is checked only at the
    moment a child is preloaded. Admission does not count paused children,
    which carry no admitted charge, so guest RAM on the host can reach
    `host_budget_memory_mib` plus `standby_memory_mib`.
