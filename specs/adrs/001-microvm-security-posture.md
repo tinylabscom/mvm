@@ -1683,6 +1683,25 @@ read nowhere (its only mention is a doc comment in `mvm-contract::stream::edge`
 saying another mechanism is shaped after it). Building one is tracked in the
 issues.
 
+**Cleartext under production (limit, not a numbered claim).** A production
+workload — one whose signed plan carries the attenuated agent-verb grant, the
+fact the endpoint reads through `production_posture` — does not originate
+plain HTTP the endpoint can identify as such unless the allow-list entry for
+that destination opted in with `--allow-host http://HOST[:PORT]`. The
+`EgressGate` refuses an admitted TCP flow to port 80 without the opt-in
+(`production_refuses_a_port_80_flow_that_was_not_opted_in`,
+`a_production_port_80_connect_is_refused_and_audited_as_cleartext`), and the
+request leg refuses an `http://` upstream on any port without it
+(`production_refuses_an_http_upstream_before_forward`); both record the
+refusal as `cleartext_denied`. The opt-in is a field of the policy entry, so
+it moves the policy digest the signed plan binds, and an endpoint whose policy
+carries an opt-in that digest does not cover refuses to start
+(`a_cleartext_opt_in_the_plan_did_not_sign_is_refused`). Port 80 is the only
+plain-HTTP signal a spliced flow carries: plain HTTP on any other port, spliced
+without termination, is not detected, so this is not a promise that a
+production workload never sends unencrypted bytes. Non-production launches are
+unchanged.
+
 <!-- absent:begin -->
 
 `MVM_ACK_UNRESTRICTED_NETWORK`.

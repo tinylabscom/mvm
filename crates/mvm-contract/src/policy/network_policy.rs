@@ -48,19 +48,40 @@ pub enum NetworkPolicyParseError {
 pub struct HostPort {
     pub host: String,
     pub port: u16,
+    /// The operator admitted plain HTTP to this destination, spelled
+    /// `http://host[:port]`. A production workload is refused cleartext
+    /// egress to any destination without it. Omitted from the wire when
+    /// unset, so an entry without it keeps the bytes, and the policy digest,
+    /// it had before the field existed.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub cleartext: bool,
 }
+
+/// The scheme that marks an allow-list entry as admitting plain HTTP.
+pub const CLEARTEXT_SCHEME_PREFIX: &str = "http://";
 
 impl HostPort {
     pub fn new(host: impl Into<String>, port: u16) -> Self {
         Self {
             host: host.into(),
             port,
+            cleartext: false,
         }
+    }
+
+    /// This entry, admitting plain HTTP.
+    #[must_use]
+    pub fn with_cleartext(mut self) -> Self {
+        self.cleartext = true;
+        self
     }
 }
 
 impl fmt::Display for HostPort {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.cleartext {
+            f.write_str(CLEARTEXT_SCHEME_PREFIX)?;
+        }
         write!(f, "{}:{}", self.host, self.port)
     }
 }
@@ -69,7 +90,11 @@ impl FromStr for HostPort {
     type Err = NetworkPolicyParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (host, port) = s
+        let (rest, cleartext) = match s.strip_prefix(CLEARTEXT_SCHEME_PREFIX) {
+            Some(rest) => (rest, true),
+            None => (s, false),
+        };
+        let (host, port) = rest
             .rsplit_once(':')
             .ok_or_else(|| NetworkPolicyParseError::MissingPort(s.to_string()))?;
         if host.is_empty() {
@@ -78,7 +103,10 @@ impl FromStr for HostPort {
         let port: u16 = port
             .parse()
             .map_err(|_| NetworkPolicyParseError::InvalidPort(s.to_string()))?;
-        Ok(Self::new(host, port))
+        Ok(Self {
+            cleartext,
+            ..Self::new(host, port)
+        })
     }
 }
 
@@ -596,6 +624,15 @@ impl NetworkPolicy {
         }
     }
 
+    /// The allow-list entries the operator admitted plain HTTP to.
+    pub fn cleartext_destinations(&self) -> Vec<HostPort> {
+        self.resolve_rules()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|rule| rule.cleartext)
+            .collect()
+    }
+
     /// Whether this policy grants any outbound egress at all.
     ///
     /// `unrestricted` obviously does; allow-lists and named presets do iff
@@ -997,6 +1034,35 @@ mod tests {
     fn host_port_display() {
         let hp = HostPort::new("github.com", 443);
         assert_eq!(hp.to_string(), "github.com:443");
+    }
+
+    /// The cleartext opt-in is spelled with the scheme it admits, renders the
+    /// same way, and parses back, so a stored or displayed entry keeps it.
+    #[test]
+    fn a_cleartext_entry_round_trips_through_its_http_spelling() {
+        let hp: HostPort = "http://example.com:80".parse().unwrap();
+        assert_eq!(hp, HostPort::new("example.com", 80).with_cleartext());
+        assert_eq!(hp.to_string(), "http://example.com:80");
+        assert_eq!(hp.to_string().parse::<HostPort>().unwrap(), hp);
+        assert!(!"example.com:80".parse::<HostPort>().unwrap().cleartext);
+    }
+
+    /// An entry without the opt-in serializes exactly as before the field
+    /// existed, so every policy digest already recorded in a signed plan is
+    /// unchanged; one with it serializes differently, so the opt-in moves the
+    /// digest the plan binds.
+    #[test]
+    fn the_cleartext_opt_in_is_absent_from_the_wire_unless_set() {
+        let plain = serde_json::to_string(&HostPort::new("example.com", 80)).unwrap();
+        assert_eq!(plain, r#"{"host":"example.com","port":80}"#);
+        let opted =
+            serde_json::to_string(&HostPort::new("example.com", 80).with_cleartext()).unwrap();
+        assert_eq!(
+            opted,
+            r#"{"host":"example.com","port":80,"cleartext":true}"#
+        );
+        let back: HostPort = serde_json::from_str(&opted).unwrap();
+        assert!(back.cleartext);
     }
 
     #[test]

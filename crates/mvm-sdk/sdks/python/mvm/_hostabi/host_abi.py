@@ -473,6 +473,7 @@ class HardwareMeasurementData:
 class HostPort:
     host: str
     port: int
+    cleartext: Optional[bool] = None
 
 
 @dataclass

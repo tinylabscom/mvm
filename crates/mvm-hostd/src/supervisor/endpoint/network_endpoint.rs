@@ -337,6 +337,18 @@ impl std::fmt::Debug for EndpointConfig {
     }
 }
 
+/// Whether this endpoint serves a production workload: its admitted plan
+/// carries the attenuated agent-verb grant, the signed fact the guest agent
+/// refuses DevOnly verbs on. Host admission sets it for every sealed
+/// production run. No plan, or a plan without the grant, is not production.
+#[must_use]
+pub fn production_posture(cfg: &EndpointConfig) -> bool {
+    cfg.audit
+        .as_ref()
+        .and_then(mvm_core::audit_sink::AuditContext::plan)
+        .is_some_and(|plan| plan.agent_verbs.is_some())
+}
+
 /// Parse an [`EndpointConfig`] from the JSON the backend writes on stdin.
 pub fn parse(bytes: &[u8]) -> Result<EndpointConfig, serde_json::Error> {
     serde_json::from_slice(bytes)
@@ -391,6 +403,11 @@ impl EndpointNetworkProjection {
         let gate = match &cfg.network_policy {
             Some(policy) => build_egress_gate(policy),
             None => mvm_runtime::vmm::egress_gate::EgressGate::default_deny(),
+        };
+        let gate = if production_posture(cfg) {
+            gate.refusing_cleartext()
+        } else {
+            gate
         };
         // Every decision asks the epoch gate first. A plan whose gate cannot
         // be built is refused at start; should one get here, nothing passes.

@@ -21,6 +21,9 @@ use mvm_core::policy::dns_pin::DnsPinRegistry;
 use mvm_core::policy::projection::{CanonicalEgress, Proto};
 use mvm_core::protocol::dns::DnsRecordType;
 
+/// The plain-HTTP port a production workload is refused without an opt-in.
+const HTTP_PORT: u16 = 80;
+
 /// Which namespace a guest target was decided in.
 ///
 /// Recorded on the audit entry so a reader can tell a peer dial from ordinary
@@ -151,6 +154,14 @@ pub enum DenyReason {
     /// its execution epoch was superseded or its unit quarantined — so no
     /// destination is decided.
     ExecutionNotAdmitted,
+    /// A production workload asked for plain HTTP (a port-80 flow) to a
+    /// destination the allow-list admits but did not opt into cleartext.
+    CleartextNotAdmitted {
+        /// The refused host or address, as the guest asked for it.
+        host: String,
+        /// The refused port.
+        port: u16,
+    },
 }
 
 impl DenyReason {
@@ -163,6 +174,7 @@ impl DenyReason {
     pub fn audit_label(&self) -> &'static str {
         match self {
             Self::RestrictedAddress { class, .. } => class.label(),
+            Self::CleartextNotAdmitted { .. } => "cleartext_denied",
             _ => "policy_denied",
         }
     }
@@ -251,6 +263,11 @@ impl std::fmt::Display for DenyReason {
             Self::ExecutionNotAdmitted => {
                 write!(f, "this workload's execution epoch is no longer admitted")
             }
+            Self::CleartextNotAdmitted { host, port } => write!(
+                f,
+                "{host}:{port} is plain HTTP, which a production workload may not send; \
+                 admit it with --allow-host http://{host}:{port}"
+            ),
         }
     }
 }
@@ -304,19 +321,18 @@ pub struct EgressGate {
     routes: RouteSet,
     /// Asked before every decision; `None` decides on policy alone.
     admission: Option<AdmissionCheck>,
+    /// Refuse plain HTTP the policy did not opt into: set for a production
+    /// workload, so every other gate decides exactly as it always has.
+    refuse_cleartext: bool,
+    /// Allow-list entries admitting plain HTTP, from the signed policy.
+    cleartext: Vec<mvm_core::policy::network_policy::HostPort>,
 }
 
 impl EgressGate {
     /// A gate that denies everything — the posture for a VM with no admitted
     /// network policy (claim-10 default-deny).
     pub fn default_deny() -> Self {
-        Self {
-            egress: CanonicalEgress::Rules(Vec::new()),
-            pins: DnsPinRegistry::new(),
-            peers: Vec::new(),
-            routes: RouteSet::default(),
-            admission: None,
-        }
+        Self::new(CanonicalEgress::Rules(Vec::new()))
     }
 
     /// A gate over an explicit resolved grant (no host-name resolution).
@@ -327,6 +343,8 @@ impl EgressGate {
             peers: Vec::new(),
             routes: RouteSet::default(),
             admission: None,
+            refuse_cleartext: false,
+            cleartext: Vec::new(),
         }
     }
 
@@ -349,14 +367,43 @@ impl EgressGate {
         };
         match mvm_core::policy::projection::canonicalize_network_policy(policy, pins, now) {
             Ok(canon) => Self {
-                egress: canon,
                 pins: pins.clone(),
-                peers: Vec::new(),
                 routes,
-                admission: None,
+                cleartext: policy.cleartext_destinations(),
+                ..Self::new(canon)
             },
             Err(_) => Self::default_deny(),
         }
+    }
+
+    /// Refuse plain HTTP to every destination the policy did not opt into
+    /// cleartext. The endpoint sets this for a production workload.
+    #[must_use]
+    pub fn refusing_cleartext(mut self) -> Self {
+        self.refuse_cleartext = true;
+        self
+    }
+
+    /// Whether plain HTTP to `host:port` is refused: this gate refuses
+    /// cleartext and no allow-list entry opted the destination into it. A
+    /// numeric `host` matches an opted entry naming that address, or an opted
+    /// name pinned to it. Callers that know a request's scheme ask this for
+    /// an `http://` URL on any port; the gate asks it itself for port 80.
+    #[must_use]
+    pub fn refuses_cleartext(&self, host: &str, port: u16) -> bool {
+        let addr = host.parse::<IpAddr>().ok();
+        self.refuse_cleartext
+            && !self.cleartext.iter().any(|rule| {
+                rule.port == port
+                    && (rule.host.eq_ignore_ascii_case(host)
+                        || addr.is_some_and(|ip| {
+                            rule.host.parse::<IpAddr>() == Ok(ip)
+                                || self
+                                    .pins
+                                    .lookup(&rule.host)
+                                    .is_some_and(|pin| pin.ips.contains(&ip))
+                        }))
+            })
     }
 
     /// Attach admitted peer routes. Separate from construction because every
@@ -673,18 +720,31 @@ impl EgressGate {
         }
         let target = target.trim();
         // Numeric ip:port — decide directly.
-        if let Ok(addr) = target.parse::<SocketAddr>() {
-            return self.decide_addr_for_proto(proto, addr.ip(), addr.port());
+        let (host, port, verdict) = if let Ok(addr) = target.parse::<SocketAddr>() {
+            let verdict = self.decide_addr_for_proto(proto, addr.ip(), addr.port());
+            (addr.ip().to_string(), addr.port(), verdict)
+        } else {
+            // hostname:port — resolve host-side against the pinned set, then
+            // policy-check each pinned IP. Admit iff some pinned IP is permitted.
+            let Some((host, port)) = target
+                .rsplit_once(':')
+                .and_then(|(host, port)| Some((host, port.parse::<u16>().ok()?)))
+            else {
+                return EgressVerdict::Malformed;
+            };
+            let verdict = self.decide_hostname_request(proto, host, port, resolve);
+            (host.to_string(), port, verdict)
+        };
+        // Port 80 is the one plain-HTTP signal a flow carries before any byte
+        // is read; a spliced flow on another port is not identifiable.
+        if matches!(verdict, EgressVerdict::Allow { .. })
+            && proto == Proto::Tcp
+            && port == HTTP_PORT
+            && self.refuses_cleartext(&host, port)
+        {
+            return EgressVerdict::Deny(DenyReason::CleartextNotAdmitted { host, port });
         }
-        // hostname:port — resolve host-side against the pinned set, then policy-check
-        // each pinned IP. Admit iff some pinned IP is permitted.
-        match target.rsplit_once(':') {
-            Some((host, port_str)) => match port_str.parse::<u16>() {
-                Ok(port) => self.decide_hostname_request(proto, host, port, resolve),
-                Err(_) => EgressVerdict::Malformed,
-            },
-            None => EgressVerdict::Malformed,
-        }
+        verdict
     }
 
     fn decide_hostname_request<F>(
@@ -861,10 +921,7 @@ mod tests {
             "2025-01-01T00:00:00Z",
             "2030-01-01T00:00:00Z",
         ));
-        let policy = NetworkPolicy::allow_list(vec![HostPort {
-            host: "example.com".into(),
-            port: 443,
-        }]);
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)]);
         let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
 
         let verdict = gate.decide_request("example.com:80");
@@ -884,6 +941,139 @@ mod tests {
         assert!(rendered.contains("example.com:443"), "{rendered}");
     }
 
+    /// A gate over `rules`, with `example.com` and `other.test` pinned.
+    fn cleartext_gate(
+        rules: Vec<mvm_core::policy::network_policy::HostPort>,
+        production: bool,
+    ) -> EgressGate {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        let mut pins = DnsPinRegistry::new();
+        for (host, ip) in [
+            ("example.com", "93.184.216.34"),
+            ("other.test", "93.184.216.35"),
+        ] {
+            pins.add(DnsPin::at(
+                host,
+                vec![ip.parse().unwrap()],
+                "2025-01-01T00:00:00Z",
+                "2030-01-01T00:00:00Z",
+            ));
+        }
+        let policy = mvm_core::policy::network_policy::NetworkPolicy::allow_list(rules);
+        let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
+        if production {
+            gate.refusing_cleartext()
+        } else {
+            gate
+        }
+    }
+
+    /// Production refuses a port-80 flow to an allow-listed destination the
+    /// operator did not opt into cleartext, by name and by address, through
+    /// the connect entry point every flow takes; the refusal says why and how
+    /// to admit it, and records its own audit word.
+    #[test]
+    fn production_refuses_a_port_80_flow_that_was_not_opted_in() {
+        use mvm_core::policy::network_policy::HostPort;
+        let gate = cleartext_gate(vec![HostPort::new("example.com", 80)], true);
+        let expected = DenyReason::CleartextNotAdmitted {
+            host: "example.com".to_string(),
+            port: 80,
+        };
+        assert_eq!(
+            gate.decide_target("example.com", 80).verdict,
+            EgressVerdict::Deny(expected.clone())
+        );
+        assert_eq!(
+            gate.decide_request("93.184.216.34:80"),
+            EgressVerdict::Deny(DenyReason::CleartextNotAdmitted {
+                host: "93.184.216.34".to_string(),
+                port: 80,
+            })
+        );
+        assert_eq!(expected.audit_label(), "cleartext_denied");
+        let rendered = expected.to_string();
+        assert!(
+            rendered.contains("--allow-host http://example.com:80"),
+            "{rendered}"
+        );
+        assert!(gate.refuses_cleartext("example.com", 80));
+    }
+
+    /// The opt-in admits exactly the destination it names, by name and by
+    /// the address it pinned to, and no other allow-listed host's port 80.
+    #[test]
+    fn production_admits_only_the_destination_opted_into_cleartext() {
+        use mvm_core::policy::network_policy::HostPort;
+        let gate = cleartext_gate(
+            vec![
+                HostPort::new("example.com", 80).with_cleartext(),
+                HostPort::new("other.test", 80),
+            ],
+            true,
+        );
+        let admitted = EgressVerdict::Allow {
+            ips: vec!["93.184.216.34".parse().unwrap()],
+            port: 80,
+        };
+        assert_eq!(gate.decide_target("example.com", 80).verdict, admitted);
+        assert_eq!(gate.decide_request("93.184.216.34:80"), admitted);
+        assert!(!gate.refuses_cleartext("example.com", 80));
+        assert!(gate.decide_target("other.test", 80).verdict.is_deny());
+        assert!(gate.refuses_cleartext("other.test", 80));
+    }
+
+    /// Outside production nothing changes: an allow-listed port-80
+    /// destination is admitted as before, marked or not, and no URL scheme is
+    /// refused.
+    #[test]
+    fn a_non_production_gate_admits_cleartext_as_before() {
+        use mvm_core::policy::network_policy::HostPort;
+        let gate = cleartext_gate(vec![HostPort::new("example.com", 80)], false);
+        assert_eq!(
+            gate.decide_target("example.com", 80).verdict,
+            EgressVerdict::Allow {
+                ips: vec!["93.184.216.34".parse().unwrap()],
+                port: 80,
+            }
+        );
+        assert!(!gate.refuses_cleartext("example.com", 80));
+        assert!(!gate.refuses_cleartext("example.com", 8080));
+    }
+
+    /// TLS is untouched: production admits 443 exactly as before, and the
+    /// scheme predicate a request leg asks about an `http://` URL on another
+    /// port is answered by the same opt-in.
+    #[test]
+    fn production_leaves_tls_alone_and_asks_the_opt_in_for_other_ports() {
+        use mvm_core::policy::network_policy::HostPort;
+        let gate = cleartext_gate(
+            vec![
+                HostPort::new("example.com", 443),
+                HostPort::new("example.com", 8080).with_cleartext(),
+            ],
+            true,
+        );
+        assert!(!gate.decide_target("example.com", 443).verdict.is_deny());
+        assert!(gate.refuses_cleartext("example.com", 443));
+        assert!(!gate.refuses_cleartext("example.com", 8080));
+    }
+
+    /// A refusal for not being admitted at all keeps its own reason: the
+    /// cleartext refusal applies only to a flow the allow-list admitted.
+    #[test]
+    fn an_unlisted_port_80_destination_keeps_its_policy_refusal() {
+        use mvm_core::policy::network_policy::HostPort;
+        let gate = cleartext_gate(vec![HostPort::new("example.com", 443)], true);
+        let EgressVerdict::Deny(reason) = gate.decide_target("example.com", 80).verdict else {
+            panic!("port 80 is not on the allow-list");
+        };
+        assert!(
+            matches!(reason, DenyReason::PortNotAdmitted { .. }),
+            "{reason:?}"
+        );
+    }
+
     /// A host absent from the allow-list is a different answer from a wrong
     /// port, and naming the admitted hosts is what turns it into one.
     #[test]
@@ -898,10 +1088,7 @@ mod tests {
             "2025-01-01T00:00:00Z",
             "2030-01-01T00:00:00Z",
         ));
-        let policy = NetworkPolicy::allow_list(vec![HostPort {
-            host: "example.com".into(),
-            port: 443,
-        }]);
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)]);
         let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
 
         let verdict = gate.decide_request("evil.test:443");
@@ -934,10 +1121,7 @@ mod tests {
             "2025-01-01T00:00:00Z",
             "2030-01-01T00:00:00Z",
         ));
-        let policy = NetworkPolicy::allow_list(vec![HostPort {
-            host: "example.com".into(),
-            port: 443,
-        }]);
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)]);
         let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
 
         assert_eq!(
@@ -972,10 +1156,7 @@ mod tests {
             "2025-01-01T00:00:00Z",
             "2030-01-01T00:00:00Z",
         ));
-        let policy = NetworkPolicy::allow_list(vec![HostPort {
-            host: "localhost.test".into(),
-            port: 443,
-        }]);
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("localhost.test", 443)]);
         let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
 
         assert!(
@@ -1142,10 +1323,7 @@ mod tests {
 
         // A host-allowlist rule with no DNS pin can't project → fail closed (deny),
         // never a permissive gate.
-        let unpinned = NetworkPolicy::allow_list(vec![HostPort {
-            host: "example.com".into(),
-            port: 443,
-        }]);
+        let unpinned = NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)]);
         let gate = EgressGate::from_network_policy(&unpinned, &pins, now);
         assert!(gate.decide_request("93.184.216.34:443").is_deny());
 
@@ -1269,10 +1447,7 @@ mod tests {
             "2025-01-01T00:00:00Z",
             "2030-01-01T00:00:00Z",
         ));
-        let policy = NetworkPolicy::allow_list(vec![HostPort {
-            host: "192.168.4.23".into(),
-            port: 19099,
-        }]);
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("192.168.4.23", 19099)]);
         let gate = EgressGate::from_network_policy(&policy, &pins, now);
         assert_eq!(
             gate.decide_request("192.168.4.23:19099"),
@@ -1303,10 +1478,7 @@ mod tests {
             "2025-01-01T00:00:00Z",
             "2030-01-01T00:00:00Z",
         ));
-        let policy = NetworkPolicy::allow_list(vec![HostPort {
-            host: "api.example.test".into(),
-            port: 443,
-        }]);
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("api.example.test", 443)]);
         let gate = EgressGate::from_network_policy(&policy, &pins, now);
 
         // hostname:port → resolved + admitted to the pinned IP.

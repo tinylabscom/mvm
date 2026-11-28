@@ -2742,12 +2742,78 @@ pub(crate) mod admit_plan_tests {
             entry.contains(&format!("\"destination_count\":\"{}\"", expected.len())),
             "{entry}"
         );
-        for (host, _) in &expected {
+        for destination in &expected {
+            let host = &destination.host;
             assert!(
                 entry.contains(&format!("\"{host}\"")),
                 "missing {host}: {entry}"
             );
         }
+    }
+
+    /// A cleartext opt-in is signed into the plan through the policy digest —
+    /// marking the same destination moves the recorded digest, so a marker
+    /// added after admission no longer matches — and the chain names the
+    /// opted destination.
+    #[test]
+    fn a_cleartext_opt_in_moves_the_signed_policy_digest_and_is_audited() {
+        let _home = isolated_home();
+        use mvm_core::network_policy::{HostPort, NetworkPolicy};
+
+        let admit = |vm_name: &'static str, rule: HostPort| {
+            let keys_dir = tempfile::tempdir().unwrap();
+            let audit_dir = tempfile::tempdir().unwrap();
+            let rootfs_dir = tempfile::tempdir().unwrap();
+            let rootfs = write_rootfs(rootfs_dir.path(), vm_name.as_bytes());
+            let ledger = InMemoryNonceLedger::new();
+            let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+                bundle_sizing: Default::default(),
+                mailbox: None,
+                vm_name,
+                cpus: 1,
+                mem_mib: 128,
+                keys_dir: Some(keys_dir.path()),
+                audit_dir: Some(audit_dir.path()),
+                network_policy: NetworkPolicy::allow_list(vec![rule]),
+                ..pinning_params(&rootfs, &ledger)
+            })
+            .expect("admission");
+            let digest = ctx
+                .admitted
+                .plan()
+                .asset_identities
+                .iter()
+                .find(|asset| asset.kind == mvm_core::plan::AssetKind::Policy)
+                .expect("the signed plan binds the network policy")
+                .digest
+                .clone();
+            let content = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
+                .expect("the default chain holds every admission record");
+            (digest, content)
+        };
+
+        let (plain_digest, plain) = admit("vm-plain", HostPort::new("93.184.216.34", 80));
+        let opted_rule = HostPort::new("93.184.216.34", 80).with_cleartext();
+        let (opted_digest, opted) = admit("vm-opted", opted_rule.clone());
+        assert_ne!(plain_digest, opted_digest);
+        assert_eq!(
+            opted_digest,
+            mvm_core::policy::network_policy::content_sha256(&NetworkPolicy::allow_list(vec![
+                opted_rule
+            ]))
+        );
+        let entry = |content: &str| {
+            content
+                .lines()
+                .find(|line| line.contains("\"plan.egress_destinations\""))
+                .unwrap_or_else(|| panic!("no plan.egress_destinations entry: {content}"))
+                .to_string()
+        };
+        assert!(
+            entry(&opted).contains("\"destination_0_cleartext\":\"true\""),
+            "{opted}"
+        );
+        assert!(!entry(&plain).contains("cleartext"), "{plain}");
     }
 
     /// A destination the egress gate could never pin is refused before the

@@ -158,6 +158,21 @@ const REASON_PEER_DESTINATION: &str = "peer_destination";
 /// The reason a destination the network policy does not admit is refused.
 /// The FlowMux connect path records the same word for the same decision.
 const REASON_POLICY_DENIED: &str = "policy_denied";
+/// The reason a production request for plain HTTP the policy did not opt into
+/// is refused; the FlowMux connect path records the same word.
+const REASON_CLEARTEXT_DENIED: &str = "cleartext_denied";
+
+/// What the workload is told when production refuses its plain HTTP.
+fn cleartext_refusal(host: &str, port: u16) -> WireResponse {
+    let reason = mvm_runtime::vmm::egress_gate::DenyReason::CleartextNotAdmitted {
+        host: host.to_string(),
+        port,
+    };
+    WireResponse::Refused {
+        message: reason.to_string(),
+    }
+}
+
 /// The reason a request whose URL names no `host:port` is refused.
 const REASON_MALFORMED: &str = "malformed";
 /// What a refusal records as its destination when the URL names none.
@@ -446,6 +461,15 @@ impl SubstitutionService {
             Ok(ips) => {
                 // The forward leg connects to exactly these; see `pinned_dns`.
                 if let Some((host, port)) = url_host_and_port(&req.url) {
+                    // The request leg knows the scheme a spliced flow hides,
+                    // so it asks the gate about plain HTTP on any port.
+                    if Url::parse(&req.url).is_ok_and(|u| u.scheme() == "http")
+                        && self.egress_gate.refuses_cleartext(&host, port)
+                    {
+                        self.audit_flow_refused(&format!("{host}:{port}"), REASON_CLEARTEXT_DENIED)
+                            .await;
+                        return Err(cleartext_refusal(&host, port));
+                    }
                     self.admitted.record(&host, port, ips);
                     // Then what the request may do there. The path is the
                     // URL's own, the one the forward leg will send.
@@ -474,6 +498,11 @@ impl SubstitutionService {
                     .or(destination.as_deref())
                     .unwrap_or(UNPARSEABLE_DESTINATION);
                 self.audit_flow_refused(recorded, reason).await;
+                if reason == REASON_CLEARTEXT_DENIED
+                    && let Some((host, port)) = url_host_and_port(&req.url)
+                {
+                    return Err(cleartext_refusal(&host, port));
+                }
                 return Err(WireResponse::Refused {
                     message: "egress destination not admitted by network policy (claim-10)".into(),
                 });
@@ -935,6 +964,88 @@ mod server_tests {
             forwarder.seen.lock().unwrap().is_none(),
             "deny-all must refuse before the forward leg"
         );
+    }
+
+    /// A production gate over `rules`, with `93.184.216.34` admitted.
+    fn production_gate(
+        rules: Vec<mvm_core::network_policy::HostPort>,
+    ) -> Arc<mvm_runtime::vmm::egress_gate::EgressGate> {
+        let policy = mvm_core::network_policy::NetworkPolicy::allow_list(rules);
+        let now = chrono::Utc::now();
+        let expires = (now + chrono::Duration::hours(1)).to_rfc3339();
+        let now = now.to_rfc3339();
+        let mut pins = mvm_core::policy::dns_pin::DnsPinRegistry::new();
+        pins.add(mvm_core::policy::dns_pin::DnsPin::at(
+            "93.184.216.34",
+            vec!["93.184.216.34".parse().unwrap()],
+            now.as_str(),
+            expires.as_str(),
+        ));
+        Arc::new(
+            mvm_runtime::vmm::egress_gate::EgressGate::from_network_policy(&policy, &pins, &now)
+                .refusing_cleartext(),
+        )
+    }
+
+    fn get(url: &str) -> WireRequest {
+        WireRequest {
+            method: "GET".into(),
+            url: url.into(),
+            headers: Vec::new(),
+            body_b64: String::new(),
+        }
+    }
+
+    /// Under production an `http://` upstream is refused before the forward
+    /// leg on any port the allow-list admits, not only port 80: the request
+    /// leg knows the scheme, which a spliced flow does not.
+    #[tokio::test]
+    async fn production_refuses_an_http_upstream_before_forward() {
+        use mvm_core::network_policy::HostPort;
+        let (service, _ph, forwarder, _dir) = service_with_gate(
+            "sk-live-zzz",
+            &["93.184.216.34"],
+            production_gate(vec![
+                HostPort::new("93.184.216.34", 8080),
+                HostPort::new("93.184.216.34", 80),
+            ]),
+        );
+        for url in ["http://93.184.216.34:8080/v1", "http://93.184.216.34/v1"] {
+            match service.process(get(url)).await {
+                WireResponse::Refused { message } => assert!(
+                    message.contains("--allow-host http://93.184.216.34:"),
+                    "{url}: {message}"
+                ),
+                WireResponse::Ok { .. } => panic!("{url} was forwarded in production"),
+            }
+        }
+        assert!(forwarder.seen.lock().unwrap().is_none());
+    }
+
+    /// The opt-in admits the `http://` upstream it names, and `https://` on
+    /// the same admitted port never needed one.
+    #[tokio::test]
+    async fn production_forwards_an_opted_in_http_upstream_and_any_https_one() {
+        use mvm_core::network_policy::HostPort;
+        for (rule, url) in [
+            (
+                HostPort::new("93.184.216.34", 8080).with_cleartext(),
+                "http://93.184.216.34:8080/v1",
+            ),
+            (
+                HostPort::new("93.184.216.34", 8080),
+                "https://93.184.216.34:8080/v1",
+            ),
+        ] {
+            let (service, _ph, forwarder, _dir) = service_with_gate(
+                "sk-live-zzz",
+                &["93.184.216.34"],
+                production_gate(vec![rule]),
+            );
+            let resp = service.process(get(url)).await;
+            assert!(matches!(resp, WireResponse::Ok { .. }), "{url}: {resp:?}");
+            assert!(forwarder.seen.lock().unwrap().is_some(), "{url}");
+        }
     }
 
     /// The peer refusal holds on every service. It does not sit behind an

@@ -1686,6 +1686,10 @@
     "HostPort": {
       "description": "A host:port pair for network allowlist rules.",
       "properties": {
+        "cleartext": {
+          "description": "The operator admitted plain HTTP to this destination, spelled `http://host[:port]`. A production workload is refused cleartext egress to any destination without it. Omitted from the wire when unset, so an entry without it keeps the bytes, and the policy digest, it had before the field existed.",
+          "type": "boolean"
+        },
         "host": {
           "type": "string"
         },

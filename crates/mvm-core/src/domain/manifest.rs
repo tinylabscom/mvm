@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use crate::naming::{validate_flake_ref, validate_template_name};
+use crate::policy::authored::allow_host::parse_allow_host;
 use crate::util::parse_human_size;
 
 /// Filenames recognised as manifests, in discovery preference order.
@@ -496,7 +497,8 @@ impl Manifest {
         let _ = parse_human_size(&self.data_disk)
             .with_context(|| format!("invalid `data_disk` field: {:?}", self.data_disk))?;
         for entry in &self.network.allow_hosts {
-            parse_allow_host(entry)?;
+            parse_allow_host(entry)
+                .with_context(|| format!("invalid allow_hosts entry: {entry:?}"))?;
         }
         mvm_contract::policy::routes::RouteSet::new(self.network.routes.clone())
             .context("invalid `[[network.routes]]`")?;
@@ -592,21 +594,6 @@ impl Manifest {
         parse_human_size(&self.data_disk)
             .with_context(|| format!("invalid `data_disk` field: {:?}", self.data_disk))
     }
-}
-
-fn parse_allow_host(entry: &str) -> Result<crate::network_policy::HostPort> {
-    if let Some((host, port)) = entry.rsplit_once(':')
-        && port.chars().all(|ch| ch.is_ascii_digit())
-    {
-        return format!("{host}:{port}")
-            .parse()
-            .with_context(|| format!("invalid allow_hosts entry: {entry:?}"));
-    }
-    let host = entry.trim();
-    if host.is_empty() {
-        return Err(anyhow!("invalid allow_hosts entry: {entry:?}"));
-    }
-    Ok(crate::network_policy::HostPort::new(host, 443))
 }
 
 fn looks_like_volume_mode_typo(tail: &str) -> bool {
@@ -1770,6 +1757,26 @@ mod tests {
                 // A bare host defaults to 443, matching `[network].allow_hosts`.
                 crate::network_policy::HostPort::new("db.internal", 443),
             ]
+        );
+    }
+
+    /// A workload file spells the cleartext opt-in the way the command line
+    /// does, through the same parser.
+    #[test]
+    fn a_grants_allow_host_takes_the_http_opt_in() {
+        let toml = r#"
+            image = "alpine:3.20"
+
+            [grants]
+            allow_hosts = ["http://mirror.example.com"]
+        "#;
+        let workflow = Manifest::from_toml_str(toml)
+            .expect("parses")
+            .machine_workflow()
+            .expect("image-backed machine workflow");
+        assert_eq!(
+            workflow.grants.egress.expect("egress granted").allow,
+            vec![crate::network_policy::HostPort::new("mirror.example.com", 80).with_cleartext()]
         );
     }
 

@@ -103,10 +103,7 @@ fn main() {
             ),
             initrd_path: std::env::var("MVM_HVF_INITRD").ok(),
             // Policy-driven: admit exactly the dynamically bound echo destination.
-            network_policy: NetworkPolicy::allow_list(vec![HostPort {
-                host: host.clone(),
-                port,
-            }]),
+            network_policy: NetworkPolicy::allow_list(vec![HostPort::new(host.clone(), port)]),
             ..Default::default()
         };
 

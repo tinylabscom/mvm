@@ -162,6 +162,29 @@ mod tests {
         );
     }
 
+    /// `--allow-host http://HOST` is the cleartext opt-in, on port 80 unless
+    /// one is named; the same host without the scheme opts nothing in.
+    #[test]
+    fn allow_host_http_scheme_opts_the_destination_into_cleartext() {
+        let p = resolve_run_network_policy(
+            false,
+            None,
+            &[
+                "http://mirror.example.com".to_string(),
+                "api.example.com:80".to_string(),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            p,
+            NetworkPolicy::allow_list(vec![
+                HostPort::new("mirror.example.com", 80).with_cleartext(),
+                HostPort::new("api.example.com", 80),
+            ])
+        );
+    }
+
     #[test]
     fn allow_host_honors_explicit_port_and_multiple_hosts() {
         let p = resolve_run_network_policy(
