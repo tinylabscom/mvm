@@ -1,4 +1,5 @@
 //! Fixtures shared by this crate's tests.
+#![cfg(test)]
 
 use std::path::Path;
 
