@@ -970,9 +970,12 @@ mod server_tests {
     fn production_gate(
         rules: Vec<mvm_core::network_policy::HostPort>,
     ) -> Arc<mvm_runtime::vmm::egress_gate::EgressGate> {
-        let now = chrono::Utc::now();
-        let expires = (now + chrono::Duration::hours(1)).to_rfc3339();
-        let now = now.to_rfc3339();
+        let now = mvm_core::util::time::utc_timestamp_now();
+        let expires = (now
+            .checked_add(std::time::Duration::from_secs(3600))
+            .unwrap())
+        .to_rfc3339_offset();
+        let now = now.to_rfc3339_offset();
         let mut pins = mvm_core::policy::dns_pin::DnsPinRegistry::new();
         for rule in &rules {
             if let Ok(ip) = rule.host.parse::<std::net::IpAddr>()
