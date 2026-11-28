@@ -225,7 +225,7 @@ fn build_append_entry(ctx: &ServiceCallCtx, report: &BeaconReport) -> AppendEntr
     AppendEntryRequest::AppendEntry {
         request_id: format!("{}-beacon", ctx.correlation_id.as_str()),
         category: BEACON_CATEGORY.into(),
-        ts: chrono::Utc::now().to_rfc3339(),
+        ts: mvm_core::util::time::utc_now_rfc3339(),
         workload_id: ctx.workload_id.clone(),
         tenant_id: ctx.tenant_id.clone(),
         session_id: ctx.session_id.clone(),

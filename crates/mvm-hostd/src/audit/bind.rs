@@ -3,7 +3,6 @@
 // emit. Error policy (best-effort vs fatal) belongs to the caller.
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use mvm_contract::provenance::{
     ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionOutcome,
     DecisionRecord, DecisionRecordBuilder,
@@ -72,7 +71,7 @@ fn checkpoint_decision_record(plan: &ExecutionPlan, meta: &CheckpointMeta) -> De
             class_str(meta.class)
         ))
         .outcome(DecisionOutcome::Approved)
-        .timestamp(Utc::now().to_rfc3339())
+        .timestamp(mvm_core::util::time::utc_now_rfc3339())
         .attestation(AttestationBinding {
             plan_id: Some(plan.plan_id.0.clone()),
             ..AttestationBinding::default()

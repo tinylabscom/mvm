@@ -47,7 +47,7 @@ fn manifest() -> TranscriptManifest {
 
 fn anchor(manifest: &TranscriptManifest) -> PlanAuditEntry {
     PlanAuditEntry {
-        timestamp: chrono::Utc::now(),
+        timestamp: mvm_core::util::time::utc_timestamp_now(),
         tenant: TenantId("tenant".into()),
         plan_id: PlanId("sha256:exact-plan".into()),
         plan_version: 1,

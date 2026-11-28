@@ -68,7 +68,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use mvm_contract::hash::hex;
 use mvm_core::crypto::image_verify::sha256_file;
 use mvm_core::deps_audit::{
@@ -528,7 +527,7 @@ fn run_install_via_driver(
     );
     annotations.insert("lockfile_sha256".to_string(), lockfile_sha256.to_string());
     annotations.insert("lockfile_hash".to_string(), lockfile_hash.to_string());
-    let created_at = Utc::now().to_rfc3339();
+    let created_at = mvm_core::util::time::utc_now_rfc3339();
     let sealed = seal_volume(&content, &sbom, &fetch_log, &cve, created_at, annotations).map_err(
         |source| InstallError::SealFailed {
             lockfile_hash: lockfile_hash.to_string(),

@@ -75,7 +75,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
 
 fn run_gc(_cli: &Cli, args: GcArgs, _cfg: &MvmConfig) -> Result<()> {
     let running_names = collect_live_vm_names()?;
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = mvm_core::util::time::utc_now_rfc3339();
     let stale = mvm_client::gc_stale_registrations(&running_names, &now, args.apply)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("garbage-collecting the VM name registry")?;

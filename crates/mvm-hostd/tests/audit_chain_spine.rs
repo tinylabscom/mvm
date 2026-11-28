@@ -15,7 +15,6 @@
 use rand::Rng;
 use std::collections::BTreeMap;
 
-use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use tempfile::tempdir;
 
@@ -36,7 +35,7 @@ fn host_key() -> SigningKey {
 
 fn lifecycle_entry(tenant: &str, event: &str) -> PlanAuditEntry {
     PlanAuditEntry {
-        timestamp: Utc::now(),
+        timestamp: mvm_core::util::time::utc_timestamp_now(),
         tenant: TenantId(tenant.to_string()),
         plan_id: PlanId("plan-1".to_string()),
         plan_version: 1,

@@ -1,14 +1,15 @@
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use chrono::{Duration, TimeZone};
 use mvm_contract::assurance::Sha256Digest;
 use mvm_contract::plan::topology::{
     CorePlacement, CryptoSuite, SealedTransitions, StateCell, TOPOLOGY_SCHEMA_VERSION, Unit,
     UnitResources, UnitRole,
 };
 use mvm_contract::protocol::vm_backend::BackendKind;
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::host_interface::workload::WorkloadLedger;
 use mvm_core::util::test_env::TestEnv;
 
@@ -25,23 +26,29 @@ const TENANT: &str = "acme";
 const PERIOD_MS: u32 = 2_000;
 
 /// A clock the test moves by hand.
-struct TestClock(Mutex<DateTime<Utc>>);
+struct TestClock(Mutex<UtcTimestamp>);
 
 impl TestClock {
     fn advance_ms(&self, ms: i64) {
         let mut now = self.0.lock().unwrap();
-        *now += Duration::milliseconds(ms);
+        let by = Duration::from_millis(ms.unsigned_abs());
+        *now = if ms < 0 {
+            now.checked_sub(by)
+        } else {
+            now.checked_add(by)
+        }
+        .unwrap();
     }
 }
 
 impl Clock for TestClock {
-    fn now(&self) -> DateTime<Utc> {
+    fn now(&self) -> UtcTimestamp {
         *self.0.lock().unwrap()
     }
 }
 
-fn t0() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap()
+fn t0() -> UtcTimestamp {
+    "2026-11-01T00:00:00Z".parse::<UtcTimestamp>().unwrap()
 }
 
 fn id(name: &str) -> WorkloadId {
@@ -82,7 +89,9 @@ fn topology(generation: u64, period_ms: u32) -> Topology {
         tenant: tenant(),
         generation,
         valid_from: t0(),
-        valid_until: t0() + Duration::days(30),
+        valid_until: t0()
+            .checked_add(std::time::Duration::from_secs(2_592_000))
+            .unwrap(),
         suite: CryptoSuite::CLASSICAL,
         units: vec![unit("controller", Some(period_ms)), unit("reader", None)],
         standby_pairs: Vec::new(),
@@ -121,7 +130,10 @@ impl Host {
             home,
             _signer: signer,
             emitter,
-            clock: Arc::new(TestClock(Mutex::new(t0() + Duration::days(1)))),
+            clock: Arc::new(TestClock(Mutex::new(
+                t0().checked_add(std::time::Duration::from_secs(86_400))
+                    .unwrap(),
+            ))),
         }
     }
 
@@ -686,8 +698,8 @@ mod owner {
         host.clock.advance_ms(i64::from(PERIOD_MS) / 2);
         let second = watch.pass().unwrap().unwrap();
         assert_eq!(
-            second - first,
-            Duration::milliseconds(i64::from(PERIOD_MS) / 2)
+            second.duration_since(first),
+            Some(Duration::from_millis(u64::from(PERIOD_MS) / 2))
         );
         assert_eq!(host.current("controller"), epoch(1));
         assert!(host.events(LIVENESS_EPOCH_REPLACED_EVENT).is_empty());
@@ -699,7 +711,9 @@ mod owner {
         let watch = watch(&host, 1);
         assert_eq!(
             watch.pass().unwrap(),
-            Some(host.clock.now() + Duration::milliseconds(i64::from(PERIOD_MS)))
+            host.clock
+                .now()
+                .checked_add(Duration::from_millis(u64::from(PERIOD_MS)))
         );
         assert_eq!(host.current("controller"), epoch(1));
     }

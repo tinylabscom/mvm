@@ -215,9 +215,12 @@ pub fn write_archive(req: &ArchiveRequest, signing_key: &SigningKey) -> Result<V
         completeness: req.completeness(),
     };
 
-    let signed =
-        SignedEvidenceManifest::sign(manifest, signing_key, chrono::Utc::now().to_rfc3339())
-            .map_err(|e| anyhow::anyhow!("signing the evidence manifest: {e}"))?;
+    let signed = SignedEvidenceManifest::sign(
+        manifest,
+        signing_key,
+        mvm_core::util::time::utc_now_rfc3339(),
+    )
+    .map_err(|e| anyhow::anyhow!("signing the evidence manifest: {e}"))?;
 
     emit_tar(&signed, signing_key, parts.members)
 }

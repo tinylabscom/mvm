@@ -92,7 +92,7 @@ tokio = { workspace = true, features = ["rt"] }
 tempfile = { workspace = true }
 async-trait = { workspace = true }
 # Verified audit reader surface: ed25519 for the trusted verifying key in
-# the reader's constructor; the shared chrono/serde/serde_json/thiserror
+# the reader's constructor; the shared serde/serde_json/thiserror
 # entries below serve its filters, DTOs, and typed refusals too. Already
 # in the mvmctl closure via mvm-core/mvm-hostd.
 ed25519-dalek = { workspace = true }
@@ -119,11 +119,10 @@ secrecy = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 tar = { workspace = true }
-chrono = { workspace = true }
 ext4-view = { workspace = true }
 # The write-only secret lifecycle service (`secret` module): typed refusals
 # (thiserror) and the `host_matches` destination check (mvm-contract); the
-# shared serde/secrecy/chrono entries above serve it too. `StreamRecord` and
+# shared serde/secrecy entries above serve it too. `StreamRecord` and
 # its tags are also in this crate's re-exported public surface.
 mvm-contract = { workspace = true }
 thiserror = { workspace = true }

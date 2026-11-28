@@ -51,7 +51,7 @@ mod tests {
 
     fn entry(event: &str) -> PlanAuditEntry {
         PlanAuditEntry {
-            timestamp: chrono::Utc::now(),
+            timestamp: mvm_core::util::time::utc_timestamp_now(),
             tenant: TenantId("local".to_string()),
             plan_id: mvm_core::plan::PlanId("plan-1".to_string()),
             plan_version: 1,

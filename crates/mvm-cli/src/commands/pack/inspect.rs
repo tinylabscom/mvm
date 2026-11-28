@@ -443,7 +443,7 @@ fn application_trust_lines(
         Some(end) => format!(
             "Revocation scope: official signed feed (verified cache valid until {})",
             // Keeps the `+00:00` form this line has always printed.
-            chrono::DateTime::<chrono::Utc>::from(end).to_rfc3339()
+            end.to_rfc3339_offset()
         ),
         None => "Revocation scope: official signed feed required; no current verified copy is cached (`mvmctl pull` refreshes it)".to_owned(),
     };

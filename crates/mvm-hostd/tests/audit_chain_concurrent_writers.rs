@@ -164,7 +164,7 @@ fn entry(worker: usize, seq: usize) -> PlanAuditEntry {
     }
 
     PlanAuditEntry {
-        timestamp: chrono::Utc::now(),
+        timestamp: mvm_core::util::time::utc_timestamp_now(),
         tenant: TenantId(TENANT.to_string()),
         plan_id: PlanId(format!("plan-{worker}-{seq}")),
         plan_version: 1,

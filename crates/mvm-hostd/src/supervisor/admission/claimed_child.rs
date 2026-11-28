@@ -186,13 +186,17 @@ mod tests {
             .tenant(TENANT)
             .workload(CHILD)
             .build();
-        let now = chrono::Utc::now();
+        let now = mvm_core::util::time::utc_timestamp_now();
         let topology = Topology {
             schema_version: TOPOLOGY_SCHEMA_VERSION,
             tenant: TenantId(TENANT.into()),
             generation: 1,
-            valid_from: now - chrono::Duration::hours(1),
-            valid_until: now + chrono::Duration::days(1),
+            valid_from: now
+                .checked_sub(std::time::Duration::from_secs(3600))
+                .unwrap(),
+            valid_until: now
+                .checked_add(std::time::Duration::from_secs(86_400))
+                .unwrap(),
             suite: CryptoSuite::CLASSICAL,
             units: vec![Unit {
                 workload: WorkloadId(CHILD.into()),

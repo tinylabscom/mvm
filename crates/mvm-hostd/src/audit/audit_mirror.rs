@@ -82,7 +82,7 @@ mod tests {
 
     fn sample_entry(event: &str) -> PlanAuditEntry {
         PlanAuditEntry {
-            timestamp: chrono::Utc::now(),
+            timestamp: mvm_core::util::time::utc_timestamp_now(),
             tenant: mvm_contract::plan::TenantId("tenant-a".to_string()),
             plan_id: mvm_contract::plan::PlanId("plan-123".to_string()),
             plan_version: 7,
@@ -149,9 +149,7 @@ mod tests {
             let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
             let signer = FileAuditSigner::open(key, dir.path()).unwrap();
             let mut entry = sample_entry("plan.admitted");
-            entry.timestamp = chrono::DateTime::parse_from_rfc3339("2026-08-14T00:00:00Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc);
+            entry.timestamp = "2026-08-14T00:00:00Z".parse().unwrap();
 
             let seen = if observe {
                 let events: CapturedEvents = Arc::new(Mutex::new(Vec::new()));

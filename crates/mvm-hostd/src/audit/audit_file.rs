@@ -667,7 +667,7 @@ impl FileAuditSigner {
         labels: std::collections::BTreeMap<String, String>,
     ) -> PlanAuditEntry {
         PlanAuditEntry {
-            timestamp: chrono::Utc::now(),
+            timestamp: mvm_core::util::time::utc_timestamp_now(),
             tenant: tenant.clone(),
             plan_id: mvm_core::plan::PlanId(
                 crate::audit::audit_recorder::UNBOUND_PLAN_ID.to_string(),
@@ -1508,7 +1508,6 @@ mod tests {
     }
     use rand::Rng;
 
-    use chrono::Utc;
     use ed25519_dalek::SigningKey;
     use mvm_core::plan::{PlanId, TenantId};
     use std::collections::BTreeMap;
@@ -1523,7 +1522,7 @@ mod tests {
 
     fn make_entry(tenant: &str, event: &str) -> PlanAuditEntry {
         PlanAuditEntry {
-            timestamp: Utc::now(),
+            timestamp: mvm_core::util::time::utc_timestamp_now(),
             tenant: TenantId(tenant.to_string()),
             plan_id: PlanId("plan-1".to_string()),
             plan_version: 1,

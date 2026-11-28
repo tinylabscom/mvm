@@ -1,7 +1,7 @@
 //! The nonce ledger a plan admission spends against.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::plan::{ExecutionPlan, NonceStore};
 use std::sync::Mutex;
 
@@ -58,7 +58,7 @@ impl InMemoryNonceLedger {
         &self,
         signer: &str,
         plan: &ExecutionPlan,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<()> {
         self.inner
             .lock()
@@ -70,13 +70,7 @@ impl InMemoryNonceLedger {
             use mvm_core::plan::PlanValidityError;
             use mvm_core::plan::nonce_ledger::NonceLedgerError;
             durable
-                .check_and_insert(
-                    signer,
-                    plan,
-                    now.try_into()
-                        .map_err(|e| anyhow::anyhow!("host clock is unrepresentable: {e}"))
-                        .context("replay protection check")?,
-                )
+                .check_and_insert(signer, plan, now)
                 .map_err(|e| match e {
                     NonceLedgerError::Replay { signer } => {
                         anyhow::Error::new(PlanValidityError::NonceReplay { signer })

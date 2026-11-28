@@ -9,7 +9,7 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::plan::{ExecutionPlan, PlanId, TenantId};
 use mvm_core::policy::PolicyId;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use thiserror::Error;
 /// the JSON shape matches the browser verifier while the host keeps strongly
 /// typed identifiers internally.
 pub type PlanAuditEntry =
-    mvm_contract::verify::PlanAuditEntry<TenantId, PlanId, PolicyId, DateTime<Utc>>;
+    mvm_contract::verify::PlanAuditEntry<TenantId, PlanId, PolicyId, UtcTimestamp>;
 
 /// On-disk representation of one host audit line.
 pub type SignedEnvelope = mvm_contract::verify::SignedEnvelope<PlanAuditEntry>;
@@ -40,7 +40,7 @@ pub fn for_plan(
     let mut labels = plan.audit_labels.clone();
     labels.extend(extras);
     PlanAuditEntry {
-        timestamp: Utc::now(),
+        timestamp: mvm_core::util::time::utc_timestamp_now(),
         tenant: plan.tenant.clone(),
         plan_id: plan.plan_id.clone(),
         plan_version: plan.plan_version,
@@ -300,7 +300,6 @@ impl AuditSigner for CapturingAuditSigner {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use chrono::TimeZone;
     use mvm_core::plan::{
         AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
         KeyRotationSpec, Nonce, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
@@ -373,12 +372,8 @@ pub(crate) mod tests {
                 idle_secs: 0,
             },
             // G4 replay-protection fields.
-            valid_from: mvm_core::plan::test_support::utc_timestamp(
-                Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
-            ),
-            valid_until: mvm_core::plan::test_support::utc_timestamp(
-                Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap(),
-            ),
+            valid_from: "2026-05-01T00:00:00Z".parse().unwrap(),
+            valid_until: "2026-05-01T01:00:00Z".parse().unwrap(),
             nonce: Nonce::from_bytes([0xab; 16]),
             bundle: None,
             deps_volume: None,
@@ -401,7 +396,7 @@ pub(crate) mod tests {
     #[test]
     fn audit_entry_serde_roundtrip() {
         let entry = PlanAuditEntry {
-            timestamp: Utc::now(),
+            timestamp: mvm_core::util::time::utc_timestamp_now(),
             tenant: TenantId("t".to_string()),
             plan_id: PlanId("p".to_string()),
             plan_version: 1,

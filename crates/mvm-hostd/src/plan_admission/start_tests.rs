@@ -2202,7 +2202,7 @@ fn a_declared_campaign_opens_its_session_on_the_boot_path() {
         provenance: mvm_core::packs::PackProvenanceMeta {
             builder_identity: "assurance-release".to_string(),
             build_environment_identity: "test".to_string(),
-            build_timestamp: Utc::now(),
+            build_timestamp: mvm_core::util::time::utc_timestamp_now(),
             reproducibility: mvm_core::packs::ReproducibilityStatus::NotChecked,
             sbom: mvm_core::packs::SbomReference {
                 uri: "urn:sbom:extension".to_string(),
@@ -2210,15 +2210,15 @@ fn a_declared_campaign_opens_its_session_on_the_boot_path() {
             },
         },
         trust: mvm_core::packs::PackTrustMeta {
-            expires_at: Utc.with_ymd_and_hms(2100, 1, 1, 0, 0, 0).unwrap(),
+            expires_at: "2100-01-01T00:00:00Z".parse().unwrap(),
             revocation_channel: "https://example.invalid/revocations".to_string(),
             channel_identity: "stable".to_string(),
             mirror_identity: None,
             transparency_log: None,
         },
         signature: mvm_core::packs::SignatureValidity {
-            signed_at: Utc::now(),
-            expires_at: Utc.with_ymd_and_hms(2100, 1, 1, 0, 0, 0).unwrap(),
+            signed_at: mvm_core::util::time::utc_timestamp_now(),
+            expires_at: "2100-01-01T00:00:00Z".parse().unwrap(),
         },
     };
     let extension_budgets = mvm_contract::protocol::extension_pack::ExtensionBudgets {
@@ -2272,7 +2272,7 @@ fn a_declared_campaign_opens_its_session_on_the_boot_path() {
             .collect(),
         policy_hash: pack_policy_hash,
         allowed_channels: ["stable".to_string()].into_iter().collect(),
-        now: Utc::now(),
+        now: mvm_core::util::time::utc_timestamp_now(),
     };
     let trust = Trust(pack_key.verifying_key());
     let revocations = Revocations;

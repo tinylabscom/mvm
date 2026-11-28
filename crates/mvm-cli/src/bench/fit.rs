@@ -623,13 +623,12 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn topology(units: Vec<Unit>, standby_pairs: Vec<StandbyPair>) -> Topology {
-        use chrono::TimeZone;
         Topology {
             schema_version: TOPOLOGY_SCHEMA_VERSION,
             tenant: TenantId("t".to_string()),
             generation: 1,
-            valid_from: chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
-            valid_until: chrono::Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap(),
+            valid_from: "2026-01-01T00:00:00Z".parse().unwrap(),
+            valid_until: "2027-01-01T00:00:00Z".parse().unwrap(),
             suite: CryptoSuite::CLASSICAL,
             units,
             standby_pairs,

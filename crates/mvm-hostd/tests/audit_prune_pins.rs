@@ -29,7 +29,7 @@ fn key() -> SigningKey {
 
 fn event(kind: &str, labels: BTreeMap<String, String>) -> PlanAuditEntry {
     PlanAuditEntry {
-        timestamp: chrono::Utc::now(),
+        timestamp: mvm_core::util::time::utc_timestamp_now(),
         tenant: TenantId("local".into()),
         plan_id: PlanId("synthetic-run".into()),
         plan_version: 1,

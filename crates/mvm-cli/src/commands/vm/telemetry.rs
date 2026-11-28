@@ -196,8 +196,11 @@ fn render_record(received: &ReceivedRecord) -> String {
     let at = received
         .received_at_ms
         .map(|ms| {
-            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(i64::try_from(ms).unwrap_or(0))
-                .map(|t| t.format("%H:%M:%S%.3f").to_string())
+            i64::try_from(ms / 1_000)
+                .ok()
+                .and_then(|secs| mvm_contract::timestamp::UtcTimestamp::from_unix(secs, 0))
+                // `HH:MM:SS` out of `YYYY-MM-DDTHH:MM:SSZ`, then the milliseconds.
+                .map(|t| format!("{}.{:03}", &t.to_string()[11..19], ms % 1_000))
                 .unwrap_or_default()
         })
         .unwrap_or_else(|| "--:--:--.---".to_string());

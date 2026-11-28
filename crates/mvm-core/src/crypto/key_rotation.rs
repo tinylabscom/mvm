@@ -48,7 +48,6 @@ use std::path::{Path, PathBuf};
 
 use crate::domain::volume::{MasterKeyRef, MasterKeyState, OrgId, WrapAlgorithm, WrappedKey};
 use anyhow::{Context, Result};
-use chrono::Utc;
 use secrecy::{ExposeSecret, SecretBox};
 
 use crate::crypto::snapshot_crypto;
@@ -261,7 +260,7 @@ pub fn rotate_master_key(active_dir: &Path, org_id: &OrgId) -> Result<MasterKeyR
     let new_ref = MasterKeyRef {
         org_id: org_id.clone(),
         version: new_version,
-        created_at: Utc::now(),
+        created_at: crate::util::time::utc_timestamp_now(),
         state: MasterKeyState::Active,
     };
     manifest.entries.push(new_ref.clone());

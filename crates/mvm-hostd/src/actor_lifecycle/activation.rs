@@ -272,7 +272,7 @@ mod tests {
         wrong.plan_digest[0] ^= 1;
         assert!(ParentActivation::activate(&machine, wrong, &path).is_err());
         let active = ParentActivation::activate(&machine, binding, &path).unwrap();
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = mvm_core::util::time::utc_timestamp_now().unix_millis();
         assert!(
             active
                 .check_current_record(LifecycleOperation::Launch, now)
@@ -311,7 +311,7 @@ mod tests {
         let (machine, binding) = started(&backend, 1);
         let active =
             ParentActivation::activate(&machine, binding, &home.path().join("active")).unwrap();
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = mvm_core::util::time::utc_timestamp_now().unix_millis();
         assert!(
             active
                 .check_current_record(LifecycleOperation::Launch, now)
@@ -340,7 +340,7 @@ mod tests {
         let (machine, binding) = started(&backend, 1);
         let mut active =
             ParentActivation::activate(&machine, binding, &home.path().join("active")).unwrap();
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = mvm_core::util::time::utc_timestamp_now().unix_millis();
         let check = |active: &ParentActivation| {
             active
                 .check_current_record(LifecycleOperation::Launch, now)

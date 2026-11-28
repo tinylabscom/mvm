@@ -15,11 +15,6 @@ description = "Feature-gated no_std protocol and storage contracts shared by mvm
 # match the workspace's resolved versions so Cargo still unifies on one
 # copy of each.
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
-# `DateTime<Utc>`'s serde impl emits/parses RFC-3339 identically under
-# `std` and `no_std` — the `clock` feature only gates `Utc::now()`
-# (wall-clock reads), never serialization — so plan DTOs keep their
-# `DateTime<Utc>` fields byte-identical across the move.
-chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"], optional = true }
 ed25519-dalek = { version = "3", default-features = false }
 # The egress-projection core decides over CIDRs. `default-features = false`
 # drops ipnet's `std` feature, under which its `AddrParseError` implements
@@ -32,10 +27,7 @@ ipnet = { version = "2", default-features = false }
 # build under `no_std` at all — optional + off by default keeps the
 # wasm32 build (which uses only this crate's own default features)
 # schemars-free. Mirrors `mvm-core`/`mvm-agentd`'s `schema` feature.
-# `chrono` gives schemars its `impl JsonSchema for DateTime<Utc>` bridge —
-# `VerbGrant::not_after` needs it under this feature the same way
-# `mvm-core`'s schemars dep already carries it.
-schemars = { version = "0.8", default-features = false, features = ["derive", "chrono"], optional = true }
+schemars = { version = "0.8", default-features = false, features = ["derive"], optional = true }
 anyhow = { workspace = true, optional = true }
 bytes = { version = "1", optional = true }
 tokio = { workspace = true, features = ["fs", "io-util"], optional = true }
@@ -52,19 +44,13 @@ thiserror = { version = "2", default-features = false }
 # gate stays clean. Exercises the policy DTOs' TOML round-trip.
 [dev-dependencies]
 toml.workspace = true
-# Re-declaring chrono here (feature-unified with the no_std `[dependencies]`
-# entry above, for this crate's own test builds only) turns on `clock` so
-# `mod tests` can call `Utc::now()`. Dev-dependencies never join the
-# wasm32-unknown-unknown lib build, so the wasm-clean gate stays chrono
-# clock-free.
-chrono = { version = "0.4", features = ["clock"] }
 tempfile.workspace = true
 
 [features]
 default = ["protocol"]
-protocol = ["dep:chrono"]
+protocol = []
 volume = ["dep:anyhow", "dep:bytes"]
-local = ["volume", "dep:chrono", "chrono/clock", "dep:tokio"]
+local = ["volume", "dep:tokio"]
 # Derive `schemars::JsonSchema` on the Workload IR types so
 # `mvm-sdk`'s `emit_schema`/`emit_addon_schema` bins can emit the IR's
 # JSON Schema. Off by default: the schema is a build-time codegen

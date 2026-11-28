@@ -44,7 +44,6 @@ ext4-view.workspace = true
 # `mvmctl trust audit verify-cert` decodes base64 destruction-cert
 # signatures + pubkeys.
 base64.workspace = true
-chrono.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
 uuid.workspace = true

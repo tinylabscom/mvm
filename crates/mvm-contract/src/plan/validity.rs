@@ -36,26 +36,10 @@ impl FreshnessClaims {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
-
     use super::*;
 
     fn ts(secs: i64) -> UtcTimestamp {
         UtcTimestamp::from_unix(secs, 0).unwrap()
-    }
-
-    /// Locks the byte-identity assumption the whole DTO split rests on:
-    /// `DateTime<Utc>` must serialize the same RFC-3339 bytes under the
-    /// scoped no_std chrono as it does under the workspace's default
-    /// `std` + `clock` chrono, since signed plans are verified over exact
-    /// bytes across the mvmd/mvm repo boundary.
-    #[test]
-    fn datetime_utc_serializes_rfc3339_byte_identical() {
-        let dt = Utc.with_ymd_and_hms(2026, 7, 16, 12, 34, 56).unwrap();
-        assert_eq!(
-            serde_json::to_vec(&dt).unwrap(),
-            br#""2026-07-16T12:34:56Z""#
-        );
     }
 
     #[test]

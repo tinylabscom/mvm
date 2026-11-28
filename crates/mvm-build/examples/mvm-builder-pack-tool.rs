@@ -50,7 +50,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use chrono::{Duration, Utc};
 use ed25519_dalek::SigningKey;
 use mvm_build::builder_pack::{
     BuildBuilderPackParams, BuildRuntimePackParams, build_builder_pack, build_keyless_builder_pack,
@@ -109,8 +108,12 @@ fn run(rest: &[String]) -> Result<(), String> {
     let sbom = sbom_reference(&parsed.sbom, parsed.sbom_uri.as_deref())?;
 
     // The producers are pure; this wrapper owns the single wall-clock read.
-    let now = Utc::now();
-    let expires_at = now + Duration::days(parsed.valid_days);
+    let now = mvm_core::util::time::utc_timestamp_now();
+    let expires_at = parsed
+        .valid_days
+        .checked_mul(86_400)
+        .and_then(|secs| now.checked_add_secs(secs))
+        .ok_or("--valid-days reaches past year 9999")?;
 
     if parsed.runtime {
         // Runtime packs are keyless-only; `parse_args` guarantees --keyless

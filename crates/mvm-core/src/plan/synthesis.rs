@@ -51,9 +51,7 @@ use crate::plan::{
     WorkloadIntent,
 };
 use anyhow::Result;
-use chrono::Utc;
 use mvm_contract::builder::BuilderError;
-use mvm_contract::timestamp::UtcTimestamp;
 use rand::Rng;
 use std::collections::BTreeMap;
 
@@ -768,7 +766,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         );
     }
     let nonce = fresh_nonce();
-    let now = UtcTimestamp::try_from(Utc::now())?;
+    let now = crate::util::time::try_utc_timestamp_now()?;
 
     let tenant_str = input.tenant.unwrap_or(DEFAULT_TENANT);
     if tenant_str.is_empty() {

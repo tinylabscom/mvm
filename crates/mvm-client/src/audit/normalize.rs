@@ -44,7 +44,7 @@ pub(crate) fn normalize_lifecycle_entry(
             seq,
         },
         kind: classify_lifecycle_event(&entry.event),
-        timestamp: entry.timestamp.to_rfc3339(),
+        timestamp: entry.timestamp.to_rfc3339_offset(),
         tenant: entry.tenant.0.clone(),
         machine: lifecycle_machine(entry),
         event: sanitize_free_text(&entry.event, MAX_FIELD_LEN),
@@ -264,7 +264,6 @@ fn refusal(
 mod tests {
     use super::super::event::AuditEventKind;
     use super::*;
-    use chrono::Utc;
     use mvm_core::plan::{PlanId, TenantId};
 
     fn lifecycle_source() -> AuditSourceId {
@@ -285,7 +284,7 @@ mod tests {
 
     fn entry(event: &str) -> PlanAuditEntry {
         PlanAuditEntry {
-            timestamp: Utc::now(),
+            timestamp: mvm_core::util::time::utc_timestamp_now(),
             tenant: TenantId("local".into()),
             plan_id: PlanId("sha256:abc".into()),
             plan_version: 1,

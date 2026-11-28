@@ -7,6 +7,7 @@
 //! table or as JSON. The JSON output *is* the serialized inventory record —
 //! the same typed shape any other consumer of the service sees.
 
+use mvm_contract::timestamp::UtcTimestamp;
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
@@ -19,7 +20,7 @@ use super::{MachineListArgs, health_cell, humanize_age};
 pub(super) fn list_machines(args: MachineListArgs) -> Result<()> {
     let query = query_from_args(&args)?;
     let records = fetch_local_inventory()?;
-    let now = chrono::Utc::now();
+    let now = mvm_core::util::time::utc_timestamp_now();
 
     let visible: Vec<MachineInventoryRecord> = records
         .into_iter()
@@ -121,7 +122,7 @@ impl Cells {
         }
     }
 
-    fn from_record(record: &MachineInventoryRecord, now: chrono::DateTime<chrono::Utc>) -> Self {
+    fn from_record(record: &MachineInventoryRecord, now: UtcTimestamp) -> Self {
         Self {
             name: record.name.clone(),
             kind: record.kind.label().to_string(),
@@ -138,10 +139,7 @@ impl Cells {
 /// Render the table: a header plus left-aligned columns padded to their widest
 /// cell, so a column nothing populates collapses to its header width. Pure so
 /// the alignment is unit-testable.
-pub(super) fn format_table(
-    records: &[MachineInventoryRecord],
-    now: chrono::DateTime<chrono::Utc>,
-) -> String {
+pub(super) fn format_table(records: &[MachineInventoryRecord], now: UtcTimestamp) -> String {
     let rows: Vec<Cells> = records
         .iter()
         .map(|record| Cells::from_record(record, now))

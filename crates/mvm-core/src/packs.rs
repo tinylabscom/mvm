@@ -13,8 +13,8 @@ use std::path::{Component, Path, PathBuf};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use mvm_contract::timestamp::UtcTimestamp;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -281,7 +281,7 @@ pub struct PackFile {
 pub struct PackProvenance {
     pub builder_identity: String,
     pub build_environment_identity: String,
-    pub build_timestamp: DateTime<Utc>,
+    pub build_timestamp: UtcTimestamp,
     pub reproducibility: ReproducibilityStatus,
     pub sbom: SbomReference,
     pub signature_bundle: SignatureBundle,
@@ -330,15 +330,15 @@ pub enum SignaturePayload {
 pub struct PackSignature {
     pub key_id: KeyId,
     pub signature_base64: String,
-    pub signed_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    pub signed_at: UtcTimestamp,
+    pub expires_at: UtcTimestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustMetadata {
     pub signing_key_id: KeyId,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: UtcTimestamp,
     pub revocation_channel: String,
     pub channel_identity: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -362,7 +362,7 @@ pub struct LocalPackPolicy {
     pub host_capabilities: BTreeSet<HostCapability>,
     pub policy_hash: Sha256Hex,
     pub allowed_channels: BTreeSet<String>,
-    pub now: DateTime<Utc>,
+    pub now: UtcTimestamp,
 }
 
 pub trait PackTrustStore {
@@ -872,7 +872,7 @@ pub enum PackVerifyError {
     #[error("pack channel {0:?} is not allowed by local policy")]
     ChannelNotAllowed(String),
     #[error("pack trust metadata expired at {expired_at}")]
-    ExpiredTrustMetadata { expired_at: DateTime<Utc> },
+    ExpiredTrustMetadata { expired_at: UtcTimestamp },
     #[error("pack is missing required output hash {0}")]
     MissingOutputHash(String),
     #[error("extension pack is missing its extension contract")]
@@ -921,7 +921,7 @@ pub enum PackVerifyError {
     #[error("signature for key {key_id:?} expired at {expired_at}")]
     ExpiredSignature {
         key_id: KeyId,
-        expired_at: DateTime<Utc>,
+        expired_at: UtcTimestamp,
     },
     #[error("unknown signing key {key_id:?}")]
     UnknownSigningKey { key_id: KeyId },
@@ -965,7 +965,7 @@ pub struct PackMetadata {
 pub struct PackProvenanceMeta {
     pub builder_identity: String,
     pub build_environment_identity: String,
-    pub build_timestamp: DateTime<Utc>,
+    pub build_timestamp: UtcTimestamp,
     pub reproducibility: ReproducibilityStatus,
     pub sbom: SbomReference,
 }
@@ -973,7 +973,7 @@ pub struct PackProvenanceMeta {
 /// Trust metadata minus `signing_key_id`, which the builder derives from the key.
 #[derive(Debug, Clone)]
 pub struct PackTrustMeta {
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: UtcTimestamp,
     pub revocation_channel: String,
     pub channel_identity: String,
     pub mirror_identity: Option<String>,
@@ -983,8 +983,8 @@ pub struct PackTrustMeta {
 /// Validity window stamped onto the produced signature.
 #[derive(Debug, Clone)]
 pub struct SignatureValidity {
-    pub signed_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    pub signed_at: UtcTimestamp,
+    pub expires_at: UtcTimestamp,
 }
 
 /// Typed output hashes the caller already knows for the assembled artifacts. The
@@ -1222,8 +1222,8 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::fs;
 
-    use chrono::{TimeZone, Utc};
     use ed25519_dalek::{Signer, SigningKey};
+    use mvm_contract::timestamp::UtcTimestamp;
     use tempfile::TempDir;
 
     use mvm_contract::protocol::agent_capability::{
@@ -1237,6 +1237,17 @@ mod tests {
     };
 
     use super::*;
+
+    /// Signed manifest times read and re-write the bytes chrono wrote.
+    #[test]
+    fn signed_manifest_times_keep_their_bytes() {
+        let signature = r#"{"key_id":"k","signature_base64":"AA==","signed_at":"2026-08-19T00:00:00.123456789Z","expires_at":"2100-01-01T00:00:00Z"}"#;
+        let parsed: PackSignature = serde_json::from_str(signature).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), signature);
+        let trust = r#"{"signing_key_id":"k","expires_at":"2100-01-01T00:00:00.500Z","revocation_channel":"c","channel_identity":"i"}"#;
+        let parsed: TrustMetadata = serde_json::from_str(trust).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), trust);
+    }
 
     #[test]
     fn signature_format_sigstore_serde_snake_case() {
@@ -1291,10 +1302,10 @@ mod tests {
         revocations: StaticRevocation,
     }
 
-    fn utc(y: i32, m: u32, d: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(y, m, d, 0, 0, 0)
-            .single()
-            .expect("valid test timestamp")
+    fn utc(y: i32, m: u32, d: u32) -> UtcTimestamp {
+        format!("{y:04}-{m:02}-{d:02}T00:00:00Z")
+            .parse::<UtcTimestamp>()
+            .unwrap()
     }
 
     fn hash(value: &str) -> Sha256Hex {

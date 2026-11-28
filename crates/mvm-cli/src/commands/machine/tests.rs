@@ -11,6 +11,7 @@ use super::runtime::{
 use super::*;
 use crate::commands::{Cli, Commands};
 use clap::{CommandFactory, Parser};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::atomic_io::atomic_write;
 use mvm_core::util::test_env::TestEnv;
 /// dragging the whole top-level CLI in for unit-level assertions.
@@ -2469,9 +2470,7 @@ fn already_running_notice_wording() {
 
 #[test]
 fn humanize_age_buckets() {
-    let now = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
+    let now = "2026-01-02T00:00:00Z".parse::<UtcTimestamp>().unwrap();
     let ago = |s: &str| humanize_age(Some(s), now);
     assert_eq!(ago("2026-01-01T23:59:30Z"), "just now");
     assert_eq!(ago("2026-01-01T23:30:00Z"), "30m");

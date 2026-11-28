@@ -59,7 +59,7 @@ fn audit_consistency_real_commands_generate_verify_and_refuse_rollback() {
     let new_path = dir.path().join("candidate.json");
     for i in 0..4 {
         rt.block_on(signer.sign_and_emit(&PlanAuditEntry {
-            timestamp: chrono::Utc::now(),
+            timestamp: mvm_core::util::time::utc_timestamp_now(),
             tenant: mvm_core::plan::TenantId("local".into()),
             plan_id: mvm_core::plan::PlanId(format!("plan-{i}")),
             plan_version: 1,
@@ -1420,7 +1420,7 @@ fn verified_machine_logs_emit_bound_output_without_audit_or_console_side_effects
     )
     .unwrap();
     let entry = PlanAuditEntry {
-        timestamp: chrono::Utc::now(),
+        timestamp: mvm_core::util::time::utc_timestamp_now(),
         tenant: mvm_core::plan::TenantId("local".into()),
         plan_id: mvm_core::plan::PlanId("exact-plan".into()),
         plan_version: 1,

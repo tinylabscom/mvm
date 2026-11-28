@@ -39,10 +39,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use mvm_contract::plan::topology::Topology;
 use mvm_contract::plan::topology::requirements::MAX_LIVENESS_UNITS;
 use mvm_contract::protocol::mailbox::ExecutionEpoch;
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::atomic_io::{self, FileLock};
 use mvm_core::host_interface::Denial;
 use mvm_core::host_interface::epoch_gate::CommandGate;
@@ -110,7 +110,7 @@ pub struct UnitPass {
     /// from now while no deadline is armed. `None` once the caller's epoch can
     /// never act again (replaced or quarantined) or the admitted topology
     /// declares no period for the unit, so there is nothing left to watch.
-    pub next: Option<DateTime<Utc>>,
+    pub next: Option<UtcTimestamp>,
 }
 
 /// What one expiry pass did.
@@ -133,13 +133,13 @@ enum State {
 #[serde(deny_unknown_fields)]
 struct Deadline {
     epoch: ExecutionEpoch,
-    last_signal: DateTime<Utc>,
-    deadline: DateTime<Utc>,
+    last_signal: UtcTimestamp,
+    deadline: UtcTimestamp,
     state: State,
 }
 
 impl Deadline {
-    fn has_passed(&self, now: DateTime<Utc>) -> bool {
+    fn has_passed(&self, now: UtcTimestamp) -> bool {
         self.state == State::Fencing || now >= self.deadline || now < self.last_signal
     }
 }
@@ -289,7 +289,7 @@ impl LivenessDeadlines<'_> {
                 None => self
                     .clock
                     .now()
-                    .checked_add_signed(chrono::Duration::milliseconds(i64::from(period.get()))),
+                    .checked_add(std::time::Duration::from_millis(u64::from(period.get()))),
             }
         };
         Ok(UnitPass { expired, next })
@@ -388,8 +388,11 @@ impl LivenessDeadlines<'_> {
             ("unit".to_string(), expiry.unit.0.clone()),
             ("fenced_epoch".to_string(), expiry.fenced.get().to_string()),
             ("epoch".to_string(), expiry.current.get().to_string()),
-            ("last_signal".to_string(), watched.last_signal.to_rfc3339()),
-            ("deadline".to_string(), watched.deadline.to_rfc3339()),
+            (
+                "last_signal".to_string(),
+                watched.last_signal.to_rfc3339_offset(),
+            ),
+            ("deadline".to_string(), watched.deadline.to_rfc3339_offset()),
         ];
         if let Some(suspended) = suspended {
             labels.push((
@@ -480,7 +483,7 @@ impl LivenessSignals<'_> {
             ));
         }
         let deadline = now
-            .checked_add_signed(chrono::Duration::milliseconds(i64::from(period.get())))
+            .checked_add(std::time::Duration::from_millis(u64::from(period.get())))
             .context("the liveness deadline overflows the clock")?;
         if let Some(topology) = &topology {
             retain_declared(&mut deadlines, topology);

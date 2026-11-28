@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
+use mvm_contract::timestamp::UtcTimestamp;
 
 use crate::ui;
 use mvm_core::user_config::MvmConfig;
@@ -148,7 +149,7 @@ struct CacheStatusEntry {
     backends: Vec<mvm_core::packs::PackBackend>,
     channel: String,
     size_bytes: u64,
-    expires_at: chrono::DateTime<chrono::Utc>,
+    expires_at: UtcTimestamp,
     expired: bool,
     signing_key_id: mvm_core::plan::bundle::KeyId,
     revocation_channel: String,
@@ -243,7 +244,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         }
         CacheAction::Status { json } => {
             let packs = mvm_core::pack_cache::list_cached_packs()?;
-            let now = chrono::Utc::now();
+            let now = mvm_core::util::time::utc_timestamp_now();
             let diagnosis = crate::commands::vm::runtime_pack::runtime_pack_diagnosis()?;
             let reason = crate::commands::vm::runtime_pack::not_instant_reason(&diagnosis);
 
@@ -292,7 +293,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     p.arch,
                     p.channel,
                     human_bytes(p.size_bytes),
-                    p.expires_at.format("%Y-%m-%d"),
+                    // The `YYYY-MM-DD` date part.
+                    &p.expires_at.to_string()[..10],
                     if expired { "EXPIRED" } else { "ok" },
                 );
             }
@@ -603,7 +605,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // is never instant-launch-eligible, so reclaiming it is always safe.
             // Valid-but-unused (LRU) pack reclamation is a separate concern and
             // is not swept here.
-            match mvm_core::pack_cache::prune_expired_packs(chrono::Utc::now(), dry_run) {
+            match mvm_core::pack_cache::prune_expired_packs(
+                mvm_core::util::time::utc_timestamp_now(),
+                dry_run,
+            ) {
                 Ok(expired) => {
                     if !expired.is_empty() {
                         if dry_run {

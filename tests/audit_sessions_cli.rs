@@ -15,7 +15,7 @@ const OPEN: &str = "sha256:dddd4444eeee5555ffff6666";
 
 fn entry(plan_id: &str, event: &str, labels: Vec<(String, String)>) -> PlanAuditEntry {
     PlanAuditEntry {
-        timestamp: chrono::Utc::now(),
+        timestamp: mvm_core::util::time::utc_timestamp_now(),
         tenant: TenantId("local".into()),
         plan_id: PlanId(plan_id.into()),
         plan_version: 1,

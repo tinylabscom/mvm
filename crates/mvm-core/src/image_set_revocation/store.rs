@@ -212,7 +212,7 @@ pub fn update_image_set_revocations(
         .detail(format!(
             "publication={} issued_at={} sha256={}",
             checkpoint.publication,
-            crate::util::time::rfc3339_offset(checkpoint.issued_at),
+            checkpoint.issued_at.to_rfc3339_offset(),
             checkpoint.sha256.as_str()
         ))
         .emit();

@@ -16,7 +16,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use chrono::{TimeZone, Utc};
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::{
     ArtifactFormat, ArtifactName, BootProtocol, GitCommit, ImageSetManifest, ImageSetMember,
@@ -50,7 +49,7 @@ impl ImageSetFixture {
         let manifest = ImageSetManifest {
             schema_version: mvm_core::image_set::LEGACY_IMAGE_SET_SCHEMA_VERSION,
             set_version: lock.release_tag.version().clone(),
-            issued_at: Utc.with_ymd_and_hms(2026, 9, 16, 0, 0, 0).unwrap(),
+            issued_at: "2026-09-16T00:00:00Z".parse().unwrap(),
             producer: ImageSetProducer::Release(ReleaseProducer {
                 repository: lock.repository.clone(),
                 workflow: lock.signing_identity.workflow.clone(),

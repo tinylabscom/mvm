@@ -23,11 +23,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::num::{NonZeroU32, NonZeroU64};
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::assurance::Sha256Digest;
 use crate::plan::types::{TenantId, WorkloadId};
+use crate::timestamp::UtcTimestamp;
 
 pub mod binding;
 pub mod requirements;
@@ -53,9 +53,9 @@ pub struct Topology {
     /// one it admitted; that check belongs to admission, not to this type.
     pub generation: u64,
     /// The topology is admissible from this instant.
-    pub valid_from: DateTime<Utc>,
+    pub valid_from: UtcTimestamp,
     /// The topology is not admissible at or after this instant.
-    pub valid_until: DateTime<Utc>,
+    pub valid_until: UtcTimestamp,
     /// Signature and key-establishment algorithms.
     pub suite: CryptoSuite,
     /// Every unit, strictly ascending by workload ID.

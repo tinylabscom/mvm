@@ -1,13 +1,13 @@
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::unix::fs::PermissionsExt;
 
-use chrono::{DateTime, Duration, TimeZone, Utc};
 use ed25519_dalek::SigningKey;
 use mvm_contract::plan::topology::{
     CoreId, CorePlacement, CryptoSuite, IsolationTier, KeyEstablishmentSuite, SealedTransitions,
     StandbyClass, StandbyPair, StateCell, TOPOLOGY_SCHEMA_VERSION, Unit, UnitResources, UnitRole,
     UnmetRequirement,
 };
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::plan::WorkloadId;
 use mvm_core::util::test_env::TestEnv;
 
@@ -17,14 +17,14 @@ use crate::audit::host_keypair::HostSigner;
 
 const TENANT: &str = "acme";
 
-fn t0() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap()
+fn t0() -> UtcTimestamp {
+    "2026-11-01T00:00:00Z".parse::<UtcTimestamp>().unwrap()
 }
 
-struct FixedClock(DateTime<Utc>);
+struct FixedClock(UtcTimestamp);
 
 impl Clock for FixedClock {
-    fn now(&self) -> DateTime<Utc> {
+    fn now(&self) -> UtcTimestamp {
         self.0
     }
 }
@@ -89,7 +89,10 @@ impl Host {
             backend: BackendKind::Firecracker,
             measured_failover: None,
             host_cpus: &self.host_cpus,
-            clock: &FixedClock(t0() + Duration::days(1)),
+            clock: &FixedClock(
+                t0().checked_add(std::time::Duration::from_secs(86_400))
+                    .unwrap(),
+            ),
             host_signer_keys_dir: Some(&keys),
             emitter: &self.emitter,
         })
@@ -118,7 +121,7 @@ impl Host {
         signed: &SignedTopology,
         backend: BackendKind,
         measured: Option<MeasuredFailoverMs>,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<TopologyAdmission> {
         let keys = self.keys();
         admit_topology(&TopologyAdmissionRequest {
@@ -138,7 +141,8 @@ impl Host {
             signed,
             BackendKind::Firecracker,
             None,
-            t0() + Duration::days(1),
+            t0().checked_add(std::time::Duration::from_secs(86_400))
+                .unwrap(),
         )
     }
 
@@ -207,7 +211,9 @@ pub(super) fn topology(generation: u64) -> Topology {
         tenant: TenantId(TENANT.to_string()),
         generation,
         valid_from: t0(),
-        valid_until: t0() + Duration::days(30),
+        valid_until: t0()
+            .checked_add(std::time::Duration::from_secs(2_592_000))
+            .unwrap(),
         suite: CryptoSuite::CLASSICAL,
         units: vec![
             unit("controller", UnitRole::Controller),
@@ -255,7 +261,11 @@ fn a_host_signed_topology_is_admitted_sealed_and_audited() {
         serde_json::from_slice(&std::fs::read(&admitted.record_path).unwrap()).unwrap();
     assert_eq!(record.generation, 3);
     assert_eq!(record.digest, topology.digest());
-    assert_eq!(record.admitted_at, t0() + Duration::days(1));
+    assert_eq!(
+        record.admitted_at,
+        t0().checked_add(std::time::Duration::from_secs(86_400))
+            .unwrap()
+    );
     let trusted = trusted_topology_signers(Some(&host.keys())).unwrap();
     let refs: Vec<(&str, &VerifyingKey)> = trusted.iter().map(|(i, k)| (i.as_str(), k)).collect();
     assert_eq!(verify_topology(&record.signed, &refs).unwrap(), topology);
@@ -316,7 +326,10 @@ fn a_topology_is_refused_before_and_after_its_validity_window() {
     let topology = topology(1);
     let signed = host.sign(&topology);
 
-    for now in [t0() - Duration::seconds(1), topology.valid_until] {
+    for now in [
+        t0().checked_sub(std::time::Duration::from_secs(1)).unwrap(),
+        topology.valid_until,
+    ] {
         let err = host
             .admit_with(&signed, BackendKind::Firecracker, None, now)
             .expect_err("outside the window");
@@ -357,7 +370,8 @@ fn readmitting_the_same_generation_and_digest_writes_nothing() {
             &signed,
             BackendKind::Firecracker,
             None,
-            t0() + Duration::days(2),
+            t0().checked_add(std::time::Duration::from_secs(172_800))
+                .unwrap(),
         )
         .unwrap();
 
@@ -463,7 +477,8 @@ fn each_unmet_requirement_is_refused_named_and_persists_nothing() {
                 &host.sign(&topology),
                 backend,
                 measured,
-                t0() + Duration::days(1),
+                t0().checked_add(std::time::Duration::from_secs(86_400))
+                    .unwrap(),
             )
             .expect_err("an unmet requirement is refused");
 
@@ -489,7 +504,9 @@ fn a_liveness_period_is_admitted_where_a_supervisor_holds_the_deadline() {
         MAX_LIVENESS_PERIOD_MS, MIN_LIVENESS_PERIOD_MS,
     };
     let host = Host::new();
-    let now = t0() + Duration::days(1);
+    let now = t0()
+        .checked_add(std::time::Duration::from_secs(86_400))
+        .unwrap();
     let watched = |period_ms: u32| {
         let mut topology = topology(1);
         topology.units[0].liveness_period_ms = NonZeroU32::new(period_ms);
@@ -603,7 +620,10 @@ fn a_tenant_that_is_not_one_path_component_is_refused_before_anything_is_written
         backend: BackendKind::Firecracker,
         measured_failover: None,
         host_cpus: &no_scope_cpuset(),
-        clock: &FixedClock(t0() + Duration::days(1)),
+        clock: &FixedClock(
+            t0().checked_add(std::time::Duration::from_secs(86_400))
+                .unwrap(),
+        ),
         host_signer_keys_dir: Some(&keys),
         emitter: &host.emitter,
     })

@@ -29,6 +29,7 @@
 //! clock larger than [`SUSPEND_TOLERANCE`] looks the same and is recorded the
 //! same; the label says what was measured, not why.
 
+use mvm_contract::timestamp::UtcTimestamp;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
@@ -115,15 +116,12 @@ pub struct LivenessWatch {
 
 impl LivenessWatch {
     /// One pass over this unit. Returns when the next is due.
-    pub fn pass(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    pub fn pass(&self) -> Result<Option<UtcTimestamp>> {
         self.pass_noting(None)
     }
 
     /// One pass, recording `suspended` in an expiry it commits.
-    fn pass_noting(
-        &self,
-        suspended: Option<Duration>,
-    ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    fn pass_noting(&self, suspended: Option<Duration>) -> Result<Option<UtcTimestamp>> {
         let deadlines = LivenessDeadlines {
             host_signer_keys_dir: self.host_signer_keys_dir.as_deref(),
             emitter: &self.emitter,
@@ -192,18 +190,14 @@ impl UnitTimer {
                     Err(e) => {
                         tracing::warn!(error = %format!("{e:#}"), unit = %watch.unit.0, "liveness expiry pass failed; retrying in one period");
                         let now = watch.clock.now();
-                        liveness_at = Some(
-                            chrono::Duration::from_std(watch.period)
-                                .ok()
-                                .and_then(|period| now.checked_add_signed(period))
-                                .unwrap_or(now),
-                        );
+                        liveness_at = Some(now.checked_add(watch.period).unwrap_or(now));
                     }
                 }
             }
             let liveness_pause = liveness.map(|watch| {
                 liveness_at.map_or(Duration::ZERO, |at| {
-                    (at - watch.clock.now()).to_std().unwrap_or(Duration::ZERO)
+                    at.duration_since(watch.clock.now())
+                        .unwrap_or(Duration::ZERO)
                 })
             });
             let digest_pause = self
@@ -249,13 +243,13 @@ impl UnitTimer {
 /// How far the wall clock ran ahead of the monotonic clock between two
 /// readings, if beyond [`SUSPEND_TOLERANCE`].
 fn suspend_gap(
-    wall_before: chrono::DateTime<chrono::Utc>,
-    wall_after: chrono::DateTime<chrono::Utc>,
+    wall_before: UtcTimestamp,
+    wall_after: UtcTimestamp,
     mono_before: Duration,
     mono_after: Duration,
 ) -> Option<Duration> {
     // A wall clock that went backwards ran ahead of nothing.
-    let wall = (wall_after - wall_before).to_std().ok()?;
+    let wall = wall_after.duration_since(wall_before)?;
     let gap = wall.saturating_sub(mono_after.saturating_sub(mono_before));
     (gap > SUSPEND_TOLERANCE).then_some(gap)
 }

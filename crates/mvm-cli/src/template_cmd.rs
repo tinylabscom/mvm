@@ -1,11 +1,10 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
 fn now_iso() -> String {
-    Utc::now().to_rfc3339()
+    mvm_core::util::time::utc_now_rfc3339()
 }
 
 /// Initialize a project: scaffold `mvm.toml` + `flake.nix` (+ NixOS

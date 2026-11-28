@@ -1,5 +1,6 @@
 use mvm_client::inventory::{InventoryQuery, MachineInventoryRecord, MachineKind, WorkloadPosture};
 use mvm_client::{MachineStatus, PortMapping};
+use mvm_contract::timestamp::UtcTimestamp;
 
 use super::super::MachineListArgs;
 use super::*;
@@ -10,10 +11,8 @@ fn record(name: &str, kind: MachineKind, status: MachineStatus) -> MachineInvent
         .build()
 }
 
-fn now() -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc)
+fn now() -> UtcTimestamp {
+    "2026-07-31T12:00:00Z".parse::<UtcTimestamp>().unwrap()
 }
 
 fn args() -> MachineListArgs {

@@ -539,7 +539,7 @@ mod tests {
             .unwrap();
         for i in 0..n {
             let e = PlanAuditEntry {
-                timestamp: chrono::Utc::now(),
+                timestamp: mvm_core::util::time::utc_timestamp_now(),
                 tenant: mvm_core::plan::TenantId("local".into()),
                 plan_id: mvm_core::plan::PlanId(format!("plan-{tag}-{i}")),
                 plan_version: 1,

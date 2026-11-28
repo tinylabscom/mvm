@@ -162,8 +162,12 @@ fn generated_transient_name() -> String {
 
 /// RFC 3339 expiry timestamp `ttl_seconds` from now, or `None`.
 fn expires_at_from_ttl(ttl_seconds: Option<u64>) -> Option<String> {
-    ttl_seconds
-        .map(|secs| (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339())
+    ttl_seconds.map(|secs| {
+        mvm_core::util::time::utc_timestamp_now()
+            .checked_add(std::time::Duration::from_secs(secs))
+            .unwrap_or(mvm_contract::timestamp::UtcTimestamp::MAX)
+            .to_rfc3339_offset()
+    })
 }
 
 impl LocalBackend {

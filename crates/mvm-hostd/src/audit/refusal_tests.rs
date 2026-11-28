@@ -1,6 +1,6 @@
 use std::sync::Mutex as StdMutex;
 
-use chrono::TimeZone;
+use mvm_contract::timestamp::UtcTimestamp;
 
 use super::*;
 
@@ -21,10 +21,10 @@ impl RefusalAudit for Recorder {
     }
 }
 
-struct TestClock(StdMutex<DateTime<Utc>>);
+struct TestClock(StdMutex<UtcTimestamp>);
 
 impl Clock for TestClock {
-    fn now(&self) -> DateTime<Utc> {
+    fn now(&self) -> UtcTimestamp {
         *self.0.lock().unwrap()
     }
 }
@@ -39,7 +39,7 @@ impl Fixture {
     fn new() -> Self {
         let recorder = Arc::new(Recorder::default());
         let clock = Arc::new(TestClock(StdMutex::new(
-            Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap(),
+            "2026-11-01T00:00:00Z".parse::<UtcTimestamp>().unwrap(),
         )));
         let throttle = ThrottledRefusals::new(recorder.clone(), clock.clone());
         Self {
@@ -49,8 +49,9 @@ impl Fixture {
         }
     }
 
-    fn advance(&self, by: chrono::Duration) {
-        *self.clock.0.lock().unwrap() += by;
+    fn advance(&self, by: std::time::Duration) {
+        let mut now = self.clock.0.lock().unwrap();
+        *now = now.checked_add(by).unwrap();
     }
 
     fn cell(&self, kind: &'static str, cell: &str) {
@@ -85,11 +86,11 @@ fn a_burst_is_one_entry_then_one_per_interval_with_the_count() {
     assert_eq!(f.entries().len(), 1);
     assert_eq!(suppressed(&f.entries()[0].2), None);
 
-    f.advance(REFUSAL_AUDIT_INTERVAL - chrono::Duration::milliseconds(1));
+    f.advance(REFUSAL_AUDIT_INTERVAL - std::time::Duration::from_millis(1));
     f.cell("not_writer", "setpoint");
     assert_eq!(f.entries().len(), 1, "still inside the interval");
 
-    f.advance(chrono::Duration::milliseconds(1));
+    f.advance(std::time::Duration::from_millis(1));
     f.cell("not_writer", "setpoint");
     let entries = f.entries();
     assert_eq!(entries.len(), 2);

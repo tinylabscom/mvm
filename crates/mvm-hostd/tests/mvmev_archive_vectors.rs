@@ -92,7 +92,7 @@ fn entry(event: &str, secs: i64) -> PlanAuditEntry {
     PlanAuditEntry {
         // Fixed, not `now()`: a vector whose contents drift with the clock
         // cannot be reasoned about by whoever reads it next.
-        timestamp: chrono::DateTime::from_timestamp(1_756_080_000 + secs, 0)
+        timestamp: mvm_contract::timestamp::UtcTimestamp::from_unix(1_756_080_000 + secs, 0)
             .expect("fixed vector timestamp is valid"),
         tenant: TenantId("local".into()),
         plan_id: PlanId(

@@ -111,23 +111,13 @@ struct VerbGrantSigned<'a> {
     application_terminal: Option<&'a crate::grants::ApplicationTerminalBinding>,
 }
 
-/// The expiry as the signature has always carried it: chrono's `+00:00`
-/// suffix, where `UtcTimestamp` renders `Z`. Changing it would invalidate every
-/// grant already minted.
-fn signed_expiry(t: UtcTimestamp) -> String {
-    let z = alloc::string::ToString::to_string(&t);
-    alloc::format!(
-        "{}+00:00",
-        z.strip_suffix('Z').expect("UtcTimestamp renders Z")
-    )
-}
-
 impl VerbGrant {
     pub fn signing_bytes(&self) -> Vec<u8> {
         let body = VerbGrantSigned {
             session_id: &self.session_id,
             plan_nonce: self.plan_nonce.as_hex(),
-            not_after: signed_expiry(self.not_after),
+            // chrono's `+00:00` form: changing it would invalidate every minted grant.
+            not_after: self.not_after.to_rfc3339_offset(),
             verbs: self.verbs.iter().map(VerbId::as_str).collect(),
             drive: self.drive.as_ref(),
             application_terminal: self.application_terminal.as_ref(),

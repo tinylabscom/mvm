@@ -13,6 +13,7 @@
 //! crate up in `mvm-client`'s `inventory` module; this module owns the wire
 //! shape and the visibility semantics both sides share.
 
+use mvm_contract::timestamp::UtcTimestamp;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -228,7 +229,7 @@ impl MachineInventoryRecord {
 
     /// Whether the machine's TTL has elapsed at `now`. A missing or
     /// unparseable `expires_at` is "no TTL" (never expired).
-    pub fn is_expired(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+    pub fn is_expired(&self, now: UtcTimestamp) -> bool {
         self.expires_at
             .as_deref()
             .and_then(crate::util::time::parse_iso8601)
@@ -406,11 +407,7 @@ impl InventoryQuery {
     /// Only [`MachineStatus::Stopped`] counts as "no longer running" — a
     /// paused or failed machine stays visible by default so its state is
     /// observable rather than silently folding away.
-    pub fn matches(
-        &self,
-        record: &MachineInventoryRecord,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> bool {
+    pub fn matches(&self, record: &MachineInventoryRecord, now: UtcTimestamp) -> bool {
         let stopped = record.status == MachineStatus::Stopped;
         if !self.include_stopped_transient && record.kind == MachineKind::Transient && stopped {
             return false;
@@ -433,7 +430,7 @@ impl InventoryQuery {
 mod tests {
     use super::*;
 
-    fn now() -> chrono::DateTime<chrono::Utc> {
+    fn now() -> UtcTimestamp {
         crate::util::time::parse_iso8601("2026-07-31T12:00:00Z").unwrap()
     }
 

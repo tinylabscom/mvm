@@ -136,7 +136,7 @@ impl<'a> SealEvidenceBuilder<'a> {
 }
 
 fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339()
+    mvm_core::util::time::utc_now_rfc3339()
 }
 
 /// The `/mvm/provenance.json` document.

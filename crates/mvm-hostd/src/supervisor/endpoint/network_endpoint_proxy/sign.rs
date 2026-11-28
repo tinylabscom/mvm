@@ -9,7 +9,7 @@ use crate::keyholder::{NetworkEndpoint, SigningInput, build_sigv4_input};
 
 /// `yyyymmddThhmmssZ` UTC, the SigV4 `x-amz-date` format.
 fn amz_date_now() -> String {
-    chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
+    mvm_core::util::time::utc_now().replace(['-', ':'], "")
 }
 
 /// The request to sign, under one signing credential. Borrowed — built once per

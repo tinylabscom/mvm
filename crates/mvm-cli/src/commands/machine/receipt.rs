@@ -340,7 +340,7 @@ pub(super) fn write_machine_start_receipt(
     let payload = MachineStartReceiptPayload {
         schema_version: 1,
         receipt_id: uuid::Uuid::new_v4().to_string(),
-        recorded_at: chrono::Utc::now().to_rfc3339(),
+        recorded_at: mvm_core::util::time::utc_now_rfc3339(),
         invocation,
         outcome,
     };

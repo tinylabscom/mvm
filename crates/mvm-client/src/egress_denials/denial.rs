@@ -5,7 +5,7 @@
 //! chain, and a refusal attributed to the wrong one would send its owner off
 //! to widen a policy that was never in the way.
 
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_hostd::supervisor::PlanAuditEntry;
 use mvm_hostd::supervisor::audit::audit_recorder::LABEL_VM_NAME;
 use mvm_hostd::supervisor::audit::denial_stage::DenialStage;
@@ -80,7 +80,7 @@ impl std::fmt::Display for Subject {
 /// One refusal the host recorded for the watched machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EgressDenial {
-    pub at: DateTime<Utc>,
+    pub at: UtcTimestamp,
     /// The audit event that recorded it.
     pub event: String,
     /// The reason label exactly as recorded.

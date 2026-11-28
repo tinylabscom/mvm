@@ -94,7 +94,7 @@ pub fn record_refs(machines_root: &Path, machine: &str, refs: &[MachineSecretRef
     let record = MachineSecretRefSet {
         schema_version: MACHINE_SECRET_REFS_SCHEMA_VERSION,
         machine: machine.to_string(),
-        recorded_at: chrono::Utc::now().to_rfc3339(),
+        recorded_at: mvm_core::util::time::utc_now_rfc3339(),
         references: refs.to_vec(),
     };
     let bytes = serde_json::to_vec_pretty(&record).context("serializing secret references")?;
@@ -277,7 +277,7 @@ mod tests {
         let record = MachineSecretRefSet {
             schema_version: MACHINE_SECRET_REFS_SCHEMA_VERSION,
             machine: "gone".into(),
-            recorded_at: chrono::Utc::now().to_rfc3339(),
+            recorded_at: mvm_core::util::time::utc_now_rfc3339(),
             references: vec![oref("local", "openai")],
         };
         std::fs::write(

@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
+use mvm_contract::timestamp::UtcTimestamp;
 use serde::Serialize;
 
 use mvm_hostd::supervisor::PlanAuditEntry;
@@ -34,7 +34,7 @@ pub fn explain_local_run(tenant: &str, run_id: &str) -> Result<RunExplanation> {
 /// tamper-evidence detail, not part of the run's story.
 #[derive(Debug, Clone, Serialize)]
 pub struct EventRecord {
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: UtcTimestamp,
     pub event: String,
     pub labels: BTreeMap<String, String>,
 }

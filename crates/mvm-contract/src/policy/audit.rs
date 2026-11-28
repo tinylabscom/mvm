@@ -6,10 +6,9 @@
 //! stay in `mvm_core::policy::audit`, which re-exports these types at
 //! their existing paths.
 //!
-//! `LocalAuditEvent::now()` (the `chrono::Utc::now()`-stamped
-//! constructor) also stays in `mvm-core` as the free function
-//! `now_event()` — the wall-clock read needs chrono's `clock` feature,
-//! unavailable in this `no_std` crate.
+//! `LocalAuditEvent::now()` (the wall-clock-stamped constructor) also
+//! stays in `mvm-core` as the free function `now_event()` — this
+//! `no_std` crate carries no clock.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -708,7 +707,7 @@ mod tests {
     use alloc::vec;
 
     /// Pure-shape constructor used in place of the removed
-    /// `LocalAuditEvent::now()` (a `chrono::Utc::now()`-stamped
+    /// `LocalAuditEvent::now()` (a wall-clock-stamped
     /// constructor that stays in `mvm-core` as `now_event()`, since
     /// this crate carries no clock). Tests here only assert on
     /// `kind`/`vm_name`/`detail`/serde shape, never on the timestamp

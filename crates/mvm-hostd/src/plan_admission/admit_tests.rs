@@ -2,6 +2,7 @@
 
 use super::test_support::*;
 use super::*;
+use mvm_contract::timestamp::UtcTimestamp;
 
 #[test]
 fn happy_path_returns_admitted_plan_with_plan_id() {
@@ -81,28 +82,24 @@ fn rejects_replay_within_validity_window() {
 fn rejects_plan_outside_validity_window() {
     // Construct a fixed clock 30 minutes in the future — past
     // the plan's 10-minute window from synthesis.
-    let now_plus_30 = Utc.with_ymd_and_hms(2099, 1, 1, 12, 30, 0).unwrap();
+    let now_plus_30 = "2099-01-01T12:30:00Z".parse::<UtcTimestamp>().unwrap();
     // Override time by constructing a plan with a known window
     // and a FixedClock outside it.
     let dir = tempfile::tempdir().unwrap();
     // To exercise the window check deterministically, we
     // pre-build a stale signed plan and feed it directly through
     // the check (synthesize_plan can't make a stale plan because
-    // it uses Utc::now()).
+    // it reads the wall clock).
     let mut plan = synthesize_plan(&fixture_input("vm1")).unwrap();
-    plan.valid_from = mvm_core::plan::test_support::utc_timestamp(
-        Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap(),
-    );
-    plan.valid_until = mvm_core::plan::test_support::utc_timestamp(
-        Utc.with_ymd_and_hms(2000, 1, 1, 0, 10, 0).unwrap(),
-    );
+    plan.valid_from = "2000-01-01T00:00:00Z".parse().unwrap();
+    plan.valid_until = "2000-01-01T00:10:00Z".parse().unwrap();
     let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
     let signed = sign_plan(&plan, &signer.signing, &host_signer_id());
     let verified = verify_plan(&signed, &[(&host_signer_id(), &signer.verifying)]).unwrap();
     let _clock = FixedClock(now_plus_30);
     // Inline the window check (admit_for_run does it after
     // synthesis; we're proving the underlying assert).
-    assert!(check_window_chrono(&verified, now_plus_30).is_err());
+    assert!(check_window(&verified, now_plus_30).is_err());
 }
 
 #[test]

@@ -593,7 +593,7 @@ pub fn handle_proc_start(
     let stdin = child.stdin.take();
 
     let argv0 = argv.first().cloned().unwrap_or_default();
-    let started_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let started_at = mvm_core::util::time::utc_now();
 
     let record = Arc::new(ProcessRecord {
         argv0,

@@ -29,8 +29,8 @@ use std::path::PathBuf;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signer, SigningKey};
+use mvm_contract::timestamp::UtcTimestamp;
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
@@ -62,13 +62,11 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Fixed timestamps. `Utc::now()` would make the bytes unfreezable, which is
+/// Fixed timestamps. A wall-clock read would make the bytes unfreezable, which is
 /// why the entries are built field-by-field rather than through
 /// `PlanAuditEntry::for_plan`.
-fn ts(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .expect("fixture timestamp parses")
-        .with_timezone(&Utc)
+fn ts(s: &str) -> UtcTimestamp {
+    s.parse().expect("fixture timestamp parses")
 }
 
 /// The frozen entry set. Deliberately exercises the shape choices that move

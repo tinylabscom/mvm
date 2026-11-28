@@ -18,8 +18,8 @@ use mvm_contract::grants::ceiling::GrantCeiling;
 use mvm_core::plan::bundle::{BundleResolver, TrustStore};
 use mvm_core::plan::{
     ExecutionPlan, PlanValidityError, SignedExecutionPlan, SynthesisInput,
-    check_embedded_image_set_for_backend, check_window_chrono, sign_plan, synthesize_plan,
-    verify_plan, verify_plan_bundle, verify_plan_id,
+    check_embedded_image_set_for_backend, check_window, sign_plan, synthesize_plan, verify_plan,
+    verify_plan_bundle, verify_plan_id,
 };
 
 /// The external plan signers this host trusts, from operator config.
@@ -353,7 +353,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
     // externally-signed plan it is the host's own check that the window the
     // fleet issuer chose still holds here.
     let now = clock.now();
-    check_window_chrono(&verified, now).map_err(|e| match e {
+    check_window(&verified, now).map_err(|e| match e {
         PlanValidityError::NotYetValid { .. } | PlanValidityError::Expired { .. } => {
             anyhow::anyhow!("plan validity window violated: {e}")
         }

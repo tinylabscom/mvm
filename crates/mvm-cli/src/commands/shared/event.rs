@@ -18,7 +18,7 @@ pub(crate) struct PhaseEvent {
 impl PhaseEvent {
     pub(crate) fn new(command: &'static str, phase: &str, status: &'static str) -> Self {
         Self {
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: mvm_core::util::time::utc_now_rfc3339(),
             command,
             phase: phase.to_string(),
             status,

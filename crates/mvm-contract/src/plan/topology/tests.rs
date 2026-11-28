@@ -3,8 +3,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::num::{NonZeroU32, NonZeroU64};
 
-use chrono::TimeZone;
-
 use super::*;
 
 pub(super) fn id(name: &str) -> WorkloadId {
@@ -52,8 +50,8 @@ pub(super) fn full() -> Topology {
         schema_version: TOPOLOGY_SCHEMA_VERSION,
         tenant: TenantId("acme".to_string()),
         generation: 7,
-        valid_from: Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap(),
-        valid_until: Utc.with_ymd_and_hms(2026, 12, 1, 0, 0, 0).unwrap(),
+        valid_from: "2026-11-01T00:00:00Z".parse().unwrap(),
+        valid_until: "2026-12-01T00:00:00Z".parse().unwrap(),
         suite: CryptoSuite::CLASSICAL,
         units: vec![
             ctl_a,
@@ -249,10 +247,10 @@ fn the_digest_changes_when_any_field_changes() {
         ("tenant", |t| t.tenant.0.push('x')),
         ("generation", |t| t.generation += 1),
         ("valid_from", |t| {
-            t.valid_from -= chrono::Duration::seconds(1);
+            t.valid_from = t.valid_from.checked_add_secs(-1).unwrap();
         }),
         ("valid_until", |t| {
-            t.valid_until += chrono::Duration::seconds(1);
+            t.valid_until = t.valid_until.checked_add_secs(1).unwrap();
         }),
         ("signature", |t| {
             t.suite.signature = SignatureSuite::Ed25519MlDsa65;

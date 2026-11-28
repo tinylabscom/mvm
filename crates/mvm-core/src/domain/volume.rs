@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 pub use mvm_contract::{VolumeEntry, VolumeError, VolumePath};
 use serde::{Deserialize, Serialize};
 
@@ -299,7 +299,7 @@ pub struct Volume {
     pub org_id: OrgId,
     pub workspace_id: WorkspaceId,
     pub name: VolumeName,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
 
     /// Optional soft cap on stored bytes. `None` = unbounded (rely on
     /// host quota). `LocalBackend` enforces this; `ObjectStoreBackend`
@@ -472,7 +472,7 @@ pub enum MasterKeyState {
 pub struct MasterKeyRef {
     pub org_id: OrgId,
     pub version: u32,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
     pub state: MasterKeyState,
 }
 
@@ -488,10 +488,19 @@ pub struct MasterKeyRef {
 mod tests {
     use super::*;
 
-    fn ts() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-05-06T20:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc)
+    /// Persisted key and volume records read and re-write the bytes chrono wrote.
+    #[test]
+    fn persisted_timestamps_keep_their_bytes() {
+        let key = r#"{"org_id":"acme","version":3,"created_at":"2026-05-06T20:00:00.123456789Z","state":"active"}"#;
+        let parsed: MasterKeyRef = serde_json::from_str(key).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), key);
+        let volume = r#"{"org_id":"acme","workspace_id":"dev","name":"data","created_at":"2026-05-06T20:00:00.120Z","backend":{"kind":"local","root":"/tmp/v"}}"#;
+        let parsed: Volume = serde_json::from_str(volume).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), volume);
+    }
+
+    fn ts() -> UtcTimestamp {
+        "2026-05-06T20:00:00Z".parse::<UtcTimestamp>().unwrap()
     }
 
     // ------------- ID validation -------------

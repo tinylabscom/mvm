@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use thiserror::Error;
 
 mod index;
@@ -582,7 +582,7 @@ pub struct PackCacheEntry {
     pub arch: GuestArch,
     pub backends: Vec<PackBackend>,
     pub channel: String,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: UtcTimestamp,
     pub signing_key_id: KeyId,
     pub revocation_channel: String,
     /// Sum of the on-disk sizes of the pack's promoted files.
@@ -665,7 +665,7 @@ pub fn list_cached_packs() -> Result<Vec<PackCacheEntry>, PackCacheError> {
 /// deleting. Valid-but-unused (LRU) pack reclamation with active-standby
 /// safety is a separate concern and is not done here.
 pub fn prune_expired_packs(
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     dry_run: bool,
 ) -> Result<Vec<Sha256Hex>, PackCacheError> {
     let mut removed = Vec::new();
@@ -917,8 +917,8 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::fs;
 
-    use chrono::{DateTime, TimeZone, Utc};
     use ed25519_dalek::{SigningKey, VerifyingKey};
+    use mvm_contract::timestamp::UtcTimestamp;
     use tempfile::TempDir;
 
     use super::*;
@@ -951,10 +951,10 @@ mod tests {
         }
     }
 
-    fn utc(y: i32, m: u32, d: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(y, m, d, 0, 0, 0)
-            .single()
-            .expect("valid timestamp")
+    fn utc(y: i32, m: u32, d: u32) -> UtcTimestamp {
+        format!("{y:04}-{m:02}-{d:02}T00:00:00Z")
+            .parse::<UtcTimestamp>()
+            .unwrap()
     }
 
     fn hash(value: &str) -> Sha256Hex {
@@ -1020,7 +1020,7 @@ mod tests {
     fn staged_builder_pack_expiring(
         kernel: &[u8],
         image: &[u8],
-        expires_at: DateTime<Utc>,
+        expires_at: UtcTimestamp,
     ) -> (TempDir, PackManifest) {
         let dir = TempDir::new().expect("tempdir");
         fs::create_dir_all(dir.path().join("boot")).expect("mkdir boot");

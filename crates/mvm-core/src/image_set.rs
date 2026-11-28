@@ -13,8 +13,8 @@
 
 use std::fmt;
 
-use chrono::{DateTime, Utc};
 use mvm_contract::guest_libc::GuestLibc;
+use mvm_contract::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::arch::GuestArch;
@@ -86,7 +86,7 @@ pub const LEGACY_IMAGE_SET_SCHEMA_VERSION: u32 = 2;
 pub struct ImageSetManifest {
     pub schema_version: u32,
     pub set_version: ImageSetVersion,
-    pub issued_at: DateTime<Utc>,
+    pub issued_at: UtcTimestamp,
     pub producer: ImageSetProducer,
     /// Legacy schema 2 runtime-source provenance. Required in that schema and
     /// absent in schema 3: the Linux-only image producer reads no mvm source.

@@ -365,7 +365,7 @@ impl Recorder {
             .map(|name| (LABEL_VM_NAME.to_string(), name.clone()));
         let labels = merge_extras(category, attribution.chain(extras));
         PlanAuditEntry {
-            timestamp: chrono::Utc::now(),
+            timestamp: mvm_core::util::time::utc_timestamp_now(),
             tenant: self.default_tenant.clone(),
             plan_id: PlanId(UNBOUND_PLAN_ID.to_string()),
             plan_version: 0,

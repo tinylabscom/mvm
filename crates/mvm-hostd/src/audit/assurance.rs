@@ -150,7 +150,7 @@ fn entry_for(
     let mut labels = identity.audit_labels.clone();
     labels.extend(extras);
     PlanAuditEntry {
-        timestamp: chrono::Utc::now(),
+        timestamp: mvm_core::util::time::utc_timestamp_now(),
         tenant: identity.tenant.clone(),
         plan_id: identity.plan_id.clone(),
         plan_version: identity.plan_version,
@@ -590,7 +590,7 @@ impl AssuranceAuditSink for SignerSink {
         let request = mvm_core::protocol::audit_signer::AppendEntryRequest::AppendEntry {
             request_id: format!("assurance-{audit_digest}"),
             category: Self::CATEGORY.to_string(),
-            ts: entry.timestamp.to_rfc3339(),
+            ts: entry.timestamp.to_rfc3339_offset(),
             workload_id: self.workload_id.clone(),
             tenant_id: self.tenant_id.clone(),
             session_id: self.session_id.clone(),
@@ -636,7 +636,7 @@ mod sink_tests {
 
     fn entry(event: &str) -> PlanAuditEntry {
         PlanAuditEntry {
-            timestamp: chrono::Utc::now(),
+            timestamp: mvm_core::util::time::utc_timestamp_now(),
             tenant: TenantId("local".to_string()),
             plan_id: mvm_core::plan::PlanId("plan-1".to_string()),
             plan_version: 1,

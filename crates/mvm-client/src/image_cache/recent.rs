@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 
 use super::oci_types::CachedOciImage;
 
@@ -26,12 +26,10 @@ pub(super) fn recent_image_references(cache_root: &Path) -> Result<Vec<String>> 
 /// RFC 3339 precisions, so the stamps are parsed rather than compared as
 /// strings; one that does not parse sorts last instead of hiding the rest.
 fn newest_first(images: &[CachedOciImage]) -> Vec<String> {
-    let mut stamped: Vec<(Option<DateTime<Utc>>, &str)> = images
+    let mut stamped: Vec<(Option<UtcTimestamp>, &str)> = images
         .iter()
         .map(|image| {
-            let at = DateTime::parse_from_rfc3339(&image.fetched_at)
-                .ok()
-                .map(|t| t.with_timezone(&Utc));
+            let at = image.fetched_at.parse::<UtcTimestamp>().ok();
             (at, image.reference.as_str())
         })
         .collect();

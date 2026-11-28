@@ -315,18 +315,14 @@ impl LockOwner {
         }
     }
 
-    /// `pid 4242 (`mvmctl machine build`) since 14:02:11` — who a waiter is
-    /// queued behind, with the holder's acquisition time in local time.
+    /// `pid 4242 (`mvmctl machine build`) since 14:02:11Z` — who a waiter is
+    /// queued behind, with the holder's acquisition time in UTC.
     fn waiting_phrase(&self) -> String {
         let since = i64::try_from(self.acquired_unix_secs)
             .ok()
-            .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
-            .map(|at| {
-                format!(
-                    " since {}",
-                    at.with_timezone(&chrono::Local).format("%H:%M:%S")
-                )
-            })
+            .and_then(|secs| mvm_contract::timestamp::UtcTimestamp::from_unix(secs, 0))
+            // Display is `YYYY-MM-DDTHH:MM:SSZ`; keep the time of day.
+            .map(|at| format!(" since {}", &at.to_string()[11..]))
             .unwrap_or_default();
         format!("pid {} (`{}`){since}", self.pid, self.command)
     }
@@ -420,7 +416,7 @@ fn describe_lock_holder(lock_path: &Path, now_unix_secs: u64) -> String {
 }
 
 /// The live status line shown while queued behind `lock_path`'s holder:
-/// `waiting for <what> — held by pid N (`cmd`) since HH:MM:SS`.
+/// `waiting for <what> — held by pid N (`cmd`) since HH:MM:SSZ`.
 fn waiting_label(subject: &LockSubject<'_>, lock_path: &Path) -> String {
     let holder = live_lock_owner(lock_path)
         .map(|owner| owner.waiting_phrase())
@@ -512,7 +508,7 @@ pub enum LockWaitError {
 /// Contention is expected rather than exceptional — a second `mvmctl` in
 /// another terminal wants the same artifact — so a held lock **waits**, for up
 /// to `wait`, with a live status line naming the holder (`waiting for <what> —
-/// held by pid N (`cmd`) since HH:MM:SS`). Failing fast was a poor trade: the
+/// held by pid N (`cmd`) since HH:MM:SSZ`). Failing fast was a poor trade: the
 /// only thing a hard error bought the operator was the job of retrying by
 /// hand.
 ///

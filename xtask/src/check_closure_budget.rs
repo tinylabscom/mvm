@@ -51,46 +51,46 @@ const BUDGETS: &[ClosureBudget] = &[
         package: "mvmctl",
         target: "aarch64-apple-darwin",
         features: RELEASE_FEATURES,
-        max: 325,
+        max: 323,
     },
     ClosureBudget {
         package: "mvmctl",
         target: "x86_64-unknown-linux-gnu",
         features: RELEASE_FEATURES,
-        max: 331,
+        max: 329,
     },
     ClosureBudget {
         package: "mvmctl",
         target: "aarch64-unknown-linux-gnu",
         features: RELEASE_FEATURES,
-        max: 330,
+        max: 328,
     },
     ClosureBudget {
         package: "mvm-builder-guest",
         target: "aarch64-unknown-linux-musl",
         features: "",
-        max: 88,
+        max: 85,
     },
     ClosureBudget {
         package: "mvm-agentd",
         target: "aarch64-unknown-linux-musl",
         features: "",
-        max: 84,
+        max: 81,
     },
     ClosureBudget {
         package: "mvm-host-services",
         target: "aarch64-unknown-linux-musl",
         features: "",
-        max: 85,
+        max: 82,
     },
 ];
 
 /// macOS omits the Linux-only confinement and networking dependencies.
-const MACOS_CLOSURE_BUDGET: usize = 321;
+const MACOS_CLOSURE_BUDGET: usize = 319;
 
 /// Maximum distinct packages in the default Linux closure.
 /// Direct coordinator observation reuses the existing Unix socket dependencies.
-pub(crate) const CLOSURE_BUDGET: usize = 326;
+pub(crate) const CLOSURE_BUDGET: usize = 324;
 
 pub(crate) fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

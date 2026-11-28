@@ -31,7 +31,7 @@ impl CaptureReportV1 {
     pub fn new(collector: impl Into<String>) -> Self {
         Self {
             schema_version: CAPTURE_SCHEMA_VERSION.to_owned(),
-            captured_at: chrono::Utc::now().to_rfc3339(),
+            captured_at: mvm_core::util::time::utc_now_rfc3339(),
             collector: collector.into(),
             ..Default::default()
         }

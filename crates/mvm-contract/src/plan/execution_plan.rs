@@ -438,8 +438,7 @@ impl ExecutionPlan {
 /// reusing `mvm-core`'s `plan::signing::test_support::sample_plan` —
 /// that fixture lives above `plan::signing` (which stays in
 /// `mvm-core`), so it's unreachable from here. A fixed timestamp
-/// stands in for `Utc::now()`, which needs chrono's `clock` feature
-/// this crate doesn't enable.
+/// stands in for a wall-clock read, which this `no_std` crate has none of.
 ///
 /// `pub(crate)` (not module-private) so other in-crate test modules —
 /// e.g. `crate::stream::input`'s plan-grant tests — can build a plan

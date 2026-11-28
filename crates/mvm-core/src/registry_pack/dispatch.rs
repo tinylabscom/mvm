@@ -296,7 +296,6 @@ pub(super) fn adopt_with(
 mod tests {
     use super::*;
     use crate::registry_pack::tests::{accept_signature, publisher_policy, reject_signature};
-    use mvm_contract::timestamp::UtcTimestamp;
 
     const APPLICATION: &[u8] = include_bytes!("application_manifest_v2.json");
 
@@ -327,7 +326,7 @@ mod tests {
         let VerifiedRegistryManifest::Application(app) = verified else {
             panic!("expected application")
         };
-        let now = UtcTimestamp::try_from(chrono::Utc::now()).unwrap();
+        let now = crate::util::time::utc_timestamp_now();
         let plus = |secs| now.checked_add_secs(secs).unwrap();
         let trust = KeylessTrust {
             issuer: "independent issuer".to_string(),

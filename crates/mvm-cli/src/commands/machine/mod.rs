@@ -35,6 +35,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use ed25519_dalek::Signer;
 #[cfg(test)]
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use mvm_contract::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1433,14 +1434,14 @@ fn health_cell(readiness: Option<&mvm_core::domain::instance::InstanceReadiness>
 /// Coarse, human-friendly age of a machine from its `created_at` timestamp,
 /// relative to `now`. `-` when absent/unparseable. Takes `now` explicitly so
 /// the buckets are unit-testable.
-fn humanize_age(created: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> String {
+fn humanize_age(created: Option<&str>, now: UtcTimestamp) -> String {
     let Some(created) = created else {
         return "-".to_string();
     };
-    let Ok(then) = chrono::DateTime::parse_from_rfc3339(created) else {
+    let Ok(then) = created.parse::<UtcTimestamp>() else {
         return "-".to_string();
     };
-    let secs = (now - then.with_timezone(&chrono::Utc)).num_seconds();
+    let secs = now.whole_secs_since(then);
     match secs {
         s if s < 0 => "-".to_string(),
         s if s < 60 => "just now".to_string(),

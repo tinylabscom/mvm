@@ -24,7 +24,7 @@ mod watch;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_hostd::supervisor::PlanAuditEntry;
 
 use crate::audit::follow::{ChainLine, parse_chain_line};
@@ -86,8 +86,8 @@ pub fn verify_local_chain() -> Result<()> {
 pub fn denials_in_window<'a>(
     entries: impl IntoIterator<Item = &'a PlanAuditEntry>,
     vm_name: &str,
-    from: DateTime<Utc>,
-    until: Option<DateTime<Utc>>,
+    from: UtcTimestamp,
+    until: Option<UtcTimestamp>,
 ) -> DenialTally {
     let mut tally = DenialTally::default();
     for entry in entries {

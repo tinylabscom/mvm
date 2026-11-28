@@ -7,8 +7,8 @@ use rand::Rng;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, TimeZone, Utc};
 use ed25519_dalek::SigningKey;
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::plan::{PlanId, TenantId};
 use mvm_hostd::audit_signer::canonical::CanonicalEntry;
 use mvm_hostd::audit_signer::chain::Chain;
@@ -22,11 +22,13 @@ fn fresh_key() -> SigningKey {
     SigningKey::from_bytes(&seed)
 }
 
-fn ts(hour: u32, minute: u32) -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 8, 1, hour, minute, 0).unwrap()
+fn ts(hour: u32, minute: u32) -> UtcTimestamp {
+    format!("2026-08-01T{hour:02}:{minute:02}:00Z")
+        .parse::<UtcTimestamp>()
+        .unwrap()
 }
 
-fn lifecycle_entry(tenant: &str, event: &str, at: DateTime<Utc>) -> PlanAuditEntry {
+fn lifecycle_entry(tenant: &str, event: &str, at: UtcTimestamp) -> PlanAuditEntry {
     PlanAuditEntry {
         timestamp: at,
         tenant: TenantId(tenant.to_string()),
@@ -590,8 +592,8 @@ fn time_window_filter_bounds_the_read() {
         .reader()
         .read(
             &AuditReadRequest::builder()
-                .since(ts(8, 30).try_into().unwrap())
-                .until(ts(9, 30).try_into().unwrap())
+                .since(ts(8, 30))
+                .until(ts(9, 30))
                 .build(),
         )
         .unwrap();

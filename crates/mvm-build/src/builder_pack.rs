@@ -12,9 +12,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
 use ed25519_dalek::SigningKey;
 use mvm_contract::builder::BuilderError;
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::arch::GuestArch;
 use mvm_core::packs::{
     HostCapability, PackBackend, PackBuilder, PackInputs, PackKind, PackManifest,
@@ -75,13 +75,13 @@ pub struct BuildBuilderPackParams {
     /// Identity of the environment the build ran in.
     pub build_environment_identity: String,
     /// When the artifacts were built.
-    pub build_timestamp: DateTime<Utc>,
+    pub build_timestamp: UtcTimestamp,
     /// Whether the build was reproduced.
     pub reproducibility: ReproducibilityStatus,
     /// SBOM enumerating the pack's contents.
     pub sbom: SbomReference,
     /// When the pack's trust metadata expires.
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: UtcTimestamp,
     /// Where a consumer looks up revocations for this signer.
     pub revocation_channel: String,
     /// Optional mirror identity.
@@ -112,10 +112,10 @@ pub struct BuildBuilderPackParamsBuilder {
     channel: Option<String>,
     builder_identity: Option<String>,
     build_environment_identity: Option<String>,
-    build_timestamp: Option<DateTime<Utc>>,
+    build_timestamp: Option<UtcTimestamp>,
     reproducibility: Option<ReproducibilityStatus>,
     sbom: Option<SbomReference>,
-    expires_at: Option<DateTime<Utc>>,
+    expires_at: Option<UtcTimestamp>,
     revocation_channel: Option<String>,
     mirror_identity: Option<String>,
     transparency_log: Option<TransparencyLogReference>,
@@ -196,7 +196,7 @@ impl BuildBuilderPackParamsBuilder {
 
     /// Set `build_timestamp`.
     #[must_use]
-    pub fn build_timestamp(mut self, build_timestamp: DateTime<Utc>) -> Self {
+    pub fn build_timestamp(mut self, build_timestamp: UtcTimestamp) -> Self {
         self.build_timestamp = Some(build_timestamp);
         self
     }
@@ -217,7 +217,7 @@ impl BuildBuilderPackParamsBuilder {
 
     /// Set `expires_at`.
     #[must_use]
-    pub fn expires_at(mut self, expires_at: DateTime<Utc>) -> Self {
+    pub fn expires_at(mut self, expires_at: UtcTimestamp) -> Self {
         self.expires_at = Some(expires_at);
         self
     }
@@ -337,13 +337,13 @@ pub struct BuildRuntimePackParams {
     /// Identity of the environment the build ran in.
     pub build_environment_identity: String,
     /// When the artifacts were built.
-    pub build_timestamp: DateTime<Utc>,
+    pub build_timestamp: UtcTimestamp,
     /// Whether the build was reproduced.
     pub reproducibility: ReproducibilityStatus,
     /// SBOM enumerating the pack's contents.
     pub sbom: SbomReference,
     /// When the pack's trust metadata expires.
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: UtcTimestamp,
     /// Where a consumer looks up revocations for this signer.
     pub revocation_channel: String,
     /// Optional mirror identity.
@@ -375,10 +375,10 @@ pub struct BuildRuntimePackParamsBuilder {
     channel: Option<String>,
     builder_identity: Option<String>,
     build_environment_identity: Option<String>,
-    build_timestamp: Option<DateTime<Utc>>,
+    build_timestamp: Option<UtcTimestamp>,
     reproducibility: Option<ReproducibilityStatus>,
     sbom: Option<SbomReference>,
-    expires_at: Option<DateTime<Utc>>,
+    expires_at: Option<UtcTimestamp>,
     revocation_channel: Option<String>,
     mirror_identity: Option<String>,
     transparency_log: Option<TransparencyLogReference>,
@@ -467,7 +467,7 @@ impl BuildRuntimePackParamsBuilder {
 
     /// Set `build_timestamp`.
     #[must_use]
-    pub fn build_timestamp(mut self, build_timestamp: DateTime<Utc>) -> Self {
+    pub fn build_timestamp(mut self, build_timestamp: UtcTimestamp) -> Self {
         self.build_timestamp = Some(build_timestamp);
         self
     }
@@ -488,7 +488,7 @@ impl BuildRuntimePackParamsBuilder {
 
     /// Set `expires_at`.
     #[must_use]
-    pub fn expires_at(mut self, expires_at: DateTime<Utc>) -> Self {
+    pub fn expires_at(mut self, expires_at: UtcTimestamp) -> Self {
         self.expires_at = Some(expires_at);
         self
     }
@@ -900,8 +900,8 @@ mod tests {
 
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as B64;
-    use chrono::{TimeZone, Utc};
     use ed25519_dalek::SigningKey;
+    use mvm_contract::timestamp::UtcTimestamp;
     use mvm_core::pack_cache::{PackVerifyCtx, promote, resolve_pack};
     use mvm_core::pack_trust::{PackTrustConfig, TrustedPublisher};
     use mvm_core::packs::{
@@ -912,10 +912,10 @@ mod tests {
 
     use super::*;
 
-    fn utc(y: i32, m: u32, d: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(y, m, d, 0, 0, 0)
-            .single()
-            .expect("valid test timestamp")
+    fn utc(y: i32, m: u32, d: u32) -> UtcTimestamp {
+        format!("{y:04}-{m:02}-{d:02}T00:00:00Z")
+            .parse::<UtcTimestamp>()
+            .unwrap()
     }
 
     fn signing_key() -> SigningKey {

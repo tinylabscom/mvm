@@ -343,7 +343,7 @@ pub(super) fn bundle_artifacts_for_sha(
         Some(r) => (r.vcpus, r.mem_mib),
         None => (user_cfg.default_cpus, user_cfg.default_memory_mib),
     };
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = mvm_core::util::time::utc_now_rfc3339();
     let spec = TemplateSpec {
         schema_version: mvm_core::template::CURRENT_SCHEMA_VERSION,
         template_id: bundle_sha256.to_string(),

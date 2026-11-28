@@ -23,7 +23,7 @@
 //! re-bumping the wire format.
 //!
 //! The clock-based constructor and the `NetworkPolicy`-resolving
-//! helper need `std` (chrono's `clock` feature for `Utc::now()`,
+//! helper need `std` (a wall-clock read,
 //! blocking DNS I/O) and stay in `mvm_core::policy::dns_pin` as
 //! free functions (`new_pin`, `resolve_network_policy_pins`) —
 //! this module carries the pure DTO plus its parse-only methods.
@@ -43,8 +43,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::net::IpAddr;
 
-use chrono::DateTime;
 use serde::{Deserialize, Serialize};
+
+use crate::timestamp::UtcTimestamp;
 
 /// One admission-time DNS pin.
 ///
@@ -105,17 +106,17 @@ impl DnsPin {
 
     /// `true` when `now < expires_at`. Pure given the supplied
     /// `now` (RFC 3339 UTC). Test consumers pass a fixed string;
-    /// production passes `Utc::now().to_rfc3339()`.
+    /// production passes the current instant in RFC 3339.
     ///
     /// Parse failures on either side return `false` (treat
     /// unparseable timestamps as expired) — fail-closed:
     /// rather emit a false `DnsPinReject` than let a malformed
     /// pin masquerade as valid.
     pub fn is_valid_at(&self, now: &str) -> bool {
-        let Ok(now_dt) = DateTime::parse_from_rfc3339(now) else {
+        let Ok(now_dt) = now.parse::<UtcTimestamp>() else {
             return false;
         };
-        let Ok(exp_dt) = DateTime::parse_from_rfc3339(&self.expires_at) else {
+        let Ok(exp_dt) = self.expires_at.parse::<UtcTimestamp>() else {
             return false;
         };
         now_dt < exp_dt
@@ -129,12 +130,12 @@ impl DnsPin {
     /// admission anyway.
     pub fn ttl_secs(&self) -> i64 {
         let (Ok(r), Ok(e)) = (
-            DateTime::parse_from_rfc3339(&self.resolved_at),
-            DateTime::parse_from_rfc3339(&self.expires_at),
+            self.resolved_at.parse::<UtcTimestamp>(),
+            self.expires_at.parse::<UtcTimestamp>(),
         ) else {
             return 0;
         };
-        (e - r).num_seconds()
+        e.whole_secs_since(r)
     }
 }
 

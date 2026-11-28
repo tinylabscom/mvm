@@ -32,14 +32,11 @@ yanked = "deny"
 # `sigstore-verify` stack, bumping inquire/indicatif/notify/httpmock/getset,
 # pinning `jiff < 0.2.29` (its optional `defmt` feature pulls
 # proc-macro-error2), and moving PEM parsing onto `rustls-pki-types`. Keep
-# this list empty: a new advisory must be fixed, not suppressed.
-#
-# One time-boxed exception. There is no expiry mechanism in cargo-deny, so the
-# review date is in the reason: remove this entry by 2026-12-31. The date is
-# checked by `xtask check-deny-ignore-expiry`, which fails once it has passed.
-ignore = [
-    { id = "RUSTSEC-2026-0543", reason = "chrono is flagged unmaintained, not vulnerable; accepted temporarily so releases can proceed. Replacing chrono is tracked in #5673. Remove or re-review; expires 2026-12-31." },
-]
+# this list empty: a new advisory must be fixed, not suppressed. chrono
+# (RUSTSEC-2026-0543, unmaintained) was replaced by the in-tree
+# `UtcTimestamp` rather than ignored. An exception needs an expiry date in its
+# reason, which `xtask check-deny-ignore-expiry` enforces.
+ignore = []
 
 # ── Licenses ──────────────────────────────────────────────────────
 [licenses]

@@ -142,7 +142,7 @@ impl Fixture {
         self.manifests
             .iter()
             .map(|manifest| PlanAuditEntry {
-                timestamp: chrono::Utc::now(),
+                timestamp: mvm_core::util::time::utc_timestamp_now(),
                 tenant: TenantId("local".into()),
                 plan_id: PlanId("sha256:exact-plan".into()),
                 plan_version: 1,
