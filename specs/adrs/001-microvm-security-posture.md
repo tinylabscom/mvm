@@ -1693,8 +1693,9 @@ that destination opted in with `--allow-host http://HOST[:PORT]`. The
 `a_production_port_80_connect_is_refused_and_audited_as_cleartext`), and the
 request leg refuses an `http://` upstream on any port without it
 (`production_refuses_an_http_upstream_before_forward`); both record the
-refusal as `cleartext_denied`. The opt-in is a field of the policy entry, so
-it moves the policy digest the signed plan binds, and an endpoint whose policy
+refusal with the reason "cleartext_denied". The opt-in is a field of the
+policy entry, so it moves the policy digest the signed plan binds, and an
+endpoint whose policy
 carries an opt-in that digest does not cover refuses to start
 (`a_cleartext_opt_in_the_plan_did_not_sign_is_refused`). Port 80 is the only
 plain-HTTP signal a spliced flow carries: plain HTTP on any other port, spliced
