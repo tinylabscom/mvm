@@ -76,6 +76,10 @@ pub fn record_charge(vm_name: &str, charge: MachineCharge) -> Result<()> {
 
 /// [`record_charge`] beneath an explicit mvm home.
 ///
+/// The bytes are synced before the rename, so a write error still fails the
+/// start and a crash never leaves a torn record. The directory is not synced:
+/// a host crash that loses the new name also ends the machine it describes.
+///
 /// # Errors
 ///
 /// If the record cannot be written.
@@ -87,7 +91,7 @@ pub fn record_charge_at(mvm_home: &Path, vm_name: &str, charge: MachineCharge) -
     std::fs::create_dir_all(dir)
         .with_context(|| format!("creating the VM state dir {}", dir.display()))?;
     let json = serde_json::to_vec(&charge).context("serializing the admitted charge")?;
-    mvm_core::atomic_io::atomic_write_durable(&path, &json)
+    mvm_core::atomic_io::atomic_write(&path, &json)
         .with_context(|| format!("writing the admitted charge to {}", path.display()))
 }
 

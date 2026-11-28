@@ -410,6 +410,11 @@ not paraphrase this row without them.
      the machine counted. Every marker read is non-blocking and bounded, so no
      marker can stall an admission.
 
+   The charge record's bytes are synced before it is renamed into place, but
+   its directory is not synced afterwards. After a host crash a record may be
+   absent, but it is never torn, and the machine it described is no longer
+   running.
+
    A charge too large to add saturates. It reads as the whole host, which the
    headroom check then refuses. An idle standby carries no record or plan, so
    admission does not count it, by design; the standby budget bounds it
