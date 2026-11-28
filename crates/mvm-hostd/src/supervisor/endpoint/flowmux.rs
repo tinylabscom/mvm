@@ -773,13 +773,19 @@ impl FlowMuxSession {
 
         let (ip, port, datagram) = decode_udp_addr(payload)
             .map_err(|e| FlowMuxError::FrameRefused(format!("invalid UdpSend address: {e}")))?;
-        let target = format!("{ip}:{port}");
+        let target = SocketAddr::new(ip, port).to_string();
 
         if relay.2 == UdpPeerAdmission::GuestMayIntroduce {
+            // The same host form an `OpenTcp` to this address is checked under.
+            let Some(host) = super::canonical_target_host(&ip.to_string()) else {
+                return Err(FlowMuxError::FrameRefused(
+                    "UdpSend address names no destination".to_string(),
+                ));
+            };
             if let Some(reason) = self
                 .substitution
                 .as_ref()
-                .and_then(|service| service.opaque_refusal_reason(&ip.to_string()))
+                .and_then(|service| service.opaque_refusal_reason(&host))
             {
                 warn!(stream_id, %target, reason, "FlowMux opaque UDP transform refused");
                 self.deny_udp_datagram(stream_id, ip, port, "typed_transform_required");
@@ -2734,6 +2740,55 @@ mod tests {
             !chain.contains("not a dns query"),
             "no payload byte reaches the chain: {chain}"
         );
+    }
+
+    /// An IPv6 `UdpSend` destination is decided as the address it is, as a
+    /// TCP one is: a gate admitting that address does not refuse it as an
+    /// unknown host name, and a refused one is audited by its address.
+    #[test]
+    fn an_ipv6_datagram_is_decided_by_its_address() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let (recorder, audit_key) = recorder_at(&audit_path);
+        let admitted: IpAddr = "2606:4700:4700::1111".parse().unwrap();
+        let gate = gate_allowing_addr(admitted, 0, Some(53));
+
+        let (mut guest, mut guest_session, host) =
+            run_owned_session_on_runtime(move |id, key, anchor, limits| {
+                FlowMuxAccept::new(id, key, anchor, limits, gate)
+                    .with_audit_sink(RecorderSink::wrap(recorder))
+            });
+        write_frame(&mut guest, &mut guest_session, Opcode::OpenUdp, 1, b"");
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(opcode, Opcode::UdpOpened);
+        for ip in [admitted, "2606:4700:4700::1112".parse().unwrap()] {
+            let mut datagram = encode_udp_addr(ip, 53);
+            datagram.extend_from_slice(b"query");
+            write_frame(
+                &mut guest,
+                &mut guest_session,
+                Opcode::UdpSend,
+                1,
+                &datagram,
+            );
+        }
+        drop(guest);
+        let _ = host.join().unwrap();
+
+        crate::supervisor::audit::audit_file::verify_audit_chain(&audit_path, &audit_key)
+            .expect("audit chain verifies");
+        let chain = std::fs::read_to_string(&audit_path).expect("read audit chain");
+        let denials: Vec<&str> = chain
+            .lines()
+            .filter(|line| line.contains("host.flow.denied"))
+            .collect();
+        assert_eq!(
+            denials.len(),
+            1,
+            "only the unadmitted address is refused: {chain}"
+        );
+        assert!(denials[0].contains("[2606:4700:4700::1112]:53"), "{chain}");
     }
 
     /// Refusing raw UDP does not refuse name resolution: a pinned name still

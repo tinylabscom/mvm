@@ -19,6 +19,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use mvm_core::policy::network_policy::canonical_host;
 use mvm_runtime::vmm::egress_gate::{EgressGate, EgressVerdict};
 
 /// Most `(host, port)` answers kept. An entry is refreshed by every request
@@ -47,14 +48,16 @@ impl AdmittedAddresses {
                 entries.remove(&key);
             }
         }
-        entries.insert((host.to_ascii_lowercase(), port), ips);
+        if let Some(host) = canonical_host(host) {
+            entries.insert((host, port), ips);
+        }
     }
 
     fn get(&self, host: &str, port: u16) -> Option<Vec<IpAddr>> {
         self.entries
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .get(&(host.to_ascii_lowercase(), port))
+            .get(&(canonical_host(host)?, port))
             .cloned()
     }
 }
@@ -72,13 +75,10 @@ impl GateResolver {
     }
 }
 
-/// The gate's target form of `host:port`, bracketing a bare IPv6 literal.
-fn target_of(host: &str, port: u16) -> String {
-    let bare = host.trim_start_matches('[').trim_end_matches(']');
-    match bare.parse::<IpAddr>() {
-        Ok(IpAddr::V6(v6)) => format!("[{v6}]:{port}"),
-        _ => format!("{bare}:{port}"),
-    }
+/// The gate's target form of `host:port`; `None` when the host names no
+/// destination.
+fn target_of(host: &str, port: u16) -> Option<String> {
+    crate::supervisor::endpoint::canonical_target_host(host).map(|host| format!("{host}:{port}"))
 }
 
 impl mvm_http::resolve::Resolve for GateResolver {
@@ -96,7 +96,9 @@ impl mvm_http::resolve::Resolve for GateResolver {
         }
         let gate = Arc::clone(&self.gate);
         Box::pin(async move {
-            let target = target_of(&host, port);
+            let target = target_of(&host, port).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "malformed destination")
+            })?;
             // An unrestricted gate resolves live, which blocks.
             let verdict = tokio::task::spawn_blocking(move || gate.decide_request(&target))
                 .await
@@ -162,9 +164,34 @@ mod tests {
 
     #[test]
     fn an_ipv6_literal_is_bracketed_for_the_gate() {
-        assert_eq!(target_of("[::1]", 443), "[::1]:443");
-        assert_eq!(target_of("::1", 443), "[::1]:443");
-        assert_eq!(target_of("api.example.com", 443), "api.example.com:443");
+        assert_eq!(target_of("[::1]", 443).as_deref(), Some("[::1]:443"));
+        assert_eq!(target_of("::1", 443).as_deref(), Some("[::1]:443"));
+        assert_eq!(
+            target_of("api.example.com", 443).as_deref(),
+            Some("api.example.com:443")
+        );
+        assert_eq!(
+            target_of("API.Example.COM.", 443).as_deref(),
+            Some("api.example.com:443")
+        );
+        assert_eq!(
+            target_of("[::ffff:192.0.2.1]", 443).as_deref(),
+            Some("192.0.2.1:443")
+        );
+        assert_eq!(target_of("api.example.com..", 443), None);
+    }
+
+    /// The cache keys an answer by the host's canonical identity, so the
+    /// forward leg finds it under any spelling the gate admitted.
+    #[test]
+    fn admitted_addresses_are_keyed_by_the_canonical_host() {
+        let admitted = AdmittedAddresses::default();
+        let ip: IpAddr = "93.184.216.34".parse().unwrap();
+        admitted.record("API.Example.com.", 443, vec![ip]);
+        for host in ["api.example.com", "api.example.com.", "Api.Example.Com"] {
+            assert_eq!(admitted.get(host, 443), Some(vec![ip]), "{host}");
+        }
+        assert_eq!(admitted.get("api.example.com", 8443), None);
     }
     #[test]
     fn admitted_address_cache_prunes_only_at_capacity_and_keeps_the_new_answer() {

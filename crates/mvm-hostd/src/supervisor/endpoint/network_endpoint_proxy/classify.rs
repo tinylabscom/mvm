@@ -117,13 +117,14 @@ impl SubstitutionService {
     /// destination whose canonical identity is `identity`. Its allowed hosts
     /// are compared as identities too, so no spelling of the same address or
     /// name slips past.
+    /// An allowed host that names nothing binds the secret to nothing.
     pub(crate) fn secret_reaches(&self, address: &str, identity: &str) -> bool {
-        use mvm_contract::policy::network_policy::canonical_host;
+        use mvm_contract::policy::network_policy::canonical_pattern;
         self.registry.resolve_name(address).is_some_and(|secret| {
             let allowed: Vec<String> = secret
                 .allowed_hosts
                 .iter()
-                .map(|host| canonical_host(host))
+                .filter_map(|host| canonical_pattern(host))
                 .collect();
             mvm_contract::ir::host_is_bound(&allowed, identity)
         })

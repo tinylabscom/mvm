@@ -822,6 +822,21 @@ fn validate_env(env: &BTreeMap<String, EnvValue>, base: &str, errors: &mut Vec<V
                     ),
                 });
             }
+            if let Some(host) = reference
+                .allowed_hosts
+                .iter()
+                .find(|host| crate::policy::network_policy::canonical_pattern(host).is_none())
+            {
+                errors.push(ValidationError {
+                    code: ErrorCode::SecretWithoutBinding,
+                    path: format!("{base}.{key}"),
+                    detail: format!(
+                        "secret {:?} is bound to {host:?}, which names no host; the binding \
+                         would never apply",
+                        reference.name
+                    ),
+                });
+            }
             if !reference.inject.admits(reference.auth_type) {
                 errors.push(ValidationError {
                     code: ErrorCode::SecretInjectionMode,

@@ -421,9 +421,16 @@ impl SubstitutionService {
                 });
             }
         };
+        let Some(url) = crate::supervisor::endpoint::canonical_url(wire.url) else {
+            self.audit_flow_refused(UNPARSEABLE_DESTINATION, REASON_MALFORMED)
+                .await;
+            return Err(WireResponse::Refused {
+                message: "the request URL host names no destination".into(),
+            });
+        };
         let req = ProxyRequest {
             method: wire.method,
-            url: wire.url,
+            url,
             headers: wire.headers,
             body,
         };
