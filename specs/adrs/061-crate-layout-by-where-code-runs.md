@@ -36,15 +36,70 @@ created, and the regrouped path for `mvm-hostd` is
 `"crates/host/mvm-hostd"` alone. The rest of this decision, including the
 feature table and the retained evidence, is unchanged.
 
-### Implementation status
+### Implementation status (2026-11-27)
 
-- Order step 4, `mvm-net`: folded into `mvm_core::net` as `channel`,
-  `provider` and `registry`. The `EgressEnforcer` seam and
-  `NetworkProvider::egress_enforcer()` had no caller and were deleted rather
-  than moved.
-- Order step 4, `mvm-bundler`: folded into `mvm_core::plan::bundle::export`
-  behind `host-state`. The caller still supplies the `BundleSigner`, and
-  `mvm-client` keeps its existing `bundle` re-exports.
+This records what is true on `origin/main`; it changes no decision below.
+
+**Members (24), by group.** Foundation: `mvm-contract`, `mvm-crypto`,
+`mvm-core`. Hypervisor: `mvm-vmm`. Guest: `mvm-agentd`, `mvm-setpriv`,
+`mvm-builder-guest`, `mvm-host-services`. Host: `mvm-hostd`. SDK:
+`mvm-sdk`, `mvm-hostlib`, `mvm-compiler`. Deps: `mvm-http`, `mvm-fs`,
+`libkrun-sys`, `mvm-macho-sign`. Build, runtime, client and CLI: `mvm-build`,
+`mvm-runtime`, `mvm-client`, `mvm-cli`. Kept at their paths: `mvm-gpu`,
+`mvm-conformance`, the root `mvmctl` package and `xtask`.
+
+**Folds done.**
+
+- `mvm-net` into `mvm_core::net` as `channel`, `provider` and `registry`
+  (#5966). The `EgressEnforcer` seam and `NetworkProvider::egress_enforcer()`
+  had no caller and were deleted rather than moved.
+- `mvm-bundler` into `mvm_core::plan::bundle::export` behind `host-state`
+  (#5969). The caller still supplies the `BundleSigner`, and `mvm-client`
+  keeps its existing `bundle` re-exports.
+- `runmvm-client` deleted with its publish lane (#5970).
+- `mvm-capture` into its only consumer, `mvm_cli::capture` (#5991).
+- `mvm-backends` into `mvm-vmm` behind its `fc`, `hvf`, `libkrun` and `qemu`
+  features (#5998), after #5992 moved `mvm-vmm`'s unix-only dependencies under
+  `cfg(unix)` so the Windows lint lane checks `-p mvm-vmm` in place of
+  `-p mvm-backends`.
+- `mvm-policy`, added after this decision, into `mvm_core::policy::authored`
+  behind `host-state` (#6012).
+
+**Folds rejected.** No rule 1 exception was granted.
+
+- `mvm-macho-sign` stays separate: it is MPL-2.0 with its own `LICENSE` and
+  provenance, `release.yml` copies that licence by path, and both SDK
+  packagers pin the crate.
+- `mvm-agentd`, `mvm-builder-guest` and `mvm-host-services` stay separate under
+  decision 8: their closures sit exactly at the hard budgets of 84, 88 and 85
+  in `xtask check-closure-budget`.
+- `mvm-http` stays out of core: `check-sdk-transport-free` and
+  `check-sdk-cdylib-deps` forbid it by package name.
+- `mvm-compiler` stays out of `mvm-sdk`: its
+  `crates/mvm-compiler/tests/dependency_boundary.rs` test is the boundary.
+
+**What remains.** Order step 2 (the protocol still lives in
+`mvm-agentd/src/vsock`), the HVF substrate and the `host` move of step 3, step
+6 (directory regrouping) and step 7. The regroup has not started; it changes
+paths that `mvmd`'s `mvmd-mvm` crate path-depends on (`mvm-client`,
+`mvm-contract`, `mvm-core`, `mvm-hostd`), so it waits for matching `mvmd`
+changes. Step 5's crate split is dropped (see the amendment above).
+
+**Measured.** Workspace members 27 → 24 and `Cargo.lock` packages 697 → 694
+between `96af1bb7ca` (before #5991, #5998 and #6012) and `c8f38c10c6`. Members
+are `workspace_members` from `cargo metadata --format-version 1 --offline
+--no-deps`; packages are `[[package]]` entries in `Cargo.lock`. The `mvmctl`
+default closure is 326 on `x86_64-unknown-linux-gnu` and 321 on
+`aarch64-apple-darwin`, down from 329 and 324, counted as distinct name and
+version from `cargo tree --offline --locked -p mvmctl -e normal,build --prefix
+none --target <t>`, the count `check-closure-budget` enforces.
+
+The [graph snapshot](../../xtask/data/evidence/adr-061/graph.json) was not
+regenerated: it is a design-time projection at
+`dd2af0833eeaf1e2abd738e694dc1b463140ff25`, produced by an out-of-tree
+tree-sitter extraction with no generator in this repository. Its scope still
+names `mvm-backends`, `mvm-net` and `mvm-bundler` and its edges model the
+withdrawn host-role split. `replay.py --self-test` still passes on it.
 
 ## Context
 
@@ -119,6 +174,9 @@ passes, written invariants per layer, and small files.
      deps/                   http, fs, libkrun-sys, macho-sign
      build/  runtime/  client/  cli/
    ```
+
+   See Implementation status: `host/` holds `mvm-hostd` alone (amendment),
+   `capture` is folded into `mvm-cli` (#5991), and the regroup has not started.
 
    `mvm-client` keeps its current path until `mvm-studio`, which depends on it
    by path, is updated in the same change. `mvm-hostlib` belongs under `sdk/`;
@@ -313,17 +371,17 @@ in the workspace.
 | `crates/mvm-contract`, `crates/mvm-core` | `"crates/contract"`, `"crates/core"` |
 | `crates/mvm-crypto` | `"crates/crypto"`; retain the independently optimized package boundary |
 | `crates/mvm-vmm` | `"crates/vmm"` |
-| `mvm-backends` (folded into `mvm_vmm`, behind its `fc`, `hvf`, `libkrun` and `qemu` features) | Fold into VMM as specified above |
+| `mvm-backends` (folded into `mvm_vmm`, behind its `fc`, `hvf`, `libkrun` and `qemu` features) | Fold into VMM as specified above; folded (#5998) |
 | `crates/mvm-agentd`, `crates/mvm-setpriv`, `crates/mvm-builder-guest`, `crates/mvm-host-services` | `"crates/guest/mvm-agentd"`, `"crates/guest/mvm-setpriv"`, `"crates/guest/mvm-builder-guest"`, `"crates/guest/mvm-host-services"` |
-| `crates/mvm-hostd` | `"crates/host/mvm-hostd"` for supervisor; extracted roles at `"crates/host/mvm-host-audit"`, `"crates/host/mvm-host-egress"`, `"crates/host/mvm-host-admission"`, `"crates/host/mvm-host-broker"` |
+| `crates/mvm-hostd` | `"crates/host/mvm-hostd"` for supervisor; extracted roles at `"crates/host/mvm-host-audit"`, `"crates/host/mvm-host-egress"`, `"crates/host/mvm-host-admission"`, `"crates/host/mvm-host-broker"`; roles withdrawn, see the amendment and Implementation status |
 | `crates/mvm-sdk`, `crates/mvm-hostlib`, `crates/mvm-compiler` | `"crates/sdk/mvm-sdk"`, `"crates/sdk/mvm-hostlib"`, `"crates/sdk/mvm-compiler"` |
 | `crates/mvm-http`, `crates/mvm-fs` | `"crates/deps/mvm-http"`, `"crates/deps/mvm-fs"` |
 | `crates/deps/libkrun-sys`, `crates/deps/mvm-macho-sign` | Unchanged |
 | `crates/mvm-build`, `crates/mvm-runtime`, `crates/mvm-cli` | `"crates/build"`, `"crates/runtime"`, `"crates/cli"` |
 | `crates/mvm-client`, `crates/mvm-gpu`, `crates/mvm-conformance`, root package, `xtask` | Unchanged; client relocation awaits coordinated Studio changes |
-| `mvm-net` (folded into `mvm_core::net`), `mvm-bundler` (folded into `mvm_core::plan::bundle::export`), `mvm-policy` (folded into `mvm_core::policy::authored`, behind `host-state`) | Fold into core as specified above |
-| `mvm-capture` (folded into `mvm_cli::capture`) | Fold into its only consumer, `mvm-cli` |
-| `runmvm-client` (deleted) | Retire with its publish/registry-smoke lane; retain contract publication |
+| `mvm-net` (folded into `mvm_core::net`), `mvm-bundler` (folded into `mvm_core::plan::bundle::export`), `mvm-policy` (folded into `mvm_core::policy::authored`, behind `host-state`) | Fold into core as specified above; folded (#5966, #5969, #6012) |
+| `mvm-capture` (folded into `mvm_cli::capture`) | Fold into its only consumer, `mvm-cli`; folded (#5991) |
+| `runmvm-client` (deleted) | Retire with its publish/registry-smoke lane; retain contract publication; deleted (#5970) |
 
 Nested fuzz workspaces travel with their owner, except the VMM geometry harness
 at `mvm-runtime/fuzz-backend`: move it to `"crates/vmm/fuzz-backend"` and make its
