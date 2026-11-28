@@ -234,6 +234,114 @@ fn a_wildcard_deny_covers_subdomains_and_a_port_deny_only_its_port() {
     );
 }
 
+/// A deny drops every allow spelling the runtime treats as its host, from
+/// whichever layer and in either order, and leaves every other host alone.
+#[test]
+fn a_deny_covers_every_spelling_of_its_host() {
+    let v6_covered: &[&str] = &[
+        "[2001:DB8::5]",
+        "2001:db8::5",
+        "2001:0db8::5",
+        "[2001:db8:0:0:0:0:0:5]:8443",
+        "2001:db8::5:6",
+    ];
+    let v6_kept: &[&str] = &["[2001:db8::6]", "2001:db8::6:5"];
+    let cases: &[(&str, &[&str], &[&str])] = &[
+        (
+            "b.test",
+            &[
+                "b.test",
+                "B.TEST",
+                "b.test.",
+                "B.Test.:8443",
+                "http://b.test.",
+            ],
+            &["a.b.test", "b.test.x"],
+        ),
+        ("b.test:443", &["b.test.", "B.TEST.:443"], &["b.test.:8443"]),
+        (
+            "*.corp.test",
+            &["api.corp.test.", "API.CORP.TEST:8443"],
+            &["corp.test.", "corp.test"],
+        ),
+        ("*.CORP.TEST.", &["api.corp.test"], &["corp.test"]),
+        (
+            "10.0.0.5",
+            &[
+                "10.0.0.5:8443",
+                "::ffff:10.0.0.5",
+                "[::ffff:10.0.0.5]:443",
+                "[::FFFF:a00:5]",
+            ],
+            &["10.0.0.6", "[::ffff:10.0.0.6]"],
+        ),
+        ("[::ffff:10.0.0.5]", &["10.0.0.5"], &["10.0.0.6"]),
+        ("[2001:db8::5]", v6_covered, v6_kept),
+        ("2001:db8::5", v6_covered, v6_kept),
+        ("2001:DB8:0::5", v6_covered, v6_kept),
+        (
+            "[2001:db8::5]:8443",
+            &["[2001:db8::5]:8443"],
+            &["2001:db8::5"],
+        ),
+        ("[::1]", &["[::1]:8443", "::1", "::1:8443"], &["[::2]"]),
+        ("::1", &["[::1]", "::1:8443"], &["[::2]"]),
+    ];
+    let mut wrong = Vec::new();
+    for (deny, covered, kept) in cases {
+        let deny_layer = format!("[network]\ndeny = [{deny:?}]\n");
+        for allow in covered.iter().chain(kept.iter()) {
+            let allow_layer = format!("[network]\nallow = [{allow:?}]\n");
+            for order in [[&deny_layer, &allow_layer], [&allow_layer, &deny_layer]] {
+                let outcome = merge_layers(&[user("one", order[0]), user("two", order[1])])
+                    .map(|resolved| resolved.policy.network.allow);
+                if !matches!(&outcome, Ok(left) if left.is_empty() == covered.contains(allow)) {
+                    wrong.push(format!("deny {deny} allow {allow}: {outcome:?}"));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A host keeps one spelling in the resolved policy, whatever case, trailing
+/// dot or address text the author used.
+#[test]
+fn allows_are_rendered_in_their_canonical_identity() {
+    let resolved = merged(&[user(
+        "a",
+        "[network]\nallow = [\"API.Example.COM.\", \"::ffff:10.0.0.5:8443\",          \"[2001:0DB8::1]\", \"2001:db8::2\", \"http://Plain.Test.\"]\n",
+    )]);
+    assert_eq!(
+        resolved.policy.network.allow,
+        [
+            "api.example.com:443",
+            "10.0.0.5:8443",
+            "2001:db8::1:443",
+            "2001:db8::2:443",
+            "http://plain.test:80"
+        ]
+    );
+}
+
+/// Numeric spellings the system resolver reads as an IPv4 address are not
+/// host names: refused, so they can never reach a denied address by name.
+#[test]
+fn non_canonical_ipv4_spellings_are_refused_as_allows() {
+    for allow in ["167772165", "0xa.0.0.5", "0xA000005", "10.5", "012.0.0.5"] {
+        let error = refused(&[user("a", &format!("[network]\nallow = [{allow:?}]\n"))]);
+        assert!(error.to_string().contains(allow), "{allow}: {error}");
+    }
+}
+
+/// An unbracketed IPv6 deny that also reads as `ADDRESS:PORT` is refused
+/// rather than guessed; the bracketed spellings say which one is meant.
+#[test]
+fn an_ambiguous_unbracketed_ipv6_deny_is_refused() {
+    let error = refused(&[user("a", "[network]\ndeny = [\"2001:db8::1:443\"]\n")]);
+    assert!(error.to_string().contains("ambiguous"), "{error}");
+}
+
 #[test]
 fn denies_union_across_every_section() {
     let resolved = merged(&[

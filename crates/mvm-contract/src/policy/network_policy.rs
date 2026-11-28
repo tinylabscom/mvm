@@ -874,6 +874,19 @@ pub fn unmap_v4_mapped(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// Whether `host` is a numeric spelling the system resolver reads as an IPv4
+/// address (`2130706433`, `0x7f.1`, `127.1`): every label decimal or `0x` hex.
+#[must_use]
+pub fn is_numeric_ipv4_spelling(host: &str) -> bool {
+    host.split('.').all(|label| {
+        (!label.is_empty() && label.bytes().all(|b| b.is_ascii_digit()))
+            || label
+                .strip_prefix("0x")
+                .or_else(|| label.strip_prefix("0X"))
+                .is_some_and(|hex| !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     /// `admits_outbound` answers for each way a policy can reach off-box, and

@@ -24,10 +24,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::env_hygiene::classify;
-use crate::network_policy::HostPort;
+use crate::network_policy::{HostPort, canonical_host};
 use mvm_contract::grants::EgressGrant;
 use mvm_contract::policy::routes::{EgressRoute, RouteSet};
 use serde::Serialize;
+use std::net::Ipv6Addr;
 
 use super::model::{
     EnvSection, NetworkSection, PolicyBody, ResourcesSection, SecretGrant, SecretsSection,
@@ -249,50 +250,23 @@ pub fn canonical_allow(entry: &str) -> Result<String, String> {
 }
 
 /// A deny pattern: `HOST[:PORT]` or `*.suffix[:PORT]`; no port means every
-/// port.
+/// port. The host is split and canonicalised as an allow entry's is, so a
+/// deny names the same host however an allow spells it.
 fn parse_deny(entry: &str) -> Result<(String, Option<u16>), String> {
     let entry = entry.trim();
-    let (host, port) = if let Some(bracketed) = entry.strip_prefix('[') {
-        let (host, rest) = bracketed
-            .split_once(']')
-            .ok_or_else(|| format!("{entry:?}: missing closing IPv6 bracket"))?;
-        host.parse::<std::net::Ipv6Addr>()
-            .map_err(|_| format!("{entry:?}: invalid IPv6 host"))?;
-        let port = if rest.is_empty() {
-            None
-        } else {
-            Some(
-                rest.strip_prefix(':')
-                    .ok_or_else(|| format!("{entry:?}: expected a port after IPv6 host"))?,
-            )
-        };
-        (host, port)
-    } else {
-        match entry.rsplit_once(':') {
-            Some((host, port)) => (host, Some(port)),
-            None => (entry, None),
-        }
-    };
-    let port = port
-        .map(|port| {
-            port.parse::<u16>()
-                .map_err(|_| format!("{entry:?}: {port:?} is not a port"))
-        })
-        .transpose()?;
+    let (host, port) = super::allow_host::split_host_port(entry)
+        .map_err(|error| format!("{entry:?}: {error:#}"))?;
+    if port.is_some() && !entry.starts_with('[') && entry.parse::<Ipv6Addr>().is_ok() {
+        return Err(format!(
+            "{entry:?} is ambiguous: write [ADDRESS]:PORT to deny one port or [ADDRESS] \
+             to deny the address"
+        ));
+    }
     let bare = host.strip_prefix("*.").unwrap_or(host);
     if bare.is_empty() || bare.contains(['*', '/', ' ']) {
         return Err(format!("{entry:?} must be HOST[:PORT] or *.suffix[:PORT]"));
     }
-    Ok((deny_host_identity(host), port))
-}
-
-fn deny_host_identity(host: &str) -> String {
-    let host = host
-        .strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'))
-        .unwrap_or(host);
-    host.parse::<std::net::IpAddr>()
-        .map_or_else(|_| host.to_ascii_lowercase(), |address| address.to_string())
+    Ok((canonical_host(host), port))
 }
 
 /// Whether deny pattern `deny` covers `host:port`.
@@ -303,7 +277,7 @@ pub fn deny_covers(deny: &str, host: &str, port: u16) -> bool {
     if deny_port.is_some_and(|p| p != port) {
         return false;
     }
-    let host = deny_host_identity(host);
+    let host = canonical_host(host);
     match pattern.strip_prefix("*.") {
         Some(suffix) => host.len() > suffix.len() && host.ends_with(&format!(".{suffix}")),
         None => host == pattern,

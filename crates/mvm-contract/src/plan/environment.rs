@@ -138,12 +138,7 @@ impl EnvironmentPolicy {
                 return Err(fail());
             }
         } else if host.len() > 253
-            || host.split('.').all(|label| {
-                label.bytes().all(|b| b.is_ascii_digit())
-                    || label.strip_prefix("0x").is_some_and(|hex| {
-                        !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit())
-                    })
-            })
+            || crate::policy::network_policy::is_numeric_ipv4_spelling(host)
             || host.split('.').any(|label| {
                 label.is_empty()
                     || label.len() > 63

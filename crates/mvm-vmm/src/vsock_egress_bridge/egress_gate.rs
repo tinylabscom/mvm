@@ -397,16 +397,12 @@ impl EgressGate {
     /// an `http://` URL on any port; the gate asks it itself for port 80.
     #[must_use]
     pub fn refuses_cleartext(&self, host: &str, port: u16) -> bool {
-        // A URL host carries an IPv6 literal in brackets; the rule does not.
-        let host = host
-            .strip_prefix('[')
-            .and_then(|inner| inner.strip_suffix(']'))
-            .unwrap_or(host);
+        let host = mvm_core::policy::network_policy::canonical_host(host);
         let addr = host.parse::<IpAddr>().ok();
         self.refuse_cleartext
             && !self.cleartext.iter().any(|rule| {
                 rule.port == port
-                    && (rule.host.eq_ignore_ascii_case(host)
+                    && (mvm_core::policy::network_policy::canonical_host(&rule.host) == host
                         || addr.is_some_and(|ip| {
                             rule.host.parse::<IpAddr>() == Ok(ip)
                                 || self
@@ -1021,6 +1017,26 @@ mod tests {
         let rendered = reason.to_string();
         assert!(rendered.contains("example.com:80"), "{rendered}");
         assert!(rendered.contains("example.com:443"), "{rendered}");
+    }
+
+    /// The gate matches a requested name by the identity the policy merge
+    /// gave it: case and one trailing dot do not make a second host, so a
+    /// deny that dropped `example.com` also dropped every spelling of it.
+    #[test]
+    fn a_requested_name_matches_its_pin_whatever_its_case_or_trailing_dot() {
+        use mvm_core::policy::network_policy::HostPort;
+        let gate = cleartext_gate(vec![HostPort::new("example.com", 443)], false);
+        for target in ["example.com:443", "EXAMPLE.com:443", "Example.Com.:443"] {
+            assert!(
+                matches!(gate.decide_request(target), EgressVerdict::Allow { .. }),
+                "{target}"
+            );
+        }
+        assert!(gate.decide_request("example.com..:443").is_deny());
+        assert!(matches!(
+            gate.dns_verdict("EXAMPLE.COM.", DnsRecordType::A, |_| Ok(Vec::new())),
+            DnsVerdict::Resolved(ips) if !ips.is_empty()
+        ));
     }
 
     /// A gate over `rules`, with `example.com` and `other.test` pinned.

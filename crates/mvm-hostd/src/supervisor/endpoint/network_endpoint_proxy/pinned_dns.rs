@@ -19,6 +19,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use mvm_core::policy::network_policy::canonical_host;
 use mvm_runtime::vmm::egress_gate::{EgressGate, EgressVerdict};
 
 /// Most `(host, port)` answers kept. An entry is refreshed by every request
@@ -47,14 +48,14 @@ impl AdmittedAddresses {
                 entries.remove(&key);
             }
         }
-        entries.insert((host.to_ascii_lowercase(), port), ips);
+        entries.insert((canonical_host(host), port), ips);
     }
 
     fn get(&self, host: &str, port: u16) -> Option<Vec<IpAddr>> {
         self.entries
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .get(&(host.to_ascii_lowercase(), port))
+            .get(&(canonical_host(host), port))
             .cloned()
     }
 }

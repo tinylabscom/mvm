@@ -43,6 +43,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::net::IpAddr;
 
+use crate::policy::network_policy::canonical_host;
+
 use serde::{Deserialize, Serialize};
 
 use crate::timestamp::UtcTimestamp;
@@ -165,13 +167,15 @@ impl DnsPinRegistry {
     /// Insert (or replace) a pin. A replace is a legitimate
     /// case — the resolver refreshes a pin at TTL/2 and the
     /// new IP set may differ; the registry holds the latest.
+    /// Keyed by the destination's canonical host, so a lookup matches
+    /// every spelling of it.
     pub fn add(&mut self, pin: DnsPin) {
-        self.pins.insert(pin.dest.clone(), pin);
+        self.pins.insert(canonical_host(&pin.dest), pin);
     }
 
-    /// O(log n) lookup by destination string.
+    /// O(log n) lookup by destination, whatever its case or trailing dot.
     pub fn lookup(&self, dest: &str) -> Option<&DnsPin> {
-        self.pins.get(dest)
+        self.pins.get(&canonical_host(dest))
     }
 
     /// The first pin whose address set contains `ip`. Lets a numeric-IP

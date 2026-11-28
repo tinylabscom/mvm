@@ -1,8 +1,11 @@
 //! The common parser for workload egress allow-host requests.
 
-use crate::network_policy::{HostPort, is_banned_ssh_port};
+use crate::network_policy::{
+    HostPort, canonical_host, is_banned_ssh_port, is_numeric_ipv4_spelling,
+};
 use anyhow::Result;
 use mvm_contract::policy::network_policy::CLEARTEXT_SCHEME_PREFIX;
+use std::net::Ipv6Addr;
 
 /// Parse one `--allow-host` entry, defaulting a bare host to HTTPS. The
 /// refusal names the flag; see [`parse_destination`] for the rules.
@@ -33,39 +36,59 @@ pub fn parse_destination(entry: &str) -> Result<HostPort> {
         Some(rest) => (rest, true),
         None => (entry, false),
     };
-    let default_port = if cleartext { 80 } else { 443 };
-    let mut parsed = match bracketed_ipv6(rest, default_port) {
-        Some(parsed) => parsed,
-        None => parse_unbracketed(rest, default_port),
-    }?;
-    parsed.cleartext = cleartext;
-    check_destination_host(&parsed.host)?;
-    if is_banned_ssh_port(parsed.port) {
+    let (host, port) = split_host_port(rest)?;
+    if host.is_empty() {
+        anyhow::bail!("a destination cannot be empty");
+    }
+    check_destination_host(host)?;
+    let port = port.unwrap_or(if cleartext { 80 } else { 443 });
+    if is_banned_ssh_port(port) {
         anyhow::bail!("{entry:?} requests TCP/22, but SSH sessions are banned in microVMs");
     }
-    Ok(parsed)
+    Ok(HostPort {
+        host: canonical_host(host),
+        port,
+        cleartext,
+    })
 }
 
-/// `[v6]` or `[v6]:port`, the bracketed spelling of an IPv6 literal. `None`
-/// when `entry` is not brackets around an IPv6 address.
-fn bracketed_ipv6(entry: &str, default_port: u16) -> Option<Result<HostPort>> {
-    let (inner, tail) = entry.strip_prefix('[')?.split_once(']')?;
-    let addr = inner.parse::<std::net::Ipv6Addr>().ok()?;
-    let port = match tail.strip_prefix(':') {
-        _ if tail.is_empty() => Ok(default_port),
-        Some(port) => port
-            .parse::<u16>()
-            .map_err(|_| anyhow::anyhow!("invalid port {port:?}")),
-        None => Err(anyhow::anyhow!("unexpected {tail:?} after the address")),
+/// Split `HOST`, `HOST:PORT`, `[V6]`, `[V6]:PORT` or a bare IPv6 address,
+/// which has no port. An unbracketed IPv6 address before `:PORT` splits at
+/// the last colon, which is how a rendered `HostPort` reads back; the deny
+/// parser refuses that spelling as ambiguous. Allow and deny entries both
+/// split here, so one spelling names one destination on either side.
+///
+/// # Errors
+///
+/// A malformed bracket or port.
+pub(crate) fn split_host_port(entry: &str) -> Result<(&str, Option<u16>)> {
+    let port = |port: &str| {
+        port.parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("invalid port {port:?}"))
     };
-    Some(port.map(|port| HostPort::new(addr.to_string(), port)))
-}
-
-fn parse_unbracketed(entry: &str, default_port: u16) -> Result<HostPort> {
+    if let Some(rest) = entry.strip_prefix('[') {
+        let (inner, tail) = rest
+            .split_once(']')
+            .ok_or_else(|| anyhow::anyhow!("missing closing IPv6 bracket"))?;
+        inner
+            .parse::<Ipv6Addr>()
+            .map_err(|_| anyhow::anyhow!("{inner:?}: only an IPv6 address may be bracketed"))?;
+        return match tail.strip_prefix(':') {
+            _ if tail.is_empty() => Ok((inner, None)),
+            Some(p) => Ok((inner, Some(port(p)?))),
+            None => Err(anyhow::anyhow!("unexpected {tail:?} after the address")),
+        };
+    }
     match entry.rsplit_once(':') {
-        Some(_) => Ok(entry.parse()?),
-        None if entry.is_empty() => anyhow::bail!("a destination cannot be empty"),
-        None => Ok(HostPort::new(entry, default_port)),
+        // `::ffff:10.0.0.5` is one address, not `::ffff` port `10.0.0.5`.
+        Some((host, p))
+            if entry.parse::<Ipv6Addr>().is_ok()
+                && (host.parse::<Ipv6Addr>().is_err() || p.parse::<u16>().is_err()) =>
+        {
+            Ok((entry, None))
+        }
+        Some((host, p)) => Ok((host, Some(port(p)?))),
+        None => Ok((entry, None)),
     }
 }
 
@@ -91,6 +114,8 @@ pub fn check_destination_host(host: &str) -> Result<()> {
         "CIDR ranges are not supported; list each host or address"
     } else if host.starts_with('[') || host.ends_with(']') {
         "only an IPv6 address may be bracketed"
+    } else if is_numeric_ipv4_spelling(host.strip_suffix('.').unwrap_or(host)) {
+        "the resolver reads this as an IPv4 address; write it as a.b.c.d"
     } else if is_dns_name(host) {
         return Ok(());
     } else {
@@ -131,6 +156,7 @@ mod tests {
         }
         assert_eq!(parse_allow_host("api.github.com").unwrap().port, 443);
         assert_eq!(parse_allow_host("::1:8443").unwrap().host, "::1");
+        assert_eq!(parse_allow_host("2001:db8::1").unwrap().port, 443);
         let bracketed = parse_allow_host("[2001:db8::1]:8443").unwrap();
         assert_eq!(
             (bracketed.host.as_str(), bracketed.port),
