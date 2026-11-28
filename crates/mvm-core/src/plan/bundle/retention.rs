@@ -113,13 +113,13 @@ impl BundleRegistry {
         self.has_bundle_users(sha)?;
         crate::config::create_private_dir(&dir)?;
         let user = dir.join(vm);
-        crate::atomic_io::atomic_write_new(&user, b"retained\n").with_context(|| {
-            format!(
-                "bundle {sha} is already retained for a VM named {vm}; if no VM of that name \
-                 is running (a power loss can leave this behind), remove {}",
-                user.display()
-            )
-        })?;
+        anyhow::ensure!(
+            std::fs::symlink_metadata(&user).is_err(),
+            "bundle {sha} is already retained for a VM named {vm}; if no VM of that name is \
+             running (a power loss can leave this behind), remove {}",
+            user.display()
+        );
+        crate::atomic_io::atomic_write_new(&user, b"retained\n")?;
         crate::private_fs::sync_managed_directory_chain(&self.root, &dir)?;
         Ok(())
     }

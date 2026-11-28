@@ -917,8 +917,8 @@ pub(crate) struct RuntimeLifecycleLease {
     directory: PathBuf,
     /// Whether `acquire` created `directory` and left its entry in the
     /// namespace root unsynced. A bind syncs it after the generation it
-    /// publishes, in the same round, or at once before an installed bundle
-    /// records this VM as its user.
+    /// publishes, in the same round. An installed-bundle bind syncs the root
+    /// at once, whether or not this acquire created the entry.
     entry_unsynced: AtomicBool,
     _lock: std::fs::File,
 }
@@ -972,10 +972,10 @@ impl RuntimeLifecycleLease {
             "an unresolved bundle use already owns this VM name"
         );
         // The registry's use must never outlive, across a power loss, the
-        // record under this VM that releases it.
-        if self.entry_unsynced.swap(false, Ordering::Relaxed) {
-            sync_dir(self.root()?)?;
-        }
+        // record under this VM that releases it. An entry that already
+        // existed may be one a crashed launcher never synced.
+        self.entry_unsynced.store(false, Ordering::Relaxed);
+        sync_dir(self.root()?)?;
         registry.retain_for_vm(sha, &config.name)?;
         write_private_new(&record, sha.as_bytes())?;
         sync_file(&record)?;
@@ -1504,6 +1504,38 @@ mod tests {
         assert!(steps.contains(&lease.bundle_use_record()));
     }
 
+    /// A crashed launcher can leave a lease entry it never synced; the next
+    /// launch of that name syncs it before an installed bundle records a use.
+    #[test]
+    fn a_lease_entry_left_by_a_crashed_launcher_is_synced_before_a_bundle_is_retained() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let registry = mvm_core::plan::bundle::BundleRegistry::default_path().unwrap();
+        let sha = "c".repeat(64);
+        let rootfs = registry.install_dir(&sha).join("artifacts/rootfs.ext4");
+        mvm_core::config::create_private_dir(rootfs.parent().unwrap()).unwrap();
+        std::fs::write(&rootfs, b"fixture rootfs").unwrap();
+        let config = VmStartConfig {
+            name: "bundle-after-crash".into(),
+            rootfs_path: rootfs.display().to_string(),
+            ..Default::default()
+        };
+        drop(RuntimeLifecycleLease::acquire(&config.name).unwrap());
+
+        let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
+        let root = namespace::root(false).unwrap();
+        namespace::durable_steps::take();
+        lease.bind(&config).unwrap();
+
+        let steps = namespace::durable_steps::take();
+        assert_eq!(steps.first(), Some(&root), "{steps:?}");
+        assert_eq!(steps.iter().filter(|path| **path == root).count(), 1);
+    }
+
     /// A bind that cannot make its generation durable removes it again, as
     /// nothing has been started from it yet.
     #[test]
@@ -1518,8 +1550,12 @@ mod tests {
         std::fs::write(&rootfs, b"fixture rootfs").unwrap();
         let (fixture, _) = checked_source_runtime_fixture("unsynced-source", &rootfs).unwrap();
         let lease = RuntimeLifecycleLease::acquire("unsynced-bind").unwrap();
-        let _hook = namespace::durable_steps::hook(|path| {
-            anyhow::ensure!(!path.ends_with("launch.json"), "fsync: input/output error");
+        let ours = home.path().canonicalize().unwrap();
+        let _hook = namespace::durable_steps::hook(move |path| {
+            anyhow::ensure!(
+                !(path.starts_with(&ours) && path.ends_with("launch.json")),
+                "fsync: input/output error"
+            );
             Ok(())
         });
 

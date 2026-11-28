@@ -26,7 +26,7 @@ pub(super) fn wait_for_unactivated_boot(
         return Ok(unsynced);
     }
     config.wait_for_admission_durability()?;
-    unsynced.sync()?;
+    unsynced.sync_before_spawn()?;
     Ok(UnsyncedBind::default())
 }
 

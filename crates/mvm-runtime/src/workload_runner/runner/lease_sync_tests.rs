@@ -338,6 +338,11 @@ fn a_failed_lease_sync_whose_kill_also_fails_still_refuses_activation() {
         format!("{error:#}").contains("input/output error"),
         "{error:#}"
     );
+    assert_eq!(
+        driver.booted_specs().len(),
+        1,
+        "the VMM booted beside the sync"
+    );
     assert!(
         driver
             .take_guest_end(&VmId(vm.into()), GUEST_AGENT_PORT)
@@ -401,7 +406,9 @@ fn a_guest_without_activation_syncs_its_lease_before_the_vmm_starts() {
         let (driver, synced, root) = (driver.clone(), Arc::clone(&synced), root.clone());
         move |path| {
             if path == root {
-                let booted = !driver.booted_specs().is_empty();
+                // Waiting gives a sync that regressed to running beside the
+                // boot the time to see it.
+                let booted = booted_within(&driver, Duration::from_millis(500));
                 synced.lock().unwrap().push((path.to_path_buf(), booted));
             }
             Ok(())
@@ -418,4 +425,33 @@ fn a_guest_without_activation_syncs_its_lease_before_the_vmm_starts() {
         vec![(root, false)],
         "the new lease entry is durable before the VMM starts"
     );
+}
+
+/// The console follower is best-effort: one that panics after the sync has
+/// finished does not stop the guest from being activated.
+#[test]
+fn a_console_follower_that_panics_does_not_fail_the_launch() {
+    struct PanickingStreamer;
+    impl ConsoleStreamer for PanickingStreamer {
+        fn start(&self, _capture: &ConsoleCapture<'_>) {
+            panic!("injected console follower panic");
+        }
+        fn stop(&self, _vm_name: &str) {}
+    }
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.set("MVM_HOME", home.path());
+    let vm = "lease-follower-panics";
+    let cfg = fresh_launch_config(vm, "follower-panics-source");
+    let driver = MockDriver::default();
+    let activation = spawn_activation_guest(driver.clone(), vm);
+
+    runner(&driver)
+        .with_console_streamer(Arc::new(PanickingStreamer) as Arc<dyn ConsoleStreamer>)
+        .start_workload(&launch(&cfg))
+        .expect("a follower panic does not fail a launch whose sync finished");
+    activation.join().expect("the guest was activated");
 }
