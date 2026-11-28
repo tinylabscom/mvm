@@ -1503,6 +1503,13 @@ mod tests {
                 format!("{name}..:443"),
                 format!("[{name}].:443"),
                 format!("[{name}]:443"),
+                format!(" {name}:443"),
+                format!("\t{name}:443"),
+                format!("\u{3000}{name}:443"),
+                format!("{name} :443"),
+                format!("{name}\n:443"),
+                format!("{name}\0:443"),
+                format!("{}:443", name.replace('.', "\u{3002}")),
             ] {
                 let (service, _dir) = if name == "api.routed.test" {
                     substitution_binding_routed("bound.example", true, vec![ungranted_route(name)])
@@ -1515,8 +1522,15 @@ mod tests {
                     &target,
                 );
                 assert_eq!(opcode, Opcode::Refused, "{target}: {payload}");
+                // A NUL is the legacy tool-binding separator, refused before
+                // the host is read at all.
+                let reason = if target.contains('\0') {
+                    "tool_binding_unsupported"
+                } else {
+                    "malformed"
+                };
                 assert!(
-                    chain.contains("\"reason\":\"malformed\""),
+                    chain.contains(&format!("\"reason\":\"{reason}\"")),
                     "{target}: {chain}"
                 );
                 assert!(!chain.contains("host.flow.allowed"), "{target}: {chain}");

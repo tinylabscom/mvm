@@ -397,13 +397,13 @@ impl EgressGate {
     /// an `http://` URL on any port; the gate asks it itself for port 80.
     #[must_use]
     pub fn refuses_cleartext(&self, host: &str, port: u16) -> bool {
-        let host = mvm_core::policy::network_policy::canonical_host(host);
-        let addr = host.parse::<IpAddr>().ok();
+        use mvm_core::policy::network_policy::canonical_host;
+        let host = canonical_host(host);
+        let addr = host.as_deref().and_then(|host| host.parse::<IpAddr>().ok());
         self.refuse_cleartext
             && !self.cleartext.iter().any(|rule| {
                 rule.port == port
-                    && ((!host.is_empty()
-                        && mvm_core::policy::network_policy::canonical_host(&rule.host) == host)
+                    && ((host.is_some() && canonical_host(&rule.host) == host)
                         || addr.is_some_and(|ip| {
                             rule.host.parse::<IpAddr>() == Ok(ip)
                                 || self
@@ -422,13 +422,13 @@ impl EgressGate {
         use mvm_core::policy::network_policy::canonical_host;
         let mut hosts = Vec::new();
         for rule in &self.cleartext {
-            hosts.push(canonical_host(&rule.host));
+            hosts.extend(canonical_host(&rule.host));
             let pinned = self.pins.lookup(&rule.host).map(|pin| pin.ips.clone());
             hosts.extend(
                 pinned
                     .into_iter()
                     .flatten()
-                    .map(|ip| canonical_host(&ip.to_string())),
+                    .filter_map(|ip| canonical_host(&ip.to_string())),
             );
         }
         hosts.sort();
@@ -748,7 +748,6 @@ impl EgressGate {
         if self.not_admitted() {
             return EgressVerdict::Deny(DenyReason::ExecutionNotAdmitted);
         }
-        let target = target.trim();
         // Numeric ip:port — decide directly.
         let (host, port, verdict) = if let Ok(addr) = target.parse::<SocketAddr>() {
             let verdict = self.decide_addr_for_proto(proto, addr.ip(), addr.port());

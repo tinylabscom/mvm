@@ -356,10 +356,51 @@ fn non_canonical_ipv4_spellings_are_refused_as_denies() {
 /// nothing.
 #[test]
 fn a_deny_that_names_no_host_is_refused() {
-    for deny in ["b.test..", "[b.test]", "[b.test].", "a..b", ".b.test"] {
-        let error = refused(&[user("a", &format!("[network]\ndeny = [{deny:?}]\n"))]);
-        assert!(error.to_string().contains(deny), "{deny}: {error}");
+    for deny in [
+        "b.test..",
+        "[b.test]",
+        "[b.test].",
+        "a..b",
+        ".b.test",
+        "b@test",
+        "b%2etest",
+        "b\u{3000}test",
+        "b\u{3002}test",
+        "b\u{fc}cher.test",
+        "a.*.b",
+    ] {
+        let error = refused(&[user("a", &format!("[network]\ndeny = [\"{deny}\"]\n"))]);
+        assert!(
+            error.to_string().contains(&format!("{deny:?}")),
+            "{deny}: {error}"
+        );
     }
+}
+
+/// A secret binding host that names no destination is refused loudly at
+/// merge: it would otherwise be accepted and never apply.
+#[test]
+fn a_secret_binding_host_that_names_no_host_is_refused() {
+    for host in [
+        "mirror.example.com..",
+        "[mirror.example.com]",
+        "a..b",
+        "a@b",
+        "*.",
+        "a.*.b",
+        "b\u{fc}cher.test",
+    ] {
+        let error = refused(&[user(
+            "a",
+            &format!("[[secrets.bind]]\nname = \"gh\"\nhosts = [\"{host}\"]\n"),
+        )]);
+        assert!(error.to_string().contains(host), "{host}: {error}");
+    }
+    let resolved = merged(&[user(
+        "a",
+        "[[secrets.bind]]\nname = \"gh\"\nhosts = [\"API.GitHub.com\", \"*.example.com\"]\n",
+    )]);
+    assert_eq!(resolved.policy.secrets.bind.len(), 1);
 }
 
 /// An unbracketed IPv6 deny that also reads as `ADDRESS:PORT` is refused

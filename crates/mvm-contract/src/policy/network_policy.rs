@@ -835,20 +835,24 @@ pub fn is_mandatory_deny(ip: IpAddr) -> bool {
             .any(|net| net.contains(&unmap_v4_mapped(ip)))
 }
 
-/// The one comparable identity of a destination host, whatever its spelling.
+/// The one comparable identity of a destination host, whatever its spelling;
+/// `None` when the spelling names no destination.
 ///
 /// One trailing dot (the DNS root) is dropped first. Then an address literal,
 /// bracketed or not, becomes its canonical text, with an IPv4-mapped IPv6
-/// address reduced to the IPv4 address it reaches. Anything else is a name,
-/// ASCII-lowercased; a name with an empty label (so two trailing dots), or a
-/// bracket or colon in it, names no destination and its identity is `""`.
+/// address reduced to the IPv4 address it reaches. Anything else is a name:
+/// it names a destination only when every label is non-empty and every byte
+/// is an ASCII letter, digit, `-` or `_`, and it is then ASCII-lowercased. So
+/// whitespace, control bytes, `%`, `/`, `@`, a wildcard, Unicode (an
+/// internationalised name arrives as `xn--` punycode) and two trailing dots
+/// all name nothing.
 ///
-/// The result is a fixed point (`canonical_host(canonical_host(x)) ==
-/// canonical_host(x)`), so a value canonicalised at an entry point and again
-/// at a lookup cannot become two identities. `""` matches nothing: every
-/// entry point refuses a destination whose identity is empty. Compare two
-/// hosts by comparing their identities, never their spellings.
-pub fn canonical_host(host: &str) -> String {
+/// The result is a fixed point, so a value canonicalised at an entry point and
+/// again at a lookup cannot become two identities. Compare two hosts by
+/// comparing their identities, never their spellings; an authored pattern
+/// goes through [`canonical_pattern`].
+#[must_use]
+pub fn canonical_host(host: &str) -> Option<String> {
     let host = match host.strip_suffix('.') {
         Some(rest) if !rest.ends_with('.') => rest,
         _ => host,
@@ -858,12 +862,30 @@ pub fn canonical_host(host: &str) -> String {
         .and_then(|inner| inner.strip_suffix(']'))
         .unwrap_or(host);
     if let Ok(ip) = bare.parse::<IpAddr>() {
-        return unmap_v4_mapped(ip).to_string();
+        return Some(unmap_v4_mapped(ip).to_string());
     }
-    if host.contains(['[', ']', ':']) || host.split('.').any(str::is_empty) {
-        return String::new();
+    host.split('.')
+        .all(|label| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+        .then(|| host.to_ascii_lowercase())
+}
+
+/// The identity of an authored host pattern (a deny entry or a secret
+/// binding host): a [`canonical_host`] name, optionally under one leading
+/// `*.` wildcard label. A wildcard is a pattern only; it never names a
+/// requested destination. `None` when the pattern matches nothing.
+#[must_use]
+pub fn canonical_pattern(pattern: &str) -> Option<String> {
+    match pattern.strip_prefix("*.") {
+        Some(suffix) => canonical_host(suffix)
+            .filter(|suffix| suffix.parse::<IpAddr>().is_err())
+            .map(|suffix| format!("*.{suffix}")),
+        None => canonical_host(pattern),
     }
-    host.to_ascii_lowercase()
 }
 
 /// Collapse an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its embedded
@@ -1077,47 +1099,99 @@ mod tests {
             ("[::ffff:10.0.0.5]", "10.0.0.5"),
             ("10.0.0.5", "10.0.0.5"),
             ("API.Example.com.", "api.example.com"),
-            ("*.Example.com", "*.example.com"),
+            ("xn--bcher-kva.Example", "xn--bcher-kva.example"),
+            ("my-service_1.internal", "my-service_1.internal"),
         ] {
-            assert_eq!(canonical_host(spelling), identity, "{spelling}");
+            assert_eq!(
+                canonical_host(spelling).as_deref(),
+                Some(identity),
+                "{spelling}"
+            );
         }
     }
 
     /// The identity is a fixed point, and every spelling that needs a second
-    /// pass to settle (two trailing dots, brackets around a name) names no
+    /// pass to settle, or carries a byte no host name has, names no
     /// destination at all rather than a different one.
     #[test]
     fn canonical_host_settles_in_one_pass() {
         for (spelling, identity) in [
-            ("api.github.com.", "api.github.com"),
-            ("API.GitHub.COM.", "api.github.com"),
-            ("api.github.com..", ""),
-            ("API.GitHub.COM..", ""),
-            ("[api.github.com]", ""),
-            ("[api.github.com].", ""),
-            ("[[::1]]", ""),
-            ("[::1]", "::1"),
-            ("[::1].", "::1"),
-            ("::ffff:1.2.3.4.", "1.2.3.4"),
-            ("1.2.3.4.", "1.2.3.4"),
-            ("a..b", ""),
-            (".a", ""),
-            (".", ""),
-            ("..", ""),
-            ("", ""),
-            ("a:b", ""),
+            ("api.github.com.", Some("api.github.com")),
+            ("API.GitHub.COM.", Some("api.github.com")),
+            ("[::1]", Some("::1")),
+            ("[::1].", Some("::1")),
+            ("::ffff:1.2.3.4.", Some("1.2.3.4")),
+            ("1.2.3.4.", Some("1.2.3.4")),
+            ("api.github.com..", None),
+            ("API.GitHub.COM..", None),
+            ("[api.github.com]", None),
+            ("[api.github.com].", None),
+            ("[[::1]]", None),
+            ("a..b", None),
+            (".a", None),
+            (".", None),
+            ("..", None),
+            ("", None),
+            ("a:b", None),
+            (" api.github.com", None),
+            ("api.github.com ", None),
+            ("\tapi.github.com", None),
+            ("api.github.com\n", None),
+            ("\u{3000}api.github.com", None),
+            ("api\u{3002}github.com", None),
+            ("api.github.com\0", None),
+            ("api%2egithub.com", None),
+            ("a/b", None),
+            ("a@b", None),
+            ("a?b", None),
+            ("a#b", None),
+            ("b\u{fc}cher.example", None),
+            ("fe80::1%eth0", None),
+            // A wildcard is a pattern, never a destination.
+            ("*.example.com", None),
+            ("*", None),
         ] {
-            assert_eq!(canonical_host(spelling), identity, "{spelling:?}");
+            assert_eq!(
+                canonical_host(spelling).as_deref(),
+                identity,
+                "{spelling:?}"
+            );
+        }
+    }
+
+    /// An authored pattern is one optional leading `*.` label before a host
+    /// identity; nothing else carries a wildcard.
+    #[test]
+    fn canonical_pattern_keeps_only_a_leading_wildcard_label() {
+        for (pattern, identity) in [
+            ("*.Example.com", Some("*.example.com")),
+            ("*.example.com.", Some("*.example.com")),
+            ("API.example.com", Some("api.example.com")),
+            ("[::ffff:10.0.0.5]", Some("10.0.0.5")),
+            ("*.", None),
+            ("*", None),
+            ("**.example.com", None),
+            ("a.*.example.com", None),
+            ("*.*.example.com", None),
+            ("*.example.com..", None),
+            ("*.[example.com]", None),
+            ("*.10.0.0.5", None),
+        ] {
+            assert_eq!(
+                canonical_pattern(pattern).as_deref(),
+                identity,
+                "{pattern:?}"
+            );
         }
     }
 
     /// Exhaustive over every string of up to six characters drawn from the
-    /// characters that shape a host: the identity settles in one pass, and it
-    /// is either empty (names nothing) or an IP address, or a name with no
-    /// trailing dot, no empty label and no bracket or colon.
+    /// characters that shape a host, upper case and a space included: the
+    /// identity settles in one pass, and it is an IP address or a lowercase
+    /// name of non-empty labels made only of host-name bytes.
     #[test]
     fn canonical_host_is_a_fixed_point_over_every_short_spelling() {
-        const ALPHABET: [char; 7] = ['a', '.', '[', ']', ':', '1', 'f'];
+        const ALPHABET: [char; 9] = ['a', 'A', '.', '[', ']', ':', '1', 'f', ' '];
         let mut spellings = vec![String::new()];
         let mut frontier = vec![String::new()];
         for _ in 0..6 {
@@ -1129,17 +1203,23 @@ mod tests {
         }
         assert_eq!(
             spellings.len(),
-            (0..=6).map(|n| 7usize.pow(n)).sum::<usize>()
+            (0..=6).map(|n| 9usize.pow(n)).sum::<usize>()
         );
         for spelling in &spellings {
-            let identity = canonical_host(spelling);
-            assert_eq!(canonical_host(&identity), identity, "{spelling:?}");
-            let is_ip = identity.parse::<IpAddr>().is_ok();
+            let Some(identity) = canonical_host(spelling) else {
+                continue;
+            };
+            assert_eq!(
+                canonical_host(&identity).as_deref(),
+                Some(identity.as_str()),
+                "{spelling:?}"
+            );
             assert!(
-                identity.is_empty()
-                    || is_ip
-                    || (!identity.contains(['[', ']', ':'])
-                        && identity.split('.').all(|label| !label.is_empty())),
+                identity.parse::<IpAddr>().is_ok()
+                    || (identity.split('.').all(|label| !label.is_empty())
+                        && identity.bytes().all(|b| b.is_ascii_lowercase()
+                            || b.is_ascii_digit()
+                            || b"._-".contains(&b))),
                 "{spelling:?} -> {identity:?}"
             );
         }

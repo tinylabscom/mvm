@@ -48,14 +48,16 @@ impl AdmittedAddresses {
                 entries.remove(&key);
             }
         }
-        entries.insert((canonical_host(host), port), ips);
+        if let Some(host) = canonical_host(host) {
+            entries.insert((host, port), ips);
+        }
     }
 
     fn get(&self, host: &str, port: u16) -> Option<Vec<IpAddr>> {
         self.entries
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .get(&(canonical_host(host), port))
+            .get(&(canonical_host(host)?, port))
             .cloned()
     }
 }

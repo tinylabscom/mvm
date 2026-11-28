@@ -207,6 +207,39 @@ fn rejects_unbound_secret_ref() {
     assert_eq!(errs[0].path, ".apps[0].entrypoint.env.KEY");
 }
 
+/// An allowed host that names no destination binds the secret to nothing;
+/// refuse it rather than admit a binding that never applies.
+#[test]
+fn rejects_a_secret_ref_bound_to_a_host_that_names_nothing() {
+    for host in [
+        "api.example.com..",
+        "[api.example.com]",
+        "a..b",
+        "a b",
+        "*.",
+    ] {
+        let mut w = base_workload();
+        w.apps[0].env.insert(
+            "TOKEN".to_string(),
+            EnvValue::SecretRef {
+                reference: SecretRef {
+                    name: "api-token".to_string(),
+                    mount: SecretMount::Env {
+                        var: "TOKEN".to_string(),
+                    },
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api.example.com".to_string(), host.to_string()],
+                    sigv4: None,
+                    inject: Default::default(),
+                },
+            },
+        );
+        let errs = validate(&w).unwrap_err();
+        assert_eq!(errs[0].code, ErrorCode::SecretWithoutBinding, "{host}");
+        assert!(errs[0].detail.contains(host), "{host}: {}", errs[0].detail);
+    }
+}
+
 #[test]
 fn rejects_persist_volume() {
     let mut w = base_workload();

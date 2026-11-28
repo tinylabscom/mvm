@@ -24,7 +24,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::env_hygiene::classify;
-use crate::network_policy::{HostPort, canonical_host, is_numeric_ipv4_spelling};
+use crate::network_policy::{
+    HostPort, canonical_host, canonical_pattern, is_numeric_ipv4_spelling,
+};
 use mvm_contract::grants::EgressGrant;
 use mvm_contract::policy::routes::{EgressRoute, RouteSet};
 use serde::Serialize;
@@ -274,10 +276,7 @@ fn parse_deny(entry: &str) -> Result<(String, Option<u16>), String> {
             super::allow_host::NUMERIC_IPV4_REFUSAL
         ));
     }
-    let identity = canonical_host(host);
-    if identity.is_empty() {
-        return Err(format!("{entry:?} names no host"));
-    }
+    let identity = canonical_pattern(host).ok_or_else(|| format!("{entry:?} names no host"))?;
     Ok((identity, port))
 }
 
@@ -289,7 +288,9 @@ pub fn deny_covers(deny: &str, host: &str, port: u16) -> bool {
     if deny_port.is_some_and(|p| p != port) {
         return false;
     }
-    let host = canonical_host(host);
+    let Some(host) = canonical_host(host) else {
+        return false;
+    };
     match pattern.strip_prefix("*.") {
         Some(suffix) => host.len() > suffix.len() && host.ends_with(&format!(".{suffix}")),
         None => host == pattern,
@@ -312,7 +313,8 @@ fn validate_secret_name(layer: &Layer, key: &str, name: &str) -> Result<(), Poli
 }
 
 fn validate_host_only(layer: &Layer, key: &str, host: &str) -> Result<(), PolicyError> {
-    if host.is_empty() || host.contains([':', '/']) || host.chars().any(char::is_whitespace) {
+    // A host whose pattern names nothing would be accepted and never apply.
+    if host.contains(':') || canonical_pattern(host).is_none() {
         return Err(layer_error(
             layer,
             key,

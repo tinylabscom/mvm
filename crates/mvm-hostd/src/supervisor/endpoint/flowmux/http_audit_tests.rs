@@ -278,6 +278,8 @@ fn a_typed_http_flow_to_a_host_that_names_nothing_is_refused() {
     for url in [
         "https://api.example.com../v1",
         "https://API.Example.COM../v1",
+        "https://api.example.com%20/v1",
+        "https://api.example.com\u{3000}/v1",
     ] {
         let seen = Arc::new(std::sync::Mutex::new(None));
         let directory = tempfile::tempdir().unwrap();

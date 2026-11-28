@@ -31,14 +31,12 @@ pub mod terminator;
 /// `None` when the host names no destination (its identity is empty); the
 /// entry point refuses it.
 pub(crate) fn canonical_target_host(host: &str) -> Option<String> {
-    let host = mvm_core::policy::network_policy::canonical_host(host);
-    if host.is_empty() {
-        None
-    } else if host.contains(':') {
-        Some(format!("[{host}]"))
+    let host = mvm_core::policy::network_policy::canonical_host(host)?;
+    Some(if host.contains(':') {
+        format!("[{host}]")
     } else {
-        Some(host)
-    }
+        host
+    })
 }
 
 /// `url` with its host in canonical form ([`canonical_target_host`]), so every

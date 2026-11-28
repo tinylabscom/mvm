@@ -169,18 +169,18 @@ impl DnsPinRegistry {
     /// new IP set may differ; the registry holds the latest.
     /// Keyed by the destination's canonical host, so a lookup matches
     /// every spelling of it.
+    /// A pin for a destination that names no host is dropped: no lookup can
+    /// ever reach it.
     pub fn add(&mut self, pin: DnsPin) {
-        self.pins.insert(canonical_host(&pin.dest), pin);
+        if let Some(identity) = canonical_host(&pin.dest) {
+            self.pins.insert(identity, pin);
+        }
     }
 
     /// O(log n) lookup by destination, whatever its case or trailing dot. A
-    /// destination that names no host (an empty identity) has no pin.
+    /// destination that names no host has no pin.
     pub fn lookup(&self, dest: &str) -> Option<&DnsPin> {
-        let identity = canonical_host(dest);
-        if identity.is_empty() {
-            return None;
-        }
-        self.pins.get(&identity)
+        self.pins.get(&canonical_host(dest)?)
     }
 
     /// The first pin whose address set contains `ip`. Lets a numeric-IP

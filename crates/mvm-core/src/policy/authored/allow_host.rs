@@ -45,8 +45,11 @@ pub fn parse_destination(entry: &str) -> Result<HostPort> {
     if is_banned_ssh_port(port) {
         anyhow::bail!("{entry:?} requests TCP/22, but SSH sessions are banned in microVMs");
     }
+    let Some(canonical) = canonical_host(host) else {
+        anyhow::bail!("{host:?} names no host");
+    };
     Ok(HostPort {
-        host: canonical_host(host),
+        host: canonical,
         port,
         cleartext,
     })

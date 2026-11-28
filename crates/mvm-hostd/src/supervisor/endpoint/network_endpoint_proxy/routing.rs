@@ -220,6 +220,9 @@ mod tests {
         for url in [
             "https://api.example.com../admin",
             "https://API.Example.COM../admin",
+            "https://api.example.com%20/admin",
+            "https://api.example.com\u{3000}/admin",
+            "https://%20api.example.com/admin",
         ] {
             let resp = service
                 .process(WireRequest {
