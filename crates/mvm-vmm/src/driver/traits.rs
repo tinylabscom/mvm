@@ -123,6 +123,39 @@ pub struct PreloadChildRequest<'a> {
     pub device_anchors_sha256: Option<&'a str>,
 }
 
+/// Why a preloaded child could not be resumed, split by what had happened to
+/// it. Only [`BeforeActivation`](Self::BeforeActivation) may give a launch
+/// its admission back: nothing about the child had been checked and no resume
+/// request had been sent, so its guest never ran.
+#[derive(Debug)]
+pub enum PreloadedResumeError {
+    /// The child was unusable before its integrity was checked or the resume
+    /// request was sent: a missing state dir, host channels or devices that
+    /// could not be set up, or a VMM that does not answer.
+    BeforeActivation(StandbyError),
+    /// A failed integrity check, a late volume that could not be attached, or
+    /// a resume request, which can take effect even when it reports failure.
+    Refused(StandbyError),
+}
+
+impl std::fmt::Display for PreloadedResumeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BeforeActivation(error) | Self::Refused(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl PreloadedResumeError {
+    /// The underlying refusal.
+    #[must_use]
+    pub fn into_standby_error(self) -> StandbyError {
+        match self {
+            Self::BeforeActivation(error) | Self::Refused(error) => error,
+        }
+    }
+}
+
 /// The process identity and control endpoint of a paused preloaded child.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreloadedChild {
@@ -277,10 +310,10 @@ pub trait VmmDriver: Send + Sync {
     fn resume_preloaded_child(
         &self,
         _req: &ChildForkRequest<'_>,
-    ) -> std::result::Result<(), StandbyError> {
-        Err(StandbyError::Unsupported {
+    ) -> std::result::Result<(), PreloadedResumeError> {
+        Err(PreloadedResumeError::Refused(StandbyError::Unsupported {
             backend: self.name().to_string(),
-        })
+        }))
     }
 
     /// Hand a freshly forked child its generation token, optional signed verb

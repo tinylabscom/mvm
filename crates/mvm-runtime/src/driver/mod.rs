@@ -18,7 +18,7 @@ pub use mvm_vmm::driver::spec::{
 };
 pub use mvm_vmm::driver::traits::{
     ChildForkRequest, DuplexStream, LateVolumeAttach, PreloadChildRequest, PreloadedChild,
-    RunningVm, RunningVmStopTiming, StandbyParentSpawn, VmmDriver,
+    PreloadedResumeError, RunningVm, RunningVmStopTiming, StandbyParentSpawn, VmmDriver,
 };
 pub use mvm_vmm::driver::{fc, hvf, libkrun, qemu};
 

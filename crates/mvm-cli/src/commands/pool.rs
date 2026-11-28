@@ -618,6 +618,19 @@ fn map_client_claim_outcome(
             },
             required,
         ),
+        mvm_client::standby::CliWarmClaimOutcome::PreloadedChildUnusable => {
+            if required {
+                return outcome_for_refusal(
+                    WarmClaimRefusal::ClaimRejected {
+                        reason: "the prepared standby's paused child could not be resumed".into(),
+                    },
+                    true,
+                );
+            }
+            Ok(WarmClaimOutcome::Cold(
+                ColdStartReason::PreloadedChildUnusable,
+            ))
+        }
         mvm_client::standby::CliWarmClaimOutcome::Refused(error) => {
             if mvm_client::admission::cli_start_failure_kind(&error)
                 == Some(mvm_client::admission::CliStartFailureKind::UncertainStop)

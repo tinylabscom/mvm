@@ -13,8 +13,8 @@ pub mod spec;
 pub mod traits;
 
 pub use traits::{
-    ChildForkRequest, DuplexStream, LateVolumeAttach, RunningVm, RunningVmStopTiming,
-    StandbyParentSpawn, VmmDriver,
+    ChildForkRequest, DuplexStream, LateVolumeAttach, PreloadedResumeError, RunningVm,
+    RunningVmStopTiming, StandbyParentSpawn, VmmDriver,
 };
 
 // Concrete drivers, one feature per backend family. `fc` turns on `libkrun`

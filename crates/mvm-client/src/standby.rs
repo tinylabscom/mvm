@@ -142,13 +142,20 @@ pub fn claim_for_admitted_launch(
             .as_ref()
             .is_some_and(|owner| preloaded_child_serves(&reserved.handle, owner.plan(), want));
         if serves {
-            return Ok(Some(claim_selected_cli_warm(
-                admission,
-                backend,
-                pool,
-                &reserved.handle,
-                Some(&reserved.lifecycle),
-            )));
+            return Ok(Some(
+                match claim_selected_cli_warm(
+                    admission,
+                    backend,
+                    pool,
+                    &reserved.handle,
+                    Some(&reserved.lifecycle),
+                ) {
+                    CliWarmClaimOutcome::ReservationLost => {
+                        CliWarmClaimOutcome::PreloadedChildUnusable
+                    }
+                    other => other,
+                },
+            ));
         }
     }
     let Some(handle) = pool.select_idle_compatible(want)? else {

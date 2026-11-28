@@ -531,11 +531,21 @@ are limits, not guarantees:
    a child no record names. The orphan sweep stops it and removes its dir,
    using the owner marker written before the VMM starts
    (`fn:a_preloaded_child_whose_standby_record_is_gone_is_stopped_and_reaped`).
-   A claim that cannot resume its paused child (one whose Firecracker does not
-   answer its API socket within 2 s, say) stops it and drops its standby; the
-   guest never ran, so the launch keeps its admission and takes the ordinary
-   path. A claim that fails after resume also drops the standby rather than
-   returning it to the pool.
+   A paused child found unusable before anything about it is checked or its
+   resume is requested (a missing state dir, host channels or devices that
+   cannot be set up, or a Firecracker that does not answer its API socket
+   within 2 s) is stopped and its standby dropped; its guest never ran, so the
+   launch keeps its admission and boots cold (`cold_reason=preloaded_child_unusable`),
+   or fails when it requires a warm claim. Any later failure (a failed
+   integrity check of the capture or the restored layout, a late volume that
+   cannot be attached, or the resume request itself, which can take effect even
+   when it reports failure) fails the launch with its admission spent; the
+   child is stopped and its standby dropped. The split is a type
+   (`PreloadedResumeError`), so only the first kind can return an admission.
+   A child whose stop cannot be confirmed keeps its standby record `Claimed`
+   and its state dir, so nothing else boots under its name, until the TTL drops
+   the record and the orphan sweep removes the dir once its process is gone;
+   until then its VMM holds guest memory no budget counts.
    A child the teardown cannot stop keeps its dir until the sweep finds its
    process gone. Its standby record is dropped all the same, so the paused
    VMM holds guest memory no budget counts, and a cold boot under its name is

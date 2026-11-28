@@ -284,6 +284,15 @@ mod tests {
             .expect_err("a VMM that never answers fails the probe");
 
         assert!(started.elapsed() < Duration::from_secs(5), "{error:#}");
+        let timed_out = error.chain().any(|cause| {
+            cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                matches!(
+                    io.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                )
+            })
+        });
+        assert!(timed_out, "the probe fails on its read timeout: {error:#}");
         drop(held.join());
     }
 

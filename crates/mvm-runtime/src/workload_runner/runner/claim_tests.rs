@@ -647,9 +647,9 @@ fn a_refused_preloaded_claim_leaves_the_child_for_the_next_launch() {
 /// The live witness: a paused child whose Firecracker stopped answering. The
 /// guest never ran, so the claim gives the launch back its admission (as a
 /// lost reservation), stops the child, and drops its standby; the launch then
-/// takes the ordinary path.
+/// boots cold.
 #[test]
-fn an_unresponsive_preloaded_child_returns_the_launch_to_the_ordinary_path() {
+fn an_unresponsive_preloaded_child_gives_the_launch_back_its_admission() {
     let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -678,6 +678,75 @@ fn an_unresponsive_preloaded_child_returns_the_launch_to_the_ordinary_path() {
         !vm_state_dir(parent.child_name()).exists(),
         "the child's state is gone"
     );
+}
+
+/// A failure once the child's integrity is being checked or its resume has
+/// been requested is not a lost reservation: a resume can take effect even
+/// when it reports failure, and a failed integrity check is evidence. The
+/// launch's admission stays spent, the child is stopped and its standby goes.
+#[test]
+fn a_preloaded_resume_refused_after_activation_spends_the_admission() {
+    for reason in [
+        "PATCH /vm Resumed: reading Firecracker response: timed out",
+        "restored layout differs from the authenticated capture",
+    ] {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let runner = WorkloadRunner::new(
+            MockDriver::default()
+                .with_preloaded_standby()
+                .refusing_preloaded_resume(reason),
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+        let parent = ProtectedPreloadedParent::seed(&runner);
+        let held = crate::vm::instance_snapshot::MachineLifecycleLock::acquire(parent.child_name())
+            .unwrap();
+
+        let error = parent
+            .claim_as(&runner, parent.child_name(), None, Some(&held))
+            .expect_err("a refused resume fails the claim");
+
+        assert!(
+            !matches!(error, StandbyError::ReservationLost),
+            "{reason}: {error}"
+        );
+        assert!(error.to_string().contains(reason), "{error}");
+        assert_eq!(runner.driver.killed_vms(), [parent.child_name()]);
+        assert!(parent.pool.load(&parent.handle.id).is_err(), "{reason}");
+    }
+}
+
+/// An unusable child whose stop cannot be confirmed keeps its reservation:
+/// the record stays `Claimed`, so nothing else is booted under that name.
+#[test]
+fn an_unusable_preloaded_child_whose_stop_fails_keeps_its_reservation() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let runner = WorkloadRunner::new(
+        MockDriver::default()
+            .with_preloaded_standby()
+            .with_unresponsive_preloaded_child()
+            .with_failing_kill(),
+        KeyingSpawner::default(),
+        RecordingBrokerRegistrar::new(),
+    );
+    let parent = ProtectedPreloadedParent::seed(&runner);
+    let held =
+        crate::vm::instance_snapshot::MachineLifecycleLock::acquire(parent.child_name()).unwrap();
+
+    let error = parent
+        .claim_as(&runner, parent.child_name(), None, Some(&held))
+        .expect_err("an unconfirmed stop fails the claim");
+
+    assert!(matches!(error, StandbyError::StopUnconfirmed(_)), "{error}");
+    assert_eq!(
+        parent.pool.load(&parent.handle.id).unwrap().state,
+        StandbyState::Claimed
+    );
+    assert!(vm_state_dir(parent.child_name()).is_dir());
 }
 
 #[test]
@@ -3288,7 +3357,7 @@ fn check_preloaded_refusal_cleanup(driver: MockDriver, retained: bool, with_over
     assert!(
         after.is_err() && pool.list().unwrap().is_empty(),
         "a failed claim of a preloaded child removes its standby: no demoted, idle or \
-         parked record is left for the next launch to pick, so it forks another standby \
+         parked record is left for the next launch to pick, so it boots cold or forks another standby \
          or boots cold, and refill prepares a fresh one"
     );
     assert_eq!(

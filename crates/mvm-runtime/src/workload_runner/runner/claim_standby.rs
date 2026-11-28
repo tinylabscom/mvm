@@ -459,9 +459,17 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let forked = if preloaded_child_name.is_some() {
             self.driver.resume_preloaded_child(&fork_request)
         } else {
-            self.driver.fork_standby_child(&fork_request)
+            self.driver
+                .fork_standby_child(&fork_request)
+                .map_err(crate::driver::PreloadedResumeError::Refused)
         };
-        if let Err(StandbyError::Unrestorable(reason)) = &forked {
+        if let Err(
+            crate::driver::PreloadedResumeError::BeforeActivation(StandbyError::Unrestorable(
+                reason,
+            ))
+            | crate::driver::PreloadedResumeError::Refused(StandbyError::Unrestorable(reason)),
+        ) = &forked
+        {
             tracing::warn!(
                 parent = %handle.id,
                 %reason,
@@ -476,20 +484,23 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             if let Err(stop) = self.driver.attach(&child).and_then(|vm| vm.kill()) {
                 cleanup.retain_uncertain_child();
                 return Err(StandbyError::StopUnconfirmed(format!(
-                    "fork failed ({error}); stopping child {} failed: {stop:#}",
+                    "fork failed ({}); stopping child {} failed: {stop:#}",
+                    error.into_standby_error(),
                     child.0
                 )));
             }
-            if preloaded_child_name.is_some() {
-                // A paused child that could not be resumed never ran the
-                // guest, so the launch keeps its admission, as for a lost
-                // reservation, and takes the ordinary path. Its standby goes
-                // with it.
-                tracing::warn!(child = %child.0, %error, "preloaded child could not be resumed");
-                cleanup.confirm_child_stopped();
-                return Err(StandbyError::ReservationLost);
-            }
-            return Err(error);
+            cleanup.confirm_child_stopped();
+            return Err(match error {
+                // Nothing about the paused child was checked and no resume was
+                // requested, so its guest never ran: the launch keeps its
+                // admission, as for a lost reservation, and boots cold. Its
+                // standby goes with it.
+                crate::driver::PreloadedResumeError::BeforeActivation(error) => {
+                    tracing::warn!(child = %child.0, %error, "preloaded child was unusable");
+                    StandbyError::ReservationLost
+                }
+                crate::driver::PreloadedResumeError::Refused(error) => error,
+            });
         }
         if preloaded_child_name.is_some() {
             claim_phase!("preloaded_resumed");

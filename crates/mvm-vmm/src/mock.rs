@@ -18,7 +18,7 @@ use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 
 use crate::driver::spec::{VmmSpec, VsockPort};
-use crate::driver::traits::{PreloadChildRequest, PreloadedChild};
+use crate::driver::traits::{PreloadChildRequest, PreloadedChild, PreloadedResumeError};
 use crate::driver::{ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver};
 use crate::post_restore::{ChildIdentity, PostRestoreOutcome};
 use crate::runtime_artifacts::{RuntimeArtifact, RuntimeArtifacts};
@@ -135,6 +135,7 @@ pub struct MockDriver {
     /// as a real driver does for a snapshot another VMM version wrote.
     unrestorable_fork: Option<String>,
     unresponsive_preloaded_child: bool,
+    refused_preloaded_resume: Option<String>,
     /// Late-volume slots this driver's parents boot.
     late_volume_slots: u8,
 }
@@ -170,6 +171,7 @@ impl MockDriver {
             preloaded_standby: false,
             unrestorable_fork: None,
             unresponsive_preloaded_child: false,
+            refused_preloaded_resume: None,
             late_volume_slots: 0,
         }
     }
@@ -187,6 +189,14 @@ impl MockDriver {
     #[must_use]
     pub fn with_unresponsive_preloaded_child(mut self) -> Self {
         self.unresponsive_preloaded_child = true;
+        self
+    }
+
+    /// Make `resume_preloaded_child` fail after the child's VMM answered: a
+    /// failed integrity check, or a resume request that may have taken effect.
+    #[must_use]
+    pub fn refusing_preloaded_resume(mut self, reason: impl Into<String>) -> Self {
+        self.refused_preloaded_resume = Some(reason.into());
         self
     }
 
@@ -365,21 +375,30 @@ impl VmmDriver for MockDriver {
     fn resume_preloaded_child(
         &self,
         req: &ChildForkRequest<'_>,
-    ) -> std::result::Result<(), StandbyError> {
+    ) -> std::result::Result<(), PreloadedResumeError> {
         if !self.preloaded_standby {
-            return Err(StandbyError::Unsupported {
+            return Err(PreloadedResumeError::Refused(StandbyError::Unsupported {
                 backend: self.name().to_string(),
-            });
+            }));
         }
         if self.unresponsive_preloaded_child {
-            return Err(StandbyError::ClaimFailed(
-                "the paused child's Firecracker does not answer: Resource temporarily unavailable"
-                    .into(),
+            return Err(PreloadedResumeError::BeforeActivation(
+                StandbyError::ClaimFailed(
+                    "the paused child's Firecracker does not answer: Resource temporarily \
+                     unavailable"
+                        .into(),
+                ),
             ));
+        }
+        if let Some(reason) = &self.refused_preloaded_resume {
+            return Err(PreloadedResumeError::Refused(StandbyError::ClaimFailed(
+                reason.clone(),
+            )));
         }
         // The paused child already holds its parent's content; resuming wires
         // the same channels and token a fork does.
         self.fork_standby_child(req)
+            .map_err(PreloadedResumeError::Refused)
     }
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
         self.observations.lock().unwrap().insert(

@@ -34,8 +34,8 @@ use mvm_core::vm_backend::{
 use crate::driver::spec::{BlockDev, KernelImage};
 use crate::driver::spec::{VmmSpec, VsockDirection, VsockPort};
 use crate::driver::traits::{
-    ChildForkRequest, DuplexStream, PreloadChildRequest, PreloadedChild, RunningVm,
-    StandbyParentSpawn, VmmDriver,
+    ChildForkRequest, DuplexStream, PreloadChildRequest, PreloadedChild, PreloadedResumeError,
+    RunningVm, StandbyParentSpawn, VmmDriver,
 };
 use crate::fc::{
     FcCapabilities, FirecrackerGuard, api_put_session, api_session, fc_pid_path,
@@ -314,6 +314,12 @@ fn fork_restore_error(e: anyhow::Error) -> StandbyError {
         None => StandbyError::ClaimFailed(format!("restore forked child: {e}")),
     }
 }
+
+/// How long a preloaded child's paused Firecracker gets to answer before a
+/// claim gives up on it. It has been running since refill and answers in well
+/// under a millisecond, so a stopped or wedged one fails the claim at once,
+/// before anything about the child is checked or resumed.
+const PRELOADED_CHILD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Preserve every context frame from a failed standby preload at the driver
 /// boundary. The pool command can only report the `StandbyError` string, so a
@@ -1119,34 +1125,32 @@ impl VmmDriver for FcDriver {
     fn resume_preloaded_child(
         &self,
         req: &ChildForkRequest<'_>,
-    ) -> std::result::Result<(), StandbyError> {
+    ) -> std::result::Result<(), PreloadedResumeError> {
         let started = std::time::Instant::now();
+        let unusable = |detail: String| {
+            PreloadedResumeError::BeforeActivation(StandbyError::ClaimFailed(format!(
+                "resume preloaded child '{}': {detail}",
+                req.child_vm_name
+            )))
+        };
         if !req.child_dir.is_dir() {
-            return Err(StandbyError::ClaimFailed(format!(
-                "resume preloaded child '{}': state dir {} is missing",
-                req.child_vm_name,
+            return Err(unusable(format!(
+                "state dir {} is missing",
                 req.child_dir.display()
             )));
         }
+        let socket = req.child_dir.join("fc.socket");
+        crate::fc::fc_api::answers_within(&socket, PRELOADED_CHILD_PROBE_TIMEOUT)
+            .map_err(|error| unusable(format!("its Firecracker does not answer: {error:#}")))?;
         let runtime_dir = req.child_dir.join("runtime");
-        std::fs::create_dir_all(&runtime_dir).map_err(|e| {
-            StandbyError::ClaimFailed(format!(
-                "resume preloaded child '{}': create runtime dir {}: {e}",
-                req.child_vm_name,
-                runtime_dir.display()
-            ))
-        })?;
-        arm_host_channels(req.channels, req.child_dir, &runtime_dir).map_err(|e| {
-            StandbyError::ClaimFailed(format!(
-                "resume preloaded child '{}': wiring host channels: {e}",
-                req.child_vm_name
-            ))
-        })?;
+        std::fs::create_dir_all(&runtime_dir)
+            .map_err(|e| unusable(format!("create runtime dir {}: {e}", runtime_dir.display())))?;
+        arm_host_channels(req.channels, req.child_dir, &runtime_dir)
+            .map_err(|e| unusable(format!("wiring host channels: {e}")))?;
         crate::agent_debug::phase("fc-resume", started, "phase=channels_armed");
         let devices = crate::fc::host::fork_devices_for(req.child_vm_name, req.child_dir)
-            .map_err(|error| StandbyError::ClaimFailed(format!("{error:#}")))?;
-        let io = crate::fc::io::FirecrackerIO::new(req.child_dir.join("fc.socket"))
-            .forking_onto(devices);
+            .map_err(|error| unusable(format!("{error:#}")))?;
+        let io = crate::fc::io::FirecrackerIO::new(socket).forking_onto(devices);
         crate::agent_debug::phase("fc-resume", started, "phase=devices_built");
         crate::fc::host::resume_preloaded_fork_child(
             &io,
@@ -1155,7 +1159,9 @@ impl VmmDriver for FcDriver {
             req.device_anchors_sha256,
             req.late_volumes,
         )
-        .map_err(|error| StandbyError::ClaimFailed(format!("{error:#}")))
+        .map_err(|error| {
+            PreloadedResumeError::Refused(StandbyError::ClaimFailed(format!("{error:#}")))
+        })
     }
 
     fn fork_standby_child(
@@ -2786,6 +2792,43 @@ mod tests {
             ),
             other => panic!("expected SpawnFailed, got {other:?}"),
         }
+    }
+
+    /// The real driver's wiring of the liveness probe: a paused child whose
+    /// Firecracker accepts the connection and never answers is refused as
+    /// unusable, before its integrity is checked or a resume is requested,
+    /// and within the probe's timeout rather than the 30-second API budget.
+    #[test]
+    fn a_silent_paused_child_is_unusable_before_activation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let child_dir = tmp.path().join("c");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(child_dir.join("fc.socket")).unwrap();
+        let held = std::thread::spawn(move || listener.accept().map(|(stream, _)| stream));
+        let req = ChildForkRequest {
+            child_vm_name: "child-vm-1",
+            child_dir: &child_dir,
+            runtime_artifacts_sha256: None,
+            device_anchors_sha256: None,
+            parent_vm_name: None,
+            genid: sample_generation_token(),
+            channels: &workload_channels(),
+            cpu_grant: None,
+            admitted_plan: None,
+            late_volumes: &[],
+        };
+        let started = std::time::Instant::now();
+
+        let error = FcDriver::new().resume_preloaded_child(&req).unwrap_err();
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        match error {
+            PreloadedResumeError::BeforeActivation(StandbyError::ClaimFailed(message)) => {
+                assert!(message.contains("does not answer"), "{message}");
+            }
+            other => panic!("expected an unusable child, got {other:?}"),
+        }
+        drop(held.join());
     }
 
     #[test]

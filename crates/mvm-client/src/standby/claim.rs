@@ -27,6 +27,9 @@ pub enum CliWarmClaimOutcome {
     Claimed(OwnedWarmClaim),
     /// Another claimant won the reservation; the exact capability was restored.
     ReservationLost,
+    /// The child reserved before admission could not be resumed and was
+    /// discarded before it ran; the exact capability was restored.
+    PreloadedChildUnusable,
     /// The claim reached a terminal gate, or retained uncertain native custody.
     ///
     /// The admission is spent in both cases. [`CliStartFailureKind::UncertainStop`]
@@ -740,7 +743,7 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            Some(CliWarmClaimOutcome::ReservationLost)
+            Some(CliWarmClaimOutcome::PreloadedChildUnusable)
         ));
         assert_exact_capability(&fixture);
         // The launcher then releases the child so the cold boot can take its name.

@@ -905,11 +905,6 @@ pub(crate) fn attach_late_volumes(
     Ok(())
 }
 
-/// How long a preloaded child's paused Firecracker gets to answer before a
-/// claim gives up on it. It has been running since refill and answers in well
-/// under a millisecond, so a stopped or wedged one fails the claim at once.
-const PRELOADED_CHILD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
 /// The resume half of a preloaded fork: re-verify the paused child's restored
 /// layout against the claim's authenticated evidence, point its late-volume
 /// slots at the claim's images, and only then resume it. The preload verified
@@ -929,8 +924,6 @@ pub(crate) fn resume_preloaded_fork_child(
     use anyhow::Context as _;
     let started = std::time::Instant::now();
     let verified = (|| -> anyhow::Result<()> {
-        super::fc_api::answers_within(&io.socket_path, PRELOADED_CHILD_PROBE_TIMEOUT)
-            .context("the paused child's Firecracker does not answer")?;
         let expected = super::runtime_artifacts::authenticated_fork_capture(
             child_dir,
             &super::ForkRuntimeEvidence {

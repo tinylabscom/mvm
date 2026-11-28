@@ -1140,8 +1140,8 @@ ceiling, and a standby that exists but cannot be claimed fails the run with the
 refusal rather than falling back to a cold boot. Each such run
 leaves one standby of its image prepared afterwards, refilled after every claim,
 so the first run of an image is cold and the runs after it are warm. Standbys
-stay within the `standby_memory_mib` cap and are released after 20 idle minutes, after
-which the next run is cold again. `mvmctl pool warm --image <image>` prepares
+stay within the `standby_memory_mib` cap and are released once they are older than the
+30-minute standby TTL, after which the next run is cold again. `mvmctl pool warm --image <image>` prepares
 one ahead of time, so even the first run is warm, and `MVM_RESIDENCY=cold` turns
 implicit standbys off:
 
@@ -1816,11 +1816,16 @@ standby's decrypted memory image and root filesystem, which carry no
 workload's data. A claimed child keeps running from those files until its run
 ends and its state is removed, as a child restored at claim time does. An
 unclaimed child's files are removed when it is released or reaped. Set
-`standby_memory_mib` to `0` to keep no paused children. A launch whose plan
-grants a CPU share, or is placed on host cores, does not resume a paused child.
-It restores another standby inside a scope carrying the grant and leaves the
-child for the next launch, or, when no other standby is ready, the paused
-child is discarded and the launch boots cold. When
+`standby_memory_mib` to `0` to keep no paused children. A launch a paused
+child cannot serve does not resume it. When its signed plan grants a CPU share,
+or admission changed its shape, it restores another ready standby inside a
+scope carrying the grant and leaves the paused child for the next launch; if
+that restore is refused, the run fails and the paused child is discarded. In
+every other case (no other standby ready, a launch placed on host cores, or a
+launch no standby can serve) the paused child is discarded and the launch boots
+cold. A paused child that cannot be resumed is discarded before it runs, and
+the launch boots cold with `cold_reason=preloaded_child_unusable`; a launch
+that requires a warm claim fails instead. When
 `default_cpu_millicores` is set, every plan carries a CPU grant, so no paused
 children are prepared. Separately, `default_cpu_millicores`
 and `default_wall_clock_secs` supply defaults for dimensions nothing else named.
