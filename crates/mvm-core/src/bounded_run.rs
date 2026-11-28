@@ -110,14 +110,15 @@ pub fn run_bounded(mut cmd: Command, bounds: RunBounds) -> Result<BoundedOutput,
         .stderr
         .take()
         .map(|p| capped_reader(p, bounds.max_stderr));
-    let deadline = Instant::now() + bounds.timeout;
+    // A bound past what the clock can represent is no bound at all.
+    let deadline = Instant::now().checked_add(bounds.timeout);
     let mut attempt = 0u32;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             // Readers are left to finish on their own: a grandchild holding
             // the pipe open must not hold this call open too.
-            Ok(None) if Instant::now() >= deadline => {
+            Ok(None) if deadline.is_some_and(|d| Instant::now() >= d) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(BoundedRunError::TimedOut(bounds.timeout));
@@ -234,6 +235,13 @@ mod tests {
         assert_eq!(out.status.code(), Some(3));
         assert_eq!(out.stdout, b"out");
         assert_eq!(out.stderr, b"err");
+    }
+
+    #[test]
+    fn a_bound_past_the_clock_range_waits_for_the_tool_instead_of_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_bounded(script(&dir, "exit 0"), RunBounds::new(Duration::MAX, 0)).unwrap();
+        assert!(out.status.success());
     }
 
     #[test]

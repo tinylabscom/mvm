@@ -1,12 +1,11 @@
 //! Security posture checks folded in from the old `mvmctl security` verb:
-//! audit log, host FDE, data-dir/socket/snapshot modes, and signing.
+//! audit log, volume storage encryption, data-dir/socket/snapshot modes, and signing.
 
 use anyhow::Result;
 
 use super::Check;
 use super::builder::dev_vm_socket_path;
 use mvm_core::host_storage_encryption::HostFdeStatus;
-use mvm_core::platform::{self, Platform};
 
 const LANDLOCK_REMEDIATION: &str = "enable CONFIG_SECURITY_LANDLOCK=y, include landlock in the active LSM list, and use Linux 5.19+";
 
@@ -326,27 +325,6 @@ fn audit_chain_check_from_scan(scan: &AuditChainScan) -> Check {
     }
 }
 
-/// Host full-disk-encryption check for encryption at rest.
-///
-/// `LocalBackend` volumes rely on host FDE for at-rest protection (we
-/// deliberately don't roll our own per-volume crypto on dev boxes).
-/// On a dev host this check is **informational/warning-only** — the
-/// `ok` flag stays `true` so a non-FDE laptop can still run mvmctl,
-/// but the report surfaces the gap so users can enable FileVault /
-/// LUKS before relying on local volumes for sensitive data.
-///
-/// On mvmd workers the analogous check is **enforced** (refuses
-/// `LocalVirtiofs` bucket creation when FDE is absent).
-pub(super) fn security_host_fde_check() -> Check {
-    let detection = detect_host_fde_status();
-    Check {
-        name: "host FDE (volumes at-rest)",
-        category: "security",
-        ok: true, // warn-only on a dev box
-        info: detection.info,
-    }
-}
-
 /// Enforce the volume storage rule for a host directory snapshot's location.
 ///
 /// A directory snapshot is plaintext guest data on the host, so where it is
@@ -361,7 +339,7 @@ pub(crate) fn require_local_volume_host_path_encrypted(path: &std::path::Path) -
 /// Where managed volume plaintext is materialized by default, and whether that
 /// storage is verified encrypted.
 ///
-/// Warn-only, like the host FDE line: an unverified host can still run
+/// Warn-only (`ok: true`): an unverified host can still run
 /// everything that does not unlock a managed volume or create a writable disk
 /// image, and those refuse on their own with the same explanation.
 pub(super) fn security_volume_storage_check() -> Check {
@@ -406,82 +384,6 @@ pub(super) fn volume_storage_check_from(
         category: "security",
         ok: true,
         info,
-    }
-}
-
-/// Best-effort detection of host full-disk encryption.
-///
-/// macOS: `fdesetup status` returns "FileVault is On." when enabled.
-/// Linux: `lsblk -no TYPE / 2>&1 | grep crypt` succeeds when the root
-/// FS sits on a dm-crypt mapping. Both checks fail closed (return
-/// "unknown") if the underlying tool is missing.
-pub(crate) fn detect_host_fde_status() -> HostFdeStatus {
-    let plat = platform::current();
-    if matches!(plat, Platform::MacOS) {
-        match mvm_core::env_hygiene::helper_command("fdesetup")
-            .arg("status")
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                parse_filevault_status(&stdout)
-            }
-            Ok(_) | Err(_) => HostFdeStatus::not_enabled(
-                "could not determine FileVault state (fdesetup unavailable)",
-            ),
-        }
-    } else if matches!(plat, Platform::LinuxNative | Platform::LinuxNoKvm) {
-        match mvm_core::env_hygiene::helper_command("findmnt")
-            .args(["-no", "SOURCE", "/"])
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                let dev = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                match mvm_core::env_hygiene::helper_command("lsblk")
-                    .args(["-no", "TYPE", &dev])
-                    .output()
-                {
-                    Ok(types) if types.status.success() => {
-                        let s = String::from_utf8_lossy(&types.stdout);
-                        parse_linux_block_types(&dev, &s)
-                    }
-                    _ => HostFdeStatus::not_enabled(format!(
-                        "could not inspect type chain for {dev}"
-                    )),
-                }
-            }
-            _ => {
-                HostFdeStatus::not_enabled("could not determine root device (findmnt unavailable)")
-            }
-        }
-    } else {
-        HostFdeStatus::not_enabled("unsupported platform for FDE detection")
-    }
-}
-
-fn parse_filevault_status(stdout: &str) -> HostFdeStatus {
-    if stdout.contains("FileVault is On") {
-        HostFdeStatus::enabled("FileVault enabled (LocalBackend volumes encrypted at rest)")
-    } else {
-        HostFdeStatus::not_enabled(format!(
-            "FileVault appears OFF — run `sudo fdesetup enable` before storing \
-             sensitive data in LocalBackend volumes ({})",
-            stdout.trim()
-        ))
-    }
-}
-
-fn parse_linux_block_types(dev: &str, types: &str) -> HostFdeStatus {
-    if types.lines().any(|l| l.trim() == "crypt") {
-        HostFdeStatus::enabled(format!(
-            "root device {dev} sits on a dm-crypt mapping (LUKS enabled; \
-             LocalBackend volumes encrypted at rest)"
-        ))
-    } else {
-        HostFdeStatus::not_enabled(format!(
-            "root device {dev} does NOT appear to be encrypted — enable LUKS \
-             on root before storing sensitive data in LocalBackend volumes"
-        ))
     }
 }
 
@@ -1451,50 +1353,6 @@ mod tests {
     }
 
     #[test]
-    fn filevault_parser_accepts_on_status() {
-        let status = parse_filevault_status("FileVault is On.\n");
-        assert!(status.enabled, "expected enabled: {}", status.info);
-        assert!(
-            status.info.contains("encrypted at rest"),
-            "info should state the at-rest guarantee, got: {}",
-            status.info
-        );
-    }
-
-    #[test]
-    fn filevault_parser_rejects_off_status() {
-        let status = parse_filevault_status("FileVault is Off.\n");
-        assert!(!status.enabled, "expected disabled");
-        assert!(
-            status.info.contains("FileVault appears OFF"),
-            "expected FileVault remediation, got: {}",
-            status.info
-        );
-    }
-
-    #[test]
-    fn linux_fde_parser_accepts_crypt_in_device_chain() {
-        let status = parse_linux_block_types("/dev/mapper/cryptroot", "disk\npart\ncrypt\n");
-        assert!(status.enabled, "expected enabled: {}", status.info);
-        assert!(
-            status.info.contains("LUKS enabled"),
-            "expected LUKS marker, got: {}",
-            status.info
-        );
-    }
-
-    #[test]
-    fn linux_fde_parser_rejects_plain_device_chain() {
-        let status = parse_linux_block_types("/dev/nvme0n1p2", "disk\npart\n");
-        assert!(!status.enabled, "expected disabled");
-        assert!(
-            status.info.contains("does NOT appear to be encrypted"),
-            "expected LUKS remediation, got: {}",
-            status.info
-        );
-    }
-
-    #[test]
     fn volume_storage_line_reports_verified_unverified_and_override() {
         let target = std::path::Path::new("/synthetic/volumes/mvm-managed/unlocked");
         let env = mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV;
@@ -1518,7 +1376,7 @@ mod tests {
             HostFdeStatus::not_enabled("synthetic plain disk"),
             false,
         );
-        assert!(refused.ok, "warn-only like the host FDE line");
+        assert!(refused.ok, "the volume storage line is warn-only");
         assert!(refused.info.contains("is refused"), "{}", refused.info);
         assert!(
             refused.info.contains("synthetic plain disk"),

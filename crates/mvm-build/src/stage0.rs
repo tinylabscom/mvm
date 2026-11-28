@@ -391,30 +391,33 @@ fn init_hash_hex(bytes: &[u8]) -> String {
 /// per-entry symlink/hardlink rewriting.
 fn extract_nix_store_tarball(tarball: &Path, nix_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(nix_dir).with_context(|| format!("creating {}", nix_dir.display()))?;
+    let f =
+        std::fs::File::open(tarball).with_context(|| format!("opening {}", tarball.display()))?;
+    let mut tar_bytes = Vec::new();
+    lzma_rs::xz_decompress(&mut std::io::BufReader::new(f), &mut tar_bytes)
+        .map_err(|e| anyhow::anyhow!("xz-decompressing {}: {e}", tarball.display()))?;
 
-    match extract_nix_store_tarball_with_native_tar(tarball, nix_dir) {
-        Ok(()) => return clear_special_mode_bits(nix_dir),
-        Err(native_err) => {
-            if !dir_is_empty(nix_dir)? {
-                std::fs::remove_dir_all(nix_dir)
-                    .with_context(|| format!("clearing partial extract {}", nix_dir.display()))?;
-                std::fs::create_dir_all(nix_dir)
-                    .with_context(|| format!("recreating {}", nix_dir.display()))?;
-            }
-            tracing::debug!(
-                error = %native_err,
-                tarball = %tarball.display(),
-                "native tar Stage 0 extraction failed; falling back to pure Rust extractor"
-            );
-        }
-    }
+    let mut archive = tar::Archive::new(std::io::Cursor::new(tar_bytes));
+    archive.set_preserve_permissions(true);
+    // The macOS host doesn't carry the numeric uids/gids the tarball
+    // references; files land owned by the current user before ext4
+    // materialization. xattrs aren't needed for the store.
+    archive.set_unpack_xattrs(false);
+    archive
+        .unpack(nix_dir)
+        .with_context(|| format!("unpacking nix seed into {}", nix_dir.display()))?;
 
-    extract_nix_store_tarball_pure_rust(tarball, nix_dir)?;
+    lift_single_top_level(nix_dir).with_context(|| {
+        format!(
+            "stripping the nix-seed wrapper dir under {}",
+            nix_dir.display()
+        )
+    })?;
     clear_special_mode_bits(nix_dir)
 }
 
-/// Drop setuid, setgid and sticky bits from everything under `dir`. Both
-/// extractors keep the archive's permission bits whatever the umask, and the
+/// Drop setuid, setgid and sticky bits from everything under `dir`. The
+/// extractor keeps the archive's permission bits whatever the umask, and the
 /// seed has no use for the special ones: a store path never needs to run
 /// privileged, and the extracting user keeps ownership.
 fn clear_special_mode_bits(dir: &Path) -> Result<()> {
@@ -441,61 +444,6 @@ fn clear_special_mode_bits(dir: &Path) -> Result<()> {
     #[cfg(not(unix))]
     let _ = dir;
     Ok(())
-}
-
-fn extract_nix_store_tarball_with_native_tar(tarball: &Path, nix_dir: &Path) -> Result<()> {
-    let output = mvm_core::env_hygiene::helper_command("tar")
-        .arg("-xJf")
-        .arg(tarball)
-        // Keep the archive's modes whatever the umask, and never adopt its owners.
-        .arg("-p")
-        .arg("--no-same-owner")
-        .arg("-C")
-        .arg(nix_dir)
-        .arg("--strip-components")
-        .arg("1")
-        .output()
-        .with_context(|| "spawning tar for Stage 0 nix seed extraction")?;
-    if !output.status.success() {
-        bail!(
-            "tar -xJf {} exited {}: {}",
-            tarball.display(),
-            output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
-}
-
-fn extract_nix_store_tarball_pure_rust(tarball: &Path, nix_dir: &Path) -> Result<()> {
-    let f =
-        std::fs::File::open(tarball).with_context(|| format!("opening {}", tarball.display()))?;
-    let mut tar_bytes = Vec::new();
-    lzma_rs::xz_decompress(&mut std::io::BufReader::new(f), &mut tar_bytes)
-        .map_err(|e| anyhow::anyhow!("xz-decompressing {}: {e}", tarball.display()))?;
-
-    let mut archive = tar::Archive::new(std::io::Cursor::new(tar_bytes));
-    archive.set_preserve_permissions(true);
-    // The macOS host doesn't carry the numeric uids/gids the tarball
-    // references; files land owned by the current user before ext4
-    // materialization. xattrs aren't needed for the store.
-    archive.set_unpack_xattrs(false);
-    archive
-        .unpack(nix_dir)
-        .with_context(|| format!("unpacking nix seed into {}", nix_dir.display()))?;
-
-    lift_single_top_level(nix_dir).with_context(|| {
-        format!(
-            "stripping the nix-seed wrapper dir under {}",
-            nix_dir.display()
-        )
-    })
-}
-
-fn dir_is_empty(dir: &Path) -> Result<bool> {
-    let mut entries =
-        std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
-    Ok(entries.next().is_none())
 }
 
 /// Hoist the children of the single top-level directory in `dir` up into
