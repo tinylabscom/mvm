@@ -303,6 +303,18 @@ impl ProtectedPreloadedParent {
         grants: Option<mvm_contract::grants::Grants>,
         held: Option<&crate::vm::instance_snapshot::MachineLifecycleLock>,
     ) -> std::result::Result<crate::backend::OwnedWarmClaim, StandbyError> {
+        self.claim_handle_as(runner, &self.handle, plan_name, grants, held)
+    }
+
+    /// [`Self::claim_as`] against the pool's current record for `handle`.
+    fn claim_handle_as(
+        &self,
+        runner: &WorkloadRunner<MockDriver, KeyingSpawner, RecordingBrokerRegistrar>,
+        handle: &StandbyHandle,
+        plan_name: &str,
+        grants: Option<mvm_contract::grants::Grants>,
+        held: Option<&crate::vm::instance_snapshot::MachineLifecycleLock>,
+    ) -> std::result::Result<crate::backend::OwnedWarmClaim, StandbyError> {
         let parent_digest = materialized_parent_rootfs_digest(&self.checkpoints, &self.parent_meta);
         let registry_path = self.store_root.path().join("vm-names.json");
         let anchor = ClaimTestAnchor::audited(&self.parent_meta);
@@ -327,7 +339,7 @@ impl ProtectedPreloadedParent {
             grant_issuer: None,
             preloaded_child_lifecycle: held,
         };
-        runner.claim_standby_owned(&ctx, &self.handle, &claim)
+        runner.claim_standby_owned(&ctx, handle, &claim)
     }
 
     fn chunk_objects(&self) -> Vec<PathBuf> {
@@ -595,6 +607,41 @@ fn a_preloaded_child_refuses_a_plan_with_a_cpu_grant() {
             .state
             .is_claimable()
     );
+}
+
+/// The launch the live witness failed on: a plan with a CPU grant reaches a
+/// reserved preloaded child. The refusal happens before any state changes, so
+/// the record is exactly as it was and the next, grant-free launch still
+/// resumes the same child.
+#[test]
+fn a_refused_preloaded_claim_leaves_the_child_for_the_next_launch() {
+    let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let runner = claim_runner();
+    let parent = ProtectedPreloadedParent::seed(&runner);
+    let before = parent.pool.load(&parent.handle.id).unwrap();
+    let held =
+        crate::vm::instance_snapshot::MachineLifecycleLock::acquire(parent.child_name()).unwrap();
+    let grants = mvm_contract::grants::Grants {
+        cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
+        ..Default::default()
+    };
+
+    parent
+        .claim_as(&runner, parent.child_name(), Some(grants), Some(&held))
+        .expect_err("a CPU grant cannot resume a preloaded child");
+    assert_eq!(
+        parent.pool.load(&parent.handle.id).unwrap(),
+        before,
+        "a refused claim restores the record exactly"
+    );
+    assert!(runner.driver.forked_children().is_empty());
+
+    let resumed = parent
+        .claim_as(&runner, parent.child_name(), None, Some(&held))
+        .expect("the next grant-free launch resumes the same child");
+    assert_eq!(resumed.into_parts().0.0, parent.child_name());
 }
 
 #[test]

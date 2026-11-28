@@ -374,9 +374,10 @@ not paraphrase this row without them.
    process born grant-less as shared pool capacity, which binding now would
    bind the pool rather than the claim. `bind_spawn` wraps a `Command` and
    this tree has no post-spawn attach. On the preloaded path no grant reaches
-   that process: a launch whose admitted plan carries a CPU grant gives up its
-   reserved child and takes the saved-state fork, and the claim refuses to
-   resume a preloaded child under such a plan
+   that process: a launch whose signed plan carries a CPU grant leaves its
+   reserved child intact for the next launch and takes the saved-state fork
+   of another standby, or boots cold when none is ready, and the claim
+   refuses to resume a preloaded child under such a plan
    (`fn:a_preloaded_child_refuses_a_plan_with_a_cpu_grant`). On the HVF
    resident handoff a claimed child's CPU bound is a ledger entry and not a
    `cpu.max`. Wall clock is re-armed on an HVF
@@ -545,7 +546,9 @@ are limits, not guarantees:
 3. **Guest RAM is bounded by `standby_memory_mib`, not by admission.** A paused
    child is a live standby and counts against the standby budget at its full
    guest memory; a child that does not fit is not prepared and its standby
-   stays saved-state. The host budget's headroom is checked only at the
+   stays saved-state. The budget applies when a child is prepared: lowering
+   `standby_memory_mib` does not evict a child already paused, which the idle
+   timeout or the TTL then removes. The host budget's headroom is checked only at the
    moment a child is preloaded. Admission does not count paused children,
    which carry no admitted charge, so guest RAM on the host can reach
    `host_budget_memory_mib` plus `standby_memory_mib`.

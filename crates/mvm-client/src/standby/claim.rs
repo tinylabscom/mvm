@@ -200,6 +200,15 @@ mod tests {
     }
 
     fn prepared_fixture(backend: AnyBackend, name: &str) -> Fixture {
+        prepared_fixture_with(backend, name, None)
+    }
+
+    /// A fixture admitted with `grants` on its signed plan.
+    fn prepared_fixture_with(
+        backend: AnyBackend,
+        name: &str,
+        grants: Option<mvm_contract::grants::Grants>,
+    ) -> Fixture {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let home = tempfile::tempdir().expect("home");
         env.isolate_mvm_home(home.path());
@@ -243,6 +252,7 @@ mod tests {
                         keys_dir: Some(keys.path()),
                         audit_dir: Some(audit.path()),
                         runtime_config: Some(config),
+                        grants: grants.clone(),
                         ..crate::admission::admit_plan_tests::pinning_params(&rootfs, &ledger)
                     },
                     verified_runtime,
@@ -498,10 +508,19 @@ mod tests {
     fn reserved_preload(
         process: &std::process::Child,
     ) -> (Fixture, crate::standby::PreloadedReservation) {
+        reserved_preload_for(process, "selected-parent-child", None)
+    }
+
+    /// [`reserved_preload`] for a launch admitted under `name` with `grants`.
+    fn reserved_preload_for(
+        process: &std::process::Child,
+        name: &str,
+        grants: Option<mvm_contract::grants::Grants>,
+    ) -> (Fixture, crate::standby::PreloadedReservation) {
         let backend = AnyBackend::Mock(
             mvm_runtime::mock::MockBackend::new().with_preloaded_standby(process.id()),
         );
-        let mut fixture = prepared_fixture(backend, "selected-parent-child");
+        let mut fixture = prepared_fixture_with(backend, name, grants);
         fixture.pool = SupervisorStandbyPool::at(fixture._home.path().join("pool"))
             .with_stop_child(mvm_runtime::standby_pool::stop_stand_in);
         let AnyBackend::Mock(mock) = &fixture.backend else {
@@ -536,7 +555,6 @@ mod tests {
             &fixture.backend,
             &fixture.pool,
             &fixture.handle.compat(),
-            &fixture.config,
             Some(&reserved),
         )
         .expect("pool readable");
@@ -562,47 +580,123 @@ mod tests {
         let _ = process.wait();
     }
 
+    /// A second, ordinary standby beside the preloaded one, sharing its shape.
+    fn record_ordinary_standby(fixture: &Fixture) -> StandbyHandle {
+        let mut ordinary = fixture.handle.clone();
+        ordinary.id = "ordinary-parent".into();
+        ordinary.pid = 0;
+        ordinary.preloaded_child_vm_name = None;
+        ordinary.control_socket = String::new();
+        fixture.pool.record(&ordinary).expect("ordinary standby");
+        ordinary
+    }
+
+    /// Through the real claim path, a launch the reserved child cannot serve
+    /// (here its plan names another VM; a CPU grant on the signed plan takes
+    /// the same branch, see `a_preloaded_child_serves_only_its_own_grant_free_compatible_launch`).
+    /// The child is left intact for the next launch and this one forks
+    /// another standby.
     #[test]
-    fn a_cpu_granted_launch_releases_its_child_and_forks_from_the_parent() {
+    fn an_unservable_launch_forks_another_standby_and_leaves_the_child_intact() {
         let mut process = paused_vmm();
-        let (fixture, reserved) = reserved_preload(&process);
-        let granted = mvm_core::vm_backend::VmStartConfig {
-            cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
-            ..fixture.config.clone()
-        };
+        let (fixture, reserved) = reserved_preload_for(&process, "another-launch", None);
+        record_ordinary_standby(&fixture);
+        let before = fixture
+            .pool
+            .load(&fixture.handle.id)
+            .expect("preloaded record");
 
         let outcome = crate::standby::claim_for_admitted_launch(
             &fixture.slot,
             &fixture.backend,
             &fixture.pool,
             &fixture.handle.compat(),
-            &granted,
             Some(&reserved),
         )
         .expect("pool readable");
 
-        assert!(
-            !process.wait().expect("released child").success(),
-            "child stopped"
-        );
-        // The fork's admission scratch reuses the admitted name's dir; the
-        // child's own state, marker included, went with the release.
-        let child_state = mvm_core::config::vm_state_dir("selected-parent-child");
-        assert!(
-            !child_state
-                .join(mvm_runtime::standby_pool::PRELOADED_CHILD_RESERVATION_FILE)
-                .exists()
-                && !child_state.join("fc.pid").exists(),
-            "its state is gone"
-        );
         let Some(CliWarmClaimOutcome::Claimed(claim)) = outcome else {
-            panic!("the launch forks from the released parent");
+            panic!("the launch forks the ordinary standby");
         };
-        assert_eq!(
-            claim.into_parts().0.0,
-            "selected-parent",
-            "a fork, not the child"
+        assert_eq!(claim.into_parts().0.0, "ordinary-parent");
+        assert!(
+            process.try_wait().unwrap().is_none(),
+            "the paused child is untouched"
         );
+        assert_eq!(
+            fixture.pool.load(&fixture.handle.id).expect("record"),
+            before,
+            "the preloaded record is exactly as it was"
+        );
+        drop(reserved);
+        assert!(
+            fixture
+                .pool
+                .reserve_preloaded_compatible(&fixture.handle.compat())
+                .expect("pool readable")
+                .is_some(),
+            "a following grant-free launch can still take the child"
+        );
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+
+    /// With no other standby the cold boot needs the admitted name the child
+    /// holds (here a reshaped launch), so the reserved standby goes and no
+    /// demoted parent is left; the launch keeps its admission.
+    #[test]
+    fn an_unservable_launch_with_no_other_standby_boots_cold_under_its_name() {
+        let mut process = paused_vmm();
+        let (fixture, reserved) = reserved_preload_for(&process, "selected-parent-child", None);
+        let mut reshaped = fixture.handle.compat();
+        reshaped.vcpus = reshaped.vcpus.saturating_add(1);
+
+        let outcome = crate::standby::claim_for_admitted_launch(
+            &fixture.slot,
+            &fixture.backend,
+            &fixture.pool,
+            &reshaped,
+            Some(&reserved),
+        )
+        .expect("pool readable");
+
+        assert!(outcome.is_none(), "no warm claim: the launch boots cold");
+        assert_exact_capability(&fixture);
+        assert!(!process.wait().expect("released child").success());
+        assert!(
+            fixture.pool.load(&fixture.handle.id).is_err(),
+            "no demoted parent left"
+        );
+        assert!(
+            mvm_runtime::vm::name_custody::NameCustody::require_cold_state("selected-parent-child")
+                .is_ok(),
+            "the admitted name is free for the cold boot"
+        );
+    }
+
+    /// A launch admitted under another name never takes the child.
+    #[test]
+    fn a_renamed_launch_never_takes_the_reserved_child() {
+        let mut process = paused_vmm();
+        let (fixture, reserved) = reserved_preload_for(&process, "another-launch", None);
+        record_ordinary_standby(&fixture);
+
+        let renamed = crate::standby::claim_for_admitted_launch(
+            &fixture.slot,
+            &fixture.backend,
+            &fixture.pool,
+            &fixture.handle.compat(),
+            Some(&reserved),
+        )
+        .expect("pool readable");
+        let Some(CliWarmClaimOutcome::Claimed(claim)) = renamed else {
+            panic!("the renamed launch forks the ordinary standby");
+        };
+        assert_eq!(claim.into_parts().0.0, "ordinary-parent");
+        assert!(process.try_wait().unwrap().is_none());
+
+        let _ = process.kill();
+        let _ = process.wait();
     }
 
     #[test]
@@ -620,7 +714,6 @@ mod tests {
             &fixture.backend,
             &fixture.pool,
             &fixture.handle.compat(),
-            &fixture.config,
             Some(&reserved),
         )
         .expect("pool readable");

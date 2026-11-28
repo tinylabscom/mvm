@@ -170,10 +170,10 @@ impl SupervisorStandbyPool {
         Ok(None)
     }
 
-    /// Give up a reservation the launch cannot use, through the same teardown
-    /// the reapers use. The parent's checkpoint is still sound, so the standby
-    /// stays in the pool as saved-state and the launch can fork from it. A
-    /// record the claim already reserved, consumed or demoted is left as it is.
+    /// Give up a reservation whose launch must boot cold under the child's
+    /// name, through the same teardown the reapers use: the child and its
+    /// standby go, and refill prepares another. A record the claim already
+    /// reserved, consumed or demoted is left as it is.
     pub fn release_reserved_preload(
         &self,
         reserved: &StandbyHandle,
@@ -188,8 +188,7 @@ impl SupervisorStandbyPool {
         {
             return Ok(());
         }
-        self.release_live(&current, Some(lifecycle), Release::KeepParent)
-            .map(|_| ())
+        self.release_live(&current, Some(lifecycle)).map(|_| ())
     }
 
     /// Atomically reserve one compatible warm parent.
@@ -308,7 +307,7 @@ impl SupervisorStandbyPool {
             }
             if h.is_saved_state() {
                 self.remove(&h.id)?;
-            } else if !self.release_live(&h, None, Release::Remove)? {
+            } else if !self.release_live(&h, None)? {
                 continue;
             }
             memory_mib = memory_mib.saturating_sub(u64::from(h.mem_mib));
@@ -414,9 +413,7 @@ impl SupervisorStandbyPool {
                     self.remove(&h.id)?;
                     reaped.push(h.id);
                 }
-            } else if (!pid_alive(h.pid) || expired)
-                && self.release_live(&h, None, Release::Remove)?
-            {
+            } else if (!pid_alive(h.pid) || expired) && self.release_live(&h, None)? {
                 reaped.push(h.id);
             }
         }
@@ -434,7 +431,7 @@ impl SupervisorStandbyPool {
         h: &StandbyHandle,
         child_gate: Option<&MachineLifecycleLock>,
     ) -> Result<bool> {
-        self.release_live(h, child_gate, Release::Remove)
+        self.release_live(h, child_gate)
     }
 
     /// Stop a standby's process and remove its record: the one teardown for a
@@ -444,12 +441,7 @@ impl SupervisorStandbyPool {
     /// A preloaded child holds the parent's decrypted memory image in its state
     /// dir, so that dir goes with it, under the child's lifecycle gate. A child
     /// whose gate another launch holds is reserved and left alone (`false`).
-    fn release_live(
-        &self,
-        h: &StandbyHandle,
-        held: Option<&MachineLifecycleLock>,
-        release: Release,
-    ) -> Result<bool> {
+    fn release_live(&self, h: &StandbyHandle, held: Option<&MachineLifecycleLock>) -> Result<bool> {
         let mut acquired = None;
         let child_gate = match (h.preloaded_child_vm_name.as_deref(), held) {
             (None, _) => None,
@@ -484,23 +476,12 @@ impl SupervisorStandbyPool {
             })
             .is_ok()
             && !api_socket_answers(gate.name());
-        // A child that did not go away keeps its parent out of rotation.
-        if stopped && remove_preloaded_child_state(gate.name()) && release == Release::KeepParent {
-            self.demote_to_saved_state(&h.id)?;
-        } else {
-            self.remove(&h.id)?;
+        if stopped {
+            remove_preloaded_child_state(gate.name());
         }
+        self.remove(&h.id)?;
         Ok(true)
     }
-}
-
-/// What a released standby leaves in the pool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Release {
-    /// Drop the standby entirely.
-    Remove,
-    /// Drop only its preloaded child; the parent stays claimable saved-state.
-    KeepParent,
 }
 
 /// Whether something still serves the child's Firecracker API socket. The
@@ -512,23 +493,16 @@ fn api_socket_answers(child: &str) -> bool {
 }
 
 /// Remove a released preloaded child's state dir, plaintext memory image
-/// included. The caller holds the child's lifecycle gate. `false` when the dir
-/// stays behind.
-fn remove_preloaded_child_state(child: &str) -> bool {
+/// included. The caller holds the child's lifecycle gate.
+fn remove_preloaded_child_state(child: &str) {
     let state_dir = mvm_core::config::vm_state_dir(child);
     match crate::vm::reconcile::reap_unowned_state_dir_locked(&state_dir) {
-        Ok(true) => true,
-        Ok(false) => {
-            tracing::warn!(
-                child,
-                "preloaded child still running after release; the orphan sweep removes its state"
-            );
-            false
-        }
-        Err(error) => {
-            tracing::warn!(%error, child, "removing a released preloaded child failed");
-            false
-        }
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(
+            child,
+            "preloaded child still running after release; the orphan sweep removes its state"
+        ),
+        Err(error) => tracing::warn!(%error, child, "removing a released preloaded child failed"),
     }
 }
 
@@ -1591,7 +1565,7 @@ mod tests {
     }
 
     #[test]
-    fn a_released_reservation_keeps_its_parent_as_saved_state() {
+    fn a_released_reservation_removes_its_child_and_its_standby() {
         let (_env, _home) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path()).with_stop_child(stop_stand_in);
@@ -1607,16 +1581,11 @@ mod tests {
 
         assert!(!process.wait().unwrap().success());
         assert!(!mvm_core::config::vm_state_dir("child-pre-f").exists());
-        let kept = pool.load("pre").expect("the parent stays in the pool");
-        assert_eq!(kept.preloaded_child_vm_name, None);
-        assert!(kept.is_saved_state(), "the parent is saved-state again");
         assert!(
-            pool.select_idle_compatible(&compat("aa"))
-                .unwrap()
-                .is_some(),
-            "a launch can now fork from it"
+            pool.load("pre").is_err(),
+            "no demoted parent is left behind"
         );
-        // A second release of an already demoted record is a no-op.
+        // A second release of an already released record is a no-op.
         pool.release_reserved_preload(&handle, &lifecycle).unwrap();
     }
 }

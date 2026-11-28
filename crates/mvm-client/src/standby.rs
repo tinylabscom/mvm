@@ -99,26 +99,32 @@ fn preload_known_unservable(
         || mvm_vmm::host::egress_bridge::mailbox_cmdline_token(config).is_some()
 }
 
-/// Whether the child reserved before admission can serve the admitted launch.
-///
-/// Admission may have changed the shape the reservation matched — a clamped
-/// vCPU count, say — so the key is compared again. A CPU grant is bound only
-/// where a claim starts the child's VMM inside a scope carrying it, which a
-/// paused child's VMM was not, so such a launch takes the fork path.
+/// Whether the child reserved before admission can serve the admitted launch,
+/// judged from the signed plan itself: its name must be the child's, and it
+/// must grant no CPU share, which only a claim that starts the child's VMM
+/// inside a scope can bind. Admission may also have changed the shape the
+/// reservation matched — a clamped vCPU count, say — so the key is compared
+/// again.
 fn preloaded_child_serves(
     handle: &StandbyHandle,
-    config: &mvm_core::vm_backend::VmStartConfig,
+    plan: &mvm_core::plan::ExecutionPlan,
     want: &mvm_core::vm_backend::StandbyCompat,
 ) -> bool {
-    config.cpu_grant.is_none()
+    plan.grants
+        .as_ref()
+        .is_none_or(|grants| grants.cpu.is_none())
         && handle.is_compatible(want)
-        && handle.preloaded_child_vm_name.as_deref() == Some(config.name.as_str())
+        && handle.preloaded_child_vm_name.as_deref() == Some(plan.image.name.as_str())
 }
 
 /// Spend an admitted launch on a warm standby: the child it reserved before
-/// admission when that child can serve it, otherwise an ordinary standby,
-/// which the released child's parent now is. `Ok(None)` means no standby is
-/// ready.
+/// admission when that child can serve it, otherwise an ordinary standby.
+/// `Ok(None)` means no standby is ready.
+///
+/// A child that cannot serve the launch is left exactly as it was for the
+/// next launch, and this one forks an ordinary standby under a fresh name.
+/// Only when none is ready is the reserved standby released, because the cold
+/// boot needs the admitted name the child holds.
 ///
 /// # Errors
 ///
@@ -128,11 +134,14 @@ pub fn claim_for_admitted_launch(
     backend: &mvm_runtime::AnyBackend,
     pool: &SupervisorStandbyPool,
     want: &mvm_core::vm_backend::StandbyCompat,
-    config: &mvm_core::vm_backend::VmStartConfig,
     preloaded: Option<&PreloadedReservation>,
 ) -> Result<Option<CliWarmClaimOutcome>> {
     if let Some(reserved) = preloaded {
-        if preloaded_child_serves(&reserved.handle, config, want) {
+        let serves = admission
+            .borrow()
+            .as_ref()
+            .is_some_and(|owner| preloaded_child_serves(&reserved.handle, owner.plan(), want));
+        if serves {
             return Ok(Some(claim_selected_cli_warm(
                 admission,
                 backend,
@@ -141,9 +150,11 @@ pub fn claim_for_admitted_launch(
                 Some(&reserved.lifecycle),
             )));
         }
-        pool.release_reserved_preload(&reserved.handle, &reserved.lifecycle)?;
     }
     let Some(handle) = pool.select_idle_compatible(want)? else {
+        if let Some(reserved) = preloaded {
+            pool.release_reserved_preload(&reserved.handle, &reserved.lifecycle)?;
+        }
         return Ok(None);
     };
     Ok(Some(claim_selected_cli_warm(
@@ -439,31 +450,28 @@ mod tests {
         let mut handle = idle_handle("standby-pre", 4242);
         handle.preloaded_child_vm_name = Some("calm-otter-01".into());
         let want = handle.compat();
-        let cfg = mvm_core::vm_backend::VmStartConfig {
-            name: "calm-otter-01".into(),
-            ..Default::default()
-        };
-        assert!(preloaded_child_serves(&handle, &cfg, &want));
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.image.name = "calm-otter-01".into();
+        assert!(preloaded_child_serves(&handle, &plan, &want));
 
-        let granted = mvm_core::vm_backend::VmStartConfig {
-            cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
-            ..cfg.clone()
-        };
+        let mut granted = plan.clone();
+        granted.grants = Some(mvm_contract::grants::Grants {
+            cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
+            ..Default::default()
+        });
         assert!(
             !preloaded_child_serves(&handle, &granted, &want),
-            "a CPU grant takes the fork path"
+            "a CPU grant on the signed plan takes the fork path"
         );
 
-        let renamed = mvm_core::vm_backend::VmStartConfig {
-            name: "another-run".into(),
-            ..cfg.clone()
-        };
+        let mut renamed = plan.clone();
+        renamed.image.name = "another-run".into();
         assert!(!preloaded_child_serves(&handle, &renamed, &want));
 
         let mut clamped = want.clone();
         clamped.vcpus = 1;
         assert!(
-            !preloaded_child_serves(&handle, &cfg, &clamped),
+            !preloaded_child_serves(&handle, &plan, &clamped),
             "a shape admission changed no longer matches"
         );
     }

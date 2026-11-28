@@ -597,7 +597,7 @@ fn claim_for_launch(
     // authority transfer and dispatch; this adapter maps only Optional/Required
     // policy.
     match mvm_client::standby::claim_for_admitted_launch(
-        admission, backend, &pool, &want, cfg, preloaded,
+        admission, backend, &pool, &want, preloaded,
     )? {
         Some(outcome) => map_client_claim_outcome(outcome, claim_required()),
         None => outcome_for_refusal(WarmClaimRefusal::NoCompatibleParent, claim_required()),
