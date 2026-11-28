@@ -39,16 +39,19 @@ pub struct PreparedPortableBootAssets {
 
 impl PreparedPortableBootAssets {
     pub fn acquire(arch: GuestArch) -> Result<Self> {
-        let image_set = PublishedImageSet::acquire_workload()?;
+        let version = env!("CARGO_PKG_VERSION");
         let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
+        // The runtime first: it is the piece a source build usually lacks.
         let runtime = mvm_build::guest_runtime::resolve_or_download_guest_runtime_quartet(
-            &cache,
-            env!("CARGO_PKG_VERSION"),
-            arch,
-        )?;
+            &cache, version, arch,
+        )
+        .with_context(|| {
+            missing_runtime_hint(mvm_build::artifact_acquisition::compiled_channel(), version)
+        })?;
         let proof = runtime
             .release_proof
             .context("portable creation requires a signed CLI runtime release")?;
+        let image_set = PublishedImageSet::acquire_workload()?;
         Self::from_set(image_set, arch, &proof)
     }
 
@@ -464,6 +467,26 @@ pub(crate) fn utf8(path: &Path) -> Result<&str> {
 #[path = "portable_boot_assets_diagnostic.rs"]
 mod diagnostic;
 
+/// Why a portable package could not get its signed guest runtime. It embeds
+/// only the one published with this CLI version, never a tree-built one.
+fn missing_runtime_hint(
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+    version: &str,
+) -> String {
+    match channel {
+        mvm_build::artifact_acquisition::DistributionChannel::Release => {
+            format!("a portable package needs the guest runtime mvmctl {version}'s release ships")
+        }
+        mvm_build::artifact_acquisition::DistributionChannel::Source => format!(
+            "a portable package embeds the signed guest runtime published with mvmctl {version}, \
+             and a source build of an unreleased version has none (whatever \
+             {} says); build packages with a released mvmctl, or boot the image \
+             directly with `mvmctl machine run --image <ref>`",
+            mvm_build::artifact_acquisition::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,6 +494,19 @@ mod tests {
     use mvm_build::published_image_set::fixture::ImageSetFixture;
     use mvm_core::image_set::{ImageSetRole, MemberTarget, WorkloadImageProfile};
     use mvm_core::util::test_env::TestEnv;
+
+    /// A source build of an unreleased version has no signed runtime to embed,
+    /// so its refusal says so instead of leaving a bare 404.
+    #[test]
+    fn a_source_build_is_told_why_it_has_no_signed_runtime() {
+        use mvm_build::artifact_acquisition::DistributionChannel;
+        let hint = missing_runtime_hint(DistributionChannel::Source, "9.9.9-rc.1");
+        assert!(hint.contains("9.9.9-rc.1"), "{hint}");
+        assert!(hint.contains("released mvmctl"), "{hint}");
+        assert!(hint.contains("machine run --image"), "{hint}");
+        let release = missing_runtime_hint(DistributionChannel::Release, "9.9.9");
+        assert!(!release.contains("source build"), "{release}");
+    }
 
     #[test]
     #[ignore = "requires genuine signed runtime, published Linux proofs, and an existing sealed workload"]
