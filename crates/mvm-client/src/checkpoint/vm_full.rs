@@ -247,9 +247,10 @@ impl PreparedVmFullFork {
 }
 
 /// The guest memory the restore will map, so the child is admitted and charged
-/// at its configured maximum: the saved RAM's authenticated length. A
-/// Firecracker load sizes the guest from it, and the HVF restore refuses RAM
-/// whose length differs from the memory its captured config names.
+/// at no less than its configured maximum: the saved RAM's authenticated
+/// length. A Firecracker load sizes the guest from it; the HVF restore maps the
+/// memory its captured config names and refuses a RAM file shorter than that,
+/// so a longer file can only over-charge.
 fn restored_memory_mib(store: &CheckpointStore, parent: &CheckpointMeta) -> Result<u64> {
     let bytes = mvm_runtime::checkpoint::materialized_blob_len(
         store,
@@ -404,8 +405,9 @@ fn verify_child_plan(
 mod tests {
     use super::*;
 
-    /// The parent's saved RAM, deliberately unlike the host's default memory.
-    const PARENT_MEMORY_MIB: u64 = 72;
+    /// The parent's saved RAM: unlike both the host default and the 64 MiB
+    /// floor plan synthesis applies, so neither can stand in for it.
+    const PARENT_MEMORY_MIB: u64 = 65;
 
     struct CapturedParent(PathBuf);
 
@@ -807,6 +809,12 @@ mod tests {
         dispatched.result.expect("a fork that fits is admitted");
         drop(dispatched.admitted);
 
+        assert!(
+            mvm_core::config::vm_state_dir_at(home.path(), "child-vm")
+                .join("admitted-charge.json")
+                .is_file(),
+            "the running child's charge is recorded, so its hold can retire when it dies"
+        );
         assert_eq!(memory_mib, PARENT_MEMORY_MIB);
         assert_headroom(BUDGET_MIB - memory_mib);
     }
