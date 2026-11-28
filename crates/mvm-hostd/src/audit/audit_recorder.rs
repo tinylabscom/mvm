@@ -62,9 +62,7 @@ use crate::audit::signer::{AuditError, AuditSigner, PlanAuditEntry, for_plan};
 /// `event_name` field's prefix) is the wire-stable identifier
 /// downstream consumers grep against.
 ///
-/// Adding a new category is a wire-format extension — bump the
-/// `mvm_core::protocol::PROTOCOL_VERSION` if a consumer's
-/// fixture set would break.
+/// Adding a new category is a wire-format extension for those consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventCategory {
     /// CLI command invocations. `cmd.<verb>.<outcome>`.

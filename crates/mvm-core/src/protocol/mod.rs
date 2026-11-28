@@ -3,8 +3,6 @@
 pub mod broker_control;
 pub mod handler;
 pub mod hvf_control;
-#[allow(clippy::module_inception)]
-pub mod protocol;
 pub mod runtime_release;
 pub mod signed_config;
 pub mod telemetry;
@@ -21,7 +19,3 @@ pub use mvm_contract::protocol::{
     audit_signer, broker, dns, host_audit, host_beacon, host_cell, host_cost, host_kv, host_signer,
     host_time, lifecycle_audit, routing, signing,
 };
-
-pub use self::protocol::{HostdRequest, HostdResponse, PROTOCOL_VERSION};
-#[cfg(feature = "hostd-transport")]
-pub use self::protocol::{read_frame, recv_request, send_request, send_response, write_frame};

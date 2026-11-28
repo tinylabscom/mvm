@@ -54,9 +54,8 @@
 //! Sync [`encode_request`]/[`decode_request`] (and response twins) are
 //! always available; async tokio helpers ([`read_request`],
 //! [`write_request`], [`read_response`], [`write_response`]) are gated
-//! behind the `hostd-transport` feature, mirroring the hostd IPC
-//! transport in `protocol.rs`, so the default `mvm-core` build stays
-//! runtime-free.
+//! behind the `hostd-transport` feature, so the default `mvm-core`
+//! build stays runtime-free.
 //!
 //! # Serde shape
 //!
@@ -601,8 +600,8 @@ pub fn decode_response(buf: &[u8]) -> Result<(VolumeBridgeResponse, Vec<u8>, usi
 // ============================================================================
 // Framing — async tokio helpers (feature: hostd-transport)
 //
-// Gated like the hostd IPC transport in `protocol.rs` so the default
-// `mvm-core` build carries no tokio (xtask check-core-runtime-free).
+// Gated so the default `mvm-core` build carries no tokio
+// (xtask check-core-runtime-free).
 // ============================================================================
 
 #[cfg(feature = "hostd-transport")]
