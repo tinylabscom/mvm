@@ -441,7 +441,8 @@ pub(super) fn decode_udp_addr(bytes: &[u8]) -> Result<(IpAddr, u16, &[u8]), Stri
             ),
             IpAddr::V4(_) => return Err("IPv4-mapped address expected".to_string()),
         },
-        0x04 => IpAddr::from(addr_bytes),
+        // A mapped address reaches its IPv4 address; decide on that one.
+        0x04 => mvm_core::policy::network_policy::unmap_v4_mapped(IpAddr::from(addr_bytes)),
         _ => return Err(format!("unknown UDP address family tag: {tag}")),
     };
 
@@ -475,6 +476,21 @@ mod tests {
             "the peer limit still applies"
         );
         assert!(inbound_admitted(ObservedOnly, true, 16, 16));
+    }
+
+    /// An IPv4-mapped address sent under the IPv6 tag is that IPv4 address,
+    /// so every later check (transform profiles, bindings, the gate, audit)
+    /// sees the address the datagram reaches.
+    #[test]
+    fn an_ipv4_mapped_address_under_the_ipv6_tag_decodes_as_ipv4() {
+        let mapped: std::net::Ipv6Addr = "::ffff:192.0.2.10".parse().unwrap();
+        let mut encoded = vec![0x04];
+        encoded.extend_from_slice(&mapped.octets());
+        encoded.extend_from_slice(&53u16.to_be_bytes());
+        encoded.extend_from_slice(b"query");
+        let (ip, port, rest) = decode_udp_addr(&encoded).unwrap();
+        assert_eq!(ip, "192.0.2.10".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!((port, rest), (53, &b"query"[..]));
     }
 
     #[test]

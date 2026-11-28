@@ -23,11 +23,12 @@ use crate::supervisor::endpoint::network_endpoint_proxy::TerminationMode;
 use crate::supervisor::endpoint::terminator;
 use mvm_contract::protocol::network_flow::open_tcp::{OpenTcpPayloadError, decode_open_tcp};
 
-/// One `OpenTcp` the claim-10 gate admitted: what the guest named, and what
-/// the gate decided about it. Carried between admission and whichever way the
+/// One `OpenTcp` the claim-10 gate admitted: the destination the guest named,
+/// in its canonical identity, and what the gate decided about it. Carried between admission and whichever way the
 /// flow is then served, so neither half re-derives the other's facts.
 struct AdmittedFlow {
-    /// The `host:port` exactly as the guest wrote it, for the audit label.
+    /// The canonical `host:port` the guest named, for the audit label; one
+    /// destination is recorded under one spelling, whatever the guest wrote.
     target: String,
     /// The host half of that target — what a secret binding is checked
     /// against, and the authority a terminated request must agree with.

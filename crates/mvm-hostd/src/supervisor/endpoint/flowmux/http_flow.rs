@@ -102,8 +102,9 @@ impl HttpFlow {
                 max: MAX_HTTP_HEAD_LEN,
             });
         }
-        let head: HttpFlowHead =
+        let mut head: HttpFlowHead =
             serde_json::from_slice(payload).map_err(|e| HttpFlowError::BadHead(e.to_string()))?;
+        head.url = crate::supervisor::endpoint::canonical_url(head.url);
         if head.body_len > MAX_HTTP_BODY_LEN {
             return Err(HttpFlowError::BodyTooLarge {
                 declared: head.body_len,

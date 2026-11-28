@@ -151,3 +151,121 @@ fn an_http_forward_is_recorded_before_dispatch() {
     drop(guest);
     host.join().unwrap().unwrap();
 }
+
+/// Records the request it is asked to forward, then fails it.
+struct RecordingForwarder {
+    seen: Arc<std::sync::Mutex<Option<PreparedRequest>>>,
+}
+
+#[async_trait::async_trait]
+impl Forwarder for RecordingForwarder {
+    async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+        *self.seen.lock().unwrap() = Some(req);
+        Err(ForwardError::Failed("fixture recorded the request".into()))
+    }
+}
+
+/// A typed HTTP flow is decided by its canonical destination: a dotted,
+/// upper-case or IPv4-mapped spelling of a host whose request body is
+/// replaced has its body replaced exactly like the canonical spelling, and
+/// the audit names the canonical host only.
+#[test]
+fn every_spelling_of_a_replaced_destination_has_its_request_body_replaced() {
+    use super::tests::gate_allowing_addr;
+    use mvm_core::policy::{
+        ReversibleReplacementAction, ReversibleReplacementPolicy, ReversibleReplacementProfile,
+    };
+    const PHONE: &str = "+14155550123";
+    let ip: std::net::IpAddr = "93.184.216.34".parse().unwrap();
+    for (profile_host, url) in [
+        ("api.example.com", "https://api.example.com/v1"),
+        ("api.example.com", "https://api.example.com./v1"),
+        ("api.example.com", "https://API.Example.COM./v1"),
+        ("93.184.216.34", "https://93.184.216.34/v1"),
+        ("93.184.216.34", "https://[::ffff:93.184.216.34]/v1"),
+    ] {
+        let gate = if profile_host == "api.example.com" {
+            gate_pinning_name(profile_host, ip, 443)
+        } else {
+            gate_allowing_addr(ip, 443, None)
+        };
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let directory = tempfile::tempdir().unwrap();
+        let resolver = LocalResolver::new(
+            "flow-replacement",
+            Arc::new(FileSecretStore::with_dir(directory.path())),
+        );
+        let service = SubstitutionService::new(
+            Arc::new(SubstitutionRegistry::new()),
+            Arc::new(resolver),
+            Arc::new(RecordingForwarder {
+                seen: Arc::clone(&seen),
+            }),
+            Arc::new(gate),
+        )
+        .with_reversible_replacement_policy(ReversibleReplacementPolicy {
+            default: Default::default(),
+            profiles: vec![ReversibleReplacementProfile {
+                host: profile_host.into(),
+                action: ReversibleReplacementAction {
+                    enabled: true,
+                    ..Default::default()
+                },
+            }],
+        });
+        let sink = Arc::new(CapturingSink::default());
+        let supplied = Arc::clone(&sink);
+        let (mut guest, mut session, host) =
+            run_session_on_runtime(move |id, key, anchor, limits| {
+                FlowMuxAccept::new(id, key, anchor, limits, EgressGate::default_deny())
+                    .with_audit_sink(supplied)
+                    .with_substitution(Some(Arc::new(service)))
+            });
+        let body = format!("call {PHONE} now");
+        write_frame(&mut guest, &mut session, Opcode::OpenHttp, 1, b"");
+        assert_eq!(
+            read_flowmux_frame(&mut guest, &mut session).0,
+            Opcode::Opened,
+            "{url}"
+        );
+        let head = serde_json::to_vec(&serde_json::json!({
+            "method": "POST",
+            "url": url,
+            "headers": [],
+            "body_len": body.len(),
+        }))
+        .unwrap();
+        write_frame(&mut guest, &mut session, Opcode::HttpRequestHead, 1, &head);
+        write_frame(
+            &mut guest,
+            &mut session,
+            Opcode::HttpRequestBody,
+            1,
+            body.as_bytes(),
+        );
+        let answer = read_flowmux_frame(&mut guest, &mut session);
+        drop(guest);
+        host.join().unwrap().unwrap();
+
+        let sent = seen
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| panic!("{url}: not forwarded: {answer:?}"));
+        let sent_body = String::from_utf8_lossy(&sent.body);
+        // Replacement leaves a reversible token; the streaming redactor alone
+        // would only mask the value, which is not what the profile asks for.
+        assert!(
+            !sent_body.contains(PHONE) && sent_body.contains("mvmr1_"),
+            "{url}: body not replaced: {sent_body}"
+        );
+        assert_eq!(sent.url, format!("https://{profile_host}/v1"), "{url}");
+        let audited = format!("{:?}", sink.records.lock().unwrap());
+        for raw in ["example.com.", "Example", "::ffff"] {
+            assert!(
+                !audited.contains(raw),
+                "{url}: audit names {raw:?}: {audited}"
+            );
+        }
+    }
+}
