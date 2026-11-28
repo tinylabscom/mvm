@@ -215,7 +215,7 @@ pub(crate) fn all_budgets() -> Vec<PerfBudget> {
             name: "rootfs_size",
             limit: ROOTFS_MAX_BYTES,
             unit: "bytes",
-            source: "plan-60 Phase 9 + ADR-005",
+            source: "plan-60 Phase 9",
             description: "Minimal-template ext4 rootfs size",
         },
         PerfBudget {
@@ -243,14 +243,14 @@ pub(crate) fn all_budgets() -> Vec<PerfBudget> {
             name: "firecracker_cold_boot",
             limit: FIRECRACKER_BOOT_BUDGET.as_millis() as u64,
             unit: "ms",
-            source: "ADR-005 §\"Per-backend boot budgets\"",
+            source: "xtask perf FIRECRACKER_BOOT_BUDGET",
             description: "Firecracker cold-boot wall-clock (1 vCPU / 256 MiB)",
         },
         PerfBudget {
             name: "libkrun_cold_boot",
             limit: LIBKRUN_BOOT_BUDGET.as_millis() as u64,
             unit: "ms",
-            source: "ADR-005 §\"Per-backend boot budgets\"",
+            source: "xtask perf LIBKRUN_BOOT_BUDGET",
             description: "Libkrun cold-boot wall-clock",
         },
         PerfBudget {

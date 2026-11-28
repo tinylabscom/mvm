@@ -108,10 +108,8 @@ const SCANNED_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 const PENDING: &[&str] = &[
     "specs/adrs/003-hypervisor-egress-policy.md",
     "specs/adrs/004-sealed-signed-builder-image.md",
-    "specs/adrs/005-function-call-entrypoints.md",
     "specs/adrs/007-vmbackend-single-trait.md",
     "specs/adrs/014-signed-audited-execution-plans.md",
-    "specs/adrs/015-hostd-protocol-versioning.md",
     "specs/adrs/020-host-services-broker.md",
     "specs/adrs/022-target-architecture.md",
     "specs/adrs/023-secrets-subsystem-egress-substitution.md",

@@ -106,9 +106,8 @@ metadata-endpoint denial with integration tests.
 ### `secret-non-leakage` — Planned
 
 Today, manually mounted secret files are still readable by the guest
-that receives them. ADR-048 §"Non-goals" explicitly states mvm will
-**not claim** secret non-leakage for that manual file-materialization
-path. The opaque-token + host-side substitution path is Planned for
+that receives them. mvm does **not claim** secret non-leakage for that
+manual file-materialization path. The opaque-token + host-side substitution path is Planned for
 managed secret refs.
 
 To move to Preview: ship the managed secret token type, host-side

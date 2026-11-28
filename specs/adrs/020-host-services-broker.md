@@ -162,6 +162,63 @@ with no host handler behind them yet (`host.time.v1`, `host.cost.v1` in
 `crates/mvm-agentd/src`); calling either today returns `NotBound`,
 identically to any other unregistered service.
 
+### `RunEntrypoint` is the production call-and-return verb
+
+The broker carries calls from a workload to the host. The opposite
+direction, the host running the workload's own code, has one
+production-safe guest-agent verb: `GuestRequest::RunEntrypoint`. The host
+sends stdin bytes, a timeout and the environment its launch path injects
+(the egress proxy and secret placeholders); the agent runs the one program
+the image names and streams `EntrypointEvent`s back (`Stdout`, `Stderr`,
+`Control`, ending in `Exit` or `Error`). There is no argv, no shell and no
+program selection. Arbitrary commands (`Exec`) and process control are
+DevOnly verbs, admitted only for a runtime profile and signed grant that
+authorize them (claim 4 in ADR-001).
+
+The program is named by `/etc/mvm/entrypoint`, read and validated once at
+boot (`crates/mvm-agentd/src/entrypoint.rs`): the resolved path must sit
+under `/usr/lib/mvm/wrappers/` on the root filesystem, owned by root, mode
+0555. An image that bakes the entrypoint as a script in the marker file
+itself passes the same ownership, mode and same-filesystem checks with only
+the prefix relaxed. A missing or invalid entrypoint fails every later call
+closed rather than falling back to another program.
+
+The agent enforces the limits itself, not the wrapper: stdin over the cap is
+refused before the wrapper starts, a call past its timeout has its process
+group killed, and each output stream is bounded in guest memory, past which
+the oldest chunks are dropped and reported as a gap. Each call gets
+a fresh agent-owned `TMPDIR` under `/tmp`, removed when the call ends, and
+the agent sets `RLIMIT_CORE=0` so no wrapper crash writes payload memory to
+disk. Without a warm pool, one call runs at a time and a concurrent caller
+gets `Busy` at once; with a pool configured in `/etc/mvm/runtime.json`, calls
+bind to warm workers over a length-prefixed JSON pipe and queue FIFO up to
+the configured depth, then get `Busy`.
+
+`mkFunctionService` (`nix/lib/factories/`) bakes the wrapper for a
+`language` from its registry (Python and Node today), and
+`mkFunctionWorkload` composes it with `mkGuest` from a workload IR file.
+IR validation refuses `network.mode = "host"` for a function entrypoint
+(`crates/mvm-contract/src/ir/validate.rs`).
+
+Open: the in-tree wrappers emit no `Control` records yet, so that variant
+round-trips but is empty on real calls; Wasm has no registry entry.
+
+### The hostd envelope has its own version, and no consumer
+
+`mvm-core` also defines a length-prefixed JSON `HostdRequest` /
+`HostdResponse` envelope for a privileged host executor, versioned by its
+own `PROTOCOL_VERSION` (3) in `crates/mvm-core/src/protocol/protocol.rs`.
+The bump policy and history are that constant's documentation, and
+`protocol_version_is_three` with canonical version-1 and version-2 fixtures
+pins it. The guest-agent vsock protocol and the builder daemon protocol keep
+separate version constants, because each joins a different pair of
+processes.
+
+Open: nothing in this repository or in mvmd sends or serves the envelope
+(the root facade only re-exports its types), so no fixture holds two peers
+together and no peer checks the version. It is to be wired to a consumer or
+deleted.
+
 ## Consequences
 
 Positive:
