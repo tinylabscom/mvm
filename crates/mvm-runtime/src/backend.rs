@@ -63,7 +63,8 @@ pub fn reap_uncertain_native_start_failure_for_test(error: anyhow::Error) {
 #[must_use]
 pub struct OwnedWarmClaim {
     pub(crate) id: VmId,
-    pub(crate) lifecycle: crate::vm::instance_snapshot::MachineLifecycleLock,
+    /// `None` when the launcher already holds the child's gate.
+    pub(crate) lifecycle: Option<crate::vm::instance_snapshot::MachineLifecycleLock>,
 }
 
 impl std::fmt::Debug for OwnedWarmClaim {
@@ -75,8 +76,14 @@ impl std::fmt::Debug for OwnedWarmClaim {
 }
 
 impl OwnedWarmClaim {
-    /// Transfer the child identity and its continuously held lifecycle gate.
-    pub fn into_parts(self) -> (VmId, crate::vm::instance_snapshot::MachineLifecycleLock) {
+    /// Transfer the child identity and its continuously held lifecycle gate,
+    /// or `None` when the launcher held that gate throughout.
+    pub fn into_parts(
+        self,
+    ) -> (
+        VmId,
+        Option<crate::vm::instance_snapshot::MachineLifecycleLock>,
+    ) {
         (self.id, self.lifecycle)
     }
 }
@@ -801,7 +808,7 @@ impl AnyBackend {
             AnyBackend::Libkrun(runner) => runner.supports_preloaded_standby(),
             AnyBackend::Hvf(runner) => runner.supports_preloaded_standby(),
             #[cfg(feature = "test-support")]
-            AnyBackend::Mock(_) => false,
+            AnyBackend::Mock(backend) => backend.supports_preloaded_standby(),
             AnyBackend::Qemu(_)
             | AnyBackend::Wasm(_)
             | AnyBackend::AppleContainer(_)
@@ -828,19 +835,21 @@ impl AnyBackend {
     /// Prepare one paused child for a saved-state standby after its checkpoint
     /// has been audited. Unsupported backends leave the existing saved-state
     /// pool path intact.
+    /// Returns the child's lifecycle gate, held until its record is published.
     pub fn preload_standby_via_runner(
         &self,
         ctx: &crate::workload_runner::PreloadContext<'_>,
         handle: &mut mvm_core::vm_backend::StandbyHandle,
-    ) -> std::result::Result<(), mvm_core::vm_backend::StandbyError> {
+    ) -> std::result::Result<
+        crate::vm::instance_snapshot::MachineLifecycleLock,
+        mvm_core::vm_backend::StandbyError,
+    > {
         match self {
             AnyBackend::Firecracker(runner) => runner.preload_standby_child(ctx, handle),
             AnyBackend::Libkrun(runner) => runner.preload_standby_child(ctx, handle),
             AnyBackend::Hvf(runner) => runner.preload_standby_child(ctx, handle),
             #[cfg(feature = "test-support")]
-            AnyBackend::Mock(_) => Err(mvm_core::vm_backend::StandbyError::Unsupported {
-                backend: self.inner().name().to_string(),
-            }),
+            AnyBackend::Mock(backend) => backend.preload_standby(handle),
             AnyBackend::Qemu(_)
             | AnyBackend::Wasm(_)
             | AnyBackend::AppleContainer(_)
@@ -901,11 +910,24 @@ impl AnyBackend {
             // its own in-memory state (the context is a runner detail it ignores).
             #[cfg(feature = "test-support")]
             AnyBackend::Mock(backend) => {
-                let lifecycle =
-                    crate::vm::instance_snapshot::MachineLifecycleLock::acquire(&handle.id)
-                        .map_err(|error| {
+                // Like the runner: a preloaded child's gate is the launcher's.
+                let lifecycle = match (
+                    &handle.preloaded_child_vm_name,
+                    ctx.preloaded_child_lifecycle,
+                ) {
+                    (Some(child), Some(held)) => {
+                        held.require_name(child).map_err(|error| {
                             mvm_core::vm_backend::StandbyError::ClaimFailed(error.to_string())
                         })?;
+                        None
+                    }
+                    _ => Some(
+                        crate::vm::instance_snapshot::MachineLifecycleLock::acquire(&handle.id)
+                            .map_err(|error| {
+                                mvm_core::vm_backend::StandbyError::ClaimFailed(error.to_string())
+                            })?,
+                    ),
+                };
                 claim
                     .start_config
                     .as_ref()
@@ -2609,6 +2631,7 @@ mod tests {
                     parent_checkpoint: &self.parent,
                     registry_path: &self.registry_path,
                     grant_issuer: None,
+                    preloaded_child_lifecycle: None,
                 }
             }
         }

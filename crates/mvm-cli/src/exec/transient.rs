@@ -155,6 +155,9 @@ pub(super) struct BootAttempt<'a> {
     /// cannot take on, so it keeps its cold path instead of requiring a claim.
     pub(super) user_named: bool,
     pub(super) writable_images: &'a mut mvm_vmm::driver::prepared_disks::WritableVolumeImages,
+    /// The paused child reserved before admission, which this launch was
+    /// admitted under the name of.
+    pub(super) preloaded: Option<&'a mvm_client::standby::PreloadedReservation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +185,7 @@ fn claim_warm_standby(
         attempt.start_config,
         attempt.user_named,
         attempt.admission,
+        attempt.preloaded,
     )
 }
 
@@ -305,7 +309,7 @@ pub(super) fn boot_transient_vm(
                 "Claimed a warm standby ({}) — skipping cold boot.",
                 id.0
             ));
-            (id.0, None, Some(lifecycle))
+            (id.0, None, lifecycle)
         }
         Ok(crate::commands::pool::WarmClaimOutcome::Cold(reason)) => {
             if let Some(declaration) = reason.declaration() {
@@ -840,6 +844,7 @@ mod tests {
                 mailbox_posture: None,
                 user_named: true,
                 writable_images: &mut images,
+                preloaded: None,
             };
             let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(false);
             let error = boot_transient_vm(
@@ -974,6 +979,7 @@ mod tests {
             mailbox_posture: None,
             user_named: true,
             writable_images: &mut images,
+            preloaded: None,
         };
         let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
 
@@ -1068,6 +1074,7 @@ mod tests {
                 mailbox_posture: None,
                 user_named: true,
                 writable_images: &mut images,
+                preloaded: None,
             };
             let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(false);
             let booted = boot_transient_vm(
@@ -1552,6 +1559,7 @@ mod tests {
                 mailbox_posture: None,
                 user_named: true,
                 writable_images: &mut images,
+                preloaded: None,
             };
             let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(false);
             boot_transient_vm(
@@ -1628,6 +1636,7 @@ mod tests {
             mailbox_posture: None,
             user_named: true,
             writable_images: &mut images,
+            preloaded: None,
         };
         assert!(matches!(
             claim_warm_standby(&mut attempt).unwrap(),
@@ -1669,6 +1678,7 @@ mod tests {
             mailbox_posture: None,
             user_named: false,
             writable_images: &mut images,
+            preloaded: None,
         };
         assert!(matches!(
             claim_warm_standby(&mut attempt).unwrap(),
@@ -1691,6 +1701,7 @@ mod tests {
             mailbox_posture: None,
             user_named: false,
             writable_images: &mut images,
+            preloaded: None,
         };
         assert!(matches!(
             claim_warm_standby(&mut attempt).unwrap(),
@@ -1785,6 +1796,7 @@ mod tests {
             mailbox_posture: None,
             user_named: false,
             writable_images: &mut images,
+            preloaded: None,
         };
         let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::default();
         let booted = boot_transient_vm(

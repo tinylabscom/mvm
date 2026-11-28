@@ -346,9 +346,6 @@ pub(crate) fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpe
     })
 }
 
-/// Reap a paused child if the pool record cannot be published after preload.
-/// The child is not yet a user VM, so leaving it behind would leak a VMM that
-/// no persisted reaper can discover.
 /// Whether a standby pool this backend cannot serve should fail the launch.
 ///
 /// The warm target is not always something anyone asked for. On the HVF
@@ -526,6 +523,26 @@ pub(crate) fn try_warm_claim_with_admission(
     cfg: &VmStartConfig,
     user_named: bool,
     admission: Option<&std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>>,
+    preloaded: Option<&mvm_client::standby::PreloadedReservation>,
+) -> Result<WarmClaimOutcome> {
+    let outcome = claim_for_launch(backend, cfg, user_named, admission, preloaded);
+    // Whatever runs next under this name needs it free: a cold boot refuses a
+    // name a paused child still holds.
+    if let Some(reserved) = preloaded
+        && !matches!(outcome, Ok(WarmClaimOutcome::Claimed(_)))
+    {
+        SupervisorStandbyPool::open()?
+            .release_reserved_preload(&reserved.handle, &reserved.lifecycle)?;
+    }
+    outcome
+}
+
+fn claim_for_launch(
+    backend: &AnyBackend,
+    cfg: &VmStartConfig,
+    user_named: bool,
+    admission: Option<&std::cell::RefCell<Option<mvm_client::admission::CliAdmission>>>,
+    preloaded: Option<&mvm_client::standby::PreloadedReservation>,
 ) -> Result<WarmClaimOutcome> {
     if let Err(reason) = claim_gate(cfg, user_named, backend.late_volume_slots()) {
         if claim_required() {
@@ -576,22 +593,15 @@ pub(crate) fn try_warm_claim_with_admission(
     mvm_core::launch_trace::lap("warm_claim.standby_compat");
     let pool = SupervisorStandbyPool::open()?;
     // Selection is the CLI's only warm-pool mechanism. The client facade owns
-    // retained-parent verification, claim context, authority transfer and
-    // dispatch; this adapter maps only Optional/Required policy.
-    let Some(handle) = pool.select_idle_compatible(&want)? else {
-        return outcome_for_refusal(WarmClaimRefusal::NoCompatibleParent, claim_required());
-    };
-    if handle
-        .preloaded_child_vm_name
-        .as_deref()
-        .is_some_and(|name| name != cfg.name)
-    {
-        return outcome_for_refusal(WarmClaimRefusal::NoCompatibleParent, claim_required());
+    // the reserved child, retained-parent verification, claim context,
+    // authority transfer and dispatch; this adapter maps only Optional/Required
+    // policy.
+    match mvm_client::standby::claim_for_admitted_launch(
+        admission, backend, &pool, &want, preloaded,
+    )? {
+        Some(outcome) => map_client_claim_outcome(outcome, claim_required()),
+        None => outcome_for_refusal(WarmClaimRefusal::NoCompatibleParent, claim_required()),
     }
-    map_client_claim_outcome(
-        mvm_client::standby::claim_selected_cli_warm(admission, backend, &pool, &handle),
-        claim_required(),
-    )
 }
 
 fn map_client_claim_outcome(
@@ -608,6 +618,19 @@ fn map_client_claim_outcome(
             },
             required,
         ),
+        mvm_client::standby::CliWarmClaimOutcome::PreloadedChildUnusable => {
+            if required {
+                return outcome_for_refusal(
+                    WarmClaimRefusal::ClaimRejected {
+                        reason: "the prepared standby's paused child could not be resumed".into(),
+                    },
+                    true,
+                );
+            }
+            Ok(WarmClaimOutcome::Cold(
+                ColdStartReason::PreloadedChildUnusable,
+            ))
+        }
         mvm_client::standby::CliWarmClaimOutcome::Refused(error) => {
             if mvm_client::admission::cli_start_failure_kind(&error)
                 == Some(mvm_client::admission::CliStartFailureKind::UncertainStop)
@@ -630,7 +653,7 @@ pub(crate) fn try_warm_claim(
     cfg: &VmStartConfig,
     user_named: bool,
 ) -> Result<WarmClaimOutcome> {
-    try_warm_claim_with_admission(backend, cfg, user_named, None)
+    try_warm_claim_with_admission(backend, cfg, user_named, None, None)
 }
 
 /// Lazily reap dead/expired standbys on the launch path — the no-daemon
@@ -662,6 +685,28 @@ mod tests {
 
     fn sha256_hex_of(bytes: &[u8]) -> String {
         hex::encode(Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn an_unusable_preloaded_child_boots_cold_unless_a_claim_is_required() {
+        assert!(matches!(
+            map_client_claim_outcome(
+                mvm_client::standby::CliWarmClaimOutcome::PreloadedChildUnusable,
+                false,
+            ),
+            Ok(WarmClaimOutcome::Cold(
+                ColdStartReason::PreloadedChildUnusable
+            ))
+        ));
+        let error = map_client_claim_outcome(
+            mvm_client::standby::CliWarmClaimOutcome::PreloadedChildUnusable,
+            true,
+        )
+        .expect_err("a required claim fails");
+        assert!(
+            format!("{error:#}").contains("could not be resumed"),
+            "{error:#}"
+        );
     }
 
     #[test]

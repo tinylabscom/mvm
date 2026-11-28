@@ -129,6 +129,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // (2) + (4) Bind the admitted plan's image digest to the verified parent.
         // A missing plan or a digest mismatch refuses before any child side effect.
         let plan = claim_plan(claim)?;
+        if let Some(child) = &preloaded_child_name {
+            require_preloaded_child_admission(child, &plan)?;
+        }
         if let Some(identity) = runtime_verified.identity() {
             plan.require_runtime_identity(identity).map_err(|error| {
                 StandbyError::ClaimFailed(format!("verify inherited runtime: {error}"))
@@ -190,9 +193,23 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             }
             None => fresh_child_id(ctx)?,
         };
-        lifecycle = crate::vm::instance_snapshot::MachineLifecycleLock::acquire(&child.0).map_err(
-            |error| StandbyError::ClaimFailed(format!("acquire child lifecycle gate: {error:#}")),
-        )?;
+        lifecycle = match ctx.preloaded_child_lifecycle {
+            Some(held) => {
+                held.require_name(&child.0).map_err(|error| {
+                    StandbyError::ClaimFailed(format!("preloaded child reservation: {error:#}"))
+                })?;
+                None
+            }
+            None => Some(
+                crate::vm::instance_snapshot::MachineLifecycleLock::acquire(&child.0).map_err(
+                    |error| {
+                        StandbyError::ClaimFailed(format!(
+                            "acquire child lifecycle gate: {error:#}"
+                        ))
+                    },
+                )?,
+            ),
+        };
         // Selection precedes the gate; recheck under it before touching child state.
         verify_preloaded_child_name_is_available(ctx, &child.0)?;
         let child_dir = vm_state_dir(&child.0);
@@ -201,6 +218,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         cleanup.track_child_dir(child_dir.clone());
         if preloaded_child_name.is_some() {
             cleanup.track_preloaded_child(child.0.clone());
+            // Before any endpoint, broker or plan material: an unusable child
+            // costs the probe and nothing else.
+            if let Err(error) = self.driver.check_preloaded_child(&child.0, &child_dir) {
+                return Err(settle_unusable_preloaded_child(&mut cleanup, &child, error));
+            }
         }
         mvm_core::launch_trace::lap("warm_claim.child_identity_and_lock");
 
@@ -442,9 +464,17 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let forked = if preloaded_child_name.is_some() {
             self.driver.resume_preloaded_child(&fork_request)
         } else {
-            self.driver.fork_standby_child(&fork_request)
+            self.driver
+                .fork_standby_child(&fork_request)
+                .map_err(crate::driver::PreloadedResumeError::Refused)
         };
-        if let Err(StandbyError::Unrestorable(reason)) = &forked {
+        if let Err(
+            crate::driver::PreloadedResumeError::BeforeActivation(StandbyError::Unrestorable(
+                reason,
+            ))
+            | crate::driver::PreloadedResumeError::Refused(StandbyError::Unrestorable(reason)),
+        ) = &forked
+        {
             tracing::warn!(
                 parent = %handle.id,
                 %reason,
@@ -453,6 +483,15 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             cleanup.quarantine();
         }
         if let Err(error) = forked {
+            if let crate::driver::PreloadedResumeError::BeforeActivation(_)
+            | crate::driver::PreloadedResumeError::Refused(StandbyError::StopUnconfirmed(_)) =
+                error
+            {
+                // The driver already stopped the child, identity-checked, or
+                // reports that it could not.
+                return Err(settle_unusable_preloaded_child(&mut cleanup, &child, error));
+            }
+            let error = error.into_standby_error();
             // A driver can fail after it has created a child VMM. Do not
             // release its parent's reservation and remove its state dir while
             // that child might still be running.
@@ -463,9 +502,14 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                     child.0
                 )));
             }
+            cleanup.confirm_child_stopped();
             return Err(error);
         }
-        claim_phase!("child_forked");
+        if preloaded_child_name.is_some() {
+            claim_phase!("preloaded_resumed");
+        } else {
+            claim_phase!("child_forked");
+        }
 
         // Unconditional and best-effort, mirroring `start_workload`: started
         // the moment the restored guest is live, before the fallible
@@ -500,7 +544,16 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             seccomp_tier: Some(admitted_seccomp_tier(&plan)),
             volumes: late_volume_configs,
         };
-        if let Err(refusal) = self.take_fresh_child_identity(&child.0, identity) {
+        // A resumed child is no longer a standby: without the marker the
+        // orphan sweep treats it as an ordinary VM, never as a paused child
+        // whose standby is gone.
+        let taken = if preloaded_child_name.is_some() {
+            release_preload_marker(&child_dir)
+        } else {
+            Ok(())
+        }
+        .and_then(|()| self.take_fresh_child_identity(&child.0, identity));
+        if let Err(refusal) = taken {
             // The child is live and still carrying its parent's random state.
             // Unwinding alone would leave running exactly the VM this refusal
             // exists to prevent, so stop it before returning. `force_stop`
@@ -610,6 +663,69 @@ fn fresh_child_id(ctx: &ClaimContext<'_>) -> std::result::Result<VmId, StandbyEr
     Err(StandbyError::ClaimFailed(
         "could not mint a registry-unique child name".into(),
     ))
+}
+
+/// The claim's answer to a preloaded child the driver found unusable and
+/// stopped. Only [`BeforeActivation`](crate::driver::PreloadedResumeError::BeforeActivation)
+/// becomes a lost reservation: nothing about the child was checked and no
+/// resume was requested, so its guest never ran and the launch keeps its
+/// admission. A stop the driver could not confirm keeps the reservation.
+fn settle_unusable_preloaded_child(
+    cleanup: &mut WarmClaimLease<'_>,
+    child: &VmId,
+    error: crate::driver::PreloadedResumeError,
+) -> StandbyError {
+    match error {
+        crate::driver::PreloadedResumeError::BeforeActivation(error) => {
+            tracing::warn!(child = %child.0, %error, "preloaded child was unusable");
+            cleanup.confirm_child_stopped();
+            StandbyError::ReservationLost
+        }
+        crate::driver::PreloadedResumeError::Refused(StandbyError::StopUnconfirmed(detail)) => {
+            cleanup.retain_uncertain_child();
+            StandbyError::StopUnconfirmed(detail)
+        }
+        crate::driver::PreloadedResumeError::Refused(error) => error,
+    }
+}
+
+fn release_preload_marker(child_dir: &Path) -> std::result::Result<(), StandbyError> {
+    match std::fs::remove_file(
+        child_dir.join(crate::standby_pool::PRELOADED_CHILD_RESERVATION_FILE),
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StandbyError::ClaimFailed(format!(
+            "release preloaded child marker: {error}"
+        ))),
+    }
+}
+
+/// A preloaded child already has its name and its VMM, so it can serve only
+/// the plan admitted under that name, and only a plan that grants no CPU
+/// share: its VMM was started before the claim, outside any CPU scope. A
+/// launch with a CPU grant takes the fork path, which starts the child's VMM
+/// inside a scope carrying the grant.
+fn require_preloaded_child_admission(
+    child: &str,
+    plan: &ExecutionPlan,
+) -> std::result::Result<(), StandbyError> {
+    if plan.image.name != child {
+        return Err(StandbyError::ClaimFailed(format!(
+            "preloaded child '{child}' cannot run a plan admitted under '{}'",
+            plan.image.name
+        )));
+    }
+    if plan
+        .grants
+        .as_ref()
+        .is_some_and(|grants| grants.cpu.is_some())
+    {
+        return Err(StandbyError::ClaimFailed(format!(
+            "preloaded child '{child}' was started without a CPU scope and cannot carry a CPU grant"
+        )));
+    }
+    Ok(())
 }
 
 /// Recheck a preloaded child's registry identity immediately before claim-side

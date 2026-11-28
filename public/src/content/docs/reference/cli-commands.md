@@ -1140,8 +1140,8 @@ ceiling, and a standby that exists but cannot be claimed fails the run with the
 refusal rather than falling back to a cold boot. Each such run
 leaves one standby of its image prepared afterwards, refilled after every claim,
 so the first run of an image is cold and the runs after it are warm. Standbys
-stay within the `standby_memory_mib` cap and are released after 20 idle minutes, after
-which the next run is cold again. `mvmctl pool warm --image <image>` prepares
+stay within the `standby_memory_mib` cap and are released once they are older than the
+30-minute standby TTL, after which the next run is cold again. `mvmctl pool warm --image <image>` prepares
 one ahead of time, so even the first run is warm, and `MVM_RESIDENCY=cold` turns
 implicit standbys off:
 
@@ -1807,7 +1807,30 @@ counts each machine's configured maximum rather than its current commitment,
 which the memory balloon moves at runtime. `standby_memory_mib` caps the guest
 RAM held by idle standbys across all images (2048 MiB by default); when a new
 standby would exceed it, the oldest is released first, and standbys are also
-kept within the `host_budget_memory_mib` headroom. Separately, `default_cpu_millicores`
+kept within the `host_budget_memory_mib` headroom. On Firecracker a standby may
+also hold a paused child already restored from it, which a claim resumes rather
+than rebuilds; such a child counts against the same cap at its full guest
+memory, and a standby whose child does not fit stays saved-state. From the
+moment the child is prepared, its state directory (mode 0700) holds the
+standby's decrypted memory image and root filesystem, which carry no
+workload's data. A claimed child keeps running from those files until its run
+ends and its state is removed, as a child restored at claim time does. An
+unclaimed child's files are removed when it is released or reaped. Set
+`standby_memory_mib` to `0` to keep no paused children. A launch a paused
+child cannot serve does not resume it. When its signed plan grants a CPU share,
+or admission changed its shape, it restores another ready standby inside a
+scope carrying the grant and leaves the paused child for the next launch; if
+that restore is refused, the run fails and the paused child is discarded. In
+every other case (no other standby ready, a launch placed on host cores, or a
+launch no standby can serve) the paused child is discarded and the launch boots
+cold. A paused child found gone or unresponsive before the claim checks or
+resumes it is discarded, and the launch boots cold with
+`cold_reason=preloaded_child_unusable` (a launch that requires a warm claim
+fails instead). A failed integrity check of the child, a read-only volume that
+cannot be attached to it, or a failed resume fails the run; the paused child is
+discarded. When
+`default_cpu_millicores` is set, every plan carries a CPU grant, so no paused
+children are prepared. Separately, `default_cpu_millicores`
 and `default_wall_clock_secs` supply defaults for dimensions nothing else named.
 There is no host-wide egress default: one would open outbound access for every
 workload that never asked for any. Relative manifest volume host paths

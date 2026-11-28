@@ -188,7 +188,11 @@ fn refill_planless(
                     result.failed += 1;
                     continue;
                 }
+                let mut handle = handle;
+                // Held until the record naming the child is published.
+                let child_gate = preload_within_budget(backend, pool, &checkpoints, &mut handle);
                 if let Err(error) = pool.record(&handle) {
+                    let handle = discard_unpublished_preload(pool, handle, child_gate.as_ref())?;
                     discard_parent(backend, &checkpoints, &handle, &mut warm_guard).with_context(
                         || {
                             format!(
@@ -228,6 +232,104 @@ fn refill_planless(
     let max_memory_mib = u64::from(target).saturating_mul(u64::from(compat.mem_mib));
     pool.evict_compatible_to_memory_budget(compat, max_memory_mib)?;
     Ok(result)
+}
+
+/// Load a paused child from a freshly captured standby, so a claim resumes it
+/// instead of rebuilding it from the sealed checkpoint. Optional per standby:
+/// a backend without preload, a child that does not fit the standby memory
+/// budget, or a failed preload leaves the standby saved-state, which the claim
+/// still serves.
+fn preload_within_budget(
+    backend: &AnyBackend,
+    pool: &SupervisorStandbyPool,
+    checkpoints: &CheckpointStore,
+    handle: &mut StandbyHandle,
+) -> Option<mvm_runtime::vm::instance_snapshot::MachineLifecycleLock> {
+    if !backend.supports_preloaded_standby() {
+        return None;
+    }
+    let config = mvm_core::user_config::load(None);
+    // Every plan on such a host carries a CPU grant, which no paused child
+    // can serve, so one would only hold plaintext and RAM until it expired.
+    if config.default_cpu_millicores.is_some() {
+        return None;
+    }
+    match preload_fits(pool, &config, handle.mem_mib) {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(
+                standby = %handle.id,
+                "standby stays saved-state: a paused child does not fit `standby_memory_mib`"
+            );
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(standby = %handle.id, error = %format!("{error:#}"), "standby stays saved-state: cannot read the standby budget");
+            return None;
+        }
+    }
+    let preloaded = (|| -> Result<_> {
+        let id = CheckpointId::new(
+            handle
+                .parent_checkpoint
+                .clone()
+                .context("captured warm parent has no checkpoint")?,
+        );
+        let snapshots =
+            mvm_fs::snapshot_store::FsSnapshotStore::new(mvm_core::config::snapshots_dir())?;
+        let anchor = PlanlessWarmParentAnchor::for_checkpoint(checkpoints, &id)?;
+        let registry_path = mvm_runtime::vm::name_registry::registry_path();
+        Ok(backend.preload_standby_via_runner(
+            &mvm_runtime::workload_runner::PreloadContext {
+                checkpoints,
+                snapshots: &snapshots,
+                anchor: &anchor,
+                registry_path: &registry_path,
+            },
+            handle,
+        )?)
+    })();
+    preloaded
+        .inspect_err(|error| {
+            tracing::warn!(standby = %handle.id, error = %format!("{error:#}"), "standby stays saved-state: preload failed");
+        })
+        .ok()
+}
+
+/// Whether one more paused child of `mem_mib` fits beside the standbys that
+/// already hold guest memory, under the same bound `make_room` applies: the
+/// standby budget, and the host budget's headroom when one is configured.
+fn preload_fits(
+    pool: &SupervisorStandbyPool,
+    config: &mvm_core::user_config::MvmConfig,
+    mem_mib: u32,
+) -> Result<bool> {
+    let host = config
+        .host_budget_memory_mib
+        .map(|budget_mib| super::HostRoom {
+            budget_mib,
+            committed_mib: mvm_hostd::admission_budget::committed().memory_mib,
+        });
+    let needed = pool
+        .idle_live_memory_mib()?
+        .saturating_add(u64::from(mem_mib));
+    Ok(super::standby_room(config.standby_memory_budget_mib(), host, needed).is_some())
+}
+
+/// Stop a paused child whose standby record could not be published, and
+/// return the handle as the saved-state parent it was before the preload.
+fn discard_unpublished_preload(
+    pool: &SupervisorStandbyPool,
+    mut handle: StandbyHandle,
+    child_gate: Option<&mvm_runtime::vm::instance_snapshot::MachineLifecycleLock>,
+) -> Result<StandbyHandle> {
+    if handle.preloaded_child_vm_name.is_some() {
+        pool.discard(&handle, child_gate)?;
+        handle.preloaded_child_vm_name = None;
+        handle.pid = 0;
+        handle.control_socket = String::new();
+    }
+    Ok(handle)
 }
 
 /// Calculate the one compatibility key used by both parent creation and lookup.
@@ -513,6 +615,27 @@ mod tests {
     }
 
     #[test]
+    fn a_paused_child_is_prepared_only_while_it_fits_the_standby_budget() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("home");
+        env.isolate_mvm_home(home.path());
+        let pool_root = tempfile::tempdir().expect("pool");
+        let pool = SupervisorStandbyPool::at(pool_root.path());
+        let config = mvm_core::user_config::load(None);
+        assert!(preload_fits(&pool, &config, 512).expect("empty pool"));
+        let budget = config.standby_memory_budget_mib();
+        assert!(
+            !preload_fits(
+                &pool,
+                &config,
+                u32::try_from(budget + 1).expect("budget fits u32")
+            )
+            .expect("budget read"),
+            "a child larger than the whole standby budget is never prepared"
+        );
+    }
+
+    #[test]
     fn one_compat_calculation_serves_preparation_and_lookup() {
         let dir = tempfile::tempdir().unwrap();
         let config = planless_config(dir.path());
@@ -637,6 +760,90 @@ mod tests {
         assert_eq!(result.spawned, 1, "{:?}", result.failures);
         assert_eq!(result.failed, 0, "{:?}", result.failures);
         assert_eq!(pool.idle_count_compatible(&compat).unwrap(), 1);
+    }
+
+    /// Refill preloads a child into the record it publishes, and releases
+    /// the child's gate once the record names it, so a launch can reserve it.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn refill_publishes_a_preloaded_child_a_launch_can_reserve() {
+        let _lock = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let mut paused =
+            mvm_runtime::mock::MockBackend::spawn_stand_in_vmm().expect("stand-in paused VMM");
+        let prepared = PreparedWarmParent::from_resolved(
+            AnyBackend::Mock(
+                mvm_runtime::mock::MockBackend::new().with_preloaded_standby(paused.id()),
+            ),
+            planless_config(home.path()),
+            None,
+            None,
+        )
+        .unwrap();
+        let compat = prepared.compat().clone();
+        let pool = SupervisorStandbyPool::at(home.path().join("pool"));
+
+        let result = prepared.refill_to(&pool, 1).unwrap();
+
+        assert_eq!(result.spawned, 1, "{:?}", result.failures);
+        let (handle, lifecycle) = pool
+            .reserve_preloaded_compatible(&compat)
+            .unwrap()
+            .expect("the published record names a paused child");
+        assert_eq!(handle.pid, paused.id());
+        assert_eq!(
+            handle.preloaded_child_vm_name.as_deref(),
+            Some(lifecycle.name())
+        );
+        drop(lifecycle);
+        let _ = paused.kill();
+        let _ = paused.wait();
+    }
+
+    /// With a host default CPU share every plan carries a CPU grant, so refill
+    /// prepares no paused child that no launch could use.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn refill_preloads_nothing_on_a_host_with_a_default_cpu_share() {
+        let _lock = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let mut host = mvm_core::user_config::load(None);
+        host.default_cpu_millicores = Some(500);
+        mvm_core::user_config::save(&host, None).unwrap();
+        let mut paused =
+            mvm_runtime::mock::MockBackend::spawn_stand_in_vmm().expect("stand-in paused VMM");
+        let prepared = PreparedWarmParent::from_resolved(
+            AnyBackend::Mock(
+                mvm_runtime::mock::MockBackend::new().with_preloaded_standby(paused.id()),
+            ),
+            planless_config(home.path()),
+            None,
+            None,
+        )
+        .unwrap();
+        let compat = prepared.compat().clone();
+        let pool = SupervisorStandbyPool::at(home.path().join("pool"));
+
+        let result = prepared.refill_to(&pool, 1).unwrap();
+
+        assert_eq!(result.spawned, 1, "{:?}", result.failures);
+        assert_eq!(pool.idle_count_compatible(&compat).unwrap(), 1);
+        assert!(
+            pool.reserve_preloaded_compatible(&compat)
+                .unwrap()
+                .is_none(),
+            "the standby stays saved-state"
+        );
+        let _ = paused.kill();
+        let _ = paused.wait();
     }
 
     #[cfg(feature = "test-support")]

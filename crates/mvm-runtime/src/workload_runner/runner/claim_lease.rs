@@ -137,21 +137,11 @@ impl Drop for WarmClaimLease<'_> {
                 self.retain_resources();
                 return;
             }
-            // The child is confirmed stopped. The record has to stop naming
-            // it: left alone it keeps advertising a paused VMM that no longer
-            // exists, so every later claim refuses on a missing control socket
-            // while the pool still counts the parent as usable capacity. The
-            // parent and its checkpoint are healthy, so demote rather than
-            // remove; the next claim materializes a fresh child from it.
-            if let Err(error) = self.pool.demote_to_saved_state(self.parent_id) {
-                tracing::warn!(
-                    parent = %self.parent_id,
-                    child = %vm_name,
-                    %error,
-                    "could not demote standby to saved-state after its preloaded child was \
-                     destroyed; it will refuse every claim until reaped"
-                );
-            }
+            // The child is confirmed stopped, and its standby goes with it:
+            // a record left naming no child would be picked by every later
+            // compatible launch and returned to the pool after each failure.
+            // Refill prepares a fresh standby.
+            self.quarantined = true;
         }
         // Reapers need the retained child directory. Run them after confirmed
         // termination, before releasing the reservation or removing the directory.

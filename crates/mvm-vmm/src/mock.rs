@@ -18,7 +18,7 @@ use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 
 use crate::driver::spec::{VmmSpec, VsockPort};
-use crate::driver::traits::{PreloadChildRequest, PreloadedChild};
+use crate::driver::traits::{PreloadChildRequest, PreloadedChild, PreloadedResumeError};
 use crate::driver::{ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver};
 use crate::post_restore::{ChildIdentity, PostRestoreOutcome};
 use crate::runtime_artifacts::{RuntimeArtifact, RuntimeArtifacts};
@@ -134,6 +134,8 @@ pub struct MockDriver {
     /// When set, `fork_standby_child` answers `Unrestorable` with this reason,
     /// as a real driver does for a snapshot another VMM version wrote.
     unrestorable_fork: Option<String>,
+    unresponsive_preloaded_child: bool,
+    refused_preloaded_resume: Option<String>,
     /// Late-volume slots this driver's parents boot.
     late_volume_slots: u8,
 }
@@ -168,6 +170,8 @@ impl MockDriver {
             resident_handoff: false,
             preloaded_standby: false,
             unrestorable_fork: None,
+            unresponsive_preloaded_child: false,
+            refused_preloaded_resume: None,
             late_volume_slots: 0,
         }
     }
@@ -177,6 +181,22 @@ impl MockDriver {
     #[must_use]
     pub fn refusing_fork_as_unrestorable(mut self, reason: impl Into<String>) -> Self {
         self.unrestorable_fork = Some(reason.into());
+        self
+    }
+
+    /// Make `resume_preloaded_child` fail as the Firecracker driver does when
+    /// the paused child's VMM no longer answers its API socket.
+    #[must_use]
+    pub fn with_unresponsive_preloaded_child(mut self) -> Self {
+        self.unresponsive_preloaded_child = true;
+        self
+    }
+
+    /// Make `resume_preloaded_child` fail after the child's VMM answered: a
+    /// failed integrity check, or a resume request that may have taken effect.
+    #[must_use]
+    pub fn refusing_preloaded_resume(mut self, reason: impl Into<String>) -> Self {
+        self.refused_preloaded_resume = Some(reason.into());
         self
     }
 
@@ -352,18 +372,49 @@ impl VmmDriver for MockDriver {
             control_socket: req.child_dir.join("mock.sock").display().to_string(),
         })
     }
+    fn check_preloaded_child(
+        &self,
+        child_vm_name: &str,
+        _child_dir: &Path,
+    ) -> std::result::Result<(), PreloadedResumeError> {
+        if !self.unresponsive_preloaded_child {
+            return Ok(());
+        }
+        // The real driver stops an unusable child through its identity-checked
+        // teardown; this records the same stop, or the same failure to stop.
+        let detail = format!(
+            "preloaded child '{child_vm_name}': its Firecracker does not answer: Resource \
+             temporarily unavailable"
+        );
+        if self.fail_kill {
+            return Err(PreloadedResumeError::Refused(
+                StandbyError::StopUnconfirmed(detail),
+            ));
+        }
+        self.killed.lock().unwrap().push(child_vm_name.to_string());
+        Err(PreloadedResumeError::BeforeActivation(
+            StandbyError::ClaimFailed(detail),
+        ))
+    }
+
     fn resume_preloaded_child(
         &self,
         req: &ChildForkRequest<'_>,
-    ) -> std::result::Result<(), StandbyError> {
+    ) -> std::result::Result<(), PreloadedResumeError> {
         if !self.preloaded_standby {
-            return Err(StandbyError::Unsupported {
+            return Err(PreloadedResumeError::Refused(StandbyError::Unsupported {
                 backend: self.name().to_string(),
-            });
+            }));
+        }
+        if let Some(reason) = &self.refused_preloaded_resume {
+            return Err(PreloadedResumeError::Refused(StandbyError::ClaimFailed(
+                reason.clone(),
+            )));
         }
         // The paused child already holds its parent's content; resuming wires
         // the same channels and token a fork does.
         self.fork_standby_child(req)
+            .map_err(PreloadedResumeError::Refused)
     }
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
         self.observations.lock().unwrap().insert(

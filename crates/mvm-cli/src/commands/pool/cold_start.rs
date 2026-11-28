@@ -39,6 +39,10 @@ pub(crate) enum ColdStartReason {
     /// The launch carries no admitted plan, so there is nothing to bind a
     /// claimed child to.
     Unadmitted,
+    /// The paused child prepared for this launch could not be resumed, so it
+    /// was discarded before it ran and the launch boots cold under its
+    /// admission.
+    PreloadedChildUnusable,
 }
 
 impl ColdStartReason {
@@ -52,6 +56,7 @@ impl ColdStartReason {
             Self::StandbysDisabled => "standbys_disabled",
             Self::BackendUnsupported => "backend_unsupported",
             Self::Unadmitted => "unadmitted",
+            Self::PreloadedChildUnusable => "preloaded_child_unusable",
         }
     }
 
@@ -61,7 +66,7 @@ impl ColdStartReason {
     /// prepare something no later launch of that shape can claim.
     #[must_use]
     pub(crate) fn leaves_a_standby(self) -> bool {
-        matches!(self, Self::NoStandbyReady)
+        matches!(self, Self::NoStandbyReady | Self::PreloadedChildUnusable)
     }
 
     /// The line a launch prints when it boots cold for this reason, or `None`
@@ -73,6 +78,10 @@ impl ColdStartReason {
             Self::NoStandbyReady => Some(
                 "No standby of this image is ready, so this run boots cold. \
                  A standby is prepared after it, and the next run of the image claims it.",
+            ),
+            Self::PreloadedChildUnusable => Some(
+                "The prepared standby could not be resumed, so this run boots cold. \
+                 A fresh standby is prepared after it.",
             ),
             Self::Named
             | Self::IneligibleShape
@@ -151,13 +160,14 @@ fn lost_the_reservation(reason: &str) -> bool {
 mod tests {
     use super::*;
 
-    const ALL: [ColdStartReason; 6] = [
+    const ALL: [ColdStartReason; 7] = [
         ColdStartReason::NoStandbyReady,
         ColdStartReason::Named,
         ColdStartReason::IneligibleShape,
         ColdStartReason::StandbysDisabled,
         ColdStartReason::BackendUnsupported,
         ColdStartReason::Unadmitted,
+        ColdStartReason::PreloadedChildUnusable,
     ];
 
     #[test]

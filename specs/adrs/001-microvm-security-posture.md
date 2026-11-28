@@ -373,8 +373,15 @@ not paraphrase this row without them.
    HVF resident handoff resumes the parent's own supervisor by signal — a
    process born grant-less as shared pool capacity, which binding now would
    bind the pool rather than the claim. `bind_spawn` wraps a `Command` and
-   this tree has no post-spawn attach, so on those two paths a claimed child's
-   CPU bound is a ledger entry and not a `cpu.max`. Wall clock is re-armed on an HVF
+   this tree has no post-spawn attach. On the preloaded path no grant reaches
+   that process: a launch whose signed plan carries a CPU grant does not resume
+   its reserved child. It takes the saved-state fork of another standby,
+   leaving the child intact, or, when none is ready, the reserved standby is
+   destroyed so the launch can boot cold under its admitted name. The claim
+   also refuses to resume a preloaded child under such a plan
+   (`fn:a_preloaded_child_refuses_a_plan_with_a_cpu_grant`). On the HVF
+   resident handoff a claimed child's CPU bound is a ledger entry and not a
+   `cpu.max`. Wall clock is re-armed on an HVF
    forked child from its own plan, per limit 2; it is not on a Firecracker
    restore. A claimed child is different: it
    has an admitted plan of its own, and on HVF the resident handoff carries
@@ -486,6 +493,99 @@ not paraphrase this row without them.
      rootfs-inject helper VM, spawn without a scope.
    - **Wasm has no VMM process to scope** and reports both dimensions as
      `declared`; its store limits are not reported here.
+7. **A claimed standby's process is never stopped by expiry. (OPEN, #6033.)**
+   Expiry drops a `Claimed` standby record without signalling its process,
+   because after a handoff that process is the claimed VM. On the HVF
+   resident handoff, a launcher that dies after reserving a parent and before
+   handing it off therefore leaves the parent's supervisor running, outside
+   both the standby and the host budget. Nothing stops it short of a reboot
+   or a manual kill (`mvmctl cache prune` does not), and the next refill
+   replaces the dropped record with a new parent, so each such crash leaks
+   one parent.
+
+**Preloaded warm standby limits — what a paused child costs while it waits.**
+On Firecracker, a standby may hold a child already restored from the parent's
+checkpoint and paused, so a claim resumes it instead of rebuilding it. These
+are limits, not guarantees:
+
+1. **Plaintext memory and rootfs at rest from preload until the run ends.** A
+   restored VMM reads plaintext, so the child's state dir (mode 0700) holds the
+   parent's decrypted memory image (`mem.bin`) and rootfs from preload. A claim
+   resumes that same VMM, whose guest memory is backed by that `mem.bin`, so
+   the files stay for the claimed child's whole run and go when its state dir
+   is removed at the end of the run. A saved-state claim also decrypts into the
+   child's dir and runs from it, so the in-run window exists on both paths;
+   preloading adds the window before the claim. That window ends when the
+   child is claimed, expires (the 30-minute standby TTL the launch path and
+   `mvmctl cache prune` apply), is evicted, or has its reservation
+   released. Until then a saved-state standby keeps only sealed chunks. The
+   parent is a planless factory boot: no plan, tenant, secrets or volumes, so
+   the image holds no workload's data. Expiry, budget eviction and a released
+   reservation stop the child through the identity-checked Firecracker teardown
+   the orphan sweep uses, which signals a pid only after confirming it is the
+   Firecracker serving the child's API socket, and remove that dir once
+   nothing answers that socket
+   (`fn:expiry_stops_a_preloaded_child_and_removes_its_memory_image`,
+   `fn:budget_eviction_removes_a_preloaded_childs_memory_image`). A refill that
+   dies after starting the paused VMM and before publishing its record leaves
+   a child no record names. The orphan sweep stops it and removes its dir,
+   using the owner marker written before the VMM starts
+   (`fn:a_preloaded_child_whose_standby_record_is_gone_is_stopped_and_reaped`).
+   A paused child found unusable before anything about it is checked or its
+   resume is requested (a missing state dir, a Firecracker that does not
+   answer its API socket within 2 s, or host channels that cannot be set up)
+   is stopped through the identity-checked Firecracker teardown and its
+   standby dropped; its guest never ran, so the launch keeps its admission and
+   boots cold (`cold_reason=preloaded_child_unusable`), or fails when it
+   requires a warm claim. The probe runs before the claim spawns the child's
+   endpoint or registers its broker, so an unusable child costs the probe (at
+   most 2 s) and no plan material reaches an endpoint for it. Any later failure (reading the
+   device anchors, a failed integrity check of the capture or the restored
+   layout, a late volume that cannot be attached, or the resume request itself,
+   which can take effect even when it reports failure) fails the launch with
+   its admission spent; the child is stopped and its standby dropped. The split
+   is a type (`PreloadedResumeError`), so only the first kind can return an
+   admission.
+   A child whose stop cannot be confirmed keeps its standby record `Claimed`
+   and its state dir, so nothing else boots under its name, until the TTL drops
+   the record and the orphan sweep removes the dir once its process is gone.
+   Until then its VMM holds guest memory no budget counts, and the claim's
+   endpoint (holding the plan's substitution secrets) and broker registration
+   are kept alive with it, even when the guest never ran. A failed claim after
+   host channels were armed may also leave their exit-capture thread and
+   descriptor until the launcher exits.
+   A child the teardown cannot stop keeps its dir until the sweep finds its
+   process gone. Its standby record is dropped all the same, so the paused
+   VMM holds guest memory no budget counts, and a cold boot under its name is
+   refused while the dir remains. A host with `default_cpu_millicores` set prepares no paused
+   children, because every plan there carries a CPU grant. With no idle watcher
+   running and no `mvmctl` invocation, nothing applies the TTL. `machine stop
+   --all` does not drain standbys of either kind.
+2. **Content is verified when the child is preloaded, not when it is claimed.**
+   Preload authenticates the sealed checkpoint and its lineage before it
+   decrypts it. The claim re-checks the capture manifest, the paused device
+   layout (no network interface) and the runtime evidence; it does not hash
+   `mem.bin` or the rootfs again. A process running as the same user could
+   change those files in between. That is a malicious host, which this ADR
+   places out of scope, so this is reuse of verified bytes and not cached
+   authorization only under that model.
+3. **Guest RAM is bounded by `standby_memory_mib`, not by admission.** A paused
+   child is a live standby and counts against the standby budget at its full
+   guest memory; a child that does not fit is not prepared and its standby
+   stays saved-state. The budget applies when a child is prepared: lowering
+   `standby_memory_mib` does not evict a child already paused, which the
+   30-minute standby TTL then removes. The host budget's headroom is checked only at the
+   moment a child is preloaded. Admission does not count paused children,
+   which carry no admitted charge, so guest RAM on the host can reach
+   `host_budget_memory_mib` plus `standby_memory_mib`.
+4. **Its signed identity is chosen before admission.** The launch reserves the
+   child by taking its lifecycle gate, then admits its plan under the child's
+   name, so the plan, the dispatch charge, the endpoint, the broker
+   registration and the audit entries name the VM that runs; the claim refuses
+   a plan admitted under any other name
+   (`fn:a_preloaded_child_refuses_a_plan_admitted_under_another_name`). The
+   saved-state fork still runs its child under a fresh name that differs from
+   the name its plan was admitted under.
 
 ### Explicit out of scope
 
@@ -1058,7 +1158,7 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 | 15 | A sealed production microVM has no shell, no DevOnly guest-agent verbs, and no PTY | fn:console_refused_on_sealed_image, ci:guest-agent-runtime-boundary, fn:following_the_console_never_writes_to_it, ci:no-ssh-forwarding, ci:sealed-prod-no-ssh | runtime profile + signed VerbGrant + host accessible-gate + console policy. The host→guest input plane is deliberately *not* claimed here: its properties are policy, not absence, and are witnessed at row 17. The two no-SSH lanes witness the absence of a remote-login path: `no-ssh-forwarding` is a source grep for SSH-capability tokens, `sealed-prod-no-ssh` mounts the runtime overlay this tree assembles and scans it for `sshd`, host keys, `sshd_config` and `authorized_keys`. Neither inspects the base root filesystems, which are built and published by the image repository | Shipped |
 | 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:network_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value, fn:substitution_is_audited_when_upstream_fails_after_send | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-023) | Preview |
 | 17 | Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited | fn:input_is_refused_without_a_plan_grant, fn:a_second_writer_is_refused_while_the_lease_is_held, fn:secret_material_split_across_frames_is_still_refused, fn:every_refusal_is_audited, fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason, fn:the_endpoint_fingerprints_what_it_resolved_and_reports_no_value, fn:the_handshakes_two_halves_go_to_two_different_places, fn:a_secret_split_across_two_frames_does_not_reassemble_in_the_workload, fn:a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret | input grant token in a signed ExecutionPlan.services + per-VM lease with TTL + fingerprint-matching sliding-window secret scan + chain-signed payload-free refusal audit + sealed-tier shell-entrypoint refusal. Read the limits note below before treating this as enforced | Preview |
-| 18 | A workload's resource consumption is bounded at admission — per workload and across the host — and its VMM process is memory- and task-bounded, and CPU-bound when a share is granted, at spawn where the host has a mechanism | fn:a_boot_past_the_headroom_is_refused, fn:budget_ignores_dead_machines, fn:budget_counts_the_configured_maximum_not_current_usage, fn:an_empty_host_admits_a_boot_within_headroom, fn:an_unreadable_charge_record_is_skipped_rather_than_fatal, fn:admission_refuses_a_grant_over_the_ceiling, fn:the_ceiling_bounds_memory_even_though_no_one_granted_it, fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu, fn:the_libkrun_tier_cannot_bound_cpu_off_linux, fn:host_cpu_mechanism_gap_honors_hvf_quota_range, fn:relay_config_threads_cpu_share_to_quota_scheduler, fn:apply_grants_reads_quota_record_from_state_dir, fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present, fn:a_spawn_with_no_grant_still_gets_memory_and_task_ceilings, fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error, fn:a_scope_with_a_resolvable_cgroup_reads_back_its_enforcement, fn:an_unresponsive_manager_fails_the_launch_instead_of_hanging_it, fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain, fn:a_grant_that_cannot_be_applied_undoes_the_launch, fn:a_grant_that_fails_to_apply_refuses_the_cli_boot, fn:emit_memory_limit_exceeded_names_the_ceiling_and_the_mechanism, fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload, fn:a_signed_plan_from_the_launch_path_arms_the_timer, fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota, fn:a_spawn_past_its_memory_ceiling_is_killed_and_the_kill_is_recorded, fn:a_vmm_pushed_past_its_memory_ceiling_is_killed_and_audited, fn:a_firecracker_restored_child_is_cpu_bounded_by_its_admitted_grant, fn:an_hvf_restored_child_is_cpu_bounded_by_its_admitted_grant, fn:a_claimed_child_over_the_host_ceiling_is_refused, fn:a_claimed_child_within_the_ceiling_is_admitted, fn:the_refusal_names_the_ceiling_and_the_request, fn:pool_matching_is_unchanged_by_the_bound | operator-configured per-workload ceiling + host-wide budget summed over live machines only (pid-marker probe, configured maximum not current usage) + cgroup v2 `cpu.max` on a systemd transient scope on Linux, or an in-process HVF run-loop scheduler on macOS, read back and written to the chain-signed audit log + cgroup v2 `memory.max` (guest RAM plus a fixed overhead margin, swap excluded) and `pids.max` on that same scope for every VMM spawn on a Linux host with a systemd user session, read back with their values and audited, with an OOM kill recorded as `plan.memory_limit_exceeded` on the waited exit-report path. CPU is declared-only for libkrun, wall clock is enforced on the tiers whose supervisor holds the admitted plan (libkrun, HVF, AppleContainer), wasm bounds via fuel and epoch, a forked child is re-bound at spawn, and a warm-claimed child is bounded by the host ceiling at admission but spawn-bound on only one of its three claim paths — read the "Preview 18 limits" note below before treating this as enforced | Preview |
+| 18 | A workload's resource consumption is bounded at admission — per workload and across the host — and its VMM process is memory- and task-bounded, and CPU-bound when a share is granted, at spawn where the host has a mechanism | fn:a_boot_past_the_headroom_is_refused, fn:budget_ignores_dead_machines, fn:budget_counts_the_configured_maximum_not_current_usage, fn:an_empty_host_admits_a_boot_within_headroom, fn:an_unreadable_charge_record_is_skipped_rather_than_fatal, fn:admission_refuses_a_grant_over_the_ceiling, fn:the_ceiling_bounds_memory_even_though_no_one_granted_it, fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu, fn:the_libkrun_tier_cannot_bound_cpu_off_linux, fn:host_cpu_mechanism_gap_honors_hvf_quota_range, fn:relay_config_threads_cpu_share_to_quota_scheduler, fn:apply_grants_reads_quota_record_from_state_dir, fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present, fn:a_spawn_with_no_grant_still_gets_memory_and_task_ceilings, fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error, fn:a_scope_with_a_resolvable_cgroup_reads_back_its_enforcement, fn:an_unresponsive_manager_fails_the_launch_instead_of_hanging_it, fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain, fn:a_grant_that_cannot_be_applied_undoes_the_launch, fn:a_grant_that_fails_to_apply_refuses_the_cli_boot, fn:emit_memory_limit_exceeded_names_the_ceiling_and_the_mechanism, fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload, fn:a_signed_plan_from_the_launch_path_arms_the_timer, fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota, fn:a_spawn_past_its_memory_ceiling_is_killed_and_the_kill_is_recorded, fn:a_vmm_pushed_past_its_memory_ceiling_is_killed_and_audited, fn:a_firecracker_restored_child_is_cpu_bounded_by_its_admitted_grant, fn:an_hvf_restored_child_is_cpu_bounded_by_its_admitted_grant, fn:a_claimed_child_over_the_host_ceiling_is_refused, fn:a_claimed_child_within_the_ceiling_is_admitted, fn:the_refusal_names_the_ceiling_and_the_request, fn:pool_matching_is_unchanged_by_the_bound, fn:a_preloaded_child_refuses_a_plan_with_a_cpu_grant | operator-configured per-workload ceiling + host-wide budget summed over live machines only (pid-marker probe, configured maximum not current usage) + cgroup v2 `cpu.max` on a systemd transient scope on Linux, or an in-process HVF run-loop scheduler on macOS, read back and written to the chain-signed audit log + cgroup v2 `memory.max` (guest RAM plus a fixed overhead margin, swap excluded) and `pids.max` on that same scope for every VMM spawn on a Linux host with a systemd user session, read back with their values and audited, with an OOM kill recorded as `plan.memory_limit_exceeded` on the waited exit-report path. CPU is declared-only for libkrun, wall clock is enforced on the tiers whose supervisor holds the admitted plan (libkrun, HVF, AppleContainer), wasm bounds via fuel and epoch, a forked child is re-bound at spawn, and a warm-claimed child is bounded by the host ceiling at admission but spawn-bound on only one of its three claim paths — read the "Preview 18 limits" note below before treating this as enforced | Preview |
 | 19 | Every workload asset and pinned host share is content-identified in the signed plan, and share drift after admission fails closed | fn:admitted_share_digest_refuses_directory_changed_after_admission, fn:synthesized_plan_records_share_and_caller_asset_identities, fn:asset_identities_event_carries_kind_name_digest_labels, fn:asset_identity_rejects_malformed_digests, fn:test_audit_asset_id_parses | content-derived AssetIdentity records inside the signed ExecutionPlan (digest validated as 64-hex at the type boundary) + admission-time share digest pins re-verified by `enforce_admitted_shares` at mount time + synthesis auto-derivation of the compute environment + chain-signed `plan.asset_identities` emission + offline digest recomputation via `trust audit asset id` | Shipped |
 | 20 | Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build, fetch, install, and self-update paths refuse an artifact whose required signature is missing or invalid | ci:verify-release, ci:release-provenance, fn:accepted_identities_are_the_versioned_release_workflow, fn:a_missing_bundle_refuses_and_names_the_asset, fn:acquire_refuses_a_root_without_a_signature, fn:the_hash_skip_hatch_does_not_waive_the_root_signature, fn:an_archive_without_a_bundle_is_refused, fn:a_real_release_bundle_verifies_under_its_tag, fn:self_update_refuses_an_unsigned_checksum_manifest_before_parsing, fn:self_update_refuses_a_checksum_manifest_signed_for_another_tag, fn:fresh_install_trust_precedes_verifier_execution, fn:fresh_install_requires_tag_pinned_bundle, fn:fresh_install_has_no_unsigned_fallback, fn:an_unsigned_release_runtime_is_refused_and_nothing_is_cached, fn:a_release_runtime_that_misses_its_digest_is_refused_before_its_signature, fn:a_release_whose_evidence_does_not_verify_publishes_nothing, fn:the_cached_files_are_the_bytes_that_were_verified, fn:bootstrap_keeps_a_hatched_download_out_of_the_install, fn:bootstrap_refuses_a_hatched_download_before_any_other_step, fn:authenticated_bundle_returns_its_actual_signer_and_refuses_wrong_identity, fn:release_proof_without_a_launch_owned_set_cannot_be_admitted, fn:release_runtime_admission_refuses_missing_or_unwritable_audit_even_in_dev, fn:admitted_runtime_identity_is_chain_signed_and_tamper_detected | keyless cosign over release archives and checksum manifests with Fulcio + Rekor bundles; raw kernels, root filesystems, and metadata are authenticated by digest entries in those signed manifests. The `verify-release` job re-verifies the signatures after publication and checks each covered blob; the build gate refuses a missing or malformed bundle and production image-set acquisition refuses an unsigned pinned root before parsing. `mvmctl env update` verifies in-process. `install.sh` uses an installed verifier or cosign when available; on a fresh host it authenticates the baked archive against its carried hash before probing its `mvmctl`. A legacy or unpinned archive uses a separately hash-pinned temporary cosign, and an unpinned archive is never executed before its mandatory exact-tag bundle verifies. Self-update verifies the checksum manifest's bundle under its exact tag before parsing it, then each tarball's own bundle; the hash-skip hatch waives neither. The guest runtime is signed as a release archive with its `.sha256` sidecar; an ordinary release launch shares one authenticated archive snapshot across attachment, signed plan admission and lifecycle custody, while a built registry pack keeps its dispatch recheck. The signed plan and chain-signed admission entry name the verified runtime, and restore, fork and warm claim verify the retained generation instead of treating fresh cache data as its authority; see "Claim 20 boundaries" for trusted-host limits | Shipped |
 | 21 | OCI base images are OS-package- and kernel-inventoried, CVE-scanned against OSV, and SBOM-enumerated at pull time, and production admission refuses a missing scan, a sidecar bound to another digest, or any high/critical finding | fn:inventory_rootfs, fn:scan_inventory, fn:apply_base_image_gate, fn:a_prod_run_refuses_a_base_image_with_no_scan, fn:a_prod_run_refuses_a_base_image_with_a_high_severity_finding | the pull pipeline inventories the unpacked rootfs (dpkg status, apk installed, os-release, in-image kernel version; rpm is a named unsupported gap) and queries OSV directly over the repo HTTP client, writing `claims/<digest>.{cve.json,sbom.cdx.json}` beside the provenance record; `resolve_or_pull_run_image` applies the gate on every `--prod` run. Limits: the sidecars live in the host-controlled cache, so the gate verifies the scan's digest binding and verdict, not its honest production — a host insider can forge a clean sidecar (the image bytes themselves remain digest-pinned and dm-verity sealed); severity is best-effort (Debian/Alpine OSV records generally carry none, and `unknown` severities are reported but never gate-refusing); the gate covers registry-pulled images — the local ingest paths are dev-only | Shipped |

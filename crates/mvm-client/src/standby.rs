@@ -34,6 +34,141 @@ pub use prepared::{
     warm_parent_native_custody_for_test,
 };
 
+/// A standby whose paused child a launch reserved before admission. The launch
+/// is admitted under the child's name, and `lifecycle` is that child's gate,
+/// held from selection through the claim, or through the release when the
+/// launch cannot use the child.
+pub struct PreloadedReservation {
+    /// The reserved standby, as recorded when it was selected.
+    pub handle: StandbyHandle,
+    /// The preloaded child's lifecycle gate.
+    pub lifecycle: mvm_runtime::vm::instance_snapshot::MachineLifecycleLock,
+}
+
+/// Reserve a compatible standby with a paused child before admission and name
+/// the launch after that child, so the plan is admitted under the name of the
+/// VM that will run.
+///
+/// Only a launch with no host shares or disks qualifies: nothing derived from
+/// its name exists yet. What is already known to rule the child out is checked
+/// here, so such a launch never takes and then destroys one (see
+/// [`preload_known_unservable`]). Everything else is checked again after
+/// admission, which releases the reservation when the child cannot serve it.
+///
+/// # Errors
+///
+/// If the launch's compatibility key cannot be computed or the pool cannot be
+/// read.
+pub fn reserve_preloaded_for_launch(
+    backend: &mvm_runtime::AnyBackend,
+    config: &mut mvm_core::vm_backend::VmStartConfig,
+    has_host_volumes: bool,
+) -> Result<Option<PreloadedReservation>> {
+    if has_host_volumes
+        || config.warm_pool_size == 0
+        || !backend.supports_preloaded_standby()
+        || preload_known_unservable(
+            config,
+            mvm_core::user_config::load(None).default_cpu_millicores,
+        )
+    {
+        return Ok(None);
+    }
+    let want = standby_compat(config)?;
+    let reserved = SupervisorStandbyPool::open()?.reserve_preloaded_compatible(&want)?;
+    mvm_core::launch_trace::lap("select.preloaded_standby");
+    let Some((handle, lifecycle)) = reserved else {
+        return Ok(None);
+    };
+    config.name = lifecycle.name().to_string();
+    Ok(Some(PreloadedReservation { handle, lifecycle }))
+}
+
+/// Whether a launch is known before admission to be one a preloaded child
+/// cannot serve: a host default CPU share puts a CPU grant on every plan, and a
+/// launch that terminates TLS, carries a mailbox, or pins bundle boot assets is
+/// never warm-eligible at all. A CPU grant from a flag or a policy layer is
+/// known only once admission resolves the plan.
+fn preload_known_unservable(
+    config: &mvm_core::vm_backend::VmStartConfig,
+    host_default_cpu_millicores: Option<u32>,
+) -> bool {
+    host_default_cpu_millicores.is_some()
+        || config.bundle_boot_assets.is_some()
+        || mvm_vmm::host::egress_shared::launch_terminates_egress_tls(config)
+        || mvm_vmm::host::egress_bridge::mailbox_cmdline_token(config).is_some()
+}
+
+/// Whether the child reserved before admission can serve the admitted launch,
+/// judged from the signed plan itself: its name must be the child's, and it
+/// must grant no CPU share, which only a claim that starts the child's VMM
+/// inside a scope can bind. Admission may also have changed the shape the
+/// reservation matched — a clamped vCPU count, say — so the key is compared
+/// again.
+fn preloaded_child_serves(
+    handle: &StandbyHandle,
+    plan: &mvm_core::plan::ExecutionPlan,
+    want: &mvm_core::vm_backend::StandbyCompat,
+) -> bool {
+    plan.grants
+        .as_ref()
+        .is_none_or(|grants| grants.cpu.is_none())
+        && handle.is_compatible(want)
+        && handle.preloaded_child_vm_name.as_deref() == Some(plan.image.name.as_str())
+}
+
+/// Spend an admitted launch on a warm standby: the child it reserved before
+/// admission when that child can serve it, otherwise an ordinary standby.
+/// `Ok(None)` means no standby is ready.
+///
+/// A child that cannot serve the launch is left exactly as it was for the
+/// next launch, and this one forks an ordinary standby under a fresh name.
+/// Only when none is ready is the reserved standby released, because the cold
+/// boot needs the admitted name the child holds.
+///
+/// # Errors
+///
+/// If the pool cannot be read or the reservation cannot be released.
+pub fn claim_for_admitted_launch(
+    admission: &std::cell::RefCell<Option<crate::admission::CliAdmission>>,
+    backend: &mvm_runtime::AnyBackend,
+    pool: &SupervisorStandbyPool,
+    want: &mvm_core::vm_backend::StandbyCompat,
+    preloaded: Option<&PreloadedReservation>,
+) -> Result<Option<CliWarmClaimOutcome>> {
+    if let Some(reserved) = preloaded {
+        let serves = admission
+            .borrow()
+            .as_ref()
+            .is_some_and(|owner| preloaded_child_serves(&reserved.handle, owner.plan(), want));
+        if serves {
+            return Ok(Some(
+                match claim_selected_cli_warm(
+                    admission,
+                    backend,
+                    pool,
+                    &reserved.handle,
+                    Some(&reserved.lifecycle),
+                ) {
+                    CliWarmClaimOutcome::ReservationLost => {
+                        CliWarmClaimOutcome::PreloadedChildUnusable
+                    }
+                    other => other,
+                },
+            ));
+        }
+    }
+    let Some(handle) = pool.select_idle_compatible(want)? else {
+        if let Some(reserved) = preloaded {
+            pool.release_reserved_preload(&reserved.handle, &reserved.lifecycle)?;
+        }
+        return Ok(None);
+    };
+    Ok(Some(claim_selected_cli_warm(
+        admission, backend, pool, &handle, None,
+    )))
+}
+
 /// How often the idle watcher looks at the pool.
 const WATCH_TICK: Duration = Duration::from_secs(5);
 
@@ -315,6 +450,37 @@ mod tests {
             preloaded_child_vm_name: None,
             vsock_egress: false,
         }
+    }
+
+    #[test]
+    fn a_preloaded_child_serves_only_its_own_grant_free_compatible_launch() {
+        let mut handle = idle_handle("standby-pre", 4242);
+        handle.preloaded_child_vm_name = Some("calm-otter-01".into());
+        let want = handle.compat();
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.image.name = "calm-otter-01".into();
+        assert!(preloaded_child_serves(&handle, &plan, &want));
+
+        let mut granted = plan.clone();
+        granted.grants = Some(mvm_contract::grants::Grants {
+            cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
+            ..Default::default()
+        });
+        assert!(
+            !preloaded_child_serves(&handle, &granted, &want),
+            "a CPU grant on the signed plan takes the fork path"
+        );
+
+        let mut renamed = plan.clone();
+        renamed.image.name = "another-run".into();
+        assert!(!preloaded_child_serves(&handle, &renamed, &want));
+
+        let mut clamped = want.clone();
+        clamped.vcpus = 1;
+        assert!(
+            !preloaded_child_serves(&handle, &plan, &clamped),
+            "a shape admission changed no longer matches"
+        );
     }
 
     #[test]

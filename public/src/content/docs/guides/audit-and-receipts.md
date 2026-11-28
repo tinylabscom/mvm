@@ -290,8 +290,8 @@ before the call returns.
 
 `plan.start_mode` records how a run started: `mode=warm` when it claimed a
 standby, or `mode=cold` with a `cold_reason` of `no_standby_ready`, `named`,
-`ineligible_shape`, `standbys_disabled`, `backend_unsupported` or
-`unadmitted`.
+`ineligible_shape`, `standbys_disabled`, `backend_unsupported`,
+`unadmitted` or `preloaded_child_unusable`.
 
 An admission writes its burst of entries and syncs them once before the boot
 proceeds.

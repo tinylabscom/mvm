@@ -88,6 +88,9 @@ pub struct MockBackend {
     fail_apply_grants: bool,
     /// Test knob: refuse start unless the original signed bridge plan is on disk.
     require_bridge_plan: bool,
+    /// Test knob: preload a paused child at refill, with this live process
+    /// standing in for its VMM.
+    preloaded_child_pid: Option<u32>,
 }
 
 impl MockBackend {
@@ -149,6 +152,57 @@ impl MockBackend {
     pub fn with_standby(mut self) -> Self {
         self.supports_standby = true;
         self
+    }
+
+    /// Test builder: preload a paused child for each standby, with the live
+    /// process `pid` standing in for its VMM.
+    pub fn with_preloaded_standby(mut self, pid: u32) -> Self {
+        self.supports_standby = true;
+        self.preloaded_child_pid = Some(pid);
+        self
+    }
+
+    /// A live process standing in for a paused child's VMM, for
+    /// [`with_preloaded_standby`](Self::with_preloaded_standby). The caller
+    /// owns it and kills it.
+    pub fn spawn_stand_in_vmm() -> std::io::Result<std::process::Child> {
+        mvm_core::env_hygiene::helper_command("sleep")
+            .arg("60")
+            .spawn()
+    }
+
+    /// Whether this mock preloads paused children.
+    pub fn supports_preloaded_standby(&self) -> bool {
+        self.preloaded_child_pid.is_some()
+    }
+
+    /// Lay out a paused child the way a Firecracker preload does: a state dir
+    /// carrying the owner marker and a pid marker, named on the handle.
+    pub fn preload_standby(
+        &self,
+        handle: &mut StandbyHandle,
+    ) -> std::result::Result<crate::vm::instance_snapshot::MachineLifecycleLock, StandbyError> {
+        let pid = self
+            .preloaded_child_pid
+            .ok_or_else(|| StandbyError::Unsupported {
+                backend: "mock".to_string(),
+            })?;
+        let child = format!("{}-child", handle.id);
+        let lifecycle = crate::vm::instance_snapshot::MachineLifecycleLock::acquire(&child)
+            .map_err(|e| StandbyError::SpawnFailed(format!("{e:#}")))?;
+        let dir = mvm_core::config::vm_state_dir(&child);
+        let laid_out = std::fs::create_dir_all(&dir)
+            .and_then(|()| {
+                std::fs::write(
+                    dir.join(crate::standby_pool::PRELOADED_CHILD_RESERVATION_FILE),
+                    &handle.id,
+                )
+            })
+            .and_then(|()| std::fs::write(dir.join("fc.pid"), pid.to_string()));
+        laid_out.map_err(|e| StandbyError::SpawnFailed(format!("mock preload: {e}")))?;
+        handle.preloaded_child_vm_name = Some(child);
+        handle.pid = pid;
+        Ok(lifecycle)
     }
 
     /// Test builder: make every `stop` return an error.
@@ -438,7 +492,12 @@ impl VmBackend for MockBackend {
                 "injected mock warm child stop uncertainty".into(),
             ));
         }
-        Ok(VmId(handle.id.clone()))
+        Ok(VmId(
+            handle
+                .preloaded_child_vm_name
+                .clone()
+                .unwrap_or_else(|| handle.id.clone()),
+        ))
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {

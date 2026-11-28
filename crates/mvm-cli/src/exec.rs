@@ -41,9 +41,11 @@ use image_artifacts::{ResolvedImage, resolve_image_artifacts};
 mod launch_plan;
 mod mounts;
 mod oci_boot;
+mod resolved_launch;
 use either::Either;
 pub(crate) use mounts::admitted_instruction_mounts;
 use mounts::refuse_unloadable_sidecar;
+pub use resolved_launch::ResolvedLaunch;
 mod session;
 mod sidecar_selection;
 mod startup_slo;
@@ -72,6 +74,8 @@ use transient::{
     standby_to_leave, start_mode,
 };
 pub(crate) use transient::{RuntimeRunCustody, TransientStopFailure, combine_run_and_stop};
+
+use mvm_client::standby::reserve_preloaded_for_launch;
 
 pub(crate) type CliColdAdmit<'a> =
     dyn Fn(AdmitInputs<'_>) -> Result<mvm_client::admission::CliColdAdmissionResult> + 'a;
@@ -422,6 +426,7 @@ fn run_inner(
         cli_admission,
         template_acceleration,
         root_strategy,
+        preloaded,
         _built_runtime,
     } = launch;
     if let Some(admission) = cli_admission {
@@ -454,10 +459,17 @@ fn run_inner(
     // classified cold path. See `boot_transient_vm`.
     let mut warm_claim_marks = crate::commands::vm::phase_timing::WarmClaimMarks::default();
     let requested_vm_name = vm_name.clone();
-    let requested_lifecycle = match named_lifecycle {
-        Some(lifecycle) => lifecycle,
-        None => mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&vm_name)?,
+    // A reserved preloaded child's gate was taken before admission and is
+    // this name's gate; taking it again would wait on ourselves.
+    let acquired_lifecycle = match named_lifecycle {
+        Some(lifecycle) => Some(lifecycle),
+        None if preloaded.is_some() => None,
+        None => Some(mvm_runtime::vm::instance_snapshot::MachineLifecycleLock::acquire(&vm_name)?),
     };
+    let requested_lifecycle = acquired_lifecycle
+        .as_ref()
+        .or(preloaded.as_ref().map(|reserved| &reserved.lifecycle))
+        .context("transient launch holds no lifecycle gate")?;
     if let Some(runtime) = &_built_runtime {
         runtime.verify_config(&start_config)?;
     }
@@ -471,6 +483,7 @@ fn run_inner(
         mailbox_posture: mailbox_posture.as_ref(),
         user_named: req.name.is_some(),
         writable_images: &mut disk_images,
+        preloaded: preloaded.as_ref(),
     };
     if let Some(permit) = &host_budget {
         let plan = mvm_core::plan::plan_from_admitted_json(
@@ -522,13 +535,14 @@ fn run_inner(
     let custody = std::sync::Arc::new(RuntimeRunCustody::capture_or_stop(
         &backend,
         &vm_name,
-        effective_lifecycle.as_ref().unwrap_or(&requested_lifecycle),
+        effective_lifecycle.as_ref().unwrap_or(requested_lifecycle),
         exit_audit,
         &mut sub_marks,
     )?);
     mvm_core::launch_trace::lap("handoff.capture_custody");
     drop(effective_lifecycle);
-    drop(requested_lifecycle);
+    drop(acquired_lifecycle);
+    drop(preloaded);
     let launch_mode = booted.launch_mode;
     if let Some(sink) = posture {
         sink.set(mvm_client::admission::BootPosture {
@@ -1084,53 +1098,6 @@ fn finish_cli_cold_lowering<T, U>(
     Ok((owner, lowered))
 }
 
-/// One launch's boot shape, resolved without starting a VM.
-///
-/// This is the whole of what a launch knows about itself before
-/// [`boot_transient_vm`] runs: the backend it resolved against, a
-/// [`VmStartConfig`] carrying the rootfs and its verity sidecars, the runtime
-/// overlay and universal initramfs, the cmdline-bearing policy fields, and —
-/// when the caller supplied an admission hook — the tenant and signed plan.
-///
-/// Producing one without booting is what lets the warm pool spawn a parent that
-/// mirrors a real launch: `pool warm` resolves this, hands it to
-/// `warm_to_target`, and the spawn derives the parent's boot shape and the
-/// pool's compat key from the same value the launch will later be matched on.
-pub struct ResolvedLaunch {
-    /// The same one-use host hold returned by admission.
-    pub host_budget: Option<std::sync::Arc<mvm_hostd::admission_budget::HostBudgetPermit>>,
-    /// The backend the launch resolved against. Selected here rather than by
-    /// the caller so a warm spawn and the run it serves cannot disagree about
-    /// which backend's capabilities shaped the config.
-    pub backend: AnyBackend,
-    pub start_config: VmStartConfig,
-    /// Exact signed release bytes owned until the lifecycle generation is bound.
-    pub verified_runtime: Option<std::sync::Arc<mvm_runtime::runtime_evidence::VerifiedRuntimeSet>>,
-    /// Only admission may supply Dev posture for an opted-in mailbox.
-    pub mailbox_posture: Option<mvm_hostd::plan_admission::MailboxLaunchPosture>,
-    /// Opaque host-prepared owner for the admitted CLI cold alternative.
-    pub cli_admission: Option<mvm_client::admission::CliAdmission>,
-    /// Why this source cold-boots instead of using template acceleration.
-    pub template_acceleration: TemplateAcceleration,
-    /// Rootfs strategy the run-path tier gate selected — the value the run path
-    /// records as `plan.boot_posture`.
-    pub root_strategy: mvm_build::run_image::RootStrategy,
-    /// Retained until normal runtime lifecycle binding has taken ownership.
-    _built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
-}
-
-impl ResolvedLaunch {
-    /// Consume a planless resolution into the opaque client warm-parent facade.
-    pub(crate) fn into_warm_parent(self) -> Result<mvm_client::standby::PreparedWarmParent> {
-        mvm_client::standby::PreparedWarmParent::from_resolved(
-            self.backend,
-            self.start_config,
-            self.verified_runtime,
-            self._built_runtime,
-        )
-    }
-}
-
 /// Resolve a launch's bootable [`VmStartConfig`] **without starting a VM**.
 ///
 /// Composes four steps:
@@ -1178,7 +1145,7 @@ fn resolve_launch_with_admit(
 
     // A transient run owns only its state directory. Host directories are
     // attached as live virtio-fs shares; no host tree is copied or staged.
-    let vm_name = shape
+    let mut vm_name = shape
         .name
         .map(str::to_string)
         .unwrap_or_else(transient_vm_name);
@@ -1213,6 +1180,13 @@ fn resolve_launch_with_admit(
         ms = t_build.elapsed().as_secs_f64() * 1000.0,
         "admit window: build_start_config"
     );
+    // Before admission, so the signed plan names the VM that will run.
+    let host_volumes = !shape.dir_shares.is_empty() || !shape.disk_volumes.is_empty();
+    let preloaded = (matches!(admit, Some(LaunchAdmit::CliCold(_))) && shape.name.is_none())
+        .then(|| reserve_preloaded_for_launch(&backend, &mut start_config, host_volumes))
+        .transpose()?
+        .flatten();
+    vm_name.clone_from(&start_config.name);
     let mut template_acceleration = boot.template_acceleration;
     let mut built_pack_check = None;
     let mut mailbox_posture = None;
@@ -1500,6 +1474,7 @@ fn resolve_launch_with_admit(
         cli_admission,
         template_acceleration,
         root_strategy: boot.root_strategy,
+        preloaded,
         _built_runtime: built_runtime,
     })
 }
