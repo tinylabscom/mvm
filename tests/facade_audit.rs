@@ -19,7 +19,6 @@ use mvmctl::core::config::is_production_mode;
 use mvmctl::core::instance::{InstanceState, InstanceStatus};
 use mvmctl::core::observability::metrics;
 use mvmctl::core::pool::{DesiredCounts, RuntimePolicy};
-use mvmctl::core::protocol::{HostdRequest, HostdResponse};
 use mvmctl::core::tenant::TenantQuota;
 use mvmctl::runtime::shell;
 
@@ -36,8 +35,6 @@ fn plan31_track_a_facade_paths_resolve() {
     let _ = std::mem::size_of::<DesiredCounts>();
     let _ = std::mem::size_of::<RuntimePolicy>();
     let _ = std::mem::size_of::<TenantQuota>();
-    let _ = std::mem::size_of::<HostdRequest>();
-    let _ = std::mem::size_of::<HostdResponse>();
 
     let _: fn() -> bool = is_production_mode;
     let _: fn() -> &'static metrics::Metrics = metrics::global;

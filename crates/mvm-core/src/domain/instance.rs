@@ -11,41 +11,8 @@ pub const MAX_BLOCK_VOLUME_TRANSFER_CHUNK_BYTES: usize = 384 * 1024;
 const SHA256_HEX_LEN: usize = 64;
 
 // ============================================================================
-// Workspace volume attach + workload classification (cross-repo with mvmd)
+// Block volume attach + workload classification (cross-repo with mvmd)
 // ============================================================================
-//
-// These types are the canonical mvm-core definitions for the workspace
-// volume attach surface introduced by mvmd's `mvmd-integrations` memory
-// service. They were defined locally in
-// `mvmd-runtime` first and are promoted here so the protocol types can
-// thread them without a circular dep. mvmd will drop its local copies
-// and re-export from `mvm_core::instance` once it bumps its mvm pin.
-
-/// Read/write mode for a workspace volume attached to an instance.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum VolumeMode {
-    ReadOnly,
-    ReadWrite,
-}
-
-/// Request to attach a workspace-scoped volume into an instance at start.
-///
-/// Identity is `(workspace_id, name)`; the on-host backing file lives at
-/// `/var/lib/mvm/workspaces/<workspace_id>/volumes/<name>.ext4` (mvmd's
-/// `mvmd_runtime::vm::workspace::volumes` owns the layout). `mount_path`
-/// is threaded through to the guest config-drive metadata.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct VolumeAttach {
-    /// Workspace that owns the volume.
-    pub workspace_id: String,
-    /// Volume name within the workspace (file stem of `<name>.ext4`).
-    pub name: String,
-    /// Mount path inside the guest.
-    pub mount_path: String,
-    pub mode: VolumeMode,
-}
-
 /// Fleet-resolved block volume attached to an instance at boot.
 ///
 /// This carries only identity and admitted mount intent. Provider credentials,
@@ -880,21 +847,7 @@ mod tests {
         assert_eq!(state.status, InstanceStatus::Running);
     }
 
-    // ------------- VolumeMode / VolumeAttach / WorkloadClass -------------
-
-    #[test]
-    fn test_volume_mode_serializes_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&VolumeMode::ReadOnly).unwrap(),
-            "\"read_only\""
-        );
-        assert_eq!(
-            serde_json::to_string(&VolumeMode::ReadWrite).unwrap(),
-            "\"read_write\""
-        );
-        let parsed: VolumeMode = serde_json::from_str("\"read_only\"").unwrap();
-        assert_eq!(parsed, VolumeMode::ReadOnly);
-    }
+    // ------------- WorkloadClass / BlockVolumeAttach -------------
 
     #[test]
     fn test_workload_class_serializes_snake_case() {
@@ -911,19 +864,6 @@ mod tests {
     #[test]
     fn test_workload_class_default_is_sandbox() {
         assert_eq!(WorkloadClass::default(), WorkloadClass::Sandbox);
-    }
-
-    #[test]
-    fn test_volume_attach_roundtrip() {
-        let attach = VolumeAttach {
-            workspace_id: "ws-prod".to_string(),
-            name: "memory".to_string(),
-            mount_path: "/var/lib/memory".to_string(),
-            mode: VolumeMode::ReadWrite,
-        };
-        let json = serde_json::to_string(&attach).unwrap();
-        let parsed: VolumeAttach = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, attach);
     }
 
     #[test]

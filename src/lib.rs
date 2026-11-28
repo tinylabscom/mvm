@@ -40,7 +40,6 @@
 //!
 //! // Now you have access to:
 //! // - InstanceState, AgentRequest, AgentResponse, ReconcileReport
-//! // - HostdRequest, HostdResponse
 //! // - anyhow::{Result, Context}
 //! ```
 
@@ -104,7 +103,6 @@ pub use mvm_hostd as hostd;
 pub mod prelude {
     // Protocol types
     pub use mvm_core::agent::{AgentRequest, AgentResponse, ReconcileReport};
-    pub use mvm_core::protocol::{HostdRequest, HostdResponse};
 
     // Instance state
     pub use mvm_core::instance::InstanceState;

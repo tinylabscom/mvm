@@ -203,21 +203,12 @@ IR validation refuses `network.mode = "host"` for a function entrypoint
 Open: the in-tree wrappers emit no `Control` records yet, so that variant
 round-trips but is empty on real calls; Wasm has no registry entry.
 
-### The hostd envelope has its own version, and no consumer
+### Protocol versions
 
-`mvm-core` also defines a length-prefixed JSON `HostdRequest` /
-`HostdResponse` envelope for a privileged host executor, versioned by its
-own `PROTOCOL_VERSION` (3) in `crates/mvm-core/src/protocol/protocol.rs`.
-The bump policy and history are that constant's documentation, and
-`protocol_version_is_three` with canonical version-1 and version-2 fixtures
-pins it. The guest-agent vsock protocol and the builder daemon protocol keep
+The guest-agent vsock protocol and the builder daemon protocol keep
 separate version constants, because each joins a different pair of
-processes.
-
-Open: nothing in this repository or in mvmd sends or serves the envelope
-(the root facade only re-exports its types), so no fixture holds two peers
-together and no peer checks the version. It is to be wired to a consumer or
-deleted.
+processes. The unused `mvm-core` hostd request/response envelope and its
+own version constant were removed (#6029).
 
 ## Consequences
 

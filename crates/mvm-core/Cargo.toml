@@ -45,8 +45,8 @@ sha2.workspace = true
 tar = { workspace = true, optional = true }
 flate2 = { workspace = true, optional = true }
 thiserror.workspace = true
-# Optional: the only default-build async surface left is
-# `protocol`'s hostd IPC transport, gated behind `hostd-transport`.
+# Optional: the async host framing helpers are gated behind
+# `hostd-transport`.
 # `manifest-verify` (sigstore) pulls the rest. With both off, the default
 # `mvm-core` build is runtime-free.
 tokio = { workspace = true, optional = true }
@@ -292,7 +292,7 @@ ipnet = { workspace = true }
 # crypto module; kept here so a future dep-trim of the main `rand` does
 # not silently break the signed_config tests.)
 rand.workspace = true
-# The `protocol` hostd-transport `#[tokio::test]`s need a runtime +
+# The hostd-transport `#[tokio::test]`s need a runtime +
 # macros regardless of which non-dev features pull tokio. Dev-only, so
 # the `-e no-dev` runtime-free gate ignores it.
 tokio = { workspace = true, features = ["macros", "rt", "io-util"] }
