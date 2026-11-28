@@ -290,6 +290,38 @@ fn preflight_missing_required_check_is_a_denial() {
     );
 }
 
+/// Resources and secrets are enforced by hostd admission, not here; every
+/// kind that remains must still deny when it is missing or fails.
+#[test]
+fn every_required_check_denies_when_missing_or_failing() {
+    let names = [
+        "policy",
+        "image",
+        "enforcement",
+        "node-admission",
+        "volumes",
+        "attestation",
+    ];
+    assert_eq!(CheckKind::REQUIRED.len(), names.len());
+    for (i, name) in names.iter().enumerate() {
+        let mut missing = all_ok();
+        missing.remove(i);
+        assert_eq!(
+            run_preflight(&missing).into_result().unwrap_err(),
+            Denial::CheckMissing(name)
+        );
+        let mut failing = all_ok();
+        failing[i] = Box::new(Always(
+            CheckKind::REQUIRED[i],
+            Some(Denial::EnforcementUnavailable),
+        ));
+        assert_eq!(
+            run_preflight(&failing).into_result().unwrap_err(),
+            Denial::EnforcementUnavailable
+        );
+    }
+}
+
 #[test]
 fn preflight_panicking_check_fails_closed() {
     let mut c = all_ok();

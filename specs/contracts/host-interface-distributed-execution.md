@@ -189,6 +189,17 @@ The microVM must not start unless all required checks pass:
 8. Start the microVM only after the boundary is established.
 9. Emit an authenticated launch receipt and telemetry event.
 
+The local host-interface preflight checks policy, image, enforcement
+readiness, node admission and epoch, volumes and attestation. It does not
+check resources or secrets. Hostd plan admission enforces those on the same
+admission path, before the plan is signed: the durable host-budget
+reservation (`reserve_plan_budget`, `verify_plan_resources`) and the
+per-workload grant ceiling (`admit_grants`) bound resource reservations, and
+a missing or unbound secret is refused by `bind_approval` (host-signed plans)
+or by the bundle's required secret slots (bundle-pinned plans). On the
+fleet-signed path no admission step yet checks that referenced keystore
+secrets exist; that gap is tracked in issue #6031.
+
 Independent checks should run concurrently. Cached warm-path results must be
 bound to node identity, policy version, image digest, epoch, and validity
 deadline. Revocation and dynamic capacity checks must not be bypassed by cache.
@@ -332,7 +343,10 @@ response, and provider-host assurance claims.
   required but unavailable or invalid.
 - Tampered/expired/revoked policy cannot launch a microVM.
 - Missing enforcement, invalid volume grants, unavailable required secrets,
-  or failed required preflight blocks launch.
+  or failed required preflight blocks launch. Unavailable required secrets
+  are refused by plan admission, not by the host-interface preflight (see
+  "Launch fail-closed invariant"); the fleet-signed path does not meet this
+  yet (#6031).
 - Local and remote host-interface implementations share the same contract.
 - Node-local volumes remain supported in read-only and explicitly authorized
   read-write modes.

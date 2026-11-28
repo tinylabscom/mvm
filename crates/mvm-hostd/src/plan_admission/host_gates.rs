@@ -7,9 +7,14 @@ use mvm_core::plan::ExecutionPlan;
 /// the node is `Active` under a permissive policy, so a plain local run is
 /// unchanged. A revoked or quarantined node, an expired or out-of-scope
 /// policy, an image outside a pinned list, an invalid volume grant or a
-/// required attestation the node cannot meet refuses the boot. Resources are
-/// covered by the durable host-budget reservation and enforcement by the runtime
-/// verification in `RunPosture`, both of which run just before this.
+/// required attestation the node cannot meet refuses the boot. Enforcement is
+/// covered by the runtime verification in `RunPosture`, which runs just before
+/// this. Resources and secrets are not checked here: the durable host-budget
+/// reservation (`reserve_plan_budget`, `verify_plan_resources`) and the grant
+/// ceiling (`admit_grants`) bound resources on this same admission path, and
+/// secrets are refused before signing when missing or unbound
+/// (`bind_approval` for host-signed plans, the bundle's required secret slots
+/// for bundle-pinned plans).
 pub(super) fn admit_host_interface(plan: &ExecutionPlan) -> Result<()> {
     use mvm_core::host_interface::{
         Assurance, HostInterface, LaunchRequest, local::LocalHostInterface, store,
