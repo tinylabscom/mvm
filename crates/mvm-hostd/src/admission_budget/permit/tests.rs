@@ -1030,3 +1030,119 @@ fn a_launcher_that_dies_after_the_spend_leaves_its_hold_charged() {
     std::mem::forget(dispatched(home.path(), "first"));
     assert_refused_for_the_budget(home.path());
 }
+
+/// Where a host crash can stop `record_charge_at`, by what it leaves on disk.
+///
+/// The record's data is synced before it is renamed into place, so no point
+/// leaves a torn record. With no directory sync after the rename, a crash may
+/// lose the new name even after the call returned, which is `BeforeRename`'s
+/// or `BeforeWrite`'s state reached later.
+#[derive(Clone, Copy, Debug)]
+enum CrashPoint {
+    BeforeWrite,
+    BeforeRename,
+    AfterRename,
+}
+
+const CRASH_POINTS: [CrashPoint; 3] = [
+    CrashPoint::BeforeWrite,
+    CrashPoint::BeforeRename,
+    CrashPoint::AfterRename,
+];
+
+/// A machine dir as the host finds it after rebooting from a crash at `point`.
+fn crashed_at(home: &Path, name: &str, point: CrashPoint, marker: Option<&[u8]>, plan: bool) {
+    neighbour(
+        home,
+        name,
+        Neighbour {
+            record: None,
+            marker,
+            plan,
+        },
+    );
+    let directory = mvm_core::config::vm_state_dir_at(home, name);
+    let record = serde_json::to_vec(&charge()).unwrap();
+    match point {
+        CrashPoint::BeforeWrite => {}
+        // The synced temp file the rename never moved.
+        CrashPoint::BeforeRename => {
+            atomic_io::write_private(&directory.join(".tmpcrash1"), &record).unwrap();
+        }
+        CrashPoint::AfterRename => {
+            atomic_io::write_private(&directory.join(super::super::CHARGE_FILE), &record).unwrap();
+        }
+    }
+}
+
+fn counted_after_crash(point: CrashPoint, marker: Option<&[u8]>, plan: bool) -> (bool, u64) {
+    let home = tempfile::tempdir().unwrap();
+    crashed_at(home.path(), "crashed", point, marker, plan);
+    (
+        neighbour_is_counted(home.path()),
+        super::super::committed_at(home.path()).memory_mib,
+    )
+}
+
+#[test]
+fn a_charge_record_lost_to_a_host_crash_frees_nothing_a_surviving_one_holds() {
+    // A host crash ends every VMM, so each machine's marker is dead or gone.
+    let dead = dead_marker();
+    for marker in [Some(&dead[..]), None] {
+        for plan in [true, false] {
+            for point in CRASH_POINTS {
+                assert_eq!(
+                    counted_after_crash(point, marker, plan),
+                    (false, 0),
+                    "{point:?}, marker {:?}, plan {plan}",
+                    marker.is_some()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_charge_record_lost_to_a_host_crash_never_counts_more_than_one_that_survived() {
+    // A live marker stands for a reused bare pid after the reboot: the one
+    // way a dead machine's dir still reads as possibly running.
+    let live = live_marker();
+    for plan in [true, false] {
+        let survived = counted_after_crash(CrashPoint::AfterRename, Some(&live), plan);
+        assert_eq!(survived, (true, 512));
+        for point in [CrashPoint::BeforeWrite, CrashPoint::BeforeRename] {
+            let lost = counted_after_crash(point, Some(&live), plan);
+            assert_eq!(lost, if plan { survived } else { (false, 0) }, "{point:?}");
+        }
+    }
+}
+
+#[test]
+fn a_held_machine_counts_once_whatever_a_crash_left_of_its_record() {
+    for point in CRASH_POINTS {
+        let home = tempfile::tempdir().unwrap();
+        let permit =
+            HostBudgetPermit::reserve_at(home.path(), &budget(), "held", charge()).unwrap();
+        let plan = plan("held");
+        permit.bind_plan(&plan).unwrap();
+        permit.mark_dispatching(&plan).unwrap();
+        crashed_at(home.path(), "held", point, Some(&dead_marker()), true);
+        assert!(neighbour_is_counted(home.path()), "{point:?}");
+    }
+}
+
+#[test]
+fn a_charge_record_that_cannot_be_written_fails_the_start() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = tempfile::tempdir().unwrap();
+    let directory = mvm_core::config::vm_state_dir_at(home.path(), "read-only");
+    mvm_core::config::create_private_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let written = super::super::record_charge_at(home.path(), "read-only", charge());
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        written.is_err(),
+        "a record that did not land must fail the start"
+    );
+    assert!(!directory.join(super::super::CHARGE_FILE).exists());
+}
