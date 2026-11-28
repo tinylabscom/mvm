@@ -1138,7 +1138,7 @@ impl AuditEmitter {
             receipt.prev_receipt_id = prev;
             receipt.receipt_id = receipt.compute_id().context("computing receipt id")?;
             emitted_id = Some(receipt.receipt_id.clone());
-            let signed_at = chrono::Utc::now().to_rfc3339();
+            let signed_at = mvm_core::util::time::utc_now_rfc3339();
             mvm_core::receipt::SignedExecutionReceipt::sign(
                 receipt.clone(),
                 &self.signing_key,
@@ -1175,7 +1175,7 @@ impl AuditEmitter {
         let appended = store.append_chained(|prev| {
             receipt.prev_receipt_id = prev;
             receipt.receipt_id = receipt.compute_id().context("computing receipt id")?;
-            let signed_at = chrono::Utc::now().to_rfc3339();
+            let signed_at = mvm_core::util::time::utc_now_rfc3339();
             mvm_core::receipt::SignedExecutionReceipt::sign(receipt, &self.signing_key, signed_at)
                 .context("signing execution receipt")
         });

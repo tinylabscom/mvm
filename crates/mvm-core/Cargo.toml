@@ -24,7 +24,6 @@ blake3 = { workspace = true, optional = true }
 serde_jcs = "0.1"
 # Host-only: `workload_address` normalization. Optional; `host-state` pulls it.
 unicode-normalization = { version = "0.1", optional = true }
-chrono.workspace = true
 # The no_std + alloc foundation crate. `plan::validity` re-exports its
 # `FreshnessClaims`; `plan::{types,verb,verb_trust}` are module aliases
 # onto its `plan` submodules.
@@ -92,7 +91,7 @@ p256 = { workspace = true, optional = true }
 p384 = { workspace = true, optional = true }
 # Only under the `schema` feature (protocol-schema codegen);
 # 0.8 matches the version mvm-sdk already pins, so no new lockfile entry.
-schemars = { version = "0.8", features = ["chrono"], optional = true }
+schemars = { version = "0.8", optional = true }
 # The per-VM name-constrained egress CA lives in
 # `crypto::egress_ca`, gated behind `egress-ca` so the foundation crate's default
 # closure doesn't pull `rcgen`/`ring`/`yasna` for non-egress consumers. Sync, no

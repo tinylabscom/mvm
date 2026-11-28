@@ -8,7 +8,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use chrono::Utc;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_core::plan::{PlanId, TenantId};
 use mvm_hostd::supervisor::{
@@ -22,7 +21,7 @@ fn signing_key() -> SigningKey {
 
 fn entry(seq: usize) -> PlanAuditEntry {
     PlanAuditEntry {
-        timestamp: Utc::now(),
+        timestamp: mvm_core::util::time::utc_timestamp_now(),
         tenant: TenantId("local".to_string()),
         plan_id: PlanId(format!("plan-{seq}")),
         plan_version: 1,

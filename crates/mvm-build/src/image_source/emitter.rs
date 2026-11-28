@@ -1,10 +1,10 @@
 //! In-process local Linux-set production. Inspection and publication share
 //! the same staged bytes; no supplied root may use source declarations instead.
 
+use mvm_contract::timestamp::UtcTimestamp;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use chrono::{TimeZone, Timelike, Utc};
 use mvm_core::image_set::{
     ArtifactFormat, BaseImageContract, BootProtocol, ImageSetCompatibility, ImageSetManifest,
     ImageSetMember, ImageSetProducer, ImageSetRole, ImageSetVersion, LocalCheckouts,
@@ -274,13 +274,13 @@ fn emit_observed(
     }
     verify_artifacts(&members, staging.path())?;
     let issued_at = match std::env::var("SOURCE_DATE_EPOCH") {
-        Ok(epoch) => Utc
-            .timestamp_opt(epoch.parse().map_err(refused)?, 0)
-            .single()
+        Ok(epoch) => UtcTimestamp::from_unix(epoch.parse().map_err(refused)?, 0)
             .ok_or_else(|| refused("invalid SOURCE_DATE_EPOCH"))?,
-        Err(std::env::VarError::NotPresent) => Utc::now()
-            .with_nanosecond(0)
-            .ok_or_else(|| refused("cannot normalize current timestamp"))?,
+        Err(std::env::VarError::NotPresent) => {
+            let now = mvm_core::util::time::try_utc_timestamp_now().map_err(refused)?;
+            UtcTimestamp::from_unix(now.unix_secs(), 0)
+                .ok_or_else(|| refused("cannot normalize current timestamp"))?
+        }
         Err(error) => return Err(refused(error)),
     };
     let manifest = ImageSetManifest {

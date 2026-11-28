@@ -272,7 +272,7 @@ mod tests {
             provenance: PackProvenance {
                 builder_identity: "builder".to_string(),
                 build_environment_identity: "ci".to_string(),
-                build_timestamp: chrono::Utc::now(),
+                build_timestamp: mvm_core::util::time::utc_timestamp_now(),
                 reproducibility: ReproducibilityStatus::NotChecked,
                 sbom: SbomReference {
                     uri: "urn:sbom:test".to_string(),
@@ -286,7 +286,7 @@ mod tests {
             },
             trust: TrustMetadata {
                 signing_key_id: signer.clone(),
-                expires_at: chrono::Utc::now(),
+                expires_at: mvm_core::util::time::utc_timestamp_now(),
                 revocation_channel: "https://example.test/revocations".to_string(),
                 channel_identity: "stable".to_string(),
                 mirror_identity: None,

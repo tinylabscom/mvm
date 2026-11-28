@@ -178,8 +178,7 @@ fn meta_to_kind(meta: &std::fs::Metadata) -> FsEntryKind {
 
 fn meta_to_mtime(meta: &std::fs::Metadata) -> Option<String> {
     let modified = meta.modified().ok()?;
-    let datetime: chrono::DateTime<chrono::Utc> = modified.into();
-    Some(datetime.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    Some(mvm_core::util::time::rfc3339_from_system_time(modified))
 }
 
 impl FsOps for OsFs {

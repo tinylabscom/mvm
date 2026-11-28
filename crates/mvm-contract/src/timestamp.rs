@@ -1,6 +1,7 @@
 //! A UTC instant at nanosecond precision whose serialized form is exactly the
-//! one `chrono::DateTime<Utc>` writes, so signed and hashed evidence does not
-//! change when a field moves to it.
+//! one `chrono::DateTime<Utc>` wrote before chrono left the workspace, so
+//! signed and hashed evidence written then still reads and re-writes
+//! byte-for-byte.
 //!
 //! Writing: `YYYY-MM-DDTHH:MM:SS[.fff[fff[fff]]]Z` — no fraction when the
 //! nanoseconds are zero, otherwise the shortest of 3, 6 or 9 digits.
@@ -43,6 +44,12 @@ impl core::error::Error for ParseTimestampError {}
 impl UtcTimestamp {
     /// 1970-01-01T00:00:00Z.
     pub const UNIX_EPOCH: Self = Self { secs: 0, nanos: 0 };
+
+    /// 9999-12-31T23:59:59.999999999Z, the last representable instant.
+    pub const MAX: Self = Self {
+        secs: MAX_SECS,
+        nanos: 999_999_999,
+    };
 
     /// `None` when `nanos` is a full second or more, or the instant is outside
     /// years 0000..=9999.
@@ -88,27 +95,33 @@ impl UtcTimestamp {
     pub fn checked_add_secs(self, secs: i64) -> Option<Self> {
         Self::from_unix(self.secs.checked_add(secs)?, self.nanos)
     }
-}
 
-#[cfg(feature = "protocol")]
-/// Temporary bridge for fields still typed `chrono::DateTime<Utc>` (the plan's
-/// validity pair, the host clock); it goes with chrono. Refuses, rather than
-/// clamps, an instant outside years 0000..=9999 or a leap-second nanosecond.
-impl TryFrom<chrono::DateTime<chrono::Utc>> for UtcTimestamp {
-    type Error = ParseTimestampError;
-
-    fn try_from(dt: chrono::DateTime<chrono::Utc>) -> Result<Self, Self::Error> {
-        Self::from_unix(dt.timestamp(), dt.timestamp_subsec_nanos()).ok_or(ParseTimestampError)
+    /// `None` when the result leaves years 0000..=9999.
+    pub fn checked_add(self, d: core::time::Duration) -> Option<Self> {
+        self.offset_nanos(i128::try_from(d.as_nanos()).ok()?)
     }
-}
 
-#[cfg(feature = "protocol")]
-/// Temporary bridge to the chrono grant expiry (`VerbGrant.not_after`, whose
-/// signed bytes stay chrono's); it goes with chrono. Every in-range instant is
-/// representable.
-impl From<UtcTimestamp> for chrono::DateTime<chrono::Utc> {
-    fn from(t: UtcTimestamp) -> Self {
-        Self::from_timestamp(t.secs, t.nanos).expect("years 0000..=9999 fit chrono")
+    /// `None` when the result leaves years 0000..=9999.
+    pub fn checked_sub(self, d: core::time::Duration) -> Option<Self> {
+        self.offset_nanos(-i128::try_from(d.as_nanos()).ok()?)
+    }
+
+    /// The `+00:00` form `chrono::DateTime::to_rfc3339` printed, which signed
+    /// grants, receipts and audit labels carry; [`fmt::Display`] ends in `Z`.
+    pub fn to_rfc3339_offset(self) -> alloc::string::String {
+        let mut text = alloc::string::ToString::to_string(&self);
+        text.pop();
+        text.push_str("+00:00");
+        text
+    }
+
+    fn offset_nanos(self, delta: i128) -> Option<Self> {
+        let total =
+            (i128::from(self.secs) * 1_000_000_000 + i128::from(self.nanos)).checked_add(delta)?;
+        Self::from_unix(
+            i64::try_from(total.div_euclid(1_000_000_000)).ok()?,
+            u32::try_from(total.rem_euclid(1_000_000_000)).ok()?,
+        )
     }
 }
 

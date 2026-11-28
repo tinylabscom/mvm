@@ -88,7 +88,7 @@ fn reconcile_with(
         .context("preflighting authenticated ciphertext payload")?;
     if !already_retired {
         let mut entry = original_seal;
-        entry.timestamp = chrono::Utc::now();
+        entry.timestamp = mvm_core::util::time::utc_timestamp_now();
         entry.event = TRANSCRIPT_RETIRED_EVENT.into();
         entry.labels = pressure::event_labels(&manifest, pressure)?;
         sign(&entry).context("durably signing transcript retirement before unlink")?;

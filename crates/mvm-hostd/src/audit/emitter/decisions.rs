@@ -10,7 +10,6 @@ use super::runtime_identity_labels;
 use super::stream_audit;
 use crate::audit::signer::for_plan;
 use anyhow::{Context, Result};
-use chrono::Utc;
 use mvm_contract::provenance::{
     ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionId, DecisionOutcome,
     DecisionRecord, DecisionRecordBuilder,
@@ -91,7 +90,7 @@ impl AuditEmitter {
             UNBOUND_IMAGE_NAME, UNBOUND_IMAGE_SHA256, UNBOUND_PLAN_ID,
         };
         self.emit_entry(&crate::audit::signer::PlanAuditEntry {
-            timestamp: Utc::now(),
+            timestamp: mvm_core::util::time::utc_timestamp_now(),
             tenant: tenant.clone(),
             plan_id: mvm_core::plan::PlanId(UNBOUND_PLAN_ID.to_string()),
             plan_version: 0,
@@ -174,7 +173,7 @@ impl AuditEmitter {
             })
             .reasoning(format!("control key authorized action: {action}"))
             .outcome(DecisionOutcome::Approved)
-            .timestamp(Utc::now().to_rfc3339())
+            .timestamp(mvm_core::util::time::utc_now_rfc3339())
             .attestation(AttestationBinding {
                 plan_id: Some(plan.plan_id.0.clone()),
                 ..AttestationBinding::default()

@@ -1589,7 +1589,7 @@ mod tests {
         )
         .unwrap();
         let entry: crate::audit_verify::PlanAuditEntry = crate::audit_verify::PlanAuditEntry {
-            timestamp: chrono::Utc::now(),
+            timestamp: crate::util::time::utc_timestamp_now(),
             tenant: crate::plan::TenantId("local".into()),
             plan_id: crate::plan::PlanId("expiry-plan".into()),
             plan_version: 1,

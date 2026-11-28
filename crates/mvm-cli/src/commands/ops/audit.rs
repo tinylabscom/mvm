@@ -1669,7 +1669,7 @@ mod verify_cert_tests {
             labels.insert("workload".to_string(), workload.to_string());
             labels.insert("cert_fingerprint".to_string(), fingerprint.to_string());
             let entry = PlanAuditEntry {
-                timestamp: chrono::Utc::now(),
+                timestamp: mvm_core::util::time::utc_timestamp_now(),
                 tenant: TenantId(tenant.to_string()),
                 plan_id: PlanId(mvm_client::audit::chain::supervisor::UNBOUND_PLAN_ID.to_string()),
                 plan_version: 0,
@@ -1800,7 +1800,7 @@ mod verify_cert_tests {
         labels.insert("workload".to_string(), "build".to_string());
         labels.insert("cert_fingerprint".to_string(), "fp1".to_string());
         let destroy_entry = PlanAuditEntry {
-            timestamp: chrono::Utc::now(),
+            timestamp: mvm_core::util::time::utc_timestamp_now(),
             tenant: TenantId("local".to_string()),
             plan_id: PlanId(mvm_client::audit::chain::supervisor::UNBOUND_PLAN_ID.to_string()),
             plan_version: 0,
@@ -1818,7 +1818,7 @@ mod verify_cert_tests {
         let mut other_labels = BTreeMap::new();
         other_labels.insert("verb".to_string(), "up".to_string());
         let other_entry = PlanAuditEntry {
-            timestamp: chrono::Utc::now(),
+            timestamp: mvm_core::util::time::utc_timestamp_now(),
             tenant: TenantId("local".to_string()),
             plan_id: PlanId(mvm_client::audit::chain::supervisor::UNBOUND_PLAN_ID.to_string()),
             plan_version: 0,
@@ -2051,7 +2051,7 @@ mod merkle_verb_tests {
             .unwrap();
         for (i, plan_id) in plan_ids.iter().enumerate() {
             let entry = PlanAuditEntry {
-                timestamp: chrono::Utc::now(),
+                timestamp: mvm_core::util::time::utc_timestamp_now(),
                 tenant: mvm_core::plan::TenantId("local".to_string()),
                 plan_id: mvm_core::plan::PlanId(plan_id.to_string()),
                 plan_version: 1,

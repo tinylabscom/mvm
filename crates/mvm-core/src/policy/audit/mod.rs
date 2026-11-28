@@ -33,14 +33,14 @@ const ROTATE_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
 /// A free function rather than an inherent method on
 /// `LocalAuditEvent`: that type now lives in `mvm-contract`, and the
 /// orphan rule forbids `mvm-core` from adding inherent `impl`s to a
-/// foreign type. `Utc::now()` also needs chrono's `clock` feature
-/// (std), unavailable in the no_std `mvm-contract` crate.
+/// foreign type. The wall-clock read also needs `std`, unavailable in
+/// the no_std `mvm-contract` crate.
 pub fn now_event(
     kind: LocalAuditKind,
     vm_name: Option<String>,
     detail: Option<String>,
 ) -> LocalAuditEvent {
-    let timestamp = chrono::Utc::now().to_rfc3339();
+    let timestamp = crate::util::time::utc_now_rfc3339();
     LocalAuditEvent {
         timestamp,
         kind,
@@ -404,7 +404,7 @@ mod tests {
         let builder_line = std::fs::read_to_string(&p_builder).unwrap();
         let legacy_line = std::fs::read_to_string(&p_legacy).unwrap();
         // Drop the timestamp segment from each so we compare shape, not
-        // wall-clock drift between the two `chrono::Utc::now()` calls.
+        // wall-clock drift between the two wall-clock reads.
         let strip_ts = |s: &str| -> String {
             // Format: {"timestamp":"…","kind":"…",…}
             let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();

@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
-use chrono::Utc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
@@ -65,7 +64,9 @@ impl VolumeBackend for LocalBackend {
             let temporary = parent.join(format!(
                 ".mvm-tmp-{}-{}",
                 std::process::id(),
-                Utc::now().timestamp_nanos_opt().unwrap_or(0)
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
             ));
             let mut file = fs::OpenOptions::new()
                 .create_new(true)

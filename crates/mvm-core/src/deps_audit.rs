@@ -167,8 +167,8 @@ pub enum VolumeError {
 /// directory to its hash.
 ///
 /// `created_at` / `last_audit_at` are caller-supplied so this
-/// function stays pure / clock-free. Production callers pass
-/// `chrono::Utc::now()`; tests pass a fixed string.
+/// function stays pure / clock-free. Production callers pass the
+/// current instant; tests pass a fixed string.
 pub fn seal_volume(
     content_dir: &Path,
     sbom: &Path,

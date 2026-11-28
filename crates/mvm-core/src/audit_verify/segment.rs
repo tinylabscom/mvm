@@ -257,7 +257,7 @@ mod tests {
 
     fn entry(event: &str, labels: BTreeMap<String, String>) -> PlanAuditEntry {
         PlanAuditEntry {
-            timestamp: chrono::Utc::now(),
+            timestamp: crate::util::time::utc_timestamp_now(),
             tenant: TenantId("local".to_string()),
             plan_id: PlanId("00000000-0000-0000-0000-000000000000".to_string()),
             plan_version: 0,

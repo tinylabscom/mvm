@@ -8,7 +8,6 @@
 //! by the workload IR.
 
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
 use clap::Args as ClapArgs;
 use mvm_core::crypto::image_verify::sha256_file;
 use serde::Serialize;
@@ -191,7 +190,7 @@ pub(in crate::commands::deps) fn capture_volume(
             &scratch.join(FILE_FETCH_LOG),
             &scratch.join(FILE_CVE),
             prior_manifest.created_at,
-            Utc::now().to_rfc3339(),
+            mvm_core::util::time::utc_now_rfc3339(),
             prior_manifest.annotations,
         )?;
         std::fs::write(scratch.join(FILE_MANIFEST), &sealed.manifest_bytes)

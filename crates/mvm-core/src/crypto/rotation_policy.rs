@@ -10,7 +10,9 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Utc};
+use std::time::Duration;
+
+use mvm_contract::timestamp::UtcTimestamp;
 use secrecy::ExposeSecret;
 
 use crate::crypto::key_rotation::{
@@ -23,9 +25,9 @@ use crate::domain::volume::{MasterKeyRef, MasterKeyState, OrgId, WrappedKey};
 pub const DEFAULT_INTERVAL_DAYS: i64 = 90;
 
 /// The default 90-day rotation interval as a [`Duration`]. A function
-/// rather than a `const` because `chrono::Duration::days` is not `const`.
+/// rather than a `const` so callers keep one spelling of the default.
 pub fn default_interval() -> Duration {
-    Duration::days(DEFAULT_INTERVAL_DAYS)
+    Duration::from_secs(DEFAULT_INTERVAL_DAYS.unsigned_abs() * 86_400)
 }
 
 /// The single `Active` entry in the manifest, if any.
@@ -42,9 +44,11 @@ fn active_entry(manifest: &MasterKeyManifest) -> Option<&MasterKeyRef> {
 /// No active key → not due: minting the first key is initial provisioning,
 /// not rotation. `now` is a parameter so the check never reads the wall
 /// clock — that keeps it a pure, freely-testable function.
-pub fn rotation_due(manifest: &MasterKeyManifest, interval: Duration, now: DateTime<Utc>) -> bool {
+pub fn rotation_due(manifest: &MasterKeyManifest, interval: Duration, now: UtcTimestamp) -> bool {
     match active_entry(manifest) {
-        Some(active) => now.signed_duration_since(active.created_at) >= interval,
+        Some(active) => now
+            .duration_since(active.created_at)
+            .is_some_and(|age| age >= interval),
         None => false,
     }
 }
@@ -82,7 +86,7 @@ pub fn rotate_if_due(
     org_id: &OrgId,
     keys: &mut [WrappedKey],
     interval: Duration,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<RotationDecision> {
     let manifest = load_manifest(active_dir)?;
     if !rotation_due(&manifest, interval, now) {
@@ -124,7 +128,7 @@ mod tests {
         OrgId::new("local").unwrap()
     }
 
-    fn manifest_active_created_at(created_at: DateTime<Utc>) -> MasterKeyManifest {
+    fn manifest_active_created_at(created_at: UtcTimestamp) -> MasterKeyManifest {
         MasterKeyManifest {
             entries: vec![MasterKeyRef {
                 org_id: org(),
@@ -146,17 +150,17 @@ mod tests {
 
     #[test]
     fn kek_due_for_rotation_past_interval() {
-        let now = Utc::now();
+        let now = crate::util::time::utc_timestamp_now();
         let interval = default_interval();
-        let stale = manifest_active_created_at(now - Duration::days(91));
+        let stale = manifest_active_created_at(now.checked_add_secs(-91 * 86_400).unwrap());
         assert!(rotation_due(&stale, interval, now));
-        let fresh = manifest_active_created_at(now - Duration::days(10));
+        let fresh = manifest_active_created_at(now.checked_add_secs(-10 * 86_400).unwrap());
         assert!(!rotation_due(&fresh, interval, now));
     }
 
     #[test]
     fn rotation_due_false_with_no_active_key() {
-        let now = Utc::now();
+        let now = crate::util::time::utc_timestamp_now();
         assert!(!rotation_due(
             &MasterKeyManifest::default(),
             default_interval(),
@@ -178,7 +182,7 @@ mod tests {
             &org(),
             &mut keys,
             default_interval(),
-            Utc::now(),
+            crate::util::time::utc_timestamp_now(),
         )
         .unwrap();
         assert_eq!(decision, RotationDecision::NotDue);
@@ -200,7 +204,7 @@ mod tests {
         let mut keys = vec![wrap(&dek_a, &m1, 1), wrap(&dek_b, &m1, 1)];
 
         // Treat "now" as 91 days after the active key was created → due.
-        let now = v1.created_at + Duration::days(91);
+        let now = v1.created_at.checked_add_secs(91 * 86_400).unwrap();
         let decision =
             rotate_if_due(tmp.path(), &org(), &mut keys, default_interval(), now).unwrap();
         assert_eq!(

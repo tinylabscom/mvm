@@ -1,4 +1,3 @@
-use chrono::{TimeZone, Utc};
 use mvm_contract::guest_libc::GuestLibc;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -402,7 +401,7 @@ fn manifest_at(set_version: &str) -> ImageSetManifest {
     ImageSetManifest {
         schema_version: LEGACY_IMAGE_SET_SCHEMA_VERSION,
         set_version: version(set_version),
-        issued_at: Utc.with_ymd_and_hms(2026, 9, 16, 0, 0, 0).unwrap(),
+        issued_at: "2026-09-16T00:00:00Z".parse().unwrap(),
         producer: ImageSetProducer::Release(ReleaseProducer {
             repository: RepositorySlug::new("tinylabscom/mvm-images").unwrap(),
             workflow: WorkflowPath::new(".github/workflows/release.yml").unwrap(),

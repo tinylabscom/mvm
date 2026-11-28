@@ -509,7 +509,7 @@ fn workflow_deadline(bootstrap: &ActorBootstrap) -> Result<Instant> {
         .workflow_deadline_unix_ms
         .min(bootstrap.parent.valid_until.unix_millis());
     let remaining = expires
-        .checked_sub(chrono::Utc::now().timestamp_millis())
+        .checked_sub(mvm_core::util::time::utc_timestamp_now().unix_millis())
         .filter(|value| *value > 0)
         .context("actor workflow expired")?;
     Instant::now()

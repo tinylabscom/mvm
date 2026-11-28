@@ -27,7 +27,6 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::{Duration, Utc};
 use mvm_contract::assurance::Sha256Digest;
 use mvm_contract::plan::topology::{
     CorePlacement, CryptoSuite, SealedTransitions, TOPOLOGY_SCHEMA_VERSION, Unit, UnitResources,
@@ -59,13 +58,17 @@ fn cell_name(size: u64) -> String {
 
 /// One writer unit and one cell per measured size.
 fn topology() -> Topology {
-    let now = Utc::now();
+    let now = mvm_core::util::time::utc_timestamp_now();
     Topology {
         schema_version: TOPOLOGY_SCHEMA_VERSION,
         tenant: TenantId(TENANT.to_string()),
         generation: 1,
-        valid_from: now - Duration::hours(1),
-        valid_until: now + Duration::days(1),
+        valid_from: now
+            .checked_sub(std::time::Duration::from_secs(3600))
+            .unwrap(),
+        valid_until: now
+            .checked_add(std::time::Duration::from_secs(86_400))
+            .unwrap(),
         suite: CryptoSuite::CLASSICAL,
         units: vec![Unit {
             workload: WorkloadId(WRITER.to_string()),

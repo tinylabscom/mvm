@@ -1,7 +1,7 @@
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Mutex;
+use std::time::Duration;
 
-use chrono::{DateTime, Duration as Days, TimeZone, Utc};
 use mvm_contract::assurance::Sha256Digest;
 use mvm_contract::plan::topology::{
     CorePlacement, CryptoSuite, SealedTransitions, StateCell, TOPOLOGY_SCHEMA_VERSION, Topology,
@@ -9,6 +9,7 @@ use mvm_contract::plan::topology::{
 };
 use mvm_contract::protocol::mailbox::ExecutionEpoch;
 use mvm_contract::protocol::vm_backend::BackendKind;
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::protocol::broker::{CorrelationId, ServiceCall, ServiceResponse};
 use mvm_core::protocol::handler::CallEpoch;
 use mvm_core::util::test_env::TestEnv;
@@ -27,22 +28,23 @@ use crate::topology_admission::{
 const TENANT: &str = "acme";
 const PERIOD_MS: u32 = 2_000;
 
-struct TestClock(Mutex<DateTime<Utc>>);
+struct TestClock(Mutex<UtcTimestamp>);
 
 impl TestClock {
-    fn advance_ms(&self, ms: i64) {
-        *self.0.lock().unwrap() += Days::milliseconds(ms);
+    fn advance_ms(&self, ms: u64) {
+        let mut now = self.0.lock().unwrap();
+        *now = now.checked_add(Duration::from_millis(ms)).unwrap();
     }
 }
 
 impl Clock for TestClock {
-    fn now(&self) -> DateTime<Utc> {
+    fn now(&self) -> UtcTimestamp {
         *self.0.lock().unwrap()
     }
 }
 
-fn t0() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap()
+fn t0() -> UtcTimestamp {
+    "2026-11-01T00:00:00Z".parse::<UtcTimestamp>().unwrap()
 }
 
 fn id(name: &str) -> WorkloadId {
@@ -75,7 +77,7 @@ fn topology() -> Topology {
         tenant: TenantId(TENANT.to_string()),
         generation: 1,
         valid_from: t0(),
-        valid_until: t0() + Days::days(30),
+        valid_until: t0().checked_add_secs(30 * 86_400).unwrap(),
         suite: CryptoSuite::CLASSICAL,
         units: vec![
             unit("controller", Some(PERIOD_MS)),
@@ -115,7 +117,9 @@ impl Host {
             AuditEmitter::with_dir(signer.signing.clone(), &home.path().join("audit"))
                 .expect("emitter"),
         );
-        let clock = Arc::new(TestClock(Mutex::new(t0() + Days::days(1))));
+        let clock = Arc::new(TestClock(Mutex::new(
+            t0().checked_add_secs(86_400).unwrap(),
+        )));
         admit_topology(&TopologyAdmissionRequest {
             tenant: &TenantId(TENANT.to_string()),
             signed: &sign_topology_as_host(&topology(), Some(&keys)).unwrap(),
@@ -367,9 +371,9 @@ async fn a_liveness_signal_is_accepted_from_the_current_epoch_only() {
 async fn a_cell_write_resets_the_liveness_deadline() {
     let host = Host::admitted();
     host.signal("controller", 1).await.unwrap();
-    host.clock.advance_ms(i64::from(PERIOD_MS) - 1);
+    host.clock.advance_ms(u64::from(PERIOD_MS) - 1);
     host.write("controller", 1, 1, b"x").await.unwrap();
-    host.clock.advance_ms(i64::from(PERIOD_MS) - 1);
+    host.clock.advance_ms(u64::from(PERIOD_MS) - 1);
     assert_eq!(host.expire(), 0, "the write moved the deadline on");
     host.clock.advance_ms(1);
     assert_eq!(host.expire(), 1);
@@ -648,7 +652,7 @@ async fn repeated_refusals_are_all_answered_but_recorded_at_a_bounded_rate() {
     }
     assert_eq!(refusals(&host).len(), 1);
     host.clock
-        .advance_ms(REFUSAL_AUDIT_INTERVAL.num_milliseconds());
+        .advance_ms(u64::try_from(REFUSAL_AUDIT_INTERVAL.as_millis()).unwrap());
     assert_eq!(
         code(
             host.call_on(&handler, Some(("reader", 1)), "write", write())

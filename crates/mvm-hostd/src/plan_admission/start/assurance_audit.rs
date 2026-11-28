@@ -1,7 +1,6 @@
 //! Launch decision records and assurance-proxy attachment.
 
 use anyhow::Result;
-use chrono::Utc;
 use mvm_contract::provenance::{
     ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionOutcome,
     DecisionRecord, DecisionRecordBuilder,
@@ -24,7 +23,7 @@ pub(crate) fn launch_decision_record(plan: &ExecutionPlan, backend_name: &str) -
         })
         .reasoning(format!("workload launched on backend {backend_name}"))
         .outcome(DecisionOutcome::Approved)
-        .timestamp(Utc::now().to_rfc3339())
+        .timestamp(mvm_core::util::time::utc_now_rfc3339())
         .attestation(AttestationBinding {
             plan_id: Some(plan.plan_id.0.clone()),
             ..AttestationBinding::default()

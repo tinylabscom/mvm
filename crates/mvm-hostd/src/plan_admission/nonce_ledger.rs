@@ -1,7 +1,7 @@
 //! The nonce ledger a plan admission spends against.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::plan::{ExecutionPlan, NonceStore};
 use std::sync::Mutex;
 
@@ -58,7 +58,7 @@ impl InMemoryNonceLedger {
         &self,
         signer: &str,
         plan: &ExecutionPlan,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Result<()> {
         self.inner
             .lock()

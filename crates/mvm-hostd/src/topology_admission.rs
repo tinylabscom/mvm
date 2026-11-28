@@ -20,6 +20,7 @@
 //! idempotent: every check runs again, but nothing is rewritten and no second
 //! `topology.admitted` is written, because nothing new was authorized.
 
+use mvm_contract::timestamp::UtcTimestamp;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -367,10 +368,7 @@ fn verify(request: &TopologyAdmissionRequest<'_>) -> Result<(Topology, String), 
     Ok((topology, request.signed.signed.signer_id.clone()))
 }
 
-fn check_window(
-    topology: &Topology,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), TopologyRefused> {
+fn check_window(topology: &Topology, now: UtcTimestamp) -> Result<(), TopologyRefused> {
     if now < topology.valid_from {
         return Err(refused(
             RefusalStage::Window,

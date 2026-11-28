@@ -208,7 +208,6 @@ pub enum PackTrustError {
 mod tests {
     use std::fs;
 
-    use chrono::{TimeZone, Utc};
     use ed25519_dalek::SigningKey;
     use tempfile::TempDir;
 
@@ -220,6 +219,7 @@ mod tests {
         PolicyCompatibility, ReproducibilityStatus, SbomReference, SignatureValidity,
         verify_pack_at,
     };
+    use mvm_contract::timestamp::UtcTimestamp;
 
     fn signing_key(seed: u8) -> SigningKey {
         SigningKey::from_bytes(&[seed; 32])
@@ -457,10 +457,10 @@ mod tests {
         );
     }
 
-    fn utc(y: i32, m: u32, d: u32) -> chrono::DateTime<Utc> {
-        Utc.with_ymd_and_hms(y, m, d, 0, 0, 0)
-            .single()
-            .expect("valid timestamp")
+    fn utc(y: i32, m: u32, d: u32) -> UtcTimestamp {
+        format!("{y:04}-{m:02}-{d:02}T00:00:00Z")
+            .parse::<UtcTimestamp>()
+            .unwrap()
     }
 
     /// Mint a signed Builder pack under `dir`, compatible with the hvf backend

@@ -426,7 +426,7 @@ fn rootfs(evidence: &Path, role: &str, binary: &Path) -> Result<PathBuf> {
         runtime_lean: true,
         image_tag: String::new(),
         source: "built-local".into(),
-        built_at: chrono::Utc::now().to_rfc3339(),
+        built_at: mvm_core::util::time::utc_now_rfc3339(),
         // The runtime binding, not this workload image, supplies the agent.
         protocol_version: 0,
         generator_rev: String::new(),

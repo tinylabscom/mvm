@@ -19,7 +19,6 @@
 //! truth and the only durability boundary that can refuse a run.
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use mvm_contract::provenance::{
     ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionOutcome,
     DecisionRecord, DecisionRecordBuilder,
@@ -162,7 +161,7 @@ fn admission_decision_record(plan: &ExecutionPlan, signer_id: &str) -> DecisionR
         })
         .reasoning("plan admitted after host grant ceiling and budget checks")
         .outcome(DecisionOutcome::Approved)
-        .timestamp(Utc::now().to_rfc3339())
+        .timestamp(mvm_core::util::time::utc_now_rfc3339())
         .attestation(AttestationBinding {
             plan_id: Some(plan.plan_id.0.clone()),
             ..AttestationBinding::default()

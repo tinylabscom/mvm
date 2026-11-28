@@ -1469,7 +1469,7 @@ pub fn bundle_sha256(archive_bytes: &[u8]) -> String {
 #[cfg(all(test, feature = "host-state"))]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
+
     use ed25519_dalek::{Signer, SigningKey};
     use rand::Rng;
     use std::collections::HashMap;
@@ -1826,7 +1826,7 @@ mod tests {
             ImageSetManifest {
                 schema_version: crate::image_set::LEGACY_IMAGE_SET_SCHEMA_VERSION,
                 set_version: ImageSetVersion::new("1.0.0").expect("version"),
-                issued_at: Utc.with_ymd_and_hms(2026, 9, 23, 0, 0, 0).unwrap(),
+                issued_at: "2026-09-23T00:00:00Z".parse().unwrap(),
                 producer: ImageSetProducer::Release(ReleaseProducer {
                     repository: RepositorySlug::new("tinylabscom/mvm-images").expect("repo"),
                     workflow: WorkflowPath::new(".github/workflows/release.yml").expect("workflow"),

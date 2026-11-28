@@ -825,7 +825,7 @@ impl HealthAuditSink {
         // The timestamp doubles as the per-event disambiguator: successive
         // health events for one VM would otherwise share a request/correlation
         // id, so stamp it into both to keep diagnostics addressable.
-        let ts = chrono::Utc::now().to_rfc3339();
+        let ts = mvm_core::util::time::utc_now_rfc3339();
         let req = SignerHelperRequest::AppendEntry(SignerHelperAppendEntry {
             request_id: format!("health-{vm_id}-{ts}"),
             vm_id: vm_id.to_string(),

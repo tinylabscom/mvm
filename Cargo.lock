@@ -545,10 +545,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link",
 ]
 
@@ -3478,7 +3476,6 @@ version = "0.28.0-rc.11"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
- "chrono",
  "ed25519-dalek",
  "hickory-proto",
  "ipnet",
@@ -3509,7 +3506,6 @@ version = "0.28.0-rc.11"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
- "chrono",
  "ed25519-dalek",
  "ext4-view",
  "flate2",
@@ -3569,7 +3565,6 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "blake3",
- "chrono",
  "clap",
  "ed25519-dalek",
  "ext4-view",
@@ -3617,7 +3612,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.23.1",
- "chrono",
  "clap",
  "ed25519-dalek",
  "ext4-view",
@@ -3714,7 +3708,6 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "bytes",
- "chrono",
  "ed25519-dalek",
  "ipnet",
  "schemars",
@@ -3738,7 +3731,6 @@ dependencies = [
  "base64 0.23.1",
  "blake3",
  "bs58",
- "chrono",
  "core-foundation",
  "ed25519-dalek",
  "flate2",
@@ -3851,7 +3843,6 @@ dependencies = [
  "async-trait",
  "aya",
  "base64 0.23.1",
- "chrono",
  "core-foundation",
  "ctor",
  "ed25519-dalek",
@@ -3958,7 +3949,6 @@ dependencies = [
  "base64 0.23.1",
  "blake3",
  "bytes",
- "chrono",
  "ed25519-dalek",
  "ext4-view",
  "flate2",
@@ -4063,7 +4053,6 @@ version = "0.28.0-rc.11"
 dependencies = [
  "anyhow",
  "assert_cmd",
- "chrono",
  "clap",
  "ed25519-dalek",
  "flate2",
@@ -5285,7 +5274,6 @@ version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
 dependencies = [
- "chrono",
  "dyn-clone",
  "schemars_derive",
  "serde",

@@ -102,7 +102,7 @@ pub fn audit_entry_to_receipt(
 
     let started_at = context.and_then(|c| c.started_at.clone());
     let ended_at = if receipt_type == receipt_type::PLAN_EXITED {
-        Some(entry.timestamp.to_rfc3339())
+        Some(entry.timestamp.to_rfc3339_offset())
     } else {
         None
     };
@@ -155,7 +155,7 @@ pub fn audit_entry_to_receipt(
         exit_code,
         granted_capabilities,
         network_destinations,
-        issued_at: entry.timestamp.to_rfc3339(),
+        issued_at: entry.timestamp.to_rfc3339_offset(),
         extensions,
     };
     receipt.receipt_id = receipt.compute_id().ok()?;
@@ -344,7 +344,7 @@ pub fn export_evidence(
     let entries = verify_audit_chain_entries(&path, &signing_key.verifying_key())
         .with_context(|| format!("verifying audit chain for tenant '{tenant}'"))?;
     let host_did = DidKey::from_verifying_key(signing_key.verifying_key()).to_did_key();
-    let signed_at = chrono::Utc::now().to_rfc3339();
+    let signed_at = mvm_core::util::time::utc_now_rfc3339();
 
     // One root for the whole pass. Every receipt from this export cites it, and
     // every inclusion proof an archive builds binds to it; a root rebuilt
@@ -385,7 +385,7 @@ pub fn export_evidence(
                     digest: format!("sha256:{digest}"),
                     event: entry.event.clone(),
                     plan_id: entry.plan_id.0.clone(),
-                    timestamp: entry.timestamp.to_rfc3339(),
+                    timestamp: entry.timestamp.to_rfc3339_offset(),
                 });
             }
         }
@@ -534,7 +534,7 @@ fn build_context_map(entries: &[PlanAuditEntry]) -> BTreeMap<String, ReceiptCont
         ctx.leaf_last = Some(ctx.leaf_last.map_or(leaf_index, |l| l.max(leaf_index)));
 
         if entry.event == "plan.launched" && ctx.started_at.is_none() {
-            ctx.started_at = Some(entry.timestamp.to_rfc3339());
+            ctx.started_at = Some(entry.timestamp.to_rfc3339_offset());
         }
 
         // The seal is the last thing a run produces, so a later anchor for the
@@ -619,7 +619,6 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    use chrono::{TimeZone, Utc};
     use ed25519_dalek::SigningKey;
     use mvm_core::plan::{PlanId, TenantId};
     use mvm_core::receipt::ReceiptOutcome;
@@ -635,7 +634,7 @@ mod tests {
 
     fn sample_audit_entry(event: &str, labels: BTreeMap<String, String>) -> PlanAuditEntry {
         PlanAuditEntry {
-            timestamp: Utc.with_ymd_and_hms(2026, 8, 6, 0, 0, 0).unwrap(),
+            timestamp: "2026-08-06T00:00:00Z".parse().unwrap(),
             tenant: TenantId("local".into()),
             plan_id: sample_plan_id(),
             plan_version: 1,
@@ -1008,7 +1007,7 @@ mod tests {
             labels.insert("backend".into(), "firecracker".into());
             sample_audit_entry("plan.launched", labels)
         };
-        let launched_at = launched.timestamp.to_rfc3339();
+        let launched_at = launched.timestamp.to_rfc3339_offset();
 
         let exited = {
             let mut labels = BTreeMap::new();
@@ -1016,7 +1015,7 @@ mod tests {
             labels.insert("exit_code".into(), "42".into());
             sample_audit_entry("plan.exited", labels)
         };
-        let exited_at = exited.timestamp.to_rfc3339();
+        let exited_at = exited.timestamp.to_rfc3339_offset();
 
         rt.block_on(signer.sign_and_emit(&launched)).unwrap();
         rt.block_on(signer.sign_and_emit(&exited)).unwrap();

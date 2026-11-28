@@ -1,29 +1,30 @@
-//! Differential tests with chrono as the oracle.
+//! Pinned oracle tests. Every expected value below was produced by chrono 0.4
+//! (the serializer these bytes must stay identical to) before chrono left the
+//! workspace; the digests cover the full generated sequences.
 
 use super::*;
-use chrono::{DateTime, Utc};
-
-fn chrono_at(secs: i64, nanos: u32) -> DateTime<Utc> {
-    DateTime::from_timestamp(secs, nanos).unwrap()
-}
-
-fn chrono_json(secs: i64, nanos: u32) -> String {
-    serde_json::to_string(&chrono_at(secs, nanos)).unwrap()
-}
+use sha2::{Digest, Sha256};
 
 fn ours(secs: i64, nanos: u32) -> UtcTimestamp {
     UtcTimestamp::from_unix(secs, nanos).unwrap()
 }
 
-/// Serialize equal to chrono, and the text parses back to the same instant
-/// under both parsers.
-fn assert_agrees(secs: i64, nanos: u32) {
-    let ts = ours(secs, nanos);
-    let json = serde_json::to_string(&ts).unwrap();
-    assert_eq!(json, chrono_json(secs, nanos), "serialize {secs} {nanos}");
-    assert_eq!(serde_json::from_str::<UtcTimestamp>(&json).unwrap(), ts);
-    let c: DateTime<Utc> = serde_json::from_str(&json).unwrap();
-    assert_eq!((c.timestamp(), c.timestamp_subsec_nanos()), (secs, nanos));
+fn json(secs: i64, nanos: u32) -> String {
+    serde_json::to_string(&ours(secs, nanos)).unwrap()
+}
+
+/// Serialize, then parse back to the same instant.
+fn round_trip(secs: i64, nanos: u32) -> String {
+    let text = json(secs, nanos);
+    assert_eq!(
+        serde_json::from_str::<UtcTimestamp>(&text).unwrap(),
+        ours(secs, nanos)
+    );
+    text
+}
+
+fn hex(digest: &[u8]) -> String {
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 const NANOS: [u32; 8] = [
@@ -40,62 +41,74 @@ const NANOS: [u32; 8] = [
 #[test]
 fn every_day_boundary_in_1900_to_2200_serializes_like_chrono() {
     let (from, to) = (-2_208_988_800i64, 7_258_118_400i64);
-    let mut i = 0usize;
-    let mut midnight = from;
+    let (mut i, mut midnight, mut digest) = (0usize, from, Sha256::new());
     while midnight < to {
         for s in [midnight - 1, midnight, midnight + 1] {
-            assert_agrees(s, NANOS[i % NANOS.len()]);
+            digest.update(round_trip(s, NANOS[i % NANOS.len()]).as_bytes());
+            digest.update(b"\n");
             i += 1;
         }
         midnight += 86_400;
     }
+    assert_eq!(i, 328_719);
+    assert_eq!(
+        hex(&digest.finalize()),
+        "77491b37e3801bd4cf54c80bab10ff544bda202310b776541b8a60de996d19ba"
+    );
 }
 
 #[test]
 fn pseudo_random_instants_across_every_year_serialize_like_chrono() {
     let mut x = 0x9E37_79B9_7F4A_7C15u64;
     let span = (MAX_SECS - MIN_SECS + 1) as u64;
+    let mut digest = Sha256::new();
     for i in 0..200_000usize {
         x = x
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
-        assert_agrees(MIN_SECS + ((x >> 11) % span) as i64, NANOS[i % NANOS.len()]);
+        let text = round_trip(MIN_SECS + ((x >> 11) % span) as i64, NANOS[i % NANOS.len()]);
+        digest.update(text.as_bytes());
+        digest.update(b"\n");
     }
-    for edge in [MIN_SECS, MAX_SECS] {
-        assert_agrees(edge, 999_999_999);
-    }
+    assert_eq!(
+        hex(&digest.finalize()),
+        "29e8c5cf13b0264ad7eaa72ecb5b33434efd80436f748c624e655c5bb4ca9492"
+    );
+    assert_eq!(
+        json(MIN_SECS, 999_999_999),
+        r#""0000-01-01T00:00:00.999999999Z""#
+    );
+    assert_eq!(
+        json(MAX_SECS, 999_999_999),
+        r#""9999-12-31T23:59:59.999999999Z""#
+    );
 }
 
 #[test]
 fn a_string_we_accept_is_accepted_by_chrono_as_the_same_instant() {
     let accepted = [
-        "2024-02-29T23:59:59Z",
-        "2024-02-29T23:59:59.5Z",
-        "2024-02-29T23:59:59.123456789Z",
-        "2024-02-29T23:59:59.000Z",
-        "0000-01-01T00:00:00Z",
-        "9999-12-31T23:59:59.999999999Z",
-        "2000-02-29T12:00:00+05:30",
-        "2026-11-20T00:00:00-23:59",
-        "2026-11-20T23:59:59+23:59",
-        "2026-11-20T10:00:00+00:00",
-        "2026-11-20T10:00:00-00:00",
-        "1969-12-31T23:59:59.999999999Z",
-        "0001-01-01T00:00:00+00:01",
+        ("2024-02-29T23:59:59Z", 1709251199, 0),
+        ("2024-02-29T23:59:59.5Z", 1709251199, 500000000),
+        ("2024-02-29T23:59:59.123456789Z", 1709251199, 123456789),
+        ("2024-02-29T23:59:59.000Z", 1709251199, 0),
+        ("0000-01-01T00:00:00Z", -62167219200, 0),
+        ("9999-12-31T23:59:59.999999999Z", 253402300799, 999999999),
+        ("2000-02-29T12:00:00+05:30", 951805800, 0),
+        ("2026-11-20T00:00:00-23:59", 1795219140, 0),
+        ("2026-11-20T23:59:59+23:59", 1795132859, 0),
+        ("2026-11-20T10:00:00+00:00", 1795168800, 0),
+        ("2026-11-20T10:00:00-00:00", 1795168800, 0),
+        ("1969-12-31T23:59:59.999999999Z", -1, 999999999),
+        ("0001-01-01T00:00:00+00:01", -62135596860, 0),
     ];
-    for s in accepted {
+    for (s, secs, nanos) in accepted {
         let ts: UtcTimestamp = s.parse().unwrap_or_else(|_| panic!("rejected {s}"));
-        let c = DateTime::parse_from_rfc3339(s).unwrap();
-        assert_eq!(
-            (c.timestamp(), c.timestamp_subsec_nanos()),
-            (ts.unix_secs(), ts.subsec_nanos()),
-            "{s}"
-        );
+        assert_eq!((ts.unix_secs(), ts.subsec_nanos()), (secs, nanos), "{s}");
     }
 }
 
 /// Mutate one byte of canonical strings; whatever the strict parser still
-/// accepts, chrono must accept as the same instant.
+/// accepts, chrono accepted as the same instant (the digest pins both).
 #[test]
 fn accepted_mutations_are_a_subset_of_chrono() {
     let mut x = 0x1234_5678_9ABC_DEF0u64;
@@ -104,9 +117,9 @@ fn accepted_mutations_are_a_subset_of_chrono() {
         (x >> 33) as usize
     };
     let alphabet = b"0123456789-:.+TZtz u";
-    let mut accepted = 0;
+    let (mut accepted, mut digest) = (0, Sha256::new());
     for i in 0..200_000usize {
-        let s = chrono_json(
+        let s = json(
             MIN_SECS + (next() as i64 * 99_991) % (MAX_SECS - MIN_SECS),
             NANOS[i % 8],
         );
@@ -118,19 +131,18 @@ fn accepted_mutations_are_a_subset_of_chrono() {
         };
         if let Ok(ts) = text.parse::<UtcTimestamp>() {
             accepted += 1;
-            let c = DateTime::parse_from_rfc3339(text).unwrap_or_else(|_| panic!("{text}"));
-            assert_eq!(
-                (c.timestamp(), c.timestamp_subsec_nanos()),
-                (ts.unix_secs(), ts.subsec_nanos()),
-                "{text}"
-            );
+            digest.update(format!("{text} {} {}\n", ts.unix_secs(), ts.subsec_nanos()).as_bytes());
         }
     }
-    assert!(accepted > 1_000, "mutation set too weak: {accepted}");
+    assert_eq!(accepted, 61_999);
+    assert_eq!(
+        hex(&digest.finalize()),
+        "8bdfb1d04dd757a56369547136adf429bac2c96627de7a3b18dbf4b5da14e713"
+    );
 }
 
 /// Each row is refused by the strict parser; the flag records whether chrono
-/// 0.4's relaxed grammar accepts it (the narrowing this type introduces).
+/// 0.4's relaxed grammar accepted it (the narrowing this type introduced).
 #[test]
 fn non_canonical_forms_are_rejected() {
     let rows: [(&str, bool); 36] = [
@@ -171,14 +183,9 @@ fn non_canonical_forms_are_rejected() {
         ("", false),
         ("2026-11-20", false),
     ];
-    for (s, chrono_accepts) in rows {
+    for (s, _chrono_accepted) in rows {
         assert!(s.parse::<UtcTimestamp>().is_err(), "accepted {s:?}");
         assert!(serde_json::from_str::<UtcTimestamp>(&format!("{s:?}")).is_err());
-        assert_eq!(
-            serde_json::from_str::<DateTime<Utc>>(&format!("{s:?}")).is_ok(),
-            chrono_accepts,
-            "chrono on {s:?}"
-        );
     }
 }
 
@@ -210,30 +217,25 @@ fn accessors_and_ordering_follow_the_instant() {
 fn the_schema_is_exactly_chromos() {
     use schemars::JsonSchema;
     let mut generator = schemars::r#gen::SchemaGenerator::default();
-    let theirs = serde_json::to_value(DateTime::<Utc>::json_schema(&mut generator)).unwrap();
     let mine = serde_json::to_value(UtcTimestamp::json_schema(&mut generator)).unwrap();
-    assert_eq!(mine, theirs);
-    assert_eq!(UtcTimestamp::schema_name(), DateTime::<Utc>::schema_name());
-    assert_eq!(UtcTimestamp::schema_id(), DateTime::<Utc>::schema_id());
     assert_eq!(
-        UtcTimestamp::is_referenceable(),
-        DateTime::<Utc>::is_referenceable()
+        mine,
+        serde_json::json!({"type": "string", "format": "date-time"})
     );
+    assert_eq!(UtcTimestamp::schema_name(), "DateTime");
+    assert_eq!(UtcTimestamp::schema_id(), "chrono :: DateTime");
+    assert!(!UtcTimestamp::is_referenceable());
 }
 
 #[test]
 fn whole_secs_since_truncates_toward_zero_like_chrono() {
-    use chrono::{DateTime, Utc};
-    for (a, an, b, bn) in [
-        (301, 100, 0, 900),
-        (0, 900, 301, 100),
-        (5, 0, 5, 0),
-        (-3, 5, 4, 0),
+    for (a, an, b, bn, want) in [
+        (301, 100, 0, 900, 300),
+        (0, 900, 301, 100, -300),
+        (5, 0, 5, 0, 0),
+        (-3, 5, 4, 0, -6),
     ] {
-        let chrono_secs = (DateTime::<Utc>::from_timestamp(a, an).unwrap()
-            - DateTime::<Utc>::from_timestamp(b, bn).unwrap())
-        .num_seconds();
-        assert_eq!(ours(a, an).whole_secs_since(ours(b, bn)), chrono_secs);
+        assert_eq!(ours(a, an).whole_secs_since(ours(b, bn)), want);
     }
     assert_eq!(
         ours(MAX_SECS, 0).whole_secs_since(ours(MIN_SECS, 0)),
@@ -256,51 +258,41 @@ fn duration_since_keeps_nanoseconds_and_refuses_a_later_earlier() {
     );
 }
 
-#[cfg(feature = "protocol")]
-#[test]
-fn the_chrono_bridge_keeps_the_instant_and_refuses_what_it_cannot_hold() {
-    for (secs, nanos) in [
-        (0, 0),
-        (1_784_205_296, 123_456_789),
-        (MIN_SECS, 0),
-        (MAX_SECS, 999_999_999),
-    ] {
-        assert_eq!(
-            UtcTimestamp::try_from(chrono_at(secs, nanos)),
-            Ok(ours(secs, nanos))
-        );
-    }
-    // Year 10000 and year -1 (chrono's `+`/`-` prefixed range), and a leap second.
-    for dt in [
-        chrono_at(MAX_SECS + 1, 0),
-        chrono_at(MIN_SECS - 1, 0),
-        chrono_at(59, 1_500_000_000),
-    ] {
-        assert_eq!(UtcTimestamp::try_from(dt), Err(ParseTimestampError));
-    }
-}
-
-#[cfg(feature = "protocol")]
-#[test]
-fn the_chrono_grant_bridge_round_trips_at_the_range_edges() {
-    for (secs, nanos) in [
-        (0, 0),
-        (1_784_205_296, 123_456_789),
-        (MIN_SECS, 0),
-        (MAX_SECS, 999_999_999),
-    ] {
-        let t = ours(secs, nanos);
-        let dt: DateTime<Utc> = t.into();
-        assert_eq!(dt, chrono_at(secs, nanos));
-        assert_eq!(UtcTimestamp::try_from(dt), Ok(t));
-    }
-}
-
 #[test]
 fn the_epoch_constant_is_the_chrono_epoch() {
     assert_eq!(
         serde_json::to_string(&UtcTimestamp::UNIX_EPOCH).unwrap(),
-        serde_json::to_string(&DateTime::<Utc>::UNIX_EPOCH).unwrap()
+        r#""1970-01-01T00:00:00Z""#
     );
     assert_eq!(UtcTimestamp::UNIX_EPOCH, ours(0, 0));
+}
+
+#[test]
+fn duration_arithmetic_stays_in_range() {
+    use core::time::Duration;
+    let t = ours(10, 900_000_000);
+    assert_eq!(
+        t.checked_add(Duration::new(1, 200_000_000)),
+        Some(ours(12, 100_000_000))
+    );
+    assert_eq!(
+        t.checked_sub(Duration::new(11, 0)),
+        Some(ours(-1, 900_000_000))
+    );
+    assert_eq!(
+        t.checked_sub(Duration::new(10, 950_000_000)),
+        Some(ours(-1, 950_000_000))
+    );
+    assert_eq!(UtcTimestamp::MAX, ours(MAX_SECS, 999_999_999));
+    assert!(
+        UtcTimestamp::MAX
+            .checked_add(Duration::from_nanos(1))
+            .is_none()
+    );
+    assert!(
+        ours(MIN_SECS, 0)
+            .checked_sub(Duration::from_nanos(1))
+            .is_none()
+    );
+    assert!(t.checked_add(Duration::MAX).is_none());
 }

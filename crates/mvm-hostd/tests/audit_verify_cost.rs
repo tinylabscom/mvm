@@ -16,7 +16,6 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::{PlanId, TenantId};
 use mvm_hostd::supervisor::{
@@ -44,7 +43,7 @@ fn entry(seq: usize) -> PlanAuditEntry {
     labels.insert("backend".to_string(), "hvf".to_string());
     labels.insert("vm".to_string(), format!("machine-{seq}"));
     PlanAuditEntry {
-        timestamp: Utc::now(),
+        timestamp: mvm_core::util::time::utc_timestamp_now(),
         tenant: TenantId("local".to_string()),
         plan_id: PlanId(format!("plan-{seq}")),
         plan_version: 1,

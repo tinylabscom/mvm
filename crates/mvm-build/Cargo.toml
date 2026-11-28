@@ -38,7 +38,6 @@ mvm-fs.workspace = true
 # Already in the closure through mvm-fs.
 ext4-view.workspace = true
 anyhow.workspace = true
-chrono.workspace = true
 hex.workspace = true
 # Libkrun FFI facade used by the in-tree builder VM launcher. Native C linkage
 # remains behind libkrun-sys's own opt-in feature; naming the Rust facade here

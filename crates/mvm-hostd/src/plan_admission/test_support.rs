@@ -15,7 +15,6 @@ pub(super) use super::start::{attach_assurance_proxy, launch_decision_record};
 pub(super) use super::verb_grant_sidecar::mint_verb_grant_sidecar;
 use super::*;
 pub(super) use crate::audit::host_keypair::host_signer_id;
-pub(super) use chrono::{DateTime, Duration, TimeZone, Utc};
 pub(super) use ed25519_dalek::SigningKey;
 pub(super) use mvm_build::guest_libc::GuestLibc;
 pub(super) use mvm_contract::builder::BuilderError;
@@ -24,10 +23,11 @@ pub(super) use mvm_contract::protocol::mailbox::{
 };
 pub(super) use mvm_contract::protocol::resource_controls::EnforcedGrants;
 pub(super) use mvm_contract::provenance::DecisionCategory;
+pub(super) use mvm_contract::timestamp::UtcTimestamp;
 pub(super) use mvm_core::plan::test_support::PlanFixture;
 pub(super) use mvm_core::plan::{
-    ExecutionPlan, PlanSeccompTier, SecretReleasePolicy, SynthesisInput, check_window_chrono,
-    sign_plan, synthesize_plan, verify_plan,
+    ExecutionPlan, PlanSeccompTier, SecretReleasePolicy, SynthesisInput, check_window, sign_plan,
+    synthesize_plan, verify_plan,
 };
 pub(super) use mvm_core::user_config::{MvmConfig, TrustedPlanSigner};
 pub(super) use mvm_core::util::test_env::TestEnv;
@@ -125,10 +125,10 @@ pub(super) fn plan_binding(services: &[&str]) -> ExecutionPlan {
     synthesize_plan(&input).expect("fixture plan synthesizes")
 }
 
-pub(super) struct FixedClock(pub(super) DateTime<Utc>);
+pub(super) struct FixedClock(pub(super) UtcTimestamp);
 
 impl Clock for FixedClock {
-    fn now(&self) -> DateTime<Utc> {
+    fn now(&self) -> UtcTimestamp {
         self.0
     }
 }

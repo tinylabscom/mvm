@@ -385,7 +385,7 @@ fn inject_and_materialize_holding(
     // both the materializer's sizing pass below and the verity seal hash
     // the exact bytes they see, so a mark written later would change the
     // roothash and break the signature's coverage.
-    let seal_started = chrono::Utc::now().to_rfc3339();
+    let seal_started = mvm_core::util::time::utc_now_rfc3339();
     maybe_write_provenance_mark(unpacked_root, sealed, evidence.as_ref())?;
 
     // The whole artifact set — image, verity tree, root hash, provenance, and
@@ -428,7 +428,7 @@ fn inject_and_materialize_holding(
                 &subject_sha256,
                 evidence,
                 &seal_started,
-                &chrono::Utc::now().to_rfc3339(),
+                &mvm_core::util::time::utc_now_rfc3339(),
             )
             .context("write in-toto provenance sidecar")?;
         }

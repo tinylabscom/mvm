@@ -48,7 +48,6 @@ use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use mvm_contract::timestamp::UtcTimestamp;
 
 use crate::crypto::image_verify::{sha256_file, sha256_reader};
@@ -778,7 +777,7 @@ fn manifest_for(
         kernel_version: None,
         profile: inputs.profile.map(str::to_string),
         workload_label: inputs.label.clone(),
-        created_at: Utc::now().to_rfc3339(),
+        created_at: crate::util::time::utc_now_rfc3339(),
         labels: Default::default(),
         artifacts,
         members,

@@ -58,7 +58,7 @@ fn sample_plan_id() -> PlanId {
 
 fn sample_audit_entry(event: &str, labels: BTreeMap<String, String>) -> PlanAuditEntry {
     PlanAuditEntry {
-        timestamp: chrono::Utc::now(),
+        timestamp: mvm_core::util::time::utc_timestamp_now(),
         tenant: TenantId("local".into()),
         plan_id: sample_plan_id(),
         plan_version: 1,

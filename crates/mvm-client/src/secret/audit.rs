@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use mvm_core::plan::TenantId;
 use mvm_hostd::supervisor::{EventCategory, FileAuditSigner, Recorder};
 
@@ -141,7 +140,7 @@ impl SecretAudit {
     ) -> Result<()> {
         if let Some(ref path) = self.path {
             let entry = serde_json::json!({
-                "timestamp": Utc::now().to_rfc3339(),
+                "timestamp": mvm_core::util::time::utc_now_rfc3339(),
                 "action": action,
                 "tenant": tenant,
                 "name": name,

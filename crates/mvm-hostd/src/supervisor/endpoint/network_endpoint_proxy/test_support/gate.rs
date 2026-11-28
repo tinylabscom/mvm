@@ -31,9 +31,12 @@ use mvm_runtime::vmm::egress_gate::EgressGate;
 /// address the gate admits and gives the service a forwarder that dials the
 /// fixture instead, as `tests/wasm_egress_witness.rs` does.
 pub(crate) fn gate_admitting(destinations: &[(&str, u16)]) -> Arc<EgressGate> {
-    let now = chrono::Utc::now();
-    let expires = (now + chrono::Duration::hours(1)).to_rfc3339();
-    let now = now.to_rfc3339();
+    let now = mvm_core::util::time::utc_timestamp_now();
+    let expires = (now
+        .checked_add(std::time::Duration::from_secs(3600))
+        .unwrap())
+    .to_rfc3339_offset();
+    let now = now.to_rfc3339_offset();
     let mut pins = DnsPinRegistry::new();
     let mut named = 0u8;
     for (host, _) in destinations {

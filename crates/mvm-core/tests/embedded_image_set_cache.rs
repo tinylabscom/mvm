@@ -5,8 +5,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Barrier;
 
-use chrono::{TimeZone, Utc};
 use ed25519_dalek::SigningKey;
+
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::{
     ArtifactFormat, ArtifactName, BootProtocol, GitCommit, GuestDeviceRequirement,
@@ -136,10 +136,7 @@ fn complete_image_set() -> (ImageSetManifest, Vec<(String, Vec<u8>)>) {
     let manifest = ImageSetManifest {
         schema_version: LEGACY_IMAGE_SET_SCHEMA_VERSION,
         set_version: ImageSetVersion::new("1.0.0").expect("version"),
-        issued_at: Utc
-            .with_ymd_and_hms(2026, 9, 23, 0, 0, 0)
-            .single()
-            .expect("timestamp"),
+        issued_at: "2026-09-23T00:00:00Z".parse().unwrap(),
         producer: ImageSetProducer::Release(ReleaseProducer {
             repository: RepositorySlug::new("tinylabscom/mvm-images").expect("repo"),
             workflow: WorkflowPath::new(".github/workflows/release.yml").expect("workflow"),

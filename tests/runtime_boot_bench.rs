@@ -1446,7 +1446,7 @@ fn grant_plan_carries_the_verbs_and_an_open_validity_window() {
     assert!(verbs.iter().any(|v| v.as_str() == STOP_FLUSH_VERB));
     assert_eq!(plan.workload.0, "mvm-boot-bench-grant-fixture");
     assert!(
-        chrono::DateTime::from(plan.valid_until) > chrono::Utc::now(),
+        plan.valid_until > mvm_core::util::time::utc_timestamp_now(),
         "a plan minted dead would make the guest refuse activation"
     );
 }

@@ -178,7 +178,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     fn now() -> UtcTimestamp {
-        chrono::Utc::now().try_into().unwrap()
+        crate::util::time::utc_timestamp_now()
     }
 
     fn claims(seed: u8, now: UtcTimestamp, ttl_secs: i64) -> FreshnessClaims {

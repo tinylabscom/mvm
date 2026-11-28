@@ -30,7 +30,7 @@ mvm-build = { workspace = true, default-features = false }
 # (`mvm_fs::rootfs`) for read-only host-directory share images.
 mvm-fs.workspace = true
 anyhow.workspace = true
-# `OverlayManager` is an async trait carrying chrono timestamps +
+# `OverlayManager` is an async trait carrying timestamps +
 # thiserror'd typed errors.
 async-trait.workspace = true
 thiserror.workspace = true
@@ -38,7 +38,6 @@ base64.workspace = true
 # `LocalBackend`/`VolumeBackend` put/get payloads + the content-addressed
 # volume digest store.
 bytes = "1"
-chrono.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
 rustix = { version = "1.1", default-features = false, features = ["fs", "std"] }

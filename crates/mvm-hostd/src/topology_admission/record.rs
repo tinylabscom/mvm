@@ -8,9 +8,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use chrono::{DateTime, Utc};
 use mvm_contract::assurance::Sha256Digest;
 use mvm_contract::plan::topology::SignedTopology;
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::atomic_io;
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +26,7 @@ pub struct AdmittedTopologyRecord {
     pub generation: u64,
     pub digest: Sha256Digest,
     pub signer_id: String,
-    pub admitted_at: DateTime<Utc>,
+    pub admitted_at: UtcTimestamp,
     pub signed: SignedTopology,
 }
 

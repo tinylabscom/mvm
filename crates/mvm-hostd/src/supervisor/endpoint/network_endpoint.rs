@@ -62,7 +62,7 @@ pub fn build_egress_gate(
              admission checks a host's shape, not that it resolves"
         );
     }
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = mvm_core::util::time::utc_now_rfc3339();
     // Peer routes ride the policy, so they arrive here already admitted and
     // need no separate thread. Attaching them at the same place the egress
     // rules are projected keeps one construction site for the whole gate.

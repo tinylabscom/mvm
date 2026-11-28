@@ -248,7 +248,7 @@ mod trust {
                 host_capabilities: BTreeSet::from([HostCapability("vsock".to_string())]),
                 policy_hash: host_pack_policy_hash(arch),
                 allowed_channels: trust.allowed_channels(),
-                now: chrono::Utc::now(),
+                now: mvm_core::util::time::utc_timestamp_now(),
             };
             policy
                 .allowed_channels
@@ -461,12 +461,8 @@ mod not_instant_reason_tests {
 
     #[test]
     fn expired_signature_reports_the_expiry_timestamp() {
-        use chrono::TimeZone;
-
-        let expired_at = chrono::Utc
-            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
-            .single()
-            .expect("valid timestamp");
+        let expired_at: mvm_contract::timestamp::UtcTimestamp =
+            "2026-01-01T00:00:00Z".parse().unwrap();
         let diagnosis = PackDiagnosis::Rejected {
             pack_hash: hash("pack"),
             reason: PackVerifyError::ExpiredSignature {

@@ -290,7 +290,7 @@ fn build_manifest(
             revision: String,
         }
         let event = BuildResult {
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: mvm_core::util::time::utc_now_rfc3339(),
             command: "build",
             phase: "manifest",
             status: "completed",
@@ -541,7 +541,7 @@ fn build_flake(
                 rootfs: String,
             }
             let event = BuildResult {
-                timestamp: chrono::Utc::now().to_rfc3339(),
+                timestamp: mvm_core::util::time::utc_now_rfc3339(),
                 command: "build",
                 phase: "nix-build",
                 status: "completed",

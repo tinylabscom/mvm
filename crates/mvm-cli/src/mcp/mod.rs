@@ -439,7 +439,9 @@ impl McpServer {
             "mvm.machine.set_ttl" => {
                 let args = parse_arguments::<SetTtlArgs>(arguments)?;
                 if args.expires_at.as_ref().is_some_and(|expires_at| {
-                    chrono::DateTime::parse_from_rfc3339(expires_at).is_err()
+                    expires_at
+                        .parse::<mvm_contract::timestamp::UtcTimestamp>()
+                        .is_err()
                 }) {
                     return Err(ToolFailure::Input(
                         "expires_at must be an RFC 3339 timestamp or null".into(),

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::plan::TenantId;
 use mvm_core::protocol::audit_signer::{AppendEntryRequest, AppendEntryResponse};
 use mvm_core::protocol::lifecycle_audit::{
@@ -93,7 +93,7 @@ impl RefusalAudit for AuditClient {
 }
 
 /// The longest one kind of refusal goes unrecorded while it repeats.
-pub const REFUSAL_AUDIT_INTERVAL: chrono::Duration = chrono::Duration::seconds(10);
+pub const REFUSAL_AUDIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The most kinds one registration tracks apart. Cell names are the guest's
 /// to choose, so every kind past these is counted as one.
@@ -104,7 +104,7 @@ pub const MAX_TRACKED_REFUSAL_KINDS: usize = 8;
 type Kind = Option<(LifecycleEvent, &'static str, Option<String>, Option<String>)>;
 
 struct Recorded {
-    at: DateTime<Utc>,
+    at: UtcTimestamp,
     suppressed: u64,
 }
 
@@ -153,8 +153,9 @@ impl RefusalAudit for ThrottledRefusals {
         let suppressed = match kinds.get_mut(&key) {
             // A clock found behind the last entry records rather than waits.
             Some(seen)
-                if now >= seen.at
-                    && now.signed_duration_since(seen.at) < REFUSAL_AUDIT_INTERVAL =>
+                if now
+                    .duration_since(seen.at)
+                    .is_some_and(|since| since < REFUSAL_AUDIT_INTERVAL) =>
             {
                 seen.suppressed += 1;
                 return Ok(());

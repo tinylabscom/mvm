@@ -328,7 +328,7 @@ mod tests {
                 labels.insert(VM_NAME_LABEL.to_string(), (*vm).to_string());
             }
             let entry = PlanAuditEntry {
-                timestamp: chrono::Utc::now(),
+                timestamp: mvm_core::util::time::utc_timestamp_now(),
                 tenant: TenantId("local".to_string()),
                 plan_id: PlanId(mvm_hostd::supervisor::UNBOUND_PLAN_ID.to_string()),
                 plan_version: 0,

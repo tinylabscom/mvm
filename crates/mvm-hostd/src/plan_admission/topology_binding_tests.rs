@@ -133,13 +133,17 @@ fn plan() -> ExecutionPlan {
 
 /// One unit the fixture plan matches exactly, for the fixture plan's tenant.
 fn topology_for(plan: &ExecutionPlan, generation: u64) -> Topology {
-    let now = Utc::now();
+    let now = mvm_core::util::time::utc_timestamp_now();
     Topology {
         schema_version: TOPOLOGY_SCHEMA_VERSION,
         tenant: plan.tenant.clone(),
         generation,
-        valid_from: now - Duration::days(1),
-        valid_until: now + Duration::days(30),
+        valid_from: now
+            .checked_sub(std::time::Duration::from_secs(86_400))
+            .unwrap(),
+        valid_until: now
+            .checked_add(std::time::Duration::from_secs(2_592_000))
+            .unwrap(),
         suite: CryptoSuite::CLASSICAL,
         units: vec![Unit {
             workload: WorkloadId(UNIT.to_string()),
@@ -259,7 +263,10 @@ fn a_plan_bound_to_an_earlier_generation_is_refused_against_the_highest() {
     let plan = plan();
     let first = topology_for(&plan, 1);
     let mut second = topology_for(&plan, 2);
-    second.valid_until = first.valid_until + Duration::days(1);
+    second.valid_until = first
+        .valid_until
+        .checked_add(std::time::Duration::from_secs(86_400))
+        .unwrap();
     host.admit_topology(&first);
     host.admit_topology(&second);
     assert_eq!(

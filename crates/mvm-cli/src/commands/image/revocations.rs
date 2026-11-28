@@ -69,7 +69,7 @@ fn describe_checkpoint(checkpoint: &ImageSetRevocationCheckpoint) -> String {
     format!(
         "verified image-set revocations publication {} issued {} (sha256 {})",
         checkpoint.publication,
-        mvm_core::util::time::rfc3339_offset(checkpoint.issued_at),
+        checkpoint.issued_at.to_rfc3339_offset(),
         checkpoint.sha256.as_str()
     )
 }
@@ -103,8 +103,8 @@ impl StatusReport {
         format!(
             "publication: {}\nissued_at:   {}\nnot_after:   {}\nsha256:      {}\nsigner:      {}\nentries:     {}",
             self.publication,
-            mvm_core::util::time::rfc3339_offset(self.issued_at),
-            mvm_core::util::time::rfc3339_offset(self.not_after),
+            self.issued_at.to_rfc3339_offset(),
+            self.not_after.to_rfc3339_offset(),
             self.sha256,
             self.signer_identity,
             self.entries

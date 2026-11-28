@@ -777,7 +777,7 @@ pub(in crate::commands) fn record_oci_pull_node(node: &OciPullNode<'_>) -> Resul
 /// set before the epoch (never in practice). Stamped on the node's
 /// `created_unix`, which is part of its content-address.
 fn now_unix() -> u64 {
-    u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0)
+    u64::try_from(mvm_core::util::time::utc_timestamp_now().unix_secs()).unwrap_or(0)
 }
 
 #[cfg(test)]

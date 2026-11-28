@@ -40,7 +40,7 @@ impl DevNetwork {
             bridge_name: "br-mvm".to_string(),
             subnet: DEFAULT_SUBNET_CIDR.to_string(),
             gateway: DEFAULT_GATEWAY_IP.to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: crate::util::time::utc_now_rfc3339(),
         }
     }
 
@@ -58,7 +58,7 @@ impl DevNetwork {
             bridge_name: format!("br-mvm-{name}"),
             subnet: format!("172.16.{slot}.0/24"),
             gateway: format!("172.16.{slot}.1"),
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: crate::util::time::utc_now_rfc3339(),
         })
     }
 }

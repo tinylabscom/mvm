@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use mvm_hostd::supervisor::audit::denial_stage::DenialStage;
@@ -37,8 +37,8 @@ pub struct DeniedDestination {
     pub description: String,
     /// How many times the workload was refused.
     pub count: u64,
-    pub first_seen: DateTime<Utc>,
-    pub last_seen: DateTime<Utc>,
+    pub first_seen: UtcTimestamp,
+    pub last_seen: UtcTimestamp,
     pub remedy: Remedy,
     /// The remedy as the notice words it.
     pub hint: String,
@@ -77,7 +77,7 @@ struct Key {
 struct Seen {
     denial: EgressDenial,
     count: u64,
-    last_seen: DateTime<Utc>,
+    last_seen: UtcTimestamp,
     /// Order of first sighting, so the summary lists refusals in the order
     /// the workload hit them.
     order: usize,

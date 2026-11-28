@@ -44,7 +44,7 @@ use sha2::{Digest, Sha256};
 /// A chain-signed audit entry.
 ///
 /// Generic over identifier and timestamp types so the host can use its
-/// strongly-typed `TenantId` / `PlanId` / `PolicyId` newtypes and `DateTime<Utc>`
+/// strongly-typed `TenantId` / `PlanId` / `PolicyId` newtypes and `UtcTimestamp`
 /// while the browser verifier uses plain strings. The serde shape is the same
 /// in all cases: the ids serialize as bare strings (`#[serde(transparent)]`
 /// upstream), the bundle fields are omitted when absent, and labels are a
@@ -52,7 +52,7 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanAuditEntry<Tenant = String, Plan = String, Bundle = String, Time = String> {
-    /// RFC 3339 timestamp. The host uses `DateTime<Utc>`; the browser verifier
+    /// RFC 3339 timestamp. The host uses `UtcTimestamp`; the browser verifier
     /// passes the string through.
     pub timestamp: Time,
     /// Tenant id. `TenantId` upstream; serializes as a bare string.

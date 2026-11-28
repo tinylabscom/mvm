@@ -1,4 +1,5 @@
 //! Read-only host audit verification. No signer, key custody or runtime.
+use mvm_contract::timestamp::UtcTimestamp;
 pub mod file;
 pub mod live;
 pub mod segment;
@@ -9,7 +10,7 @@ pub type PlanAuditEntry = mvm_contract::verify::PlanAuditEntry<
     crate::plan::TenantId,
     crate::plan::PlanId,
     crate::policy::PolicyId,
-    chrono::DateTime<chrono::Utc>,
+    UtcTimestamp,
 >;
 pub type SignedEnvelope = mvm_contract::verify::SignedEnvelope<PlanAuditEntry>;
 

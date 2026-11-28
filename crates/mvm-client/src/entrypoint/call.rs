@@ -951,7 +951,7 @@ pub(crate) fn bump_invoke_count(id: &SessionId) {
 }
 
 pub(crate) fn rfc3339_now() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    mvm_core::util::time::utc_now()
 }
 
 /// Resolve the backend name an entrypoint boot runs on.

@@ -1419,7 +1419,7 @@ fn write_run_receipt(
     let payload = RunReceiptPayload {
         schema_version: 1,
         receipt_id: uuid::Uuid::new_v4().to_string(),
-        recorded_at: chrono::Utc::now().to_rfc3339(),
+        recorded_at: mvm_core::util::time::utc_now_rfc3339(),
         invocation,
         outcome: ReceiptOutcome::from_exec_output(output),
     };

@@ -89,9 +89,17 @@ impl BlockVolumeAttach {
         if self.size_mib == 0 {
             bail!("size_mib must be non-zero");
         }
-        let lease_expiry = chrono::DateTime::parse_from_rfc3339(&self.lease_expires_at)
-            .map_err(|_| anyhow::anyhow!("lease_expires_at must be RFC 3339 UTC time"))?;
-        if lease_expiry.offset().local_minus_utc() != 0 {
+        let lease_expiry = &self.lease_expires_at;
+        if lease_expiry
+            .parse::<mvm_contract::timestamp::UtcTimestamp>()
+            .is_err()
+        {
+            bail!("lease_expires_at must be RFC 3339 UTC time");
+        }
+        if !["Z", "+00:00", "-00:00"]
+            .iter()
+            .any(|zone| lease_expiry.ends_with(zone))
+        {
             bail!("lease_expires_at must use UTC");
         }
         if self.data_key_version == 0 {
@@ -486,7 +494,7 @@ fn default_auto_resume() -> bool {
 impl InstanceState {
     /// Record a readiness transition together with the wall-clock
     /// timestamp it happened at. Callers pass the timestamp explicitly
-    /// (rather than this calling `Utc::now()` itself) so tests stay
+    /// (rather than this reading the wall clock itself) so tests stay
     /// deterministic and audit emit can bind the same instant to its
     /// event row.
     ///

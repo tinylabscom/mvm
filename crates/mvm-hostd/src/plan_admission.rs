@@ -14,7 +14,7 @@
 //!   ↓ load_or_init_host_signer()
 //!   ↓ sign_plan(plan, signer)
 //!   ↓ verify_plan(signed, trusted) — catches signing-time bugs
-//!   ↓ check_window_chrono(plan, now) — G4 validity window
+//!   ↓ check_window(plan, now) — G4 validity window
 //!   ↓ nonce_store.check_and_insert  — G4 replay protection
 //!   ↓ return AdmittedPlan { plan, plan_id, signer_id, signed }
 //!   ↓ caller invokes backend.start() as before

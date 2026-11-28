@@ -3,7 +3,6 @@
 //! `MVM_HOME`; everything here resolves under it.
 
 use anyhow::Result;
-use chrono::{Duration, Utc};
 use mvm_contract::assurance::Sha256Digest;
 use mvm_contract::plan::topology::{
     CorePlacement, CryptoSuite, SealedTransitions, TOPOLOGY_SCHEMA_VERSION, Topology,
@@ -17,7 +16,7 @@ use crate::topology_admission::{TopologyAdmissionRequest, admit_topology, sign_t
 /// A topology whose one unit is exactly `plan`, permitting `permits`.
 #[must_use]
 pub fn topology_for(plan: &ExecutionPlan, generation: u64, permits: SealedTransitions) -> Topology {
-    let now = Utc::now();
+    let now = mvm_core::util::time::utc_timestamp_now();
     let recipe = plan_recipe(plan);
     let recipe = format!(
         "sha256:{}",
@@ -27,8 +26,12 @@ pub fn topology_for(plan: &ExecutionPlan, generation: u64, permits: SealedTransi
         schema_version: TOPOLOGY_SCHEMA_VERSION,
         tenant: plan.tenant.clone(),
         generation,
-        valid_from: now - Duration::days(1),
-        valid_until: now + Duration::days(30),
+        valid_from: now
+            .checked_sub(std::time::Duration::from_secs(86_400))
+            .unwrap(),
+        valid_until: now
+            .checked_add(std::time::Duration::from_secs(2_592_000))
+            .unwrap(),
         suite: CryptoSuite::CLASSICAL,
         units: vec![Unit {
             workload: plan.workload.clone(),

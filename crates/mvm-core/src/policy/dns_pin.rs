@@ -6,28 +6,30 @@
 
 use std::net::IpAddr;
 
-use chrono::{Duration, Utc};
+use std::time::Duration;
 
 pub use mvm_contract::policy::dns_pin::{DnsPin, DnsPinRegistry};
 
 /// Construct a pin from the canonical inputs. Computes
-/// `resolved_at = Utc::now()` and `expires_at =
-/// resolved_at + ttl`. The `ttl` is the operator-supplied
+/// `resolved_at` = now and `expires_at =`
+/// resolved_at + ttl`, both in the `+00:00` RFC 3339 form. The `ttl` is the operator-supplied
 /// validity window — typically 1h, capped per tenant policy.
 ///
 /// A free function rather than an inherent method on [`DnsPin`]:
 /// that type now lives in `mvm-contract`, and the orphan rule
 /// forbids `mvm-core` from adding inherent `impl`s to a foreign
-/// type. `Utc::now()` also needs chrono's `clock` feature (std),
-/// unavailable in the no_std `mvm-contract` crate.
+/// type. The wall-clock read also needs `std`, unavailable in the
+/// no_std `mvm-contract` crate. A host clock past year 9999, or a TTL
+/// reaching past it, saturates at the last representable instant.
 pub fn new_pin(dest: impl Into<String>, ips: Vec<IpAddr>, ttl: Duration) -> DnsPin {
-    let now = Utc::now();
-    let expires = now + ttl;
+    use mvm_contract::timestamp::UtcTimestamp;
+    let now = crate::util::time::utc_timestamp_now();
+    let expires = now.checked_add(ttl).unwrap_or(UtcTimestamp::MAX);
     DnsPin {
         dest: dest.into(),
         ips,
-        resolved_at: now.to_rfc3339(),
-        expires_at: expires.to_rfc3339(),
+        resolved_at: now.to_rfc3339_offset(),
+        expires_at: expires.to_rfc3339_offset(),
     }
 }
 
@@ -62,7 +64,7 @@ pub fn resolve_network_policy_pins(
                 .unwrap_or_default()
         };
         sort_ipv4_first(&mut ips);
-        reg.add(new_pin(hp.host, ips, Duration::hours(24)));
+        reg.add(new_pin(hp.host, ips, Duration::from_secs(24 * 3600)));
     }
     reg
 }
@@ -103,7 +105,7 @@ mod tests {
 
     #[test]
     fn pin_new_uses_utc_now_and_sets_expires() {
-        // `Utc::now()` makes the test wall-clock dependent —
+        // The wall clock makes the test wall-clock dependent —
         // we don't pin a specific timestamp, but we can assert
         // the relative invariant (ttl matches the supplied
         // Duration) and that the pin is_valid_at the same
@@ -111,7 +113,7 @@ mod tests {
         let pin = new_pin(
             "example.com",
             vec![ip("93.184.216.34")],
-            Duration::seconds(3600),
+            Duration::from_secs(3600),
         );
         assert_eq!(pin.ttl_secs(), 3600);
         assert!(pin.is_valid_at(&pin.resolved_at));
@@ -172,9 +174,13 @@ mod tests {
         pins.add(new_pin(
             "93.184.216.34",
             vec![ip("93.184.216.34")],
-            Duration::hours(1),
+            Duration::from_secs(3600),
         ));
-        pins.add(new_pin("typo.invalid", Vec::new(), Duration::hours(1)));
+        pins.add(new_pin(
+            "typo.invalid",
+            Vec::new(),
+            Duration::from_secs(3600),
+        ));
         assert_eq!(
             unpinned_hosts(&policy, &pins),
             vec!["typo.invalid".to_string(), "missing.invalid".to_string()]

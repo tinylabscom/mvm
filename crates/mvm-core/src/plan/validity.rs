@@ -130,16 +130,6 @@ pub fn check_window<F: Freshness>(item: &F, now: UtcTimestamp) -> Result<(), Pla
     Ok(())
 }
 
-/// [`check_window`] for a caller whose clock is still a chrono instant; one
-/// outside years 0000..=9999 is refused. Temporary, until the host clock moves
-/// to `UtcTimestamp`.
-pub fn check_window_chrono<F: Freshness>(
-    item: &F,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), PlanValidityError> {
-    check_window(item, now.try_into()?)
-}
-
 /// Per-signer nonce ledger. Bounded by `valid_until`: when a stored
 /// nonce passes its plan's `valid_until` it can be GC'd safely
 /// because `check_window` would reject the plan anyway.
@@ -200,16 +190,12 @@ impl NonceStore {
 mod tests {
     use super::*;
     use crate::plan::test_support::PlanFixture;
-    use chrono::{DateTime, Duration, Utc};
+    use mvm_contract::timestamp::UtcTimestamp;
 
     const NOW: i64 = 1_784_205_296;
 
     fn ts(secs: i64) -> UtcTimestamp {
         UtcTimestamp::from_unix(secs, 0).unwrap()
-    }
-
-    fn at(dt: DateTime<Utc>) -> UtcTimestamp {
-        dt.try_into().unwrap()
     }
 
     fn nonce(seed: u8) -> Nonce {
@@ -278,7 +264,7 @@ mod tests {
     // edges, for whole-second and fractional edges alike.
     #[test]
     fn window_check_matches_the_chrono_rule_at_every_edge() {
-        let chrono_rule = |from: DateTime<Utc>, until: DateTime<Utc>, now: DateTime<Utc>| {
+        let chrono_rule = |from: UtcTimestamp, until: UtcTimestamp, now: UtcTimestamp| {
             if from >= until {
                 "inverted"
             } else if now < from {
@@ -296,24 +282,27 @@ mod tests {
             Err(PlanValidityError::Expired { .. }) => "expired",
             Err(e) => panic!("unexpected {e}"),
         };
-        let base = DateTime::from_timestamp(NOW, 0).unwrap();
+        let nano = std::time::Duration::from_nanos(1);
         for frac in [0, 1, 500_000_000, 999_999_999] {
-            let from = base + Duration::nanoseconds(frac);
+            let from = UtcTimestamp::from_unix(NOW, frac).unwrap();
             for until in [
-                from + Duration::minutes(10),
+                from.checked_add_secs(600).unwrap(),
                 from,
-                from - Duration::nanoseconds(1),
+                from.checked_sub(nano).unwrap(),
             ] {
                 let item = CheckedFreshness {
-                    valid_from: at(from),
-                    valid_until: at(until),
+                    valid_from: from,
+                    valid_until: until,
                     nonce: nonce(4),
                 };
                 for edge in [from, until] {
-                    for delta in [-1, 0, 1] {
-                        let now = edge + Duration::nanoseconds(delta);
+                    for now in [
+                        edge.checked_sub(nano).unwrap(),
+                        edge,
+                        edge.checked_add(nano).unwrap(),
+                    ] {
                         assert_eq!(
-                            kind(check_window(&item, at(now))),
+                            kind(check_window(&item, now)),
                             chrono_rule(from, until, now),
                             "from={from} until={until} now={now}"
                         );

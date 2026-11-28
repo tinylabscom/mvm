@@ -372,7 +372,7 @@ impl Session {
     pub fn seal(&mut self, plaintext: &[u8]) -> Result<SealedFrame, SessionError> {
         self.check_poison()?;
         let sequence = self.next_send_sequence;
-        let timestamp = chrono::Utc::now().to_rfc3339();
+        let timestamp = crate::util::time::utc_now_rfc3339();
         let context = frame_context(
             &self.session_id,
             sequence,
@@ -1374,7 +1374,7 @@ mod tests {
         // receive counter cannot advance past u64::MAX.
         let plaintext = b"last";
         let sequence = u64::MAX;
-        let timestamp = chrono::Utc::now().to_rfc3339();
+        let timestamp = crate::util::time::utc_now_rfc3339();
         let context = frame_context(&session_id, sequence, &timestamp, "host").unwrap();
         let nonce = session_nonce(&session_id, SessionRole::Host, sequence);
         let cipher = Aes256Gcm::new_from_slice(host.key.as_ref()).unwrap();

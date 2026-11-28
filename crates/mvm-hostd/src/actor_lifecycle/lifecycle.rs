@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
-use chrono::Utc;
 use mvm_contract::assurance::Sha256Digest;
 use mvm_contract::plan::{ExecutionPlan, Nonce, Resources, Variant, WorkloadId};
 use mvm_contract::policy::resolver::EffectivePolicy;
@@ -231,7 +230,7 @@ impl ActorLifecycle {
         operation: LifecycleOperation,
         parent_owner: &ActorOwner,
     ) -> std::result::Result<(), ActorRefusalCode> {
-        let now = Utc::now().timestamp_millis();
+        let now = mvm_core::util::time::utc_timestamp_now().unix_millis();
         let plan = self.host.parent.plan();
         let grant = self
             .host
@@ -485,10 +484,13 @@ impl ActorLifecycle {
         child.nonce = Nonce::from_bytes(rand::random());
         child.valid_from = child.valid_from.max(self.host.parent.plan().valid_from);
         child.valid_until = child.valid_until.min(self.host.parent.plan().valid_until);
-        let grant_expiry =
-            chrono::DateTime::from_timestamp_millis(self.host.parent.grant()?.expires_at_unix_ms)
-                .ok_or_else(|| anyhow::anyhow!("invalid actor grant expiry"))?;
-        child.valid_until = child.valid_until.min(grant_expiry.try_into()?);
+        let expires_ms = self.host.parent.grant()?.expires_at_unix_ms;
+        let grant_expiry = mvm_contract::timestamp::UtcTimestamp::from_unix(
+            expires_ms.div_euclid(1_000),
+            u32::try_from(expires_ms.rem_euclid(1_000) * 1_000_000)?,
+        )
+        .ok_or_else(|| anyhow::anyhow!("invalid actor grant expiry"))?;
+        child.valid_until = child.valid_until.min(grant_expiry);
         let mut workflow = self
             .host
             .parent
@@ -600,7 +602,7 @@ impl ActorLifecycle {
         self.host.parent.check(
             parent_owner,
             LifecycleOperation::Launch,
-            Utc::now().timestamp_millis(),
+            mvm_core::util::time::utc_timestamp_now().unix_millis(),
         )?;
         self.host.mailboxes.verify_current(
             self.host.parent.plan(),
@@ -629,7 +631,7 @@ impl ActorLifecycle {
                 self.host.parent.check(
                     parent_owner,
                     LifecycleOperation::Launch,
-                    Utc::now().timestamp_millis(),
+                    mvm_core::util::time::utc_timestamp_now().unix_millis(),
                 )?;
                 self.host.mailboxes.verify_current(
                     self.host.parent.plan(),
@@ -684,7 +686,7 @@ impl ActorLifecycle {
             self.host.parent.check(
                 parent_owner,
                 LifecycleOperation::Launch,
-                Utc::now().timestamp_millis(),
+                mvm_core::util::time::utc_timestamp_now().unix_millis(),
             )?;
             self.host.emitter.emit(
                 self.host.parent.plan(),
@@ -695,9 +697,10 @@ impl ActorLifecycle {
                 )],
             )?;
             let plan = started.admitted.plan();
-            let mut timeout = chrono::DateTime::<Utc>::from(plan.valid_until)
-                .signed_duration_since(Utc::now())
-                .to_std()?;
+            let mut timeout = plan
+                .valid_until
+                .duration_since(mvm_core::util::time::try_utc_timestamp_now()?)
+                .unwrap_or_default();
             if plan.resources.timeouts.exec_secs != 0 {
                 timeout = timeout.min(std::time::Duration::from_secs(u64::from(
                     plan.resources.timeouts.exec_secs,
@@ -1004,7 +1007,7 @@ impl ActorLifecycle {
                 self.host.parent.check(
                     parent_owner,
                     LifecycleOperation::ReleaseChild,
-                    Utc::now().timestamp_millis(),
+                    mvm_core::util::time::utc_timestamp_now().unix_millis(),
                 )?;
             }
             let evidence_digest = if record.state == ChildState::Cancelling {

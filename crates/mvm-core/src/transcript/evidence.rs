@@ -166,7 +166,7 @@ pub fn recovered_seal_entry(
         "recovery changed original capture configuration"
     );
     let mut entry = authenticate_opening(audit_dir, trusted_key, seed)?;
-    entry.timestamp = chrono::Utc::now();
+    entry.timestamp = crate::util::time::utc_timestamp_now();
     entry.event = TRANSCRIPT_SEALED_EVENT.into();
     entry.labels = [
         (LABEL_CAPTURE_ID.into(), recovered.capture_id.clone()),

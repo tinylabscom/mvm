@@ -284,7 +284,7 @@ mod tests {
         for _ in 0..3 {
             signer
                 .sign_and_emit(&PlanAuditEntry {
-                    timestamp: chrono::Utc::now(),
+                    timestamp: mvm_core::util::time::utc_timestamp_now(),
                     tenant: TenantId("local".into()),
                     plan_id: PlanId("synthetic-run".into()),
                     plan_version: 1,

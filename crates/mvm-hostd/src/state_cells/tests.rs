@@ -1,13 +1,13 @@
 use std::num::NonZeroU64;
 use std::os::unix::fs::PermissionsExt;
 
-use chrono::{DateTime, Duration, TimeZone, Utc};
 use mvm_contract::assurance::Sha256Digest;
 use mvm_contract::plan::topology::{
     CorePlacement, CryptoSuite, SealedTransitions, TOPOLOGY_SCHEMA_VERSION, Unit, UnitResources,
     UnitRole,
 };
 use mvm_contract::protocol::vm_backend::BackendKind;
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::host_interface::workload::WorkloadChange;
 use mvm_core::time::Clock;
 use mvm_core::util::test_env::TestEnv;
@@ -23,16 +23,16 @@ use crate::topology_admission::{
 const TENANT: &str = "acme";
 const CELL: &str = "setpoint";
 
-struct FixedClock(DateTime<Utc>);
+struct FixedClock(UtcTimestamp);
 
 impl Clock for FixedClock {
-    fn now(&self) -> DateTime<Utc> {
+    fn now(&self) -> UtcTimestamp {
         self.0
     }
 }
 
-fn t0() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap()
+fn t0() -> UtcTimestamp {
+    "2026-11-01T00:00:00Z".parse::<UtcTimestamp>().unwrap()
 }
 
 fn id(name: &str) -> WorkloadId {
@@ -65,7 +65,9 @@ fn topology(generation: u64, size: u64) -> Topology {
         tenant: TenantId(TENANT.to_string()),
         generation,
         valid_from: t0(),
-        valid_until: t0() + Duration::days(30),
+        valid_until: t0()
+            .checked_add(std::time::Duration::from_secs(2_592_000))
+            .unwrap(),
         suite: CryptoSuite::CLASSICAL,
         units: vec![unit("controller"), unit("reader"), unit("stranger")],
         standby_pairs: Vec::new(),
@@ -126,7 +128,10 @@ impl Host {
                 isolated: None,
                 live: Vec::new(),
             },
-            clock: &FixedClock(t0() + Duration::days(1)),
+            clock: &FixedClock(
+                t0().checked_add(std::time::Duration::from_secs(86_400))
+                    .unwrap(),
+            ),
             host_signer_keys_dir: Some(&keys),
             emitter: &self.emitter,
         })

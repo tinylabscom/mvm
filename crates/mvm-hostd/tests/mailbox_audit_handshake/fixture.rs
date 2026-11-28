@@ -275,9 +275,7 @@ fn obligation(request: &Request, cursor: u64, hash: Evidence) -> PlanAuditEntry 
         ),
     ]);
     PlanAuditEntry {
-        timestamp: chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-            .unwrap()
-            .to_utc(),
+        timestamp: "2026-01-01T00:00:00Z".parse().unwrap(),
         tenant: mvm_core::plan::TenantId("fixture".into()),
         plan_id: mvm_core::plan::PlanId("fixture-plan".into()),
         plan_version: 1,

@@ -48,7 +48,6 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
-use chrono::Utc;
 use libkrun_sys::{
     LogLevel, SupervisorBaseConfig, SupervisorConfig, init_log, run_supervisor, set_log_level,
 };
@@ -411,7 +410,7 @@ fn run_prelaunched(base: SupervisorBaseConfig) -> ExitCode {
     let cfg = match mvm_hostd::prelaunch::verify_and_merge_attach(
         base,
         &attach_bytes,
-        Utc::now(),
+        mvm_core::util::time::utc_timestamp_now(),
         &mut nonce_store,
     ) {
         Ok(c) => c,
@@ -529,7 +528,7 @@ fn record_usage_at_exit(vm_state_dir: &std::path::Path) {
 fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, detail: String) {
     let path = vm_state_dir.join("supervisor.lifecycle.log");
     let _ = mvm_core::config::create_private_dir(vm_state_dir);
-    let timestamp = chrono::Utc::now().to_rfc3339();
+    let timestamp = mvm_core::util::time::utc_now_rfc3339();
     let line = format!("{timestamp} {stage}: {detail}\n");
     if let Ok(mut file) = mvm_core::util::atomic_io::open_private_append(&path) {
         let _ = std::io::Write::write_all(&mut file, line.as_bytes());

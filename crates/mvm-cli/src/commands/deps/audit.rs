@@ -306,7 +306,7 @@ fn audit_one(
     std::fs::write(&scratch_cve, &fresh_cve)
         .with_context(|| format!("writing {}", scratch_cve.display()))?;
 
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = mvm_core::util::time::utc_now_rfc3339();
     let sealed = reseal_volume(
         &scratch.join("content"),
         &scratch.join(FILE_SBOM),
@@ -785,8 +785,8 @@ mod tests {
         // sbom/fetch/cve hashes. last_audit_at still changes →
         // manifest changes → volume hash changes. We always rename.
         // To prove the "no rename" branch separately we'd need
-        // identical timestamps too; production gives a fresh
-        // chrono::Utc::now() so the rename branch is what real
+        // identical timestamps too; production reads a fresh wall-clock
+        // instant so the rename branch is what real
         // re-audits exercise. This test pins that.
         let tmp = tempdir().unwrap();
         let cache = tmp.path();

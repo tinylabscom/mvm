@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{TimeZone, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
     KeyRotationSpec, Nonce, NonceParseError, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle,
@@ -13,14 +13,6 @@ use mvm_core::plan::types::{
 };
 use mvm_core::plan::validity::{NonceStore, PlanValidityError, check_window};
 use mvm_core::plan::{ExecutionPlan, SCHEMA_VERSION};
-
-fn at<T>(t: T) -> mvm_contract::timestamp::UtcTimestamp
-where
-    T: TryInto<mvm_contract::timestamp::UtcTimestamp>,
-    T::Error: std::fmt::Debug,
-{
-    t.try_into().unwrap()
-}
 
 fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
     ExecutionPlan {
@@ -83,8 +75,8 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
             snapshot_on_idle: false,
             idle_secs: 0,
         },
-        valid_from: at(Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap()),
-        valid_until: at(Utc.with_ymd_and_hms(2026, 5, 1, 1, 0, 0).unwrap()),
+        valid_from: "2026-05-01T00:00:00Z".parse().unwrap(),
+        valid_until: "2026-05-01T01:00:00Z".parse().unwrap(),
         nonce: Nonce::from_bytes(nonce),
         agent_verbs: None,
         bundle: None,
@@ -104,15 +96,15 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
 #[test]
 fn check_window_accepts_now_inside() {
     let plan = fixture_plan([0xaa; 16]);
-    let now = Utc.with_ymd_and_hms(2026, 5, 1, 0, 30, 0).unwrap();
-    check_window(&plan, at(now)).expect("inside window");
+    let now = "2026-05-01T00:30:00Z".parse::<UtcTimestamp>().unwrap();
+    check_window(&plan, now).expect("inside window");
 }
 
 #[test]
 fn check_window_rejects_before_valid_from() {
     let plan = fixture_plan([0xaa; 16]);
-    let now = Utc.with_ymd_and_hms(2026, 4, 30, 23, 59, 59).unwrap();
-    let err = check_window(&plan, at(now)).unwrap_err();
+    let now = "2026-04-30T23:59:59Z".parse::<UtcTimestamp>().unwrap();
+    let err = check_window(&plan, now).unwrap_err();
     assert!(matches!(err, PlanValidityError::NotYetValid { .. }));
 }
 
@@ -122,15 +114,15 @@ fn check_window_rejects_at_valid_until_boundary() {
     // Boundary case: now == valid_until is rejected (closed-open
     // window).
     let now = plan.valid_until;
-    let err = check_window(&plan, at(now)).unwrap_err();
+    let err = check_window(&plan, now).unwrap_err();
     assert!(matches!(err, PlanValidityError::Expired { .. }));
 }
 
 #[test]
 fn check_window_rejects_after_valid_until() {
     let plan = fixture_plan([0xaa; 16]);
-    let now = Utc.with_ymd_and_hms(2026, 5, 1, 2, 0, 0).unwrap();
-    let err = check_window(&plan, at(now)).unwrap_err();
+    let now = "2026-05-01T02:00:00Z".parse::<UtcTimestamp>().unwrap();
+    let err = check_window(&plan, now).unwrap_err();
     assert!(matches!(err, PlanValidityError::Expired { .. }));
 }
 
@@ -139,7 +131,7 @@ fn check_window_rejects_inverted_window() {
     let mut plan = fixture_plan([0xaa; 16]);
     plan.valid_until = plan.valid_from.checked_add_secs(-1).unwrap();
     let now = plan.valid_from;
-    let err = check_window(&plan, at(now)).unwrap_err();
+    let err = check_window(&plan, now).unwrap_err();
     assert!(matches!(err, PlanValidityError::InvertedWindow { .. }));
 }
 
@@ -148,7 +140,7 @@ fn check_window_rejects_zero_duration_window() {
     let mut plan = fixture_plan([0xaa; 16]);
     plan.valid_until = plan.valid_from;
     let now = plan.valid_from;
-    let err = check_window(&plan, at(now)).unwrap_err();
+    let err = check_window(&plan, now).unwrap_err();
     // Zero-duration is treated as inverted: valid_from >= valid_until.
     assert!(matches!(err, PlanValidityError::InvertedWindow { .. }));
 }
@@ -204,7 +196,7 @@ fn nonce_store_gc_drops_expired() {
     store.check_and_insert("signer-a", &plan).unwrap();
     assert_eq!(store.len(), 1);
     let after_window = plan.valid_until.checked_add_secs(1).unwrap();
-    store.gc(at(after_window));
+    store.gc(after_window);
     assert!(store.is_empty(), "expired nonce should have been dropped");
 }
 
@@ -214,7 +206,7 @@ fn nonce_store_gc_preserves_unexpired() {
     let mut store = NonceStore::new();
     store.check_and_insert("signer-a", &plan).unwrap();
     let inside_window = plan.valid_from.checked_add_secs(1).unwrap();
-    store.gc(at(inside_window));
+    store.gc(inside_window);
     assert_eq!(store.len(), 1, "unexpired nonce should remain");
 }
 
@@ -225,7 +217,7 @@ fn nonce_store_gc_drops_at_valid_until_boundary() {
     store.check_and_insert("signer-a", &plan).unwrap();
     // GC at valid_until exactly: stored entry has valid_until ==
     // plan.valid_until, GC drops where valid_until <= now.
-    store.gc(at(plan.valid_until));
+    store.gc(plan.valid_until);
     assert!(store.is_empty(), "boundary GC should drop");
 }
 

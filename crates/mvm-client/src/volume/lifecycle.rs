@@ -431,7 +431,7 @@ fn maybe_rotate_local_master_key() -> Result<()> {
         &org,
         &mut sweep,
         rotation_policy::default_interval(),
-        chrono::Utc::now(),
+        mvm_core::util::time::utc_timestamp_now(),
     )?;
 
     if let rotation_policy::RotationDecision::Rotated {

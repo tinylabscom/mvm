@@ -63,9 +63,9 @@ fn topology(writer: &str, reader: &str, recipe: &Sha256Digest) -> Topology {
         tenant: TenantId(TENANT.to_string()),
         // A live home may be reused across runs, and each admission must
         // carry a generation above the last.
-        generation: now.timestamp().unsigned_abs(),
-        valid_from: now - Duration::from_secs(3600),
-        valid_until: now + Duration::from_secs(86_400),
+        generation: now.unix_secs().unsigned_abs(),
+        valid_from: now.checked_sub(Duration::from_secs(3600)).unwrap(),
+        valid_until: now.checked_add(Duration::from_secs(86_400)).unwrap(),
         suite: CryptoSuite::CLASSICAL,
         units: vec![unit(writer, recipe), unit(reader, recipe)],
         standby_pairs: Vec::new(),

@@ -455,7 +455,7 @@ pub fn scan_inventory(
     Ok(BaseImageScanReport {
         schema: CVE_SCHEMA.to_string(),
         image: image.clone(),
-        scanned_at: chrono::Utc::now().to_rfc3339(),
+        scanned_at: mvm_core::util::time::utc_now_rfc3339(),
         components_scanned: components.len(),
         findings,
         limitations: inventory.limitations.clone(),

@@ -522,7 +522,7 @@ pub fn sign_root_in(
     let vk = signing_key.verifying_key();
     let (root, tree_size) = build_root_in(audit_dir, tenant, &vk)?;
     let root_hash = hex::encode(root);
-    let timestamp = chrono::Utc::now().to_rfc3339();
+    let timestamp = mvm_core::util::time::utc_now_rfc3339();
     let payload =
         mvm_contract::merkle::root_signing_bytes(tenant, tree_size, &root_hash, &timestamp)
             .map_err(|e| anyhow::anyhow!("serializing Merkle root signing payload: {e}"))?;
@@ -557,7 +557,7 @@ mod tests {
 
     fn entry(tenant: &str, event: &str) -> PlanAuditEntry {
         PlanAuditEntry {
-            timestamp: chrono::Utc::now(),
+            timestamp: mvm_core::util::time::utc_timestamp_now(),
             tenant: TenantId(tenant.to_string()),
             plan_id: PlanId(format!("plan-{event}")),
             plan_version: 1,

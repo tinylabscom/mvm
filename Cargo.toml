@@ -258,7 +258,6 @@ hickory-proto = "0.26"
 
 # Utilities
 anyhow = "1"
-chrono = { version = "0.4", default-features = false, features = ["serde", "std", "clock"] }
 # Decodes OTLP exporter header values, which the OpenTelemetry environment
 # convention percent-encodes. Already in mvmctl's closure through `url`.
 percent-encoding = "2"
@@ -429,7 +428,6 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 mvm-contract.workspace = true
 hex.workspace = true
 assert_cmd.workspace = true
-chrono.workspace = true
 flate2.workspace = true
 sha2.workspace = true
 tar.workspace = true

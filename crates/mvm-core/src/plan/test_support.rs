@@ -10,7 +10,6 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
 use mvm_contract::timestamp::UtcTimestamp;
 
 use crate::util::time::utc_timestamp_now;
@@ -23,11 +22,6 @@ use crate::plan::types::{
     WorkloadId,
 };
 use mvm_contract::protocol::broker::ServiceId;
-
-/// A fixture instant as the plan's validity type.
-pub fn utc_timestamp(t: DateTime<Utc>) -> mvm_contract::timestamp::UtcTimestamp {
-    t.try_into().expect("fixture time within years 0000..=9999")
-}
 
 /// Builder for a minimal, valid local [`ExecutionPlan`]. Defaults match the
 /// shape the audit/admission tests need; override only what a test pins.

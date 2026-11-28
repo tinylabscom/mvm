@@ -30,7 +30,6 @@ use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use chrono::Duration;
 use mvm_contract::assurance::Sha256Digest;
 use mvm_contract::plan::topology::requirements::MIN_LIVENESS_PERIOD_MS;
 use mvm_contract::plan::topology::{
@@ -38,6 +37,7 @@ use mvm_contract::plan::topology::{
     UnitRole,
 };
 use mvm_contract::protocol::vm_backend::BackendKind;
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::host_interface::workload::{WorkloadCommit, WorkloadLedger};
 use mvm_core::time::SystemClock;
 
@@ -56,13 +56,17 @@ const WARMUP: usize = 3;
 const BARE_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn topology() -> Topology {
-    let now = Utc::now();
+    let now = mvm_core::util::time::utc_timestamp_now();
     Topology {
         schema_version: TOPOLOGY_SCHEMA_VERSION,
         tenant: TenantId(TENANT.to_string()),
         generation: 1,
-        valid_from: now - Duration::hours(1),
-        valid_until: now + Duration::days(1),
+        valid_from: now
+            .checked_sub(std::time::Duration::from_secs(3600))
+            .unwrap(),
+        valid_until: now
+            .checked_add(std::time::Duration::from_secs(86_400))
+            .unwrap(),
         suite: CryptoSuite::CLASSICAL,
         units: vec![Unit {
             workload: WorkloadId(UNIT.to_string()),
@@ -89,7 +93,7 @@ fn topology() -> Topology {
 /// The coordinator, noting when its commit returned.
 struct Timed {
     inner: CoordinatorWorkloads,
-    committed: Arc<Mutex<Option<DateTime<Utc>>>>,
+    committed: Arc<Mutex<Option<UtcTimestamp>>>,
 }
 
 impl WorkloadAuthority for Timed {
@@ -99,14 +103,14 @@ impl WorkloadAuthority for Timed {
 
     fn commit(&self, change: &WorkloadChange) -> Result<WorkloadCommit> {
         let commit = self.inner.commit(change)?;
-        *self.committed.lock().unwrap() = Some(Utc::now());
+        *self.committed.lock().unwrap() = Some(mvm_core::util::time::utc_timestamp_now());
         Ok(commit)
     }
 }
 
 /// Milliseconds from `from` to `to`.
-fn ms_between(from: DateTime<Utc>, to: DateTime<Utc>) -> f64 {
-    (to - from).num_microseconds().unwrap() as f64 / 1e3
+fn ms_between(from: UtcTimestamp, to: UtcTimestamp) -> f64 {
+    to.duration_since(from).unwrap().as_secs_f64() * 1e3
 }
 
 /// Nearest-rank percentile of sorted samples.
@@ -200,7 +204,7 @@ fn report_how_late_an_expiry_fences_past_its_deadline() {
         let (_stop, thread) = timer.spawn().expect("the timer thread");
         // The timer ends by itself once its epoch is fenced.
         thread.join().expect("the timer thread");
-        let done = Utc::now();
+        let done = mvm_core::util::time::utc_timestamp_now();
         let committed = committed.lock().unwrap().expect("the expiry fenced");
         if sample >= WARMUP {
             fenced.push(ms_between(deadline, committed));

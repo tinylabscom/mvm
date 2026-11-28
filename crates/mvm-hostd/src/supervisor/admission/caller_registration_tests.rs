@@ -752,7 +752,7 @@ fn activation_checks_exact_registration_deadline_and_rejects_clock_rollback() {
     let (_env, _home) = isolate();
     for case in 0..4 {
         let vm = format!("activation-{case}");
-        let deadline = chrono::Utc::now().timestamp() + 300;
+        let deadline = mvm_core::util::time::utc_timestamp_now().unix_secs() + 300;
         let mut plan = PlanFixture::new()
             .workload(&vm)
             .nonce([case + 1; 16])
@@ -767,15 +767,20 @@ fn activation_checks_exact_registration_deadline_and_rejects_clock_rollback() {
         );
         let consumed = launch(&admitted, &registration).consume(&vm).unwrap();
         let activation = match case {
-            0 => chrono::DateTime::from_timestamp(deadline - 1, 999_999_999).unwrap(),
-            1 => chrono::DateTime::from_timestamp(deadline, 1).unwrap(),
-            2 => consumed.consumed_at - chrono::Duration::nanoseconds(1),
-            3 => chrono::DateTime::from_timestamp(-1, 0).unwrap(),
+            0 => {
+                mvm_contract::timestamp::UtcTimestamp::from_unix(deadline - 1, 999_999_999).unwrap()
+            }
+            1 => mvm_contract::timestamp::UtcTimestamp::from_unix(deadline, 1).unwrap(),
+            2 => consumed
+                .consumed_at
+                .checked_sub(std::time::Duration::from_nanos(1))
+                .unwrap(),
+            3 => mvm_contract::timestamp::UtcTimestamp::from_unix(-1, 0).unwrap(),
             _ => unreachable!(),
         };
         if case == 1 {
             assert!(
-                mvm_core::plan::validity::check_window_chrono(admitted.plan(), activation).is_ok(),
+                mvm_core::plan::validity::check_window(admitted.plan(), activation).is_ok(),
                 "the signed plan alone still permits the final fractional second"
             );
         }
@@ -1070,12 +1075,12 @@ fn signed_but_expired_plan_is_rejected_before_consumption() {
     let admitted = admit_fixture("expired-cold", 1);
     let registration = registration_fixture(&admitted, "expired-cold", 1);
     let mut plan = admitted.plan().clone();
-    plan.valid_from = mvm_core::plan::test_support::utc_timestamp(
-        chrono::Utc::now() - chrono::Duration::seconds(20),
-    );
-    plan.valid_until = mvm_core::plan::test_support::utc_timestamp(
-        chrono::Utc::now() - chrono::Duration::seconds(10),
-    );
+    plan.valid_from = mvm_core::util::time::utc_timestamp_now()
+        .checked_sub(std::time::Duration::from_secs(20))
+        .unwrap();
+    plan.valid_until = mvm_core::util::time::utc_timestamp_now()
+        .checked_sub(std::time::Duration::from_secs(10))
+        .unwrap();
     plan.plan_id = mvm_core::plan::content_id::compute_plan_id(&plan);
     let signer = host_keypair::load_or_init().unwrap();
     let signed = mvm_core::plan::sign_plan(&plan, &signer.signing, &host_keypair::host_signer_id());

@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 use crate::extension_admission::{ExtensionAdmissionPolicy, ExtensionAuthority, admit_extension};
 use anyhow::{Context, Result};
-use chrono::Utc;
 use mvm_contract::assurance::{
     ApprovalSet, AssuranceId, AssuranceSessionRequest, AuthorityCeiling, CampaignProviderRequest,
     Sha256Digest, ToolId,
@@ -496,7 +495,7 @@ impl OperatorConfiguredTrialBooter {
             anyhow::bail!("configured backend resolved to a different runtime");
         }
 
-        let now = Utc::now();
+        let now = mvm_core::util::time::utc_timestamp_now();
         let trust_bytes =
             read_bounded_regular_file(&self.config.extension.trust_config, MAX_TRUST_BYTES, false)?;
         let trust: PackTrustConfig =
@@ -1437,9 +1436,7 @@ mod tests {
             provenance: mvm_core::packs::PackProvenanceMeta {
                 builder_identity: "assurance-release-test".to_string(),
                 build_environment_identity: "hermetic-test".to_string(),
-                build_timestamp: chrono::DateTime::parse_from_rfc3339("2026-08-19T00:00:00Z")
-                    .expect("timestamp")
-                    .with_timezone(&Utc),
+                build_timestamp: "2026-08-19T00:00:00Z".parse().unwrap(),
                 reproducibility: mvm_core::packs::ReproducibilityStatus::NotChecked,
                 sbom: mvm_core::packs::SbomReference {
                     uri: "urn:sbom:operator-test".to_string(),
@@ -1447,21 +1444,15 @@ mod tests {
                 },
             },
             trust: mvm_core::packs::PackTrustMeta {
-                expires_at: chrono::DateTime::parse_from_rfc3339("2100-01-01T00:00:00Z")
-                    .expect("expiry")
-                    .with_timezone(&Utc),
+                expires_at: "2100-01-01T00:00:00Z".parse().unwrap(),
                 revocation_channel: "https://example.invalid/revocations".to_string(),
                 channel_identity: "assurance".to_string(),
                 mirror_identity: None,
                 transparency_log: None,
             },
             signature: mvm_core::packs::SignatureValidity {
-                signed_at: chrono::DateTime::parse_from_rfc3339("2026-08-19T00:00:00Z")
-                    .expect("signed at")
-                    .with_timezone(&Utc),
-                expires_at: chrono::DateTime::parse_from_rfc3339("2100-01-01T00:00:00Z")
-                    .expect("signature expiry")
-                    .with_timezone(&Utc),
+                signed_at: "2026-08-19T00:00:00Z".parse().unwrap(),
+                expires_at: "2100-01-01T00:00:00Z".parse().unwrap(),
             },
         };
         let extension = mvm_contract::protocol::extension_pack::ExtensionPackContract {

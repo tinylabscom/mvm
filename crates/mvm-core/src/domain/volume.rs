@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 pub use mvm_contract::{VolumeEntry, VolumeError, VolumePath};
 use serde::{Deserialize, Serialize};
 
@@ -299,7 +299,7 @@ pub struct Volume {
     pub org_id: OrgId,
     pub workspace_id: WorkspaceId,
     pub name: VolumeName,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
 
     /// Optional soft cap on stored bytes. `None` = unbounded (rely on
     /// host quota). `LocalBackend` enforces this; `ObjectStoreBackend`
@@ -472,7 +472,7 @@ pub enum MasterKeyState {
 pub struct MasterKeyRef {
     pub org_id: OrgId,
     pub version: u32,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
     pub state: MasterKeyState,
 }
 
@@ -499,10 +499,8 @@ mod tests {
         assert_eq!(serde_json::to_string(&parsed).unwrap(), volume);
     }
 
-    fn ts() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-05-06T20:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc)
+    fn ts() -> UtcTimestamp {
+        "2026-05-06T20:00:00Z".parse::<UtcTimestamp>().unwrap()
     }
 
     // ------------- ID validation -------------

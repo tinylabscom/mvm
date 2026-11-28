@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use mvm_contract::timestamp::{ParseTimestampError, UtcTimestamp};
 
 /// Shared wall-clock seam for code that needs deterministic time in tests.
@@ -8,15 +7,15 @@ use mvm_contract::timestamp::{ParseTimestampError, UtcTimestamp};
 /// Kept sync and object-safe so crates that only need a "what time is it now?"
 /// dependency do not have to pull in async/runtime abstractions.
 pub trait Clock: Send + Sync {
-    fn now(&self) -> DateTime<Utc>;
+    fn now(&self) -> UtcTimestamp;
 }
 
-/// Production wall clock backed by `chrono::Utc::now()`.
+/// Production wall clock, read through [`utc_timestamp_now`].
 pub struct SystemClock;
 
 impl Clock for SystemClock {
-    fn now(&self) -> DateTime<Utc> {
-        Utc::now()
+    fn now(&self) -> UtcTimestamp {
+        utc_timestamp_now()
     }
 }
 
@@ -26,23 +25,9 @@ impl Clock for SystemClock {
 fn rfc3339_from_unix_secs(secs: i64) -> String {
     // 0000-01-01T00:00:00Z and 9999-12-31T23:59:59Z.
     let secs = secs.clamp(-62_167_219_200, 253_402_300_799);
-    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    // Hinnant's civil-from-days, shifted to a March-based year.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        rem / 3_600,
-        rem % 3_600 / 60,
-        rem % 60
-    )
+    UtcTimestamp::from_unix(secs, 0)
+        .unwrap_or(UtcTimestamp::UNIX_EPOCH)
+        .to_string()
 }
 
 /// Whole seconds since the Unix epoch, rounded toward negative infinity for
@@ -68,12 +53,6 @@ pub fn utc_now() -> String {
     rfc3339_from_system_time(std::time::SystemTime::now())
 }
 
-/// `ts` in the `+00:00` form `chrono::DateTime::to_rfc3339` prints, for output
-/// that predates `UtcTimestamp` (its own `Display` ends in `Z`).
-pub fn rfc3339_offset(ts: UtcTimestamp) -> String {
-    chrono::DateTime::<chrono::Utc>::from(ts).to_rfc3339()
-}
-
 /// `at` as a [`UtcTimestamp`], nanosecond precision, saturating at the epoch
 /// for an instant before 1970. Errors when `at` is past year 9999, which the
 /// type cannot hold.
@@ -95,9 +74,11 @@ pub fn try_utc_timestamp_now() -> Result<UtcTimestamp, ParseTimestampError> {
     utc_timestamp_at(std::time::SystemTime::now())
 }
 
-/// [`try_utc_timestamp_now`] for tests, which have no error path to take.
+/// [`try_utc_timestamp_now`] for a caller with no refusal to make, such as an
+/// audit stamp: a host clock past year 9999 reads as the last representable
+/// instant, so every validity window and deadline compared to it has passed.
 pub fn utc_timestamp_now() -> UtcTimestamp {
-    try_utc_timestamp_now().expect("the current time is within years 0000..=9999")
+    try_utc_timestamp_now().unwrap_or(UtcTimestamp::MAX)
 }
 
 /// Render a `SystemTime` as the same ISO 8601 / RFC 3339 shape [`utc_now`]
@@ -140,10 +121,15 @@ pub fn now_unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn parse_iso8601(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc))
+pub fn parse_iso8601(s: &str) -> Option<UtcTimestamp> {
+    s.parse().ok()
+}
+
+/// The current instant in the `+00:00` form `chrono`'s `to_rfc3339` printed,
+/// for labels, receipts and records that have always carried it. A host clock
+/// past year 9999 renders as the last representable instant.
+pub fn utc_now_rfc3339() -> String {
+    utc_timestamp_now().to_rfc3339_offset()
 }
 
 #[cfg(test)]
@@ -152,18 +138,27 @@ mod tests {
 
     #[test]
     fn rfc3339_offset_keeps_the_chrono_form() {
-        let whole = UtcTimestamp::from_unix(1_790_812_800, 0).unwrap();
-        assert_eq!(rfc3339_offset(whole), "2026-10-01T00:00:00+00:00");
-        let frac = UtcTimestamp::from_unix(1_790_812_800, 123_000_000).unwrap();
-        assert_eq!(rfc3339_offset(frac), "2026-10-01T00:00:00.123+00:00");
-        let micros = UtcTimestamp::from_unix(1_790_812_800, 123_456_000).unwrap();
-        assert_eq!(rfc3339_offset(micros), "2026-10-01T00:00:00.123456+00:00");
-        let nanos = UtcTimestamp::from_unix(-1, 999_999_999).unwrap();
-        assert_eq!(rfc3339_offset(nanos), "1969-12-31T23:59:59.999999999+00:00");
-        let first = UtcTimestamp::from_unix(-62_167_219_200, 0).unwrap();
-        assert_eq!(rfc3339_offset(first), "0000-01-01T00:00:00+00:00");
-        let last = UtcTimestamp::from_unix(253_402_300_799, 1_000).unwrap();
-        assert_eq!(rfc3339_offset(last), "9999-12-31T23:59:59.000001+00:00");
+        let at = |secs, nanos| {
+            UtcTimestamp::from_unix(secs, nanos)
+                .unwrap()
+                .to_rfc3339_offset()
+        };
+        assert_eq!(at(1_790_812_800, 0), "2026-10-01T00:00:00+00:00");
+        assert_eq!(
+            at(1_790_812_800, 123_000_000),
+            "2026-10-01T00:00:00.123+00:00"
+        );
+        assert_eq!(
+            at(1_790_812_800, 123_456_000),
+            "2026-10-01T00:00:00.123456+00:00"
+        );
+        assert_eq!(at(-1, 999_999_999), "1969-12-31T23:59:59.999999999+00:00");
+        assert_eq!(at(-62_167_219_200, 0), "0000-01-01T00:00:00+00:00");
+        assert_eq!(
+            at(253_402_300_799, 1_000),
+            "9999-12-31T23:59:59.000001+00:00"
+        );
+        assert!(utc_now_rfc3339().ends_with("+00:00"));
     }
 
     #[test]
@@ -186,12 +181,9 @@ mod tests {
 
     #[test]
     fn utc_plus_duration_advances() {
-        let now = chrono::Utc::now();
-        let later_str = utc_plus_duration(Duration::from_secs(60));
-        let later = chrono::DateTime::parse_from_rfc3339(&later_str)
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let delta = (later - now).num_seconds();
+        let now = utc_timestamp_now();
+        let later = parse_iso8601(&utc_plus_duration(Duration::from_secs(60))).unwrap();
+        let delta = later.whole_secs_since(now);
         // Allow a generous slack for slow CI hosts.
         assert!((58..=62).contains(&delta), "delta={delta}");
     }
@@ -205,83 +197,56 @@ mod tests {
         );
     }
 
-    fn chrono_secs_form(at: std::time::SystemTime) -> String {
-        DateTime::<Utc>::from(at)
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string()
-    }
-
+    /// Expected strings are the ones chrono's `%Y-%m-%dT%H:%M:%SZ` printed.
     #[test]
     fn rfc3339_from_system_time_is_byte_identical_to_chrono() {
-        use std::time::{Duration as D, SystemTime, UNIX_EPOCH};
-        let cases = [
-            UNIX_EPOCH,
-            UNIX_EPOCH + D::from_secs(1_709_251_199), // 2024-02-29T23:59:59Z, leap day
-            UNIX_EPOCH + D::new(1_709_251_199, 999_999_999), // fraction truncates, never rounds
-            UNIX_EPOCH + D::from_secs(2_147_483_648), // past i32
-            UNIX_EPOCH + D::from_secs(253_402_300_799), // 9999-12-31T23:59:59Z
-            UNIX_EPOCH - D::from_secs(1),
-            UNIX_EPOCH - D::new(0, 1), // sub-second before the epoch floors to 23:59:59
-            UNIX_EPOCH - D::new(86_400 * 365, 500_000_000),
-        ];
-        for at in cases {
-            assert_eq!(rfc3339_from_system_time(at), chrono_secs_form(at), "{at:?}");
-        }
-        let _ = SystemTime::now();
-    }
-
-    #[test]
-    fn hand_written_rendering_matches_chrono_across_spread() {
         use std::time::{Duration as D, UNIX_EPOCH};
-        let check = |secs: i64| {
-            let t = if secs >= 0 {
-                UNIX_EPOCH + D::from_secs(secs as u64)
-            } else {
-                UNIX_EPOCH - D::from_secs(secs.unsigned_abs())
-            };
-            assert_eq!(rfc3339_from_system_time(t), chrono_secs_form(t), "{secs}");
-        };
-        // Every day boundary +/- 1s from 1900 to 2200.
-        let mut day = -2_208_988_800_i64;
-        while day <= 7_258_118_400 {
-            for d in [-1, 0, 1] {
-                check(day + d);
-            }
-            day += 86_400;
-        }
-        // Deterministic xorshift spread over years 0001..=9999.
-        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
-        for _ in 0..20_000 {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            check((x % 253_402_300_800) as i64 - 62_135_596_800);
+        let cases = [
+            (UNIX_EPOCH, "1970-01-01T00:00:00Z"),
+            (
+                UNIX_EPOCH + D::from_secs(1_709_251_199),
+                "2024-02-29T23:59:59Z",
+            ),
+            // The fraction truncates, never rounds.
+            (
+                UNIX_EPOCH + D::new(1_709_251_199, 999_999_999),
+                "2024-02-29T23:59:59Z",
+            ),
+            (
+                UNIX_EPOCH + D::from_secs(2_147_483_648),
+                "2038-01-19T03:14:08Z",
+            ),
+            (
+                UNIX_EPOCH + D::from_secs(253_402_300_799),
+                "9999-12-31T23:59:59Z",
+            ),
+            (UNIX_EPOCH - D::from_secs(1), "1969-12-31T23:59:59Z"),
+            // A sub-second before the epoch floors to 23:59:59.
+            (UNIX_EPOCH - D::new(0, 1), "1969-12-31T23:59:59Z"),
+            (
+                UNIX_EPOCH - D::new(86_400 * 365, 500_000_000),
+                "1968-12-31T23:59:59Z",
+            ),
+        ];
+        for (at, want) in cases {
+            assert_eq!(rfc3339_from_system_time(at), want, "{at:?}");
         }
     }
 
     #[test]
-    fn utc_timestamp_now_matches_chrono_now_within_a_second() {
-        let ours = chrono::DateTime::<Utc>::from(utc_timestamp_now());
-        assert!((Utc::now() - ours).num_seconds().abs() <= 1);
-    }
-
-    #[test]
-    fn utc_now_matches_chrono_now_within_a_second() {
+    fn utc_now_matches_the_timestamp_clock_within_a_second() {
         let ours = parse_iso8601(&utc_now()).expect("parses");
-        assert!((Utc::now() - ours).num_seconds().abs() <= 1);
+        assert!(utc_timestamp_now().whole_secs_since(ours).abs() <= 1);
     }
 
     #[test]
-    fn emitted_z_form_and_chrono_offset_form_parse_to_the_same_instant() {
+    fn emitted_z_form_and_offset_form_parse_to_the_same_instant() {
         let z = parse_iso8601("2024-02-29T23:59:59Z").unwrap();
         let off = parse_iso8601("2024-03-01T01:59:59+02:00").unwrap();
         let zero = parse_iso8601("2024-02-29T23:59:59+00:00").unwrap();
         assert_eq!(z, off);
         assert_eq!(z, zero);
-        assert_eq!(
-            z.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "2024-02-29T23:59:59Z"
-        );
+        assert_eq!(z.to_string(), "2024-02-29T23:59:59Z");
     }
 
     #[test]
@@ -291,15 +256,14 @@ mod tests {
         assert!(parse_iso8601("2024-03-01T00:00:00").is_none());
         assert!(parse_iso8601(" 2024-03-01T00:00:00Z").is_none());
         let frac = parse_iso8601("2024-02-29T23:59:59.987Z").unwrap();
-        assert_eq!(frac.timestamp(), 1_709_251_199);
+        assert_eq!(frac.unix_secs(), 1_709_251_199);
     }
 
     #[test]
     fn parse_iso8601_roundtrips() {
         let now = utc_now();
         let parsed = parse_iso8601(&now).expect("roundtrip");
-        let formatted = parsed.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        assert_eq!(formatted, now);
+        assert_eq!(parsed.to_string(), now);
     }
 
     #[test]

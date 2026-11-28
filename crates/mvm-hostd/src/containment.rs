@@ -86,7 +86,7 @@ fn emit_operator_event(
         return emitter.emit(plan, event, extras);
     }
     emitter.emit_entry(&PlanAuditEntry {
-        timestamp: chrono::Utc::now(),
+        timestamp: mvm_core::util::time::utc_timestamp_now(),
         tenant: mvm_core::plan::TenantId(tenant.to_owned()),
         plan_id: mvm_core::plan::PlanId(String::new()),
         plan_version: 0,

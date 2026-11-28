@@ -7,12 +7,10 @@
 //! signature + G4 window + nonce-replay) before the caller may `start_enter`.
 //! Reuses `mvm_core::plan::{verify_plan, check_window, NonceStore}`; no fork.
 
-use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use libkrun_sys::{SupervisorAttachConfig, SupervisorBaseConfig, SupervisorConfig};
-use mvm_core::plan::{
-    NonceStore, SignedExecutionPlan, check_window_chrono, verify_plan, verify_plan_id,
-};
+use mvm_contract::timestamp::UtcTimestamp;
+use mvm_core::plan::{NonceStore, SignedExecutionPlan, check_window, verify_plan, verify_plan_id};
 
 /// Why an attach was refused. Every variant means the caller must NOT
 /// `start_enter` — the standby exits non-zero.
@@ -43,7 +41,7 @@ pub enum AttachVerifyError {
 pub fn verify_and_merge_attach(
     base: SupervisorBaseConfig,
     attach_bytes: &[u8],
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     nonce_store: &mut NonceStore,
 ) -> Result<SupervisorConfig, AttachVerifyError> {
     // Pull the bits we still need after `base`/`attach` are moved into the merge.
@@ -80,7 +78,7 @@ pub fn verify_and_merge_attach(
     verify_plan_id(&plan).map_err(|e| AttachVerifyError::PlanVerify(e.to_string()))?;
 
     // G4 validity window + per-signer nonce-replay.
-    check_window_chrono(&plan, now).map_err(|e| AttachVerifyError::Validity(e.to_string()))?;
+    check_window(&plan, now).map_err(|e| AttachVerifyError::Validity(e.to_string()))?;
     nonce_store
         .check_and_insert(&signed.0.signer_id, &plan)
         .map_err(|e| AttachVerifyError::Validity(e.to_string()))?;
@@ -91,11 +89,11 @@ pub fn verify_and_merge_attach(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, TimeZone, Utc};
     use ed25519_dalek::SigningKey;
     use libkrun_sys::{
         BridgeRestartPolicy, KrunContext, SupervisorAttachConfig, SupervisorBaseConfig,
     };
+    use mvm_contract::timestamp::UtcTimestamp;
     use mvm_core::plan::signing::test_support::sample_plan;
     use mvm_core::plan::{ExecutionPlan, NonceStore, sign_plan};
     use std::io::Write;
@@ -111,10 +109,14 @@ mod tests {
         (path, key)
     }
 
-    fn plan_around(now: chrono::DateTime<Utc>) -> ExecutionPlan {
+    fn plan_around(now: UtcTimestamp) -> ExecutionPlan {
         let mut p = sample_plan();
-        p.valid_from = mvm_core::plan::test_support::utc_timestamp(now - Duration::minutes(5));
-        p.valid_until = mvm_core::plan::test_support::utc_timestamp(now + Duration::minutes(5));
+        p.valid_from = now
+            .checked_sub(std::time::Duration::from_secs(300))
+            .unwrap();
+        p.valid_until = now
+            .checked_add(std::time::Duration::from_secs(300))
+            .unwrap();
         p
     }
 
@@ -159,7 +161,7 @@ mod tests {
     fn happy_path_returns_admitted_config() {
         let dir = tempfile::tempdir().unwrap();
         let (kp, key) = write_key(dir.path());
-        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let now = "2026-06-09T12:00:00Z".parse::<UtcTimestamp>().unwrap();
         let plan = plan_around(now);
         let bytes = attach_bytes(NONCE, signed_envelope(&plan, &key, "host:test"));
         let mut store = NonceStore::new();
@@ -172,7 +174,7 @@ mod tests {
     fn rejects_wrong_binding_nonce() {
         let dir = tempfile::tempdir().unwrap();
         let (kp, key) = write_key(dir.path());
-        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let now = "2026-06-09T12:00:00Z".parse::<UtcTimestamp>().unwrap();
         let bytes = attach_bytes(
             "WRONG",
             signed_envelope(&plan_around(now), &key, "host:test"),
@@ -188,7 +190,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (kp, _real) = write_key(dir.path());
         let attacker = SigningKey::from_bytes(&[9u8; 32]); // not the on-disk key
-        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let now = "2026-06-09T12:00:00Z".parse::<UtcTimestamp>().unwrap();
         let bytes = attach_bytes(
             NONCE,
             signed_envelope(&plan_around(now), &attacker, "host:test"),
@@ -203,11 +205,13 @@ mod tests {
     fn rejects_out_of_window_plan() {
         let dir = tempfile::tempdir().unwrap();
         let (kp, key) = write_key(dir.path());
-        let plan_now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let plan_now = "2026-06-09T12:00:00Z".parse::<UtcTimestamp>().unwrap();
         let plan = plan_around(plan_now);
         let bytes = attach_bytes(NONCE, signed_envelope(&plan, &key, "host:test"));
         // Verify an hour after the window closed.
-        let later = plan_now + Duration::hours(1);
+        let later = plan_now
+            .checked_add(std::time::Duration::from_secs(3600))
+            .unwrap();
         let mut store = NonceStore::new();
         let err =
             verify_and_merge_attach(base(kp, "host:test"), &bytes, later, &mut store).unwrap_err();
@@ -218,7 +222,7 @@ mod tests {
     fn rejects_replayed_nonce() {
         let dir = tempfile::tempdir().unwrap();
         let (kp, key) = write_key(dir.path());
-        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let now = "2026-06-09T12:00:00Z".parse::<UtcTimestamp>().unwrap();
         let plan = plan_around(now);
         let bytes = attach_bytes(NONCE, signed_envelope(&plan, &key, "host:test"));
         let mut store = NonceStore::new();
@@ -236,7 +240,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let (kp, key) = write_key(dir.path());
-        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let now = "2026-06-09T12:00:00Z".parse::<UtcTimestamp>().unwrap();
         let plan = plan_around(now);
 
         // A signature-valid envelope whose inner plan_id is NOT the

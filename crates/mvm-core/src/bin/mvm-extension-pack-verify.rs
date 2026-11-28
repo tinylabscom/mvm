@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use chrono::{DateTime, Utc};
+use mvm_contract::timestamp::UtcTimestamp;
 use mvm_core::pack_trust::load_pack_trust_config;
 use mvm_core::packs::{
     HostCapability, LocalPackPolicy, PackBackend, PackKind, PackManifest, Sha256Hex, verify_pack_at,
@@ -29,7 +29,7 @@ struct Args {
     trust: PathBuf,
     backend: PackBackend,
     policy_hash: Sha256Hex,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     host_capabilities: BTreeSet<HostCapability>,
 }
 
@@ -93,9 +93,10 @@ fn parse_args() -> Result<Args, String> {
             }
             Some("--now") if now.is_none() => {
                 now = Some(
-                    DateTime::parse_from_rfc3339(&value.to_string_lossy())
-                        .map_err(|error| format!("invalid --now: {error}"))?
-                        .with_timezone(&Utc),
+                    value
+                        .to_string_lossy()
+                        .parse::<UtcTimestamp>()
+                        .map_err(|error| format!("invalid --now: {error}"))?,
                 )
             }
             Some("--host-capability") => {
